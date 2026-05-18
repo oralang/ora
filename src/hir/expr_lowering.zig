@@ -1096,6 +1096,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
             if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            if (imported_target != null) {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.imported_call"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);

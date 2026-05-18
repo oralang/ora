@@ -20,7 +20,7 @@ SEMA_FAIL_CASES=(
   "ora-example/corpus/modifies/fail_external_storage_path.ora|only supports current-contract storage paths"
   "ora-example/corpus/modifies/fail_mixed_indexed_field_path.ora|does not support mixed indexed-field storage paths"
   "ora-example/corpus/modifies/fail_unsupported_map_key.ora|map keys must be literals"
-  "ora-example/corpus/modifies/fail_write_outside_declared.ora|storage write to 'balances[other]' is not covered|storage write to 'config.admin' is not covered"
+  "ora-example/corpus/modifies/fail_write_outside_declared.ora|storage write to 'balances[other]' is not covered|storage write to 'buckets[43]' is not covered|storage write to 'balances[recipient]' is not covered|storage write to 'config.admin' is not covered"
 )
 
 PASS_CASES=(
@@ -37,6 +37,10 @@ OPAQUE_PASS_CASES=(
   "ora-example/smt/modifies/pass_internal_map_key_frame.ora"
   "ora-example/smt/modifies/pass_internal_nested_map_frame.ora"
   "ora-example/smt/modifies/pass_internal_struct_field_frame.ora"
+)
+
+IMPORTED_SUMMARY_PASS_CASES=(
+  "ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora"
 )
 
 REAL_CONTRACT_PASS_CASES=(
@@ -109,10 +113,28 @@ run_opaque_pass() {
   log_file="$(mktemp)"
 
   echo "[pass] opaque-summary $source"
-  ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH=0 "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
+  "$ORA_BIN" build --verify=full --verify-max-summary-inline-depth=0 -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
   assert_query_budget "$out_dir" "$source"
   if grep -q "precision_note" "$log_file"; then
     echo "error: opaque-summary run for $source emitted precision notes" >&2
+    sed -n '1,120p' "$log_file" >&2
+    rm -f "$log_file"
+    return 1
+  fi
+  rm -f "$log_file"
+}
+
+run_imported_summary_pass() {
+  local source="$1"
+  local out_dir="$OUT_ROOT/imported-summary/$(basename "$source" .ora)"
+  local log_file
+  log_file="$(mktemp)"
+
+  echo "[pass] imported-summary $source"
+  "$ORA_BIN" build --verify=full --verify-imported-summaries-only -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
+  assert_query_budget "$out_dir" "$source"
+  if grep -q "precision_note" "$log_file"; then
+    echo "error: imported-summary run for $source emitted precision notes" >&2
     sed -n '1,120p' "$log_file" >&2
     rm -f "$log_file"
     return 1
@@ -170,6 +192,10 @@ main() {
 
   for source in "${OPAQUE_PASS_CASES[@]}"; do
     run_opaque_pass "$source"
+  done
+
+  for source in "${IMPORTED_SUMMARY_PASS_CASES[@]}"; do
+    run_imported_summary_pass "$source"
   done
 
   for source in "${REAL_CONTRACT_PASS_CASES[@]}"; do

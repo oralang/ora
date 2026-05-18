@@ -19,6 +19,7 @@ const verifyExampleWithoutDegradation = h.verifyExampleWithoutDegradation;
 const verifyTextWithoutDegradation = h.verifyTextWithoutDegradation;
 const verifyTextWithoutDegradationWithTimeout = h.verifyTextWithoutDegradationWithTimeout;
 const verifyTextWithoutDegradationWithSummaryInlineDepth = h.verifyTextWithoutDegradationWithSummaryInlineDepth;
+const verifyPackageWithoutDegradationWithImportedSummariesOnly = h.verifyPackageWithoutDegradationWithImportedSummariesOnly;
 const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
@@ -546,6 +547,30 @@ test "verification opaque modifies metadata does not frame declared written key"
     try testing.expect(!result.degraded);
     try testing.expect(result.errors_len > 0);
     try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "compiler marks imported-module calls as summary-boundary candidates" {
+    var compilation = try compilePackage("ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.imported_call"));
+}
+
+test "verification uses imported-module opaque modifies metadata when imported summaries are forced" {
+    var result = try verifyPackageWithoutDegradationWithImportedSummariesOnly(
+        "ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora",
+        "f",
+    );
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqualStrings("", result.soundness_losses);
     try testing.expectEqualStrings("", result.precision_notes);
 }

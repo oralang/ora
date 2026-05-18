@@ -20,6 +20,8 @@ const finite_scf_while_unroll_limit: usize = 64;
 
 /// MLIR to SMT encoder
 pub const Encoder = struct {
+    pub const default_max_summary_inline_depth: u32 = 8;
+
     pub const PendingObligationSourceKind = enum {
         local,
         imported_callee_obligation,
@@ -242,6 +244,7 @@ pub const Encoder = struct {
     verify_calls: bool,
     verify_state: bool,
     max_summary_inline_depth: u32,
+    summary_only_imported_calls: bool,
 
     /// Map from MLIR value to Z3 AST (for caching encoded values)
     value_map: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
@@ -318,7 +321,8 @@ pub const Encoder = struct {
             .allocator = allocator,
             .verify_calls = true,
             .verify_state = true,
-            .max_summary_inline_depth = 8,
+            .max_summary_inline_depth = default_max_summary_inline_depth,
+            .summary_only_imported_calls = false,
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
@@ -361,6 +365,10 @@ pub const Encoder = struct {
 
     pub fn setVerifyState(self: *Encoder, enabled: bool) void {
         self.verify_state = enabled;
+    }
+
+    pub fn setSummaryOnlyImportedCalls(self: *Encoder, enabled: bool) void {
+        self.summary_only_imported_calls = enabled;
     }
 
     pub fn clearDegradation(self: *Encoder) void {
@@ -8449,6 +8457,7 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!?z3.Z3_ast {
         // Old-mode fallbacks should not mutate caller state. Inline only pure callees.
+        if (self.shouldUseOpaqueImportedSummary(call_op)) return null;
         if (self.functionMayWriteTrackedState(func_op)) return null;
         if (self.inlineStackContains(callee)) return null;
         if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
@@ -8458,6 +8467,7 @@ pub const Encoder = struct {
         summary_encoder.setVerifyCalls(self.verify_calls);
         summary_encoder.setVerifyState(self.verify_state);
         summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+        summary_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
         try summary_encoder.copyFunctionRegistryFrom(self);
         try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyEnumRegistryFrom(self);
@@ -12448,6 +12458,7 @@ pub const Encoder = struct {
         result_exprs: []?z3.Z3_ast,
     ) EncodeError!bool {
         // Stop recursive/non-terminating expansion; fall back to UF summaries.
+        if (self.shouldUseOpaqueImportedSummary(call_op)) return false;
         if (self.inlineStackContains(callee)) return false;
         if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return false;
 
@@ -12466,6 +12477,7 @@ pub const Encoder = struct {
             result_encoder.setVerifyCalls(self.verify_calls);
             result_encoder.setVerifyState(self.verify_state);
             result_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+            result_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
             try result_encoder.copyFunctionRegistryFrom(self);
             try result_encoder.copyStructRegistryFrom(self);
             try result_encoder.copyEnumRegistryFrom(self);
@@ -12530,6 +12542,7 @@ pub const Encoder = struct {
             summary_encoder.setVerifyCalls(self.verify_calls);
             summary_encoder.setVerifyState(self.verify_state);
             summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
+            summary_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
             try summary_encoder.copyFunctionRegistryFrom(self);
             try summary_encoder.copyStructRegistryFrom(self);
             try summary_encoder.copyEnumRegistryFrom(self);
@@ -13859,6 +13872,16 @@ pub const Encoder = struct {
 
     fn getOperationName(_: *Encoder, op: mlir.MlirOperation) mlir.MlirStringRef {
         return mlir.oraOperationGetName(op);
+    }
+
+    fn hasAttribute(_: *Encoder, op: mlir.MlirOperation, name: []const u8) bool {
+        const attr_name_ref = mlir.oraStringRefCreate(name.ptr, name.len);
+        const attr = mlir.oraOperationGetAttributeByName(op, attr_name_ref);
+        return !mlir.oraAttributeIsNull(attr);
+    }
+
+    fn shouldUseOpaqueImportedSummary(self: *Encoder, op: mlir.MlirOperation) bool {
+        return self.summary_only_imported_calls and self.hasAttribute(op, "ora.imported_call");
     }
 
     fn getStringAttr(_: *Encoder, op: mlir.MlirOperation, name: []const u8) ?[]const u8 {

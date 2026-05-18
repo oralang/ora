@@ -329,6 +329,42 @@ pub fn verifyTextWithoutDegradationWithSummaryInlineDepth(
     };
 }
 
+pub fn verifyPackageWithoutDegradationWithImportedSummariesOnly(
+    root_path: []const u8,
+    function_name: ?[]const u8,
+) !VerificationProbeSummary {
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.filter_function_name = function_name;
+    verifier.setSummaryOnlyImportedCalls(true);
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
+
+    defer result.deinit();
+    verifier.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
+    };
+}
+
 pub fn firstChildNodeOfKind(node: compiler.SyntaxNode, kind: compiler.syntax.SyntaxKind) ?compiler.SyntaxNode {
     var it = node.children();
     while (it.next()) |child| {

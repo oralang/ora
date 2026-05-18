@@ -1,0 +1,7 @@
+storage var balances: map<address, u256>;
+
+fn set_balance(user: address, value: u256)
+    modifies balances[user]
+{
+    balances[user] = value;
+}

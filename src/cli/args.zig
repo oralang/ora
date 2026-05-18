@@ -25,6 +25,9 @@ pub const CliOptions = struct {
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
+    /// null means "use the encoder default"; zero is an explicit summary-only cap.
+    verify_max_summary_inline_depth: ?u32 = null,
+    verify_imported_summaries_only: bool = false,
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
@@ -144,6 +147,17 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-verify-state")) {
             opts.verify_state = false;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--verify-max-summary-inline-depth")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.verify_max_summary_inline_depth = std.fmt.parseInt(u32, args[i + 1], 10) catch return error.UnknownArgument;
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--verify-max-summary-inline-depth=")) {
+            const depth = arg["--verify-max-summary-inline-depth=".len..];
+            opts.verify_max_summary_inline_depth = std.fmt.parseInt(u32, depth, 10) catch return error.UnknownArgument;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--verify-imported-summaries-only")) {
+            opts.verify_imported_summaries_only = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--verify-stats")) {
             opts.verify_stats = true;
@@ -277,6 +291,8 @@ test "parse verify mode and toggles" {
         "--verify=full",
         "--verify-calls",
         "--no-verify-state",
+        "--verify-max-summary-inline-depth=0",
+        "--verify-imported-summaries-only",
         "--verify-stats",
         "--explain",
         "--z3-proofs",
@@ -289,6 +305,8 @@ test "parse verify mode and toggles" {
     try std.testing.expect(std.mem.eql(u8, parsed.verify_mode.?, "full"));
     try std.testing.expect(parsed.verify_calls != null and parsed.verify_calls.?);
     try std.testing.expect(parsed.verify_state != null and !parsed.verify_state.?);
+    try std.testing.expectEqual(@as(?u32, 0), parsed.verify_max_summary_inline_depth);
+    try std.testing.expect(parsed.verify_imported_summaries_only);
     try std.testing.expect(parsed.verify_stats);
     try std.testing.expect(parsed.explain_cores);
     try std.testing.expect(parsed.z3_proofs);
@@ -298,6 +316,21 @@ test "parse verify mode and toggles" {
 test "parse invalid verify mode fails" {
     const args = [_][]const u8{"--verify=turbo"};
     try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
+}
+
+test "parse invalid summary inline depth fails" {
+    const args = [_][]const u8{"--verify-max-summary-inline-depth=full"};
+    try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
+}
+
+test "parse invalid spaced summary inline depth fails" {
+    const args = [_][]const u8{ "--verify-max-summary-inline-depth", "full" };
+    try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
+}
+
+test "parse missing summary inline depth fails" {
+    const args = [_][]const u8{"--verify-max-summary-inline-depth"};
+    try std.testing.expectError(error.MissingArgument, parseArgs(args[0..]));
 }
 
 test "parse debug-info flag" {

@@ -363,6 +363,10 @@ pub const VerificationPass = struct {
         self.encoder.max_summary_inline_depth = depth;
     }
 
+    pub fn setSummaryOnlyImportedCalls(self: *VerificationPass, enabled: bool) void {
+        self.encoder.setSummaryOnlyImportedCalls(enabled);
+    }
+
     pub fn setVerifyStats(self: *VerificationPass, enabled: bool) void {
         self.verify_stats = enabled;
     }

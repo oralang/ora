@@ -40,6 +40,8 @@ const MlirOptions = struct {
     verify_mode: ?[]const u8 = null,
     verify_calls: ?bool = null,
     verify_state: ?bool = null,
+    verify_max_summary_inline_depth: ?u32 = null,
+    verify_imported_summaries_only: bool = false,
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
@@ -435,6 +437,8 @@ pub fn main() !void {
     const verify_mode: ?[]const u8 = parsed.verify_mode;
     const verify_calls: ?bool = parsed.verify_calls;
     const verify_state: ?bool = parsed.verify_state;
+    const verify_max_summary_inline_depth: ?u32 = parsed.verify_max_summary_inline_depth;
+    const verify_imported_summaries_only: bool = parsed.verify_imported_summaries_only;
     const verify_stats: bool = parsed.verify_stats;
     const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
     const z3_proofs: bool = parsed.z3_proofs;
@@ -541,6 +545,8 @@ pub fn main() !void {
         .verify_mode = verify_mode,
         .verify_calls = verify_calls,
         .verify_state = verify_state,
+        .verify_max_summary_inline_depth = verify_max_summary_inline_depth,
+        .verify_imported_summaries_only = verify_imported_summaries_only,
         .verify_stats = verify_stats,
         .explain_cores = explain_cores,
         .z3_proofs = z3_proofs,
@@ -1722,6 +1728,7 @@ fn printUsage() !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
+    const default_summary_inline_depth = @import("z3/encoder.zig").Encoder.default_max_summary_inline_depth;
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
     try stdout.print("       ora build [options]\n", .{});
@@ -1776,6 +1783,8 @@ fn printUsage() !void {
     try stdout.print("  --no-verify-calls      - Disable call reasoning (treat calls as unknown)\n", .{});
     try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
     try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
+    try stdout.print("  --verify-max-summary-inline-depth <n> - Cap internal summary inlining depth (default: {d})\n", .{default_summary_inline_depth});
+    try stdout.print("  --verify-imported-summaries-only - Treat imported-module calls as verifier summary boundaries\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
@@ -3810,6 +3819,8 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        if (mlir_options.verify_max_summary_inline_depth) |depth| verifier.setMaxSummaryInlineDepth(depth);
+        verifier.setSummaryOnlyImportedCalls(mlir_options.verify_imported_summaries_only);
         verifier.setVerifyStats(mlir_options.verify_stats);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
@@ -3856,6 +3867,8 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
         if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
+        if (mlir_options.verify_max_summary_inline_depth) |depth| verifier.setMaxSummaryInlineDepth(depth);
+        verifier.setSummaryOnlyImportedCalls(mlir_options.verify_imported_summaries_only);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
