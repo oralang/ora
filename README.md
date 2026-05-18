@@ -57,21 +57,22 @@ properties below and fails closed when it cannot model a proof soundly.
 
 ## Verification capabilities
 
-| Capability | Current status |
-|------------|----------------|
-| Checked arithmetic overflow/underflow | Proved for modeled paths |
-| Division/remainder by zero | Proved as explicit safety obligations |
-| Closed refinement lexicon | Proven or kept as runtime guards |
-| Function contracts | `requires`, `ensures`, `assert`, and contract invariants are SMT obligations |
-| `old()` | Function-entry snapshot, including loop invariants; call summaries rebind to call-site state |
-| Storage frames | Proved for resolved callees and known write sets |
-| Unresolved state-changing external calls | Fail closed / degrade; never silently preserve storage |
-| Unresolved `staticcall` | Modeled as no-write with opaque return values |
-| Effectful loops | Supported when supplied invariants prove body safety and post-state obligations |
-| Runtime `keccak256` | Deterministic uninterpreted function; no collision-resistance axiom |
-| Precompiles | Encoder boundary only; cryptographic semantics, gas, and failure behavior not proved |
-| Bytecode equivalence | Not yet proven end-to-end against emitted EVM bytecode |
-| Reentrancy | `@lock` is checked by sema/effects, separate from SMT |
+| Capability | Evidence | Boundary |
+|------------|----------|----------|
+| Checked arithmetic overflow/underflow | SMT-proved for modeled paths | Requires successful full verification |
+| Division/remainder by zero | SMT-proved as explicit safety obligations | Same modeled-path boundary |
+| Closed refinement lexicon | SMT-proved or kept as runtime guards | User-defined arbitrary predicates are not extensible refinements |
+| Function contracts | `requires`, `ensures`, `assert`, and invariants become SMT obligations | Proof strength depends on supplied specs and invariants |
+| `old()` | Function-entry snapshot, including loop invariants and call-summary rebinding | Not a loop-entry snapshot unless the program stores one explicitly |
+| Effectful loops | SMT-proved when invariants establish entry, step, body safety, and post-state use | Missing invariants fail proof instead of implying induction |
+| Storage frames for known code | SMT-proved for resolved callees and known write sets | Unknown writes are not silently ignored |
+| Trusted extern summaries | SMT uses explicit `staticcall fn` summaries and framed `call fn` summaries | Trusted boundary; unannotated state-changing calls fail closed |
+| Unresolved `staticcall` | SMT models no-write with opaque return values | No semantic facts about returned values without a summary |
+| Runtime `keccak256` in SMT | Deterministic uninterpreted function | No collision-resistance or cryptographic axiom |
+| Precompiles | Encoder boundary only | Cryptographic semantics, gas, failure, and exceptional behavior are not proved |
+| Storage-layout bytecode behavior | Nightly deployed-bytecode smoke covers common scalar, mapping, slice, struct, packed, nested, and multi-contract shapes | Not a formal proof that every SMT state transition matches emitted bytecode |
+| Multi-contract runtime behavior | Deployed-bytecode smoke covers namespace isolation, returns, catches, reverts, and OOG call failure slices | Caller SMT proof remains separate from unresolved concrete callee execution |
+| Reentrancy | `@lock` is checked by sema/effects | Separate from SMT theorem proving |
 
 See [`website/docs/compiler/what-ora-proves.md`](website/docs/compiler/what-ora-proves.md)
 for the full soundness model.
