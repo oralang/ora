@@ -5733,6 +5733,7 @@ const TypeChecker = struct {
     }
 
     fn keySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
+        if (self.environmentKeySegmentForExpr(expr_id)) |segment| return segment;
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.keySegmentForExpr(group.expr),
             .Name => blk: {
@@ -5740,7 +5741,7 @@ const TypeChecker = struct {
                     switch (binding) {
                         .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id)) |index| {
                             break :blk .{ .parameter = index };
-                        },
+                        } else if (self.localAliasEnvironmentKeySegment(pattern_id)) |segment| break :blk segment,
                         .item => {},
                     }
                 }
@@ -5751,17 +5752,61 @@ const TypeChecker = struct {
             .AddressLiteral => |literal| .{ .constant = literal.text },
             .BytesLiteral => |literal| .{ .constant = literal.text },
             .BoolLiteral => |literal| .{ .constant = if (literal.value) "true" else "false" },
-            .Field => |field| blk: {
-                const base = self.file.expression(field.base).*;
-                if (base == .Name and std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) {
-                    break :blk .msg_sender;
-                }
-                if (base == .Name and std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")) {
-                    break :blk .tx_origin;
-                }
-                break :blk .unknown;
-            },
             else => .unknown,
+        };
+    }
+
+    fn localAliasEnvironmentKeySegment(self: *TypeChecker, pattern_id: ast.PatternId) ?KeySegment {
+        for (self.file.statements) |statement| {
+            if (statement != .VariableDecl) continue;
+            const decl = statement.VariableDecl;
+            if (decl.pattern.index() != pattern_id.index()) continue;
+            switch (decl.binding_kind) {
+                .let_, .constant, .immutable => {},
+                .var_ => return null,
+            }
+            const value = decl.value orelse return null;
+            return self.environmentKeySegmentForExpr(value);
+        }
+        return null;
+    }
+
+    fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.environmentKeySegmentForExpr(group.expr),
+            .Call => |call| if (call.args.len == 0) self.environmentKeySegmentForExpr(call.callee) else null,
+            .Field => blk: {
+                const msg_sender_paths = [_][]const []const u8{
+                    &.{ "msg", "sender" },
+                    &.{ "std", "msg", "sender" },
+                    &.{ "std", "transaction", "sender" },
+                };
+                for (msg_sender_paths) |path| {
+                    if (self.exprPathMatches(expr_id, path)) break :blk .msg_sender;
+                }
+                const tx_origin_paths = [_][]const []const u8{
+                    &.{ "tx", "origin" },
+                    &.{ "std", "tx", "origin" },
+                };
+                for (tx_origin_paths) |path| {
+                    if (self.exprPathMatches(expr_id, path)) break :blk .tx_origin;
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    fn exprPathMatches(self: *TypeChecker, expr_id: ast.ExprId, components: []const []const u8) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprPathMatches(group.expr, components),
+            .Name => |name| components.len == 1 and std.mem.eql(u8, name.name, components[0]),
+            .Field => |field| blk: {
+                if (components.len < 2) break :blk false;
+                if (!std.mem.eql(u8, field.name, components[components.len - 1])) break :blk false;
+                break :blk self.exprPathMatches(field.base, components[0 .. components.len - 1]);
+            },
+            else => false,
         };
     }
 

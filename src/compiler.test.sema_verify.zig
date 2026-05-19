@@ -245,6 +245,69 @@ test "compiler enforces modifies declarations against storage writes" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
 }
 
+test "compiler matches modifies environment keys through direct uses and immutable local aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn direct(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        balances[std.msg.sender()] = value;
+        \\    }
+        \\
+        \\    pub fn aliased(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        balances[sender] = value;
+        \\    }
+        \\
+        \\    pub fn nested(spender: address, value: u256)
+        \\        modifies allowances[msg.sender][spender]
+        \\    {
+        \\        let owner: address = std.msg.sender();
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\
+        \\    pub fn origin(value: u256)
+        \\        modifies balances[tx.origin]
+        \\    {
+        \\        const origin: address = std.tx.origin();
+        \\        balances[origin] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler does not match modifies environment keys through mutable local aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        var sender: address = std.msg.sender();
+        \\        balances[sender] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[?]' is not covered by this function's `modifies` clause"));
+}
+
 test "compiler treats modifies empty form as no storage writes" {
     const source_text =
         \\contract Vault {
