@@ -8,6 +8,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ORA_BIN="${ORA_BIN:-$PROJECT_ROOT/zig-out/bin/ora}"
 OUT_ROOT="${OUT_ROOT:-${TMPDIR:-/tmp}/ora-smt-modifies-corpus}"
 MAX_QUERY_MS="${ORA_SMT_MODIFIES_MAX_QUERY_MS:-5000}"
+PERF_REPORT="${ORA_SMT_MODIFIES_PERF_REPORT:-$OUT_ROOT/perf.tsv}"
+PERF_BASELINE="${ORA_SMT_MODIFIES_PERF_BASELINE:-}"
+PERF_TOLERANCE_MS="${ORA_SMT_MODIFIES_PERF_TOLERANCE_MS:-250}"
 
 SEMA_PASS_CASES=(
   "ora-example/corpus/modifies/pass_supported_paths.ora"
@@ -67,11 +70,42 @@ if [[ ! "$MAX_QUERY_MS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+if [[ ! "$PERF_TOLERANCE_MS" =~ ^[0-9]+$ ]]; then
+  echo "error: ORA_SMT_MODIFIES_PERF_TOLERANCE_MS must be an integer millisecond tolerance, got '$PERF_TOLERANCE_MS'" >&2
+  exit 1
+fi
+
+if [[ -n "$PERF_BASELINE" && ! -f "$PERF_BASELINE" ]]; then
+  echo "error: ORA_SMT_MODIFIES_PERF_BASELINE does not exist: $PERF_BASELINE" >&2
+  exit 1
+fi
+
+baseline_max_for() {
+  local mode="$1"
+  local source="$2"
+
+  if [[ -z "$PERF_BASELINE" ]]; then
+    echo ""
+    return 0
+  fi
+
+  awk -F '\t' -v mode="$mode" -v source="$source" '
+    NR == 1 { next }
+    $1 == mode && $2 == source { print $5; found = 1; exit }
+    END { if (!found) print "" }
+  ' "$PERF_BASELINE"
+}
+
 assert_query_budget() {
   local out_dir="$1"
   local source="$2"
+  local mode="$3"
   local report_file
   local max_elapsed
+  local query_count
+  local total_elapsed
+  local stats
+  local baseline_max
 
   report_file="$(find "$out_dir/verify" -name '*.smt.report.json' -print -quit 2>/dev/null || true)"
   if [[ -z "$report_file" ]]; then
@@ -79,22 +113,46 @@ assert_query_budget() {
     return 1
   fi
 
-  max_elapsed="$(
+  stats="$(
     awk '
-      match($0, /"elapsed_ms"[[:space:]]*:[[:space:]]*[0-9]+/) {
-        value = substr($0, RSTART, RLENGTH)
-        sub(/.*:[[:space:]]*/, "", value)
-        if (value + 0 > max) max = value + 0
+      {
+        line = $0
+        while (match(line, /"elapsed_ms"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          value = substr(line, RSTART, RLENGTH)
+          sub(/.*:[[:space:]]*/, "", value)
+          count += 1
+          total += value + 0
+          if (value + 0 > max) max = value + 0
+          line = substr(line, RSTART + RLENGTH)
+        }
       }
-      END { print max + 0 }
+      END { print count + 0, total + 0, max + 0 }
     ' "$report_file"
   )"
+  read -r query_count total_elapsed max_elapsed <<< "$stats"
+  query_count="${query_count:-0}"
+  total_elapsed="${total_elapsed:-0}"
   max_elapsed="${max_elapsed:-0}"
 
   if (( max_elapsed > MAX_QUERY_MS )); then
     echo "error: SMT query budget exceeded for $source: max elapsed ${max_elapsed}ms > ${MAX_QUERY_MS}ms" >&2
     echo "report: $report_file" >&2
     return 1
+  fi
+
+  printf '[perf] %s queries=%s total_ms=%s max_ms=%s budget_ms=%s\n' \
+    "$source" "$query_count" "$total_elapsed" "$max_elapsed" "$MAX_QUERY_MS"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$mode" "$source" "$query_count" "$total_elapsed" "$max_elapsed" "$MAX_QUERY_MS" >>"$PERF_REPORT"
+
+  baseline_max="$(baseline_max_for "$mode" "$source")"
+  if [[ -n "$baseline_max" && "$baseline_max" =~ ^[0-9]+$ ]]; then
+    if (( max_elapsed > baseline_max + PERF_TOLERANCE_MS )); then
+      echo "error: SMT perf regression for $source [$mode]: max elapsed ${max_elapsed}ms > baseline ${baseline_max}ms + tolerance ${PERF_TOLERANCE_MS}ms" >&2
+      echo "report: $report_file" >&2
+      echo "perf report: $PERF_REPORT" >&2
+      return 1
+    fi
   fi
 }
 
@@ -105,7 +163,7 @@ run_pass() {
 
   echo "[pass] $label $source"
   "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >/dev/null 2>&1
-  assert_query_budget "$out_dir" "$source"
+  assert_query_budget "$out_dir" "$source" "$label"
 }
 
 run_opaque_pass() {
@@ -116,7 +174,7 @@ run_opaque_pass() {
 
   echo "[pass] opaque-summary $source"
   "$ORA_BIN" build --verify=full --verify-max-summary-inline-depth=0 -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
-  assert_query_budget "$out_dir" "$source"
+  assert_query_budget "$out_dir" "$source" "opaque-summary"
   if grep -q "precision_note" "$log_file"; then
     echo "error: opaque-summary run for $source emitted precision notes" >&2
     sed -n '1,120p' "$log_file" >&2
@@ -134,7 +192,7 @@ run_imported_summary_pass() {
 
   echo "[pass] imported-summary $source"
   "$ORA_BIN" build --verify=full --verify-imported-summaries-only -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
-  assert_query_budget "$out_dir" "$source"
+  assert_query_budget "$out_dir" "$source" "imported-summary"
   if grep -q "precision_note" "$log_file"; then
     echo "error: imported-summary run for $source emitted precision notes" >&2
     sed -n '1,120p' "$log_file" >&2
@@ -177,8 +235,16 @@ main() {
     echo "error: refusing to clean unsafe OUT_ROOT: '$OUT_ROOT'" >&2
     exit 1
   fi
+  if [[ -n "$PERF_BASELINE" ]]; then
+    local baseline_copy
+    baseline_copy="$(mktemp)"
+    cp "$PERF_BASELINE" "$baseline_copy"
+    PERF_BASELINE="$baseline_copy"
+  fi
   rm -rf "$OUT_ROOT"
   mkdir -p "$OUT_ROOT"
+  mkdir -p "$(dirname "$PERF_REPORT")"
+  printf 'mode\tsource\tqueries\ttotal_ms\tmax_ms\tbudget_ms\n' >"$PERF_REPORT"
 
   for source in "${SEMA_PASS_CASES[@]}"; do
     run_pass "$source" "sema"
@@ -208,6 +274,7 @@ main() {
     run_fail "$entry"
   done
 
+  echo "perf report: $PERF_REPORT"
   echo "SMT modifies corpus: ok"
 }
 

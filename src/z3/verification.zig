@@ -3499,6 +3499,7 @@ pub const VerificationPass = struct {
         summary.degradation_reasons = self.encoder.degradationReasons();
         summary.soundness_losses = self.encoder.soundnessLosses();
         summary.precision_notes = self.encoder.precisionNotes();
+        summary.precision_note_events = self.encoder.precisionNoteEvents();
         var kind_counts = ReportKindCounts{};
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
@@ -3652,6 +3653,7 @@ pub const VerificationPass = struct {
             .degradation_reason = self.encoder.degradationReason(),
             .soundness_losses = self.encoder.soundnessLosses(),
             .precision_notes = self.encoder.precisionNotes(),
+            .precision_note_events = self.encoder.precisionNoteEvents(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3697,6 +3699,7 @@ pub const VerificationPass = struct {
             .degradation_reasons = self.encoder.degradationReasons(),
             .soundness_losses = self.encoder.soundnessLosses(),
             .precision_notes = self.encoder.precisionNotes(),
+            .precision_note_events = self.encoder.precisionNoteEvents(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3825,6 +3828,9 @@ pub const VerificationPass = struct {
                 try writer.writeAll("- No verification findings.\n");
             } else {
                 for (vr.errors.items, 0..) |err, idx| {
+                    const matched_query_idx = findQueryIndexForError(err, queries, runs);
+                    const matched_function_name = if (matched_query_idx) |qidx| queries[qidx].function_name else null;
+                    const attributed_precision_event_count = countPrecisionEventsForFunction(summary.precision_note_events, matched_function_name);
                     try writer.print("### Error {d}\n", .{idx + 1});
                     try writer.print("- Type: `{s}`\n", .{@tagName(err.error_type)});
                     try writer.print("- Message: {s}\n", .{err.message});
@@ -3832,11 +3838,28 @@ pub const VerificationPass = struct {
                     if (summary.precision_notes.len > 0) {
                         try writer.writeAll("- Precision context:\n");
                         try writer.print("  - {s}\n", .{precisionContextHint()});
-                        for (summary.precision_notes) |note| {
-                            try writer.print("  - `{s}`: {s}\n", .{
-                                Encoder.precisionNoteLabel(note),
-                                precisionNoteDescription(note),
-                            });
+                        if (attributed_precision_event_count > 0) {
+                            try writer.print("  - Scope: {s}\n", .{precisionContextFunctionScopeDescription()});
+                            for (summary.precision_note_events) |event| {
+                                if (!precisionEventMatchesFunction(event, matched_function_name)) continue;
+                                try writer.print("  - `{s}`: {s}", .{
+                                    Encoder.precisionNoteLabel(event.kind),
+                                    precisionNoteEventDescription(event),
+                                });
+                                if (event.callee) |callee| try writer.print("; callee `{s}`", .{callee});
+                                if (event.storage_root) |root| try writer.print("; storage root `{s}`", .{root});
+                                if (event.declared_path) |path| try writer.print("; declared path `{s}`", .{path});
+                                if (event.location) |location| try writer.print("; location `{s}`", .{location});
+                                try writer.writeByte('\n');
+                            }
+                        } else {
+                            try writer.print("  - Scope: {s}\n", .{precisionContextGlobalScopeDescription()});
+                            for (summary.precision_notes) |note| {
+                                try writer.print("  - `{s}`: {s}\n", .{
+                                    Encoder.precisionNoteLabel(note),
+                                    precisionNoteDescription(note),
+                                });
+                            }
                         }
                     }
                     if (err.counterexample) |ce| {
@@ -3988,6 +4011,12 @@ pub const VerificationPass = struct {
             try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
         }
         try writer.writeByte(']');
+        try writer.writeAll(",\"precision_note_events\":[");
+        for (summary.precision_note_events, 0..) |event, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writePrecisionNoteEventJson(writer, event);
+        }
+        try writer.writeByte(']');
         try writer.writeByte('}');
         try writer.writeByte(',');
 
@@ -4032,6 +4061,8 @@ pub const VerificationPass = struct {
                     classifyQueryFailure(queries[qidx], runs[qidx])
                 else
                     FailureClassification{};
+                const matched_function_name = if (matched_query_idx) |qidx| queries[qidx].function_name else null;
+                const attributed_precision_event_count = countPrecisionEventsForFunction(summary.precision_note_events, matched_function_name);
                 try writer.writeByte('{');
                 try writer.writeAll("\"type\":");
                 try writeJsonStringEscaped(writer, @tagName(err.error_type));
@@ -4059,6 +4090,23 @@ pub const VerificationPass = struct {
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.writeAll(",\"precision_context_scope\":");
+                if (attributed_precision_event_count > 0) {
+                    try writeJsonStringEscaped(writer, precisionContextFunctionScopeLabel());
+                } else if (summary.precision_notes.len > 0) {
+                    try writeJsonStringEscaped(writer, precisionContextGlobalScopeLabel());
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"precision_context_events\":[");
+                var first_precision_event = true;
+                for (summary.precision_note_events) |event| {
+                    if (!precisionEventMatchesFunction(event, matched_function_name)) continue;
+                    if (!first_precision_event) try writer.writeByte(',');
+                    first_precision_event = false;
+                    try writePrecisionNoteEventJson(writer, event);
+                }
+                try writer.writeByte(']');
                 try writer.writeAll(",\"subtype\":");
                 if (classification.subtype) |subtype| {
                     try writeJsonStringEscaped(writer, subtype);
@@ -6067,6 +6115,7 @@ const ReportSummary = struct {
     degradation_reasons: []const []const u8 = &.{},
     soundness_losses: []const Encoder.SoundnessLoss = &.{},
     precision_notes: []const Encoder.PrecisionNoteKind = &.{},
+    precision_note_events: []const Encoder.PrecisionNoteEvent = &.{},
     fragment_counts: ReportFragmentCounts = .{},
 };
 
@@ -6391,7 +6440,23 @@ fn findQueryIndexForDiagnostic(
 }
 
 fn precisionContextHint() []const u8 {
-    return "The verifier stayed sound, but one or more precision fallbacks used coarser facts; this can explain proof failures that depend on path-precise modifies framing.";
+    return "The verifier stayed sound, but one or more precision fallbacks used coarser facts; this global context can explain proof failures that depend on path-precise modifies framing.";
+}
+
+fn precisionContextGlobalScopeLabel() []const u8 {
+    return "global";
+}
+
+fn precisionContextFunctionScopeLabel() []const u8 {
+    return "function";
+}
+
+fn precisionContextGlobalScopeDescription() []const u8 {
+    return "global encoder precision context, attached to this error as a possible explanation rather than as proof-local attribution";
+}
+
+fn precisionContextFunctionScopeDescription() []const u8 {
+    return "function-level encoder precision context matched to this error's prepared query";
 }
 
 fn precisionNoteDescription(note: Encoder.PrecisionNoteKind) []const u8 {
@@ -6399,6 +6464,52 @@ fn precisionNoteDescription(note: Encoder.PrecisionNoteKind) []const u8 {
         .path_precise_modifies_fallback_unavailable => "path-precise modifies metadata framing was unavailable, so the verifier used a root-precise opaque state summary",
         .precision_note_cap_exceeded => "additional precision notes were omitted after the report cap was reached",
     };
+}
+
+fn precisionEventMatchesFunction(event: Encoder.PrecisionNoteEvent, function_name: ?[]const u8) bool {
+    const expected = function_name orelse return false;
+    const actual = event.function_name orelse return false;
+    return std.mem.eql(u8, actual, expected);
+}
+
+fn countPrecisionEventsForFunction(events: []const Encoder.PrecisionNoteEvent, function_name: ?[]const u8) usize {
+    var count: usize = 0;
+    for (events) |event| {
+        if (precisionEventMatchesFunction(event, function_name)) count += 1;
+    }
+    return count;
+}
+
+fn precisionNoteEventDescription(event: Encoder.PrecisionNoteEvent) []const u8 {
+    return switch (event.kind) {
+        .path_precise_modifies_fallback_unavailable => "path-precise modifies metadata framing was unavailable at this call site, so the verifier used a root-precise opaque state summary",
+        .precision_note_cap_exceeded => "additional precision-note events were omitted after the report cap was reached",
+    };
+}
+
+fn writeOptionalJsonString(writer: anytype, value: ?[]const u8) !void {
+    if (value) |text| {
+        try writeJsonStringEscaped(writer, text);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writePrecisionNoteEventJson(writer: anytype, event: Encoder.PrecisionNoteEvent) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"kind\":");
+    try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(event.kind));
+    try writer.writeAll(",\"function\":");
+    try writeOptionalJsonString(writer, event.function_name);
+    try writer.writeAll(",\"callee\":");
+    try writeOptionalJsonString(writer, event.callee);
+    try writer.writeAll(",\"storage_root\":");
+    try writeOptionalJsonString(writer, event.storage_root);
+    try writer.writeAll(",\"declared_path\":");
+    try writeOptionalJsonString(writer, event.declared_path);
+    try writer.writeAll(",\"location\":");
+    try writeOptionalJsonString(writer, event.location);
+    try writer.writeByte('}');
 }
 
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
@@ -12051,7 +12162,9 @@ test "rendered SMT report connects precision notes to proof errors" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\",\"precision_note_cap_exceeded\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\":\"The verifier stayed sound, but one or more precision fallbacks used coarser facts; this can explain proof failures that depend on path-precise modifies framing.\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\":\"The verifier stayed sound, but one or more precision fallbacks used coarser facts; this global context can explain proof failures that depend on path-precise modifies framing.\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\":\"global\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[]") != null);
 
     const markdown = try pass.renderSmtReportMarkdown(
         "/tmp/test.ora",
@@ -12066,6 +12179,7 @@ test "rendered SMT report connects precision notes to proof errors" {
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "The verifier stayed sound, but one or more precision fallbacks used coarser facts") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "Scope: global encoder precision context") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "`path_precise_modifies_fallback_unavailable`") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "path-precise modifies metadata framing was unavailable") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "`precision_note_cap_exceeded`") != null);
@@ -12107,6 +12221,8 @@ test "rendered SMT report omits markdown precision context when there are no pre
 
     try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[]") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[]") != null);
 
     const markdown = try pass.renderSmtReportMarkdown(
         "/tmp/test.ora",
@@ -12120,6 +12236,102 @@ test "rendered SMT report omits markdown precision context when there are no pre
     defer testing.allocator.free(markdown);
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
+}
+
+test "rendered SMT report attributes precision events to matching proof errors" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const precision_notes = [_]Encoder.PrecisionNoteKind{
+        .path_precise_modifies_fallback_unavailable,
+    };
+    const precision_events = [_]Encoder.PrecisionNoteEvent{
+        .{
+            .kind = .path_precise_modifies_fallback_unavailable,
+            .function_name = "caller",
+            .callee = "set_balance",
+            .storage_root = "balances",
+            .declared_path = "balances[param#0]",
+            .location = "loc(\"test.ora\":10:5)",
+        },
+        .{
+            .kind = .path_precise_modifies_fallback_unavailable,
+            .function_name = "other",
+            .callee = "set_total",
+            .storage_root = "total",
+            .declared_path = "total",
+            .location = "loc(\"test.ora\":20:5)",
+        },
+    };
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+        .precision_notes = &precision_notes,
+        .precision_note_events = &precision_events,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "caller",
+        .obligation_kind = .Ensures,
+        .file = "test.ora",
+        .line = 12,
+        .column = 3,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "caller [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_TRUE,
+        .elapsed_ms = 1,
+    };
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .PostconditionViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove ensures"),
+        .file = try testing.allocator.dupe(u8, "test.ora"),
+        .line = 12,
+        .column = 3,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\":\"function\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[{\"kind\":\"path_precise_modifies_fallback_unavailable\",\"function\":\"caller\",\"callee\":\"set_balance\",\"storage_root\":\"balances\",\"declared_path\":\"balances[param#0]\",\"location\":\"loc(\\\"test.ora\\\":10:5)\"}]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "Scope: function-level encoder precision context") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "path-precise modifies metadata framing was unavailable at this call site") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "callee `set_balance`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "declared path `balances[param#0]`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "set_total") == null);
 }
 
 test "rendered SMT report json includes query fragment metadata" {

@@ -61,6 +61,15 @@ pub const Encoder = struct {
         precision_note_cap_exceeded,
     };
 
+    pub const PrecisionNoteEvent = struct {
+        kind: PrecisionNoteKind,
+        function_name: ?[]const u8 = null,
+        callee: ?[]const u8 = null,
+        storage_root: ?[]const u8 = null,
+        declared_path: ?[]const u8 = null,
+        location: ?[]const u8 = null,
+    };
+
     // SENTINEL: check-verifier-introspection extracts soundness-loss labels from this function.
     pub fn soundnessLossLabel(loss: SoundnessLoss) []const u8 {
         return switch (loss) {
@@ -302,6 +311,8 @@ pub const Encoder = struct {
     encoding_soundness_losses: std.ArrayList(SoundnessLoss),
     /// Bounded list of precision notes that do not taint soundness.
     encoding_precision_notes: std.ArrayList(PrecisionNoteKind),
+    /// Bounded precision-note provenance for attributing notes to report findings.
+    encoding_precision_note_events: std.ArrayList(PrecisionNoteEvent),
     /// Cache of error_union tuple sorts by MLIR type pointer.
     error_union_sorts: std.StringHashMap(ErrorUnionSort),
     /// Cache of product tuple sorts for tuples and structs.
@@ -350,6 +361,7 @@ pub const Encoder = struct {
             .encoding_degraded_reasons = std.ArrayList([]const u8){},
             .encoding_soundness_losses = std.ArrayList(SoundnessLoss){},
             .encoding_precision_notes = std.ArrayList(PrecisionNoteKind){},
+            .encoding_precision_note_events = std.ArrayList(PrecisionNoteEvent){},
             .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
@@ -377,6 +389,7 @@ pub const Encoder = struct {
         self.encoding_degraded_reasons.clearRetainingCapacity();
         self.encoding_soundness_losses.clearRetainingCapacity();
         self.encoding_precision_notes.clearRetainingCapacity();
+        self.encoding_precision_note_events.clearRetainingCapacity();
     }
 
     pub fn isDegraded(self: *const Encoder) bool {
@@ -397,6 +410,10 @@ pub const Encoder = struct {
 
     pub fn precisionNotes(self: *const Encoder) []const PrecisionNoteKind {
         return self.encoding_precision_notes.items;
+    }
+
+    pub fn precisionNoteEvents(self: *const Encoder) []const PrecisionNoteEvent {
+        return self.encoding_precision_note_events.items;
     }
 
     /// Public wrapper used by verifier-side test hooks and other callers that need
@@ -462,10 +479,71 @@ pub const Encoder = struct {
         self.encoding_precision_notes.append(self.allocator, note) catch {};
     }
 
+    fn recordPrecisionNoteEvent(self: *Encoder, event: PrecisionNoteEvent) void {
+        self.recordPrecisionNote(event.kind);
+
+        const precision_note_cap = 10;
+        if (self.encoding_precision_note_events.items.len >= precision_note_cap) {
+            self.encoding_precision_note_events.items[precision_note_cap - 1] = .{
+                .kind = .precision_note_cap_exceeded,
+            };
+            return;
+        }
+
+        self.encoding_precision_note_events.append(self.allocator, event) catch {};
+    }
+
+    fn recordPrecisionNoteForCall(
+        self: *Encoder,
+        note: PrecisionNoteKind,
+        call_op: mlir.MlirOperation,
+        callee: []const u8,
+        storage_root: []const u8,
+        declared_path: []const u8,
+    ) void {
+        const event = PrecisionNoteEvent{
+            .kind = note,
+            .function_name = self.getEnclosingFunctionNameForOperation(call_op) catch null,
+            .callee = self.allocPersistentMessage(callee) catch null,
+            .storage_root = self.allocPersistentMessage(storage_root) catch null,
+            .declared_path = self.allocPersistentMessage(declared_path) catch null,
+            .location = self.getOperationLocationText(call_op) catch null,
+        };
+        self.recordPrecisionNoteEvent(event);
+    }
+
     fn allocPersistentMessage(self: *Encoder, message: []const u8) ![]const u8 {
         const copy = try self.allocator.dupeZ(u8, message);
         try self.string_storage.append(self.allocator, copy[0 .. message.len + 1]);
         return copy[0..message.len];
+    }
+
+    fn getEnclosingFunctionNameForOperation(self: *Encoder, op: mlir.MlirOperation) !?[]const u8 {
+        var current = op;
+        var depth: usize = 0;
+        while (!mlir.oraOperationIsNull(current) and depth < 64) : (depth += 1) {
+            const block = mlir.mlirOperationGetBlock(current);
+            if (mlir.oraBlockIsNull(block)) return null;
+            const parent = mlir.mlirBlockGetParentOperation(block);
+            if (mlir.oraOperationIsNull(parent)) return null;
+
+            const name_ref = mlir.oraOperationGetName(parent);
+            defer @import("mlir_c_api").freeStringRef(name_ref);
+            if (name_ref.data != null and name_ref.length > 0) {
+                const op_name = name_ref.data[0..name_ref.length];
+                if (std.mem.eql(u8, op_name, "func.func") or std.mem.eql(u8, op_name, "ora.func_decl")) {
+                    if (self.getStringAttr(parent, "sym_name")) |name| {
+                        return try self.allocPersistentMessage(name);
+                    }
+                    const resolved = try self.resolveCalleeName(parent);
+                    defer if (resolved) |name| self.allocator.free(name);
+                    return if (resolved) |name| try self.allocPersistentMessage(name) else null;
+                }
+            }
+
+            current = parent;
+        }
+        return null;
     }
 
     fn getOperationLocationText(self: *Encoder, op: mlir.MlirOperation) !?[]const u8 {
@@ -2213,6 +2291,7 @@ pub const Encoder = struct {
         self.encoding_degraded_reasons.deinit(self.allocator);
         self.encoding_soundness_losses.deinit(self.allocator);
         self.encoding_precision_notes.deinit(self.allocator);
+        self.encoding_precision_note_events.deinit(self.allocator);
         var error_union_it = self.error_union_sorts.iterator();
         while (error_union_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -7683,15 +7762,19 @@ pub const Encoder = struct {
     }
 
     fn declaredModifiesHasPathPreciseShapeForRoot(paths: []const []u8, root: []const u8) bool {
+        return declaredModifiesPathPrecisePathForRoot(paths, root) != null;
+    }
+
+    fn declaredModifiesPathPrecisePathForRoot(paths: []const []u8, root: []const u8) ?[]const u8 {
         for (paths) |path| {
             if (!std.mem.eql(u8, effectSlotPathRoot(path), root)) continue;
             if (std.mem.indexOfScalar(u8, path, '[') != null or
                 std.mem.indexOfScalar(u8, path, '.') != null)
             {
-                return true;
+                return path;
             }
         }
-        return false;
+        return null;
     }
 
     fn parseFieldEffectSlotPath(self: *Encoder, path: []const u8) EncodeError!?EffectPathSegments {
@@ -13433,8 +13516,16 @@ pub const Encoder = struct {
                         const covered_by_declared_modifies = Encoder.declaredModifiesCoversRoot(declared_modifies_paths.items, slot.name);
                         if (func_op != null and !covered_by_declared_modifies) {
                             self.recordSoundnessLoss(.inexact_call_summary, "known callee state fell back to opaque UF summary");
-                        } else if (func_op != null and Encoder.declaredModifiesHasPathPreciseShapeForRoot(declared_modifies_paths.items, slot.name)) {
-                            self.recordPrecisionNote(.path_precise_modifies_fallback_unavailable);
+                        } else if (func_op != null) {
+                            if (Encoder.declaredModifiesPathPrecisePathForRoot(declared_modifies_paths.items, slot.name)) |declared_path| {
+                                self.recordPrecisionNoteForCall(
+                                    .path_precise_modifies_fallback_unavailable,
+                                    mlir_op,
+                                    callee,
+                                    slot.name,
+                                    declared_path,
+                                );
+                            }
                         }
                         post = try self.encodeCallStateTransitionUFSymbol(callee, slot, operands, slots.items);
                     }
