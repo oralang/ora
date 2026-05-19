@@ -79,27 +79,37 @@ contract ERC20BitfieldComptimeGenerics {
         log Transfer(std.constants.ZERO_ADDRESS, deployer, initial_supply);
     }
 
-    pub fn decimals() -> u8 {
+    pub fn decimals() -> u8
+        modifies()
+    {
         let f: TokenFlags = token_flags;
         return f.decimals;
     }
 
-    pub fn isPaused() -> bool {
+    pub fn isPaused() -> bool
+        modifies()
+    {
         let f: TokenFlags = token_flags;
         return f.paused;
     }
 
-    pub fn setPaused(next: bool) {
+    pub fn setPaused(next: bool)
+        modifies token_flags
+    {
         let f: TokenFlags = token_flags;
         f.paused = next;
         token_flags = f;
     }
 
-    pub fn balanceOf(owner: address) -> u256 {
+    pub fn balanceOf(owner: address) -> u256
+        modifies()
+    {
         return balances[owner];
     }
 
-    pub fn allowance(owner: address, spender: address) -> u256 {
+    pub fn allowance(owner: address, spender: address) -> u256
+        modifies()
+    {
         return allowances[owner][spender];
     }
 
@@ -164,6 +174,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        modifies total_supply, balances[to]
         guard total_supply <= std.constants.U256_MAX - amount
         guard balances[to] <= std.constants.U256_MAX - amount
     {
