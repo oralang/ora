@@ -1,0 +1,17 @@
+trait ERC20 {
+    fn transfer(self, to: address, value: u256) -> bool;
+}
+
+contract AbiBuiltinCorpus {
+    pub fn transfer_selector() -> bytes4 {
+        return comptime {
+            @selector(ERC20.transfer);
+        };
+    }
+
+    pub fn transfer_signature() -> string {
+        return comptime {
+            @abiSignature(ERC20.transfer);
+        };
+    }
+}

@@ -99,7 +99,7 @@ fn isValidBuiltin(name: []const u8) bool {
         "divTrunc",        "divFloor",          "divCeil",         "divExact",        "divMod",          "divmod",
         "cast",            "truncate",          "addWithOverflow", "subWithOverflow", "mulWithOverflow", "divWithOverflow",
         "modWithOverflow", "powerWithOverflow", "negWithOverflow", "shlWithOverflow", "shrWithOverflow", "bitCast",
-        "bits",            "concat",            "slice",
+        "bits",            "concat",            "slice",           "compileError",    "selector",        "abiSignature",
     };
     for (valid) |v| {
         if (std.mem.eql(u8, name, v)) return true;

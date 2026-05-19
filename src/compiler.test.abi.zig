@@ -433,6 +433,125 @@ test "compiler const eval supports keccak256 for ABI selector hashes" {
     try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
 }
 
+test "compiler const eval supports selector builtin for trait methods" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn transfer(self, to: address, value: u256) -> bool;
+        \\}
+        \\pub fn run() -> bytes4 {
+        \\    return comptime {
+        \\        @selector(ERC20.transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    var expected = try std.math.big.int.Managed.init(testing.allocator);
+    defer expected.deinit();
+    try expected.setString(16, "a9059cbb");
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
+}
+
+test "compiler const eval supports abiSignature builtin for trait methods" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn transfer(self, to: address, value: u256) -> bool;
+        \\}
+        \\pub fn run() -> string {
+        \\    return comptime {
+        \\        @abiSignature(ERC20.transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[ret_stmt.value.?.index()].?.string);
+}
+
+test "compiler selector builtin rejects non-function arguments" {
+    const source_text =
+        \\pub fn run() -> bytes4 {
+        \\    return comptime {
+        \\        @selector(42);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "function reference"));
+}
+
+test "compiler corpus covers ABI selector and signature builtins" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/abi_builtins.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("AbiBuiltinCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var selector_index: ?usize = null;
+    var signature_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const function = item.Function;
+        const body = ast_file.body(function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, function.name, "transfer_selector")) {
+            selector_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, function.name, "transfer_signature")) {
+            signature_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(selector_index != null);
+    try testing.expect(signature_index != null);
+
+    var expected_selector = try std.math.big.int.Managed.init(testing.allocator);
+    defer expected_selector.deinit();
+    try expected_selector.setString(16, "a9059cbb");
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[selector_index.?].?.integer.eql(expected_selector));
+    try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[signature_index.?].?.string);
+}
+
+test "compiler corpus rejects selector misuse" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/fail_selector_non_function.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "function reference"));
+}
+
 test "compiler emits ABI attrs for public contract entries" {
     const source_text =
         \\contract Entry {

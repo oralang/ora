@@ -46,6 +46,7 @@ pub const CtErrorKind = enum {
     index_out_of_bounds,
     field_not_found,
     undefined_identifier,
+    compile_error,
 
     // === Internal ===
     internal_error,
@@ -68,6 +69,7 @@ pub const CtErrorKind = enum {
             .index_out_of_bounds => "index out of bounds",
             .field_not_found => "field not found",
             .undefined_identifier => "undefined identifier",
+            .compile_error => "compile error",
             .internal_error => "internal evaluator error",
         };
     }

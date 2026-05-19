@@ -1,0 +1,8 @@
+contract CompileErrorCorpus {
+    pub fn fail() -> u256 {
+        return comptime {
+            @compileError("corpus intentional failure");
+            0;
+        };
+    }
+}

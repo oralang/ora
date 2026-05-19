@@ -3981,3 +3981,28 @@ test "generic struct field extract checked add verifies without degradation" {
         try testing.expectEqual(@as(usize, 0), rerun.errors_len);
     }
 }
+
+test "compiler compileError builtin reports user message in comptime block" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @compileError("intentional failure");
+        \\        0;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "intentional failure"));
+}
+
+test "compiler corpus covers compileError builtin diagnostics" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/fail_compile_error.ora");
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "corpus intentional failure"));
+}

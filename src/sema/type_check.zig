@@ -3297,6 +3297,12 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "keccak256")) {
             try self.checkKeccak256BuiltinArguments(builtin);
         }
+        if (std.mem.eql(u8, builtin.name, "compileError")) {
+            try self.checkCompileErrorBuiltinArguments(builtin);
+        }
+        if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
+            try self.checkAbiFunctionReferenceBuiltinArguments(builtin);
+        }
         if (std.mem.eql(u8, builtin.name, "concat")) {
             try self.checkConcatBuiltinArguments(builtin);
         }
@@ -3318,6 +3324,84 @@ const TypeChecker = struct {
                 diagnosticTypeDisplayName(self, arg_type),
             }),
         }
+    }
+
+    fn checkCompileErrorBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@compileError expects 1 argument", .{});
+            return;
+        }
+
+        const arg_type = self.expr_types[builtin.args[0].index()];
+        if (arg_type.kind() != .string) {
+            try self.emitRangeError(builtin.range, "@compileError expects a string argument", .{});
+        }
+    }
+
+    fn checkAbiFunctionReferenceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@{s} expects 1 argument", .{builtin.name});
+            return;
+        }
+
+        if (self.resolveBuiltinFunctionReferenceType(builtin.args[0]) == null) {
+            try self.emitRangeError(builtin.range, "@{s} requires a function reference", .{builtin.name});
+        }
+    }
+
+    fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resolveBuiltinFunctionReferenceType(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                const item_id = switch (binding) {
+                    .item => |item_id| item_id,
+                    .pattern => break :blk null,
+                };
+                if (self.file.item(item_id).* != .Function) break :blk null;
+                const ty = self.item_types[item_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+            .Field => |field| blk: {
+                if (switch (self.file.expression(field.base).*) {
+                    .Name => |name| name.name,
+                    .Group => |group| switch (self.file.expression(group.expr).*) {
+                        .Name => |name| name.name,
+                        else => null,
+                    },
+                    else => null,
+                }) |base_name| {
+                    const binding = self.resolution.expr_bindings[field.base.index()];
+                    if (binding) |resolved| switch (resolved) {
+                        .item => |item_id| switch (self.file.item(item_id).*) {
+                            .Trait => |trait_item| {
+                                const trait_interface = self.traitInterfaceByName(trait_item.name) orelse break :blk null;
+                                const method = self.findTraitMethodSignature(trait_interface, field.name) orelse break :blk null;
+                                break :blk self.functionTypeFromTraitSignature(method);
+                            },
+                            .Contract => |contract| {
+                                for (contract.members) |member_id| {
+                                    const member = self.file.item(member_id).*;
+                                    if (member != .Function or !std.mem.eql(u8, member.Function.name, field.name)) continue;
+                                    const ty = self.item_types[member_id.index()];
+                                    break :blk if (ty.kind() == .function) ty else null;
+                                }
+                            },
+                            else => {},
+                        },
+                        .pattern => {},
+                    };
+                    _ = base_name;
+                }
+
+                const ty = self.expr_types[expr_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+            else => blk: {
+                const ty = self.expr_types[expr_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+        };
     }
 
     fn checkConcatBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
@@ -4718,6 +4802,14 @@ const TypeChecker = struct {
             return descriptorFromPathName(self.file, self.item_index, "u256");
         }
 
+        if (std.mem.eql(u8, builtin.name, "selector")) {
+            return .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "compileError")) {
+            return .{ .unknown = {} };
+        }
+
         if (std.mem.eql(u8, builtin.name, "concat") or std.mem.eql(u8, builtin.name, "slice")) {
             if (builtin.args.len == 0) return .{ .unknown = {} };
             const value_type = self.expr_types[builtin.args[0].index()];
@@ -4728,7 +4820,7 @@ const TypeChecker = struct {
             };
         }
 
-        if (std.mem.eql(u8, builtin.name, "typeName")) {
+        if (std.mem.eql(u8, builtin.name, "typeName") or std.mem.eql(u8, builtin.name, "abiSignature")) {
             return .{ .string = {} };
         }
 

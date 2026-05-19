@@ -8,6 +8,7 @@ const model = @import("../sema/model.zig");
 const refinements = @import("../sema/refinements.zig");
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
+const hir_abi = @import("../hir/abi.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -1361,6 +1362,25 @@ const ConstEvaluator = struct {
         synthetic_self_arg: ?ast.ExprId = null,
     };
 
+    const AbiFunctionReference = struct {
+        name: []const u8,
+        param_types: []const model.Type,
+        has_self: bool = false,
+        signature: ?[]const u8 = null,
+    };
+
+    fn signatureForTraitMethod(self: *ConstEvaluator, method: anytype) !?[]const u8 {
+        var abi_types: std.ArrayList([]const u8) = .{};
+        defer abi_types.deinit(self.allocator);
+
+        for (method.parameters) |parameter| {
+            const abi_type = (try self.typeExprAbiName(parameter.type_expr)) orelse return null;
+            try abi_types.append(self.allocator, abi_type);
+        }
+
+        return try hir_abi.signatureForAbiTypes(self.allocator, method.name, abi_types.items);
+    }
+
     fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
         const module_id = self.module_id orelse return;
         const type_query = self.type_query orelse return;
@@ -1741,6 +1761,127 @@ const ConstEvaluator = struct {
         }
     }
 
+    fn functionReferenceFromItemType(
+        self: *ConstEvaluator,
+        name: []const u8,
+        ty: model.Type,
+        self_param_index: ?usize,
+    ) !?AbiFunctionReference {
+        if (ty.kind() != .function) return null;
+        const params = ty.function.param_types;
+        const filtered = if (self_param_index) |skip_index| blk: {
+            if (skip_index >= params.len) break :blk params;
+            var out = try self.allocator.alloc(model.Type, params.len - 1);
+            var out_index: usize = 0;
+            for (params, 0..) |param, index| {
+                if (index == skip_index) continue;
+                out[out_index] = param;
+                out_index += 1;
+            }
+            break :blk out;
+        } else params;
+        return .{
+            .name = ty.function.name orelse name,
+            .param_types = filtered,
+            .has_self = self_param_index != null,
+        };
+    }
+
+    fn resolveAbiFunctionReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?AbiFunctionReference {
+        const typecheck = try self.currentModuleTypeCheckResult();
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.resolveAbiFunctionReference(group.expr),
+            .Name => |name| blk: {
+                const module_typecheck = typecheck orelse break :blk null;
+                const item_id = self.lookupNamedItem(name.name) orelse break :blk null;
+                const item = self.file.item(item_id).*;
+                if (item != .Function) break :blk null;
+                break :blk try self.functionReferenceFromItemType(
+                    name.name,
+                    module_typecheck.itemLocatedType(item_id).type,
+                    self.functionRuntimeSelfParameterIndex(item.Function),
+                );
+            },
+            .Field => |field| blk: {
+                if (switch (self.file.expression(field.base).*) {
+                    .Name => |name| name.name,
+                    else => null,
+                }) |base_name| {
+                    if ((self.resolveImportAlias(base_name) catch null)) |target_module_id| {
+                        const target_file = self.astFileForModule(target_module_id) catch break :blk null;
+                        const target_typecheck = if (self.type_query) |query|
+                            (query.module_typecheck(query.context, target_module_id) catch break :blk null)
+                        else
+                            break :blk null;
+                        const item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch break :blk null) orelse break :blk null;
+                        const item = target_file.item(item_id).*;
+                        if (item != .Function) break :blk null;
+                        break :blk try self.functionReferenceFromItemType(
+                            field.name,
+                            target_typecheck.itemLocatedType(item_id).type,
+                            self.functionRuntimeSelfParameterIndex(item.Function),
+                        );
+                    }
+
+                    if (self.lookupNamedItem(base_name)) |base_item_id| {
+                        switch (self.file.item(base_item_id).*) {
+                            .Trait => |trait_item| {
+                                for (trait_item.methods) |method| {
+                                    if (std.mem.eql(u8, method.name, field.name)) {
+                                        const signature = (try self.signatureForTraitMethod(method)) orelse break :blk null;
+                                        break :blk AbiFunctionReference{
+                                            .name = method.name,
+                                            .param_types = &.{},
+                                            .has_self = method.receiver_kind != .none,
+                                            .signature = signature,
+                                        };
+                                    }
+                                }
+
+                                const module_typecheck = typecheck orelse break :blk null;
+                                if (module_typecheck.traitInterfaceByName(trait_item.name)) |trait_interface| {
+                                    var found_method: ?model.TraitMethodSignature = null;
+                                    for (trait_interface.methods) |method| {
+                                        if (std.mem.eql(u8, method.name, field.name)) {
+                                            found_method = method;
+                                            break;
+                                        }
+                                    }
+                                    const method = found_method orelse break :blk null;
+                                    break :blk AbiFunctionReference{
+                                        .name = method.name,
+                                        .param_types = method.param_types,
+                                        .has_self = method.receiver_kind != .none,
+                                    };
+                                } else {
+                                    break :blk null;
+                                }
+                            },
+                            .Contract => |contract| {
+                                const module_typecheck = typecheck orelse break :blk null;
+                                for (contract.members) |member_id| {
+                                    const member = self.file.item(member_id).*;
+                                    if (member != .Function or !std.mem.eql(u8, member.Function.name, field.name)) continue;
+                                    break :blk try self.functionReferenceFromItemType(
+                                        field.name,
+                                        module_typecheck.itemLocatedType(member_id).type,
+                                        self.functionRuntimeSelfParameterIndex(member.Function),
+                                    );
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                }
+
+                const module_typecheck = typecheck orelse break :blk null;
+                const ty = module_typecheck.exprType(expr_id);
+                break :blk try self.functionReferenceFromItemType(field.name, ty, null);
+            },
+            else => null,
+        };
+    }
+
     fn itemName(self: *ConstEvaluator, item_id: ast.ItemId) ?[]const u8 {
         return switch (self.file.item(item_id).*) {
             .Contract => |contract| contract.name,
@@ -1748,6 +1889,7 @@ const ConstEvaluator = struct {
             .Struct => |struct_item| struct_item.name,
             .Bitfield => |bitfield_item| bitfield_item.name,
             .Enum => |enum_item| enum_item.name,
+            .Trait => |trait_item| trait_item.name,
             .Field => |field| field.name,
             .Constant => |constant| constant.name,
             .ErrorDecl => |error_decl| error_decl.name,
@@ -1952,6 +2094,45 @@ const ConstEvaluator = struct {
     }
 
     fn evalBuiltin(self: *ConstEvaluator, builtin: ast.BuiltinExpr) anyerror!?ConstValue {
+        if (std.mem.eql(u8, builtin.name, "compileError")) {
+            if (builtin.args.len != 1) return null;
+            const message: []const u8 = if (try self.evalExprCtValue(builtin.args[0])) |value|
+                switch (value) {
+                    .string_ref => |heap_id| self.env.heap.getString(heap_id),
+                    else => return null,
+                }
+            else if (try self.evalExpr(builtin.args[0])) |value|
+                switch (value) {
+                    .string => |string| string,
+                    else => return null,
+                }
+            else
+                return null;
+
+            self.recordCtError(error_mod.CtError.withReason(
+                .compile_error,
+                self.sourceSpan(builtin.range),
+                "compile error",
+                message,
+            ));
+            return null;
+        }
+
+        if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
+            if (builtin.args.len != 1) return null;
+            const function_ref = (try self.resolveAbiFunctionReference(builtin.args[0])) orelse return null;
+            const signature = function_ref.signature orelse try hir_abi.signatureForMethod(
+                self.allocator,
+                function_ref.name,
+                function_ref.has_self,
+                function_ref.param_types,
+            );
+            if (std.mem.eql(u8, builtin.name, "abiSignature")) return .{ .string = signature };
+
+            const selector = hir_abi.keccakSelectorValue(signature);
+            return .{ .integer = try std.math.big.int.Managed.initSet(self.allocator, selector) };
+        }
+
         if (std.mem.eql(u8, builtin.name, "cast")) {
             if (builtin.args.len == 0) return null;
             if (builtin.type_arg) |type_arg| {
