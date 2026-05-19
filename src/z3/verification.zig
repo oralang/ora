@@ -3793,7 +3793,10 @@ pub const VerificationPass = struct {
         if (summary.precision_notes.len > 0) {
             try writer.writeAll("- Precision notes:\n");
             for (summary.precision_notes) |note| {
-                try writer.print("  - `{s}`\n", .{Encoder.precisionNoteLabel(note)});
+                try writer.print("  - `{s}`: {s}\n", .{
+                    Encoder.precisionNoteLabel(note),
+                    precisionNoteDescription(note),
+                });
             }
         }
         try writer.writeAll("\n");
@@ -3828,8 +3831,12 @@ pub const VerificationPass = struct {
                     try writer.print("- Location: `{s}:{d}:{d}`\n", .{ err.file, err.line, err.column });
                     if (summary.precision_notes.len > 0) {
                         try writer.writeAll("- Precision context:\n");
+                        try writer.print("  - {s}\n", .{precisionContextHint()});
                         for (summary.precision_notes) |note| {
-                            try writer.print("  - `{s}`\n", .{Encoder.precisionNoteLabel(note)});
+                            try writer.print("  - `{s}`: {s}\n", .{
+                                Encoder.precisionNoteLabel(note),
+                                precisionNoteDescription(note),
+                            });
                         }
                     }
                     if (err.counterexample) |ce| {
@@ -4046,6 +4053,12 @@ pub const VerificationPass = struct {
                     try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
                 }
                 try writer.writeByte(']');
+                try writer.writeAll(",\"precision_context_hint\":");
+                if (summary.precision_notes.len > 0) {
+                    try writeJsonStringEscaped(writer, precisionContextHint());
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.writeAll(",\"subtype\":");
                 if (classification.subtype) |subtype| {
                     try writeJsonStringEscaped(writer, subtype);
@@ -6375,6 +6388,17 @@ fn findQueryIndexForDiagnostic(
         return idx;
     }
     return null;
+}
+
+fn precisionContextHint() []const u8 {
+    return "The verifier stayed sound, but one or more precision fallbacks used coarser facts; this can explain proof failures that depend on path-precise modifies framing.";
+}
+
+fn precisionNoteDescription(note: Encoder.PrecisionNoteKind) []const u8 {
+    return switch (note) {
+        .path_precise_modifies_fallback_unavailable => "path-precise modifies metadata framing was unavailable, so the verifier used a root-precise opaque state summary",
+        .precision_note_cap_exceeded => "additional precision notes were omitted after the report cap was reached",
+    };
 }
 
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
@@ -12027,6 +12051,7 @@ test "rendered SMT report connects precision notes to proof errors" {
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\",\"precision_note_cap_exceeded\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\":\"The verifier stayed sound, but one or more precision fallbacks used coarser facts; this can explain proof failures that depend on path-precise modifies framing.\"") != null);
 
     const markdown = try pass.renderSmtReportMarkdown(
         "/tmp/test.ora",
@@ -12040,8 +12065,11 @@ test "rendered SMT report connects precision notes to proof errors" {
     defer testing.allocator.free(markdown);
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "The verifier stayed sound, but one or more precision fallbacks used coarser facts") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "`path_precise_modifies_fallback_unavailable`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "path-precise modifies metadata framing was unavailable") != null);
     try testing.expect(std.mem.indexOf(u8, markdown, "`precision_note_cap_exceeded`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "additional precision notes were omitted") != null);
 }
 
 test "rendered SMT report omits markdown precision context when there are no precision notes" {
@@ -12078,6 +12106,7 @@ test "rendered SMT report omits markdown precision context when there are no pre
     defer testing.allocator.free(json);
 
     try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\":null") != null);
 
     const markdown = try pass.renderSmtReportMarkdown(
         "/tmp/test.ora",
