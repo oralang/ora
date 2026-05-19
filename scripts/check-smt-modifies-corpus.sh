@@ -44,6 +44,7 @@ IMPORTED_SUMMARY_PASS_CASES=(
 )
 
 REAL_CONTRACT_PASS_CASES=(
+  "ora-example/apps/erc20.ora"
   "ora-example/apps/erc20_verified.ora"
   "ora-example/apps/erc20_bitfield_comptime_generics.ora"
 )
