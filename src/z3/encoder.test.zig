@@ -22295,3 +22295,22 @@ test "production encoder quantifiers are created only through mkQuantifier" {
     try testing.expect(forall_index > helper_index and forall_index < helper_end);
     try testing.expect(exists_index > helper_index and exists_index < helper_end);
 }
+
+test "array-store frame quantifier is reserved for opaque indexed modifies fallback" {
+    const source = @embedFile("encoder.zig");
+    const helper_needle = "fn addArrayStoreFrameConstraint";
+    const call_needle = "self.addArrayStoreFrameConstraint(";
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, helper_needle));
+    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "pub fn addArrayStoreFrameConstraint"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, call_needle));
+
+    const call_index = std.mem.indexOf(u8, source, call_needle).?;
+    const opaque_index = std.mem.indexOf(u8, source, "fn encodeOpaqueIndexedPathStore").?;
+    const opaque_end = std.mem.indexOfPos(u8, source, opaque_index, "// SENTINEL: end_of_encodeOpaqueIndexedPathStore") orelse {
+        std.debug.print("encoder.zig opaque indexed modifies sentinel moved; update the array-store frame quantifier guardrail\n", .{});
+        return error.TestUnexpectedResult;
+    };
+
+    try testing.expect(call_index > opaque_index and call_index < opaque_end);
+}

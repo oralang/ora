@@ -7579,6 +7579,8 @@ pub const Encoder = struct {
         return updated;
     }
 
+    // SENTINEL: end_of_encodeOpaqueIndexedPathStore
+
     fn encodeOpaqueStructFieldPathStore(
         self: *Encoder,
         callee: []const u8,
