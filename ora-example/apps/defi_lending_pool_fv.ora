@@ -177,8 +177,6 @@ contract LendingPoolFV {
     }
     
     pub fn get_available_liquidity() -> u256
-        requires(total_borrows <= total_deposits)
-        ensures(total_deposits >= total_borrows)
     {
         let deposits_base: u256 = total_deposits;
         let borrows_base: u256 = total_borrows;
@@ -380,7 +378,6 @@ contract LendingPoolFV {
     
     pub fn deposit(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused
         requires(amount > 0)
-        requires(when_not_paused())
         requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - amount)
         requires(collateral[std.transaction.sender] <= std.constants.U256_MAX - amount)
         requires(total_deposits <= std.constants.U256_MAX - amount)
@@ -419,8 +416,6 @@ contract LendingPoolFV {
     
     pub fn borrow(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InsufficientLiquidity | InsufficientCollateral | MaxBorrowExceeded | HealthFactorTooLow
         requires(amount > 0)
-        requires(when_not_paused())
-        requires(amount <= get_available_liquidity())
         requires(borrows[std.transaction.sender] <= std.constants.U256_MAX - amount)
         requires(total_borrows <= std.constants.U256_MAX - amount)
         ensures(amount > 0)
@@ -458,7 +453,6 @@ contract LendingPoolFV {
     
     pub fn repay(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | InsufficientDeposit
         requires(amount > 0)
-        requires(borrows[std.transaction.sender] > 0)
         ensures(amount > 0)
     {
         let user: address = std.transaction.sender;
@@ -503,10 +497,7 @@ contract LendingPoolFV {
     
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InsufficientDeposit | InsufficientLiquidity | HealthFactorTooLow
         requires(amount > 0)
-        requires(when_not_paused())
-        requires(deposits[std.transaction.sender] >= amount)
         requires(collateral[std.transaction.sender] >= amount)
-        requires(amount <= get_available_liquidity())
         requires(total_deposits >= amount)
         requires(borrows[std.transaction.sender] == 0)
         ensures(amount > 0)
@@ -552,12 +543,7 @@ contract LendingPoolFV {
     // ========================================================================
     
     pub fn liquidate(borrower: NonZeroAddress, repay_amount: MinValue<u256, 1>) -> !bool | InvalidAmount | ContractPaused | InvalidAddress | LiquidationNotAllowed | InvalidLiquidationAmount
-        requires(borrower != std.constants.ZERO_ADDRESS)
         requires(repay_amount > 0)
-        requires(when_not_paused())
-        requires(borrower != std.transaction.sender)
-        requires(borrows[borrower] > 0)
-        requires(collateral[borrower] > 0)
         requires(total_borrows >= borrows[borrower])
         requires(deposits[borrower] >= collateral[borrower])
         requires(deposits[std.transaction.sender] <= std.constants.U256_MAX - collateral[borrower])

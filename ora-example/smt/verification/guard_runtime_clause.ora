@@ -1,0 +1,10 @@
+// Unit corpus: guard clauses are runtime checks, not proof-only assumptions.
+
+contract GuardRuntimeClause {
+    pub fn accept(amount: u256) -> bool
+        guard amount > 0
+        ensures_ok(result == true)
+    {
+        return true;
+    }
+}

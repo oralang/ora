@@ -1,6 +1,8 @@
 // Trait receiver methods.
 // Covers `self` methods, intra-impl receiver calls, and ordinary value dispatch.
 
+comptime const std = @import("std");
+
 trait Priced {
     fn raw(self) -> u256;
     fn with_fee(self, fee: u256) -> u256;
@@ -15,7 +17,9 @@ impl Priced for Quote {
         return self.amount;
     }
 
-    fn with_fee(self, fee: u256) -> u256 {
+    fn with_fee(self, fee: u256) -> u256
+        requires(self.raw() <= std.constants.U256_MAX - fee)
+    {
         return self.raw() + fee;
     }
 }
@@ -25,7 +29,9 @@ fn quote(amount: u256) -> u256 {
     return q.raw();
 }
 
-fn quote_with_fee(amount: u256, fee: u256) -> u256 {
+fn quote_with_fee(amount: u256, fee: u256) -> u256
+    requires(amount <= std.constants.U256_MAX - fee)
+{
     let q: Quote = Quote { amount: amount };
     return q.with_fee(fee);
 }

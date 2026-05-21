@@ -8,7 +8,7 @@
 // we isolate fact propagation without public-entry guard-violation noise.
 //
 // Run with:
-//   ./zig-out/bin/ora build --verify=full --verify-stats --emit-smt-report ora-example/smt/verification/refinement_fact_proven.ora
+//   ./zig-out/bin/ora build --verify=full --verify-stats ora-example/smt/verification/refinement_fact_proven.ora
 //
 // Expected: verification succeeds.
 // ============================================================================

@@ -64,7 +64,9 @@ contract TokenWithMetadata {
         return allowances[owner_addr][spender];
     }
 
-    pub fn transfer_from(spender: address, from: address, to: address, amount: u256) -> bool {
+    pub fn transfer_from(spender: address, from: address, to: address, amount: u256) -> bool
+        requires(balances[to] <= std.constants.U256_MAX - amount)
+    {
         let allowed: u256 = allowances[from][spender];
         let enough_allowance: bool = allowed >= amount;
         if (enough_allowance) {

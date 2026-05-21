@@ -1,0 +1,13 @@
+comptime const dep = @import("./pass_imported_summary_discriminator_dep.ora");
+
+contract ImportedSummaryDiscriminator {
+    storage var balances: map<address, u256>;
+
+    pub fn f(user: address, other: address, value: u256) -> bool
+        requires(user != other)
+        ensures(balances[other] == old(balances[other]))
+    {
+        dep.set_balance_with_bad_body(user, value);
+        return true;
+    }
+}

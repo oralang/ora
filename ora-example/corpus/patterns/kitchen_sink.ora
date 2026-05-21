@@ -245,15 +245,17 @@ contract KitchenSink {
 
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance
         requires(amount > 0)
-        requires(balances[std.msg.sender()] >= amount)
         requires(totalDeposits >= amount)
         requires(specTotalBalance >= amount)
         requires(specWithdrawCount <= std.constants.U256_MAX - amount)
         guard !flags.paused
         guard flags.allowWithdrawals
-        ensures(totalDeposits == old(totalDeposits) - amount)
-        ensures(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
-        ensures(specTotalBalance == old(specTotalBalance) - amount)
+        ensures_ok(totalDeposits == old(totalDeposits) - amount)
+        ensures_ok(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
+        ensures_ok(specTotalBalance == old(specTotalBalance) - amount)
+        ensures_err(totalDeposits == old(totalDeposits))
+        ensures_err(balances[std.msg.sender()] == old(balances[std.msg.sender()]))
+        ensures_err(specTotalBalance == old(specTotalBalance))
     {
         let sender: NonZeroAddress = std.msg.sender();
         @lock(reentrancyGuard);

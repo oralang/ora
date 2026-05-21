@@ -6,7 +6,7 @@
 // 2) Keep complex/call-based clauses as runtime cf.assert.
 //
 // Inspect with:
-//   ./zig-out/bin/ora emit --emit-mlir=ora --no-verify ora-example/smt/verification/refinement_contract_dedup_sound_core.ora
+//   ./zig-out/bin/ora emit --emit=mlir:ora --no-verify ora-example/smt/verification/refinement_contract_dedup_sound_core.ora
 //
 // Expected:
 // - requiresCovered: requires(amount > 0) -> ora.assume (covered by MinValue<u256, 1>)

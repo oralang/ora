@@ -1,0 +1,14 @@
+// Unit corpus: ensures_err only applies to error exits.
+
+error Rejected;
+
+contract EnsuresErrErrorUnion {
+    pub fn choose(flag: bool, value: u256) -> !u256 | Rejected
+        ensures_err(value == value)
+    {
+        if (!flag) {
+            return Rejected;
+        }
+        return value;
+    }
+}

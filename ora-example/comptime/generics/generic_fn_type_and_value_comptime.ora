@@ -7,11 +7,15 @@ contract GenericFnTypeAndValueComptime {
         return x + bias;
     }
 
-    pub fn add_three(x: u256) -> u256 {
+    pub fn add_three(x: u256) -> u256
+        requires(x <= std.constants.U256_MAX - 3)
+    {
         return add_with_bias(u256, 3, x);
     }
 
-    pub fn add_ten(x: u256) -> u256 {
+    pub fn add_ten(x: u256) -> u256
+        requires(x <= std.constants.U256_MAX - 10)
+    {
         return add_with_bias(u256, 10, x);
     }
 }

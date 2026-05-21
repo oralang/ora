@@ -106,7 +106,9 @@ contract ComptimeEdgeCases {
         return (value + mask) - ((value + mask) % alignment);
     }
 
-    pub fn test_comptime_param_mixed(x: u256) -> u256 {
+    pub fn test_comptime_param_mixed(x: u256) -> u256
+        requires(x <= std.constants.U256_MAX - 31)
+    {
         // alignment is comptime (32), x is runtime
         return align_up(32, x);
     }

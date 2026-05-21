@@ -4,23 +4,31 @@
 // Tests how refinement types behave in arithmetic operations
 // ============================================================================
 
+comptime const std = @import("std");
+
 contract RefinementArithmetic {
     // ============================================================================
     // MinValue Arithmetic
     // ============================================================================
     
-    // MinValue + MinValue = MinValue (preserves minimum)
-    fn testMinValuePlusMinValue(a: MinValue<u256, 100>, b: MinValue<u256, 200>) -> MinValue<u256, 300> {
+    // MinValue + MinValue = MinValue (preserves minimum when the checked add is in range)
+    fn testMinValuePlusMinValue(a: MinValue<u256, 100>, b: MinValue<u256, 200>) -> MinValue<u256, 300>
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b; // Result >= 300
     }
     
     // MinValue + u256 = MinValue (preserves minimum)
-    fn testMinValuePlusBase(a: MinValue<u256, 100>, b: u256) -> MinValue<u256, 100> {
+    fn testMinValuePlusBase(a: MinValue<u256, 100>, b: u256) -> MinValue<u256, 100>
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b; // Result >= 100
     }
     
     // MinValue - u256 = ? (may lose refinement if b >= a.min)
-    fn testMinValueMinusBase(a: MinValue<u256, 100>, b: u256) -> u256 {
+    fn testMinValueMinusBase(a: MinValue<u256, 100>, b: u256) -> u256
+        requires(a >= b)
+    {
         return a - b; // Result type depends on whether b < a.min
     }
     
@@ -33,9 +41,11 @@ contract RefinementArithmetic {
         return a + b; // Result <= 800
     }
     
-    // MaxValue + u256 = MaxValue (preserves maximum)
-    fn testMaxValuePlusBase(a: MaxValue<u256, 500>, b: u256) -> MaxValue<u256, 500> {
-        return a + b; // Result <= 500 (conservative)
+    // MaxValue + u256 = u256 (loses the maximum unless the base operand is bounded)
+    fn testMaxValuePlusBase(a: MaxValue<u256, 500>, b: u256) -> u256
+        requires(a <= std.constants.U256_MAX - b)
+    {
+        return a + b;
     }
     
     // ============================================================================
@@ -48,7 +58,9 @@ contract RefinementArithmetic {
     }
     
     // InRange - InRange = InRange (combines ranges)
-    fn testInRangeMinusInRange(a: InRange<u256, 100, 500>, b: InRange<u256, 20, 200>) -> InRange<u256, 0, 480> {
+    fn testInRangeMinusInRange(a: InRange<u256, 100, 500>, b: InRange<u256, 20, 200>) -> InRange<u256, 0, 480>
+        requires(a >= b)
+    {
         return a - b; // Result in [0, 480] (assuming no underflow)
     }
     
@@ -71,12 +83,17 @@ contract RefinementArithmetic {
     // ============================================================================
     
     // Scaled + Scaled (same decimals) = Scaled (preserves scale)
-    fn testScaledPlusScaled(a: Scaled<u256, 18>, b: Scaled<u256, 18>) -> Scaled<u256, 18> {
+    fn testScaledPlusScaled(a: Scaled<u256, 18>, b: Scaled<u256, 18>) -> Scaled<u256, 18>
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b; // Result has same scale (18 decimals)
     }
     
     // Scaled * Scaled = Scaled (scale doubles)
-    fn testScaledTimesScaled(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> Scaled<u256, 24> {
+    fn testScaledTimesScaled(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> Scaled<u256, 24>
+        requires(b != 0)
+        requires(a <= std.constants.U256_MAX / b)
+    {
         return a * b; // Result has scale 18 + 6 = 24
     }
     
@@ -85,12 +102,16 @@ contract RefinementArithmetic {
     // ============================================================================
     
     // MinValue + MaxValue = ? (conservative result)
-    fn testMinValuePlusMaxValue(a: MinValue<u256, 100>, b: MaxValue<u256, 500>) -> u256 {
+    fn testMinValuePlusMaxValue(a: MinValue<u256, 100>, b: MaxValue<u256, 500>) -> u256
+        requires(a <= std.constants.U256_MAX - b)
+    {
         return a + b; // Result type: u256 (conservative, loses refinements)
     }
     
-    // InRange + MinValue = InRange (combines constraints)
-    fn testInRangePlusMinValue(rate: InRange<u256, 0, 10000>, amount: MinValue<u256, 100>) -> InRange<u256, 100, 10100> {
-        return rate + amount; // Result in [100, 10100]
+    // InRange + MinValue = u256 (the minimum is known, but MinValue has no upper bound)
+    fn testInRangePlusMinValue(rate: InRange<u256, 0, 10000>, amount: MinValue<u256, 100>) -> u256
+        requires(rate <= std.constants.U256_MAX - amount)
+    {
+        return rate + amount;
     }
 }

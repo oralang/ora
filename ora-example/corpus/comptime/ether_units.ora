@@ -1,0 +1,19 @@
+contract EtherUnitCorpus {
+    pub fn min_stake() -> u256 {
+        return comptime {
+            1 ether;
+        };
+    }
+
+    pub fn priority_fee() -> u256 {
+        return comptime {
+            50 gwei;
+        };
+    }
+
+    pub fn mixed_units() -> u256 {
+        return comptime {
+            1 ether + 1 milliether + 1 microether + 1 gwei + 1 mwei + 1 kwei + 1 wei;
+        };
+    }
+}

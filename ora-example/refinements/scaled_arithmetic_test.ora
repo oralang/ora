@@ -5,6 +5,8 @@
 // preserved correctly in operations.
 // ============================================================================
 
+comptime const std = @import("std");
+
 contract ScaledArithmetic {
     // ============================================================================
     // Type Aliases for Common Scales
@@ -19,7 +21,9 @@ contract ScaledArithmetic {
     fn testScaledAddition(
         wad1: Scaled<u256, 18>,
         wad2: Scaled<u256, 18>,
-    ) -> Scaled<u256, 18> {
+    ) -> Scaled<u256, 18>
+        requires(wad1 <= std.constants.U256_MAX - wad2)
+    {
         // Scaled<u256, 18> + Scaled<u256, 18> = Scaled<u256, 18> (preserve scale)
         return wad1 + wad2;
     }
@@ -31,7 +35,9 @@ contract ScaledArithmetic {
     fn testScaledSubtraction(
         wad1: Scaled<u256, 18>,
         wad2: Scaled<u256, 18>,
-    ) -> Scaled<u256, 18> {
+    ) -> Scaled<u256, 18>
+        requires(wad1 >= wad2)
+    {
         // Scaled<u256, 18> - Scaled<u256, 18> = Scaled<u256, 18> (preserve scale)
         return wad1 - wad2;
     }
@@ -43,7 +49,10 @@ contract ScaledArithmetic {
     fn testScaledMultiplication(
         wad1: Scaled<u256, 18>,
         wad2: Scaled<u256, 18>,
-    ) -> Scaled<u256, 36> {
+    ) -> Scaled<u256, 36>
+        requires(wad2 != 0)
+        requires(wad1 <= std.constants.U256_MAX / wad2)
+    {
         // Scaled<u256, 18> * Scaled<u256, 18> = Scaled<u256, 36> (scale doubles)
         return wad1 * wad2;
     }
@@ -55,7 +64,10 @@ contract ScaledArithmetic {
     fn calculateTokenAmount(
         price_per_token: Scaled<u256, 18>,  // Price in wei per token (18 decimals)
         quantity: Scaled<u256, 18>          // Quantity of tokens (18 decimals)
-    ) -> Scaled<u256, 36> {                 // Total value (36 decimals, needs normalization)
+    ) -> Scaled<u256, 36>                   // Total value (36 decimals, needs normalization)
+        requires(quantity != 0)
+        requires(price_per_token <= std.constants.U256_MAX / quantity)
+    {
         // price * quantity = Scaled<u256, 36>
         return price_per_token * quantity;
     }
@@ -63,7 +75,9 @@ contract ScaledArithmetic {
     fn addTokenAmounts(
         amount1: Scaled<u256, 18>,
         amount2: Scaled<u256, 18>
-    ) -> Scaled<u256, 18> {
+    ) -> Scaled<u256, 18>
+        requires(amount1 <= std.constants.U256_MAX - amount2)
+    {
         // Both have same scale, addition preserves scale
         return amount1 + amount2;
     }
@@ -75,7 +89,10 @@ contract ScaledArithmetic {
     fn testScaleMismatch(
         wad: Scaled<u256, 18>,
         ray: Scaled<u256, 27>,
-    ) -> Scaled<u256, 45> {
+    ) -> Scaled<u256, 45>
+        requires(ray != 0)
+        requires(wad <= std.constants.U256_MAX / ray)
+    {
         // Different scales cannot be added or subtracted.
         // Multiplication preserves the type-level scale relationship.
         return wad * ray;

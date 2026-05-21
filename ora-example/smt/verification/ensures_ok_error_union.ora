@@ -1,0 +1,14 @@
+// Unit corpus: ensures_ok only applies to successful error-union exits.
+
+error Rejected;
+
+contract EnsuresOkErrorUnion {
+    pub fn choose(flag: bool, value: u256) -> !u256 | Rejected
+        ensures_ok(result == value)
+    {
+        if (!flag) {
+            return Rejected;
+        }
+        return value;
+    }
+}

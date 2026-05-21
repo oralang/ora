@@ -9,8 +9,11 @@ contract ComptimeParamProbe {
         return (value + mask) - ((value + mask) % alignment);
     }
 
-    pub fn test_ok(x: u256) -> u256 {
-        return align_up(32, x);  // 32 is comptime-known: OK
+    pub fn test_ok(x: u256) -> u256
+        requires(x <= std.constants.U256_MAX - 31)
+    {
+        // 32 is comptime-known; the runtime value still must satisfy align_up's bound.
+        return align_up(32, x);
     }
 
     // Uncomment to see compile error:

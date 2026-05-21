@@ -2,7 +2,7 @@
 // SMT Guard Smoke Test
 // ============================================================================
 //
-// Intended to be run with --verify and --emit-mlir-sir to exercise:
+// Intended to be run with --verify and --emit=mlir:sir to exercise:
 // - guard creation
 // - SMT discharge of guards
 // - guard cleanup before Ora -> SIR

@@ -5,7 +5,7 @@
 // Full verification mode should treat untagged ora.assert as an obligation.
 //
 // Run with:
-//   ./zig-out/bin/ora build --verify=full --verify-stats --emit-smt-report ora-example/smt/verification/ora_assert_obligation_pass.ora
+//   ./zig-out/bin/ora build --verify=full --verify-stats ora-example/smt/verification/ora_assert_obligation_pass.ora
 //
 // Expected: verification succeeds and report includes obligation queries.
 // ============================================================================
