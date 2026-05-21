@@ -51,10 +51,21 @@ fn expectSingleSelectTrigger(ctx: *Context, quantifier: z3.Z3_ast) !void {
 
 fn expectNoQuantifiedConstraints(ctx: *Context, constraints: []const z3.Z3_ast) !void {
     for (constraints) |constraint| {
-        const text = std.mem.span(z3.Z3_ast_to_string(ctx.ctx, constraint));
-        try testing.expect(std.mem.indexOf(u8, text, "forall") == null);
-        try testing.expect(std.mem.indexOf(u8, text, "exists") == null);
+        try testing.expect(!astContainsQuantifier(ctx, constraint));
     }
+}
+
+fn astContainsQuantifier(ctx: *Context, ast: z3.Z3_ast) bool {
+    const kind = z3.Z3_get_ast_kind(ctx.ctx, ast);
+    if (kind == z3.Z3_QUANTIFIER_AST) return true;
+    if (kind != z3.Z3_APP_AST) return false;
+
+    const app = z3.Z3_to_app(ctx.ctx, ast);
+    const arg_count: usize = @intCast(z3.Z3_get_app_num_args(ctx.ctx, app));
+    for (0..arg_count) |idx| {
+        if (astContainsQuantifier(ctx, z3.Z3_get_app_arg(ctx.ctx, app, @intCast(idx)))) return true;
+    }
+    return false;
 }
 
 test "encodeMLIRType maps bool and i32" {
@@ -3140,7 +3151,7 @@ test "encodeValue errors on unsupported operation" {
     _ = try encoder.encodeValue(result);
 }
 
-test "ora.evm.caller shares symbol without assuming non-zero" {
+test "ora.evm.caller shares symbol and assumes non-zero" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
@@ -3170,15 +3181,15 @@ test "ora.evm.caller shares symbol without assuming non-zero" {
     solver_same.assert(neq);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_same.check());
 
-    // The verifier must not globally assume caller is non-zero; CREATE and
-    // low-level harness contexts can expose a zero caller.
+    // Ora's std.msg.sender() is modeled as NonZeroAddress, so the SMT
+    // environment must exclude ZERO_ADDRESS for caller.
     var solver_zero = try Solver.init(&z3_ctx, testing.allocator);
     defer solver_zero.deinit();
     for (constraints) |cst| solver_zero.assert(cst);
     const caller_sort = z3.Z3_get_sort(z3_ctx.ctx, caller_a);
     const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, caller_sort);
     solver_zero.assert(z3.Z3_mk_eq(z3_ctx.ctx, caller_a, zero));
-    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_TRUE), solver_zero.check());
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver_zero.check());
 }
 
 test "declared ora.evm environment ops encode as stable env symbols" {
@@ -18831,6 +18842,22 @@ test "known callee covered root opaque fallback records precision note when inde
     const seed_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, mlir.oraIntegerAttrCreateI64FromType(i256_ty, 0));
     _ = try encoder.encodeOperation(mlir.oraSStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(seed_op, 0), stringRef("counter")));
 
+    const caller_attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("callerWithBadPathShape"))),
+    };
+    const caller = mlir.oraFuncFuncOpCreate(
+        mlir_ctx,
+        loc,
+        &caller_attrs,
+        caller_attrs.len,
+        &[_]mlir.MlirType{},
+        &[_]mlir.MlirLocation{},
+        0,
+    );
+    const caller_body = mlir.oraFuncOpGetBodyBlock(caller);
+    mlir.oraBlockAppendOwnedOperation(caller_body, user_op);
+    mlir.oraBlockAppendOwnedOperation(caller_body, value_op);
+
     const call = mlir.oraFuncCallOpCreate(
         mlir_ctx,
         loc,
@@ -18840,6 +18867,7 @@ test "known callee covered root opaque fallback records precision note when inde
         &[_]mlir.MlirType{},
         0,
     );
+    mlir.oraBlockAppendOwnedOperation(caller_body, call);
     _ = try encoder.encodeOperation(call);
 
     try testing.expect(!encoder.isDegraded());
@@ -18848,6 +18876,15 @@ test "known callee covered root opaque fallback records precision note when inde
     const notes = encoder.precisionNotes();
     try testing.expectEqual(@as(usize, 1), notes.len);
     try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, notes[0]);
+
+    const events = encoder.precisionNoteEvents();
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(Encoder.PrecisionNoteKind.path_precise_modifies_fallback_unavailable, events[0].kind);
+    try testing.expectEqualStrings("callerWithBadPathShape", events[0].function_name.?);
+    try testing.expectEqualStrings("opaqueSetCounterWithBadPathShape", events[0].callee.?);
+    try testing.expectEqualStrings("counter", events[0].storage_root.?);
+    try testing.expectEqualStrings("counter[param#0]", events[0].declared_path.?);
+    try testing.expect(events[0].location != null);
 }
 
 test "known callee covered root opaque fallback records precision note for mixed indexed field metadata" {

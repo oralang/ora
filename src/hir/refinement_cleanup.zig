@@ -130,19 +130,7 @@ fn handleVerificationOp(
         const context = getStringAttr(context_attr);
         const verification_type_attr = mlir.oraOperationGetAttributeByName(op, strRef("ora.verification_type"));
         const verification_type = getStringAttr(verification_type_attr);
-        const guard_id_attr = mlir.oraOperationGetAttributeByName(op, strRef("ora.guard_id"));
-        const guard_id = getStringAttr(guard_id_attr);
-        const is_proven_guard_clause = context != null and
-            verification_type != null and
-            std.mem.eql(u8, context.?, "guard_clause") and
-            std.mem.eql(u8, verification_type.?, "guard") and
-            guard_id != null and
-            proven_guard_ids.contains(guard_id.?);
-        if (is_proven_guard_clause) {
-            if (debug_enabled) std.debug.print("[verification-cleanup] removed proven guard clause {s}\n", .{guard_id.?});
-            mlir.oraOperationErase(op);
-            return;
-        }
+        _ = proven_guard_ids;
         const is_ghost = context != null and std.mem.eql(u8, context.?, "ghost_assertion");
         if (!is_ghost) {
             const condition = mlir.oraOperationGetOperand(op, 0);

@@ -187,6 +187,21 @@ test "compiler lowers guard clauses to runtime revert through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
 }
 
+test "corpus guard runtime clause lowers to SIR revert" {
+    var compilation = try compilePackage("ora-example/smt/verification/guard_runtime_clause.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "guard_runtime_clause.ora"));
+}
+
 test "compiler converts tuple top-level const items through OraToSIR" {
     const source_text =
         \\const PAIR: (u256, u256) = @divmod(17, 5);
@@ -872,7 +887,6 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
 
     const touch_total = try functionSlice(rendered, "touch_total");
     try expectOrderedNeedles(touch_total, &.{
-        "slot_total = const 0x0",
         lock_prefix,
         "tstore",
     });

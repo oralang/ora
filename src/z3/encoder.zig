@@ -26,6 +26,7 @@ pub const Encoder = struct {
         local,
         imported_callee_obligation,
         imported_callee_ensures,
+        callee_precondition,
     };
 
     pub const PendingConstraintSourceKind = enum {
@@ -254,6 +255,8 @@ pub const Encoder = struct {
     verify_state: bool,
     max_summary_inline_depth: u32,
     summary_only_imported_calls: bool,
+    separate_function_body_verification: bool,
+    debug_assert_simplify: bool,
 
     /// Map from MLIR value to Z3 AST (for caching encoded values)
     value_map: std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
@@ -333,7 +336,9 @@ pub const Encoder = struct {
             .verify_calls = true,
             .verify_state = true,
             .max_summary_inline_depth = default_max_summary_inline_depth,
-            .summary_only_imported_calls = false,
+            .summary_only_imported_calls = true,
+            .separate_function_body_verification = true,
+            .debug_assert_simplify = false,
             .value_map = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_map_old = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
             .value_bindings = std.HashMap(u64, z3.Z3_ast, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage).init(allocator),
@@ -371,16 +376,30 @@ pub const Encoder = struct {
         };
     }
 
+    // Internal test hook for reduced-trust encoder cases. Production verifier
+    // entrypoints keep call reasoning enabled.
     pub fn setVerifyCalls(self: *Encoder, enabled: bool) void {
         self.verify_calls = enabled;
     }
 
+    // Internal test hook for reduced-trust encoder cases. Production verifier
+    // entrypoints keep storage/map state reasoning enabled.
     pub fn setVerifyState(self: *Encoder, enabled: bool) void {
         self.verify_state = enabled;
     }
 
+    // Internal recursive-encoder knob: summary encoders inherit this setting so
+    // nested imported calls keep the same boundary semantics. Not user-facing.
     pub fn setSummaryOnlyImportedCalls(self: *Encoder, enabled: bool) void {
         self.summary_only_imported_calls = enabled;
+    }
+
+    pub fn setSeparateFunctionBodyVerification(self: *Encoder, enabled: bool) void {
+        self.separate_function_body_verification = enabled;
+    }
+
+    pub fn setDebugAssertSimplify(self: *Encoder, enabled: bool) void {
+        self.debug_assert_simplify = enabled;
     }
 
     pub fn clearDegradation(self: *Encoder) void {
@@ -3089,6 +3108,16 @@ pub const Encoder = struct {
         self.addObligationWithSource(obligation, imported_callee_name, .imported_callee_ensures);
     }
 
+    fn addCalleePrecondition(self: *Encoder, obligation: z3.Z3_ast, callee_name: []const u8) void {
+        self.addObligationWithSource(obligation, callee_name, .callee_precondition);
+    }
+
+    fn addCalleePreconditions(self: *Encoder, obligations: []const z3.Z3_ast, callee_name: []const u8) void {
+        for (obligations) |obligation| {
+            self.addCalleePrecondition(obligation, callee_name);
+        }
+    }
+
     fn addObligation(self: *Encoder, obligation: z3.Z3_ast) void {
         self.addObligationWithSource(obligation, null, .local);
     }
@@ -3232,7 +3261,13 @@ pub const Encoder = struct {
         if (z3.Z3_get_sort_kind(self.context.ctx, result_sort) != z3.Z3_BV_SORT) return error.UnsupportedOperation;
         const actual_bits: u32 = @intCast(z3.Z3_get_bv_sort_size(self.context.ctx, result_sort));
         if (actual_bits != entry.expected_bv_bits) return error.UnsupportedOperation;
-        return try self.getOrCreateEnv(entry.env_name, result_sort);
+        const env = try self.getOrCreateEnv(entry.env_name, result_sort);
+        if (std.mem.eql(u8, entry.env_name, "evm_caller")) {
+            const zero = try self.encodeIntegerConstant(0, actual_bits);
+            const non_zero = z3.Z3_mk_not(self.context.ctx, z3.Z3_mk_eq(self.context.ctx, env, zero));
+            self.addGlobalConstraintWithSource(non_zero, .env_assume, "environment assumption (msg.sender != ZERO_ADDRESS)");
+        }
+        return env;
     }
 
     const PrecompileOp = struct {
@@ -4730,15 +4765,7 @@ pub const Encoder = struct {
             const condition_value = mlir.oraOperationGetOperand(assert_op, 0);
             const specialized = try self.tryEncodeCheckedUnsignedMulAssert(condition_value, mode);
             if (specialized == null) {
-                const debug_enabled = blk: {
-                    const value = std.process.getEnvVarOwned(self.allocator, "ORA_Z3_DEBUG_ASSERT_SIMPLIFY") catch null;
-                    defer if (value) |buf| self.allocator.free(buf);
-                    break :blk if (value) |buf|
-                        std.mem.eql(u8, buf, "1") or std.ascii.eqlIgnoreCase(buf, "true")
-                    else
-                        false;
-                };
-                if (debug_enabled) {
+                if (self.debug_assert_simplify) {
                     const printed = mlir.oraOperationPrintToString(assert_op);
                     defer if (printed.data != null) @import("mlir_c_api").freeStringRef(printed);
                     if (printed.data != null and printed.length > 0) {
@@ -5715,7 +5742,7 @@ pub const Encoder = struct {
             const result_sort = try self.encodeMLIRType(result_type);
             if (!self.verify_state) {
                 const op_id = @intFromPtr(mlir_op.ptr);
-                return try self.soundnessLossUndef(result_sort, "sload", op_id, .user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables storage-load verification");
+                return try self.soundnessLossUndef(result_sort, "sload", op_id, .user_disabled_state_verification, "state verification is disabled; storage loads are unknown");
             }
             if (mode == .Old) {
                 return try self.getOrCreateOldGlobal(global_name, result_sort);
@@ -5726,7 +5753,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.sstore")) {
             if (operands.len < 1) return error.InvalidOperandCount;
             if (!self.verify_state) {
-                self.recordSoundnessLoss(.user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables storage-store verification");
+                self.recordSoundnessLoss(.user_disabled_state_verification, "state verification is disabled; storage stores are not modeled");
                 return operands[0];
             }
             const global_name = self.getStringAttr(mlir_op, "global") orelse return error.UnsupportedOperation;
@@ -5758,7 +5785,7 @@ pub const Encoder = struct {
                     const result_type = mlir.oraValueGetType(result_value);
                     const result_sort = try self.encodeMLIRType(result_type);
                     const op_id = @intFromPtr(mlir_op.ptr);
-                    return try self.soundnessLossUndef(result_sort, "map_get", op_id, .user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables map-load verification");
+                    return try self.soundnessLossUndef(result_sort, "map_get", op_id, .user_disabled_state_verification, "state verification is disabled; map loads are unknown");
                 }
                 const map_sort = z3.Z3_get_sort(self.context.ctx, operands[0]);
                 if (!self.isArraySort(map_sort)) return error.UnsupportedOperation;
@@ -5777,7 +5804,7 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, op_name, "ora.map_store")) {
             if (operands.len >= 3) {
                 if (!self.verify_state) {
-                    self.recordSoundnessLoss(.user_disabled_state_verification, "ORA_VERIFY_STATE=0 disables map-store verification");
+                    self.recordSoundnessLoss(.user_disabled_state_verification, "state verification is disabled; map stores are not modeled");
                     const num_results = mlir.oraOperationGetNumResults(mlir_op);
                     if (num_results > 0) return operands[2];
                     return self.encodeBoolConstant(true);
@@ -7192,7 +7219,7 @@ pub const Encoder = struct {
             const op_id = @intFromPtr(mlir_op.ptr);
             const label = try std.fmt.allocPrint(self.allocator, "external_call_r{d}", .{result_index});
             defer self.allocator.free(label);
-            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "ORA_VERIFY_CALLS=0 disables external-call verification");
+            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "call verification is disabled; external calls are unknown");
         }
 
         const callee = try self.getOpaqueCalleeKey(mlir_op);
@@ -7247,7 +7274,7 @@ pub const Encoder = struct {
             const op_id = @intFromPtr(mlir_op.ptr);
             const label = try std.fmt.allocPrint(self.allocator, "call_r{d}", .{result_index});
             defer self.allocator.free(label);
-            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "ORA_VERIFY_CALLS=0 disables call-summary verification");
+            return try self.soundnessLossUndef(result_sort, label, op_id, .user_disabled_call_verification, "call verification is disabled; call summaries are unknown");
         }
 
         if (mode == .Old) {
@@ -8553,6 +8580,7 @@ pub const Encoder = struct {
         summary_encoder.setVerifyState(self.verify_state);
         summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
         summary_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
+        summary_encoder.setSeparateFunctionBodyVerification(self.separate_function_body_verification);
         try summary_encoder.copyFunctionRegistryFrom(self);
         try summary_encoder.copyStructRegistryFrom(self);
         try summary_encoder.copyEnumRegistryFrom(self);
@@ -8578,6 +8606,7 @@ pub const Encoder = struct {
         var callee_requires = std.ArrayList(z3.Z3_ast){};
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
+        self.addCalleePreconditions(callee_requires.items, callee);
 
         const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
         if (!self.functionIsExternallyVerified(func_op)) {
@@ -8601,7 +8630,12 @@ pub const Encoder = struct {
         const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
         if (!self.functionIsExternallyVerified(func_op)) {
-            self.addSummaryObligations(extra_obligations, callee, callee_requires.items, summary_encoder.return_path_assumptions.items);
+            self.addSummaryObligations(
+                extra_obligations,
+                callee,
+                callee_requires.items,
+                summary_encoder.return_path_assumptions.items,
+            );
         }
 
         return encoded;
@@ -12563,6 +12597,7 @@ pub const Encoder = struct {
             result_encoder.setVerifyState(self.verify_state);
             result_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
             result_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
+            result_encoder.setSeparateFunctionBodyVerification(self.separate_function_body_verification);
             try result_encoder.copyFunctionRegistryFrom(self);
             try result_encoder.copyStructRegistryFrom(self);
             try result_encoder.copyEnumRegistryFrom(self);
@@ -12588,6 +12623,7 @@ pub const Encoder = struct {
             }
 
             try result_encoder.collectRequiresForSummary(func_op, &callee_requires);
+            self.addCalleePreconditions(callee_requires.items, callee);
 
             for (0..result_exprs.len) |i| {
                 const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
@@ -12616,8 +12652,13 @@ pub const Encoder = struct {
 
             const extra_obligations = try result_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-            if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(extra_obligations, callee, callee_requires.items, result_encoder.return_path_assumptions.items);
+            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
+                self.addSummaryObligations(
+                    extra_obligations,
+                    callee,
+                    callee_requires.items,
+                    result_encoder.return_path_assumptions.items,
+                );
             }
         }
 
@@ -12628,6 +12669,7 @@ pub const Encoder = struct {
             summary_encoder.setVerifyState(self.verify_state);
             summary_encoder.max_summary_inline_depth = self.max_summary_inline_depth;
             summary_encoder.setSummaryOnlyImportedCalls(self.summary_only_imported_calls);
+            summary_encoder.setSeparateFunctionBodyVerification(self.separate_function_body_verification);
             try summary_encoder.copyFunctionRegistryFrom(self);
             try summary_encoder.copyStructRegistryFrom(self);
             try summary_encoder.copyEnumRegistryFrom(self);
@@ -12686,7 +12728,12 @@ pub const Encoder = struct {
             const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
             defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
             if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(extra_obligations, callee, callee_requires.items, summary_encoder.return_path_assumptions.items);
+                self.addSummaryObligations(
+                    extra_obligations,
+                    callee,
+                    callee_requires.items,
+                    summary_encoder.return_path_assumptions.items,
+                );
             }
 
             for (slots) |*slot| {
@@ -12818,9 +12865,7 @@ pub const Encoder = struct {
         const visibility_ref = mlir.oraStringAttrGetValue(visibility_attr);
         if (visibility_ref.data == null or visibility_ref.length == 0) return true;
         const visibility = visibility_ref.data[0..visibility_ref.length];
-        return std.mem.eql(u8, visibility, "pub") or
-            std.mem.eql(u8, visibility, "public") or
-            std.mem.eql(u8, visibility, "external");
+        return std.mem.eql(u8, visibility, "pub");
     }
 
     fn addSummaryObligations(
@@ -12831,6 +12876,19 @@ pub const Encoder = struct {
         path_guards: []const z3.Z3_ast,
     ) void {
         if (obligations.len == 0) return;
+        const callerVisible = struct {
+            fn include(separate_function_body_verification: bool, obligation: PendingObligation) bool {
+                if (!separate_function_body_verification) return true;
+                return switch (obligation.source_kind) {
+                    // Function bodies present in the artifact are verified in
+                    // their own symbolic context. Callers prove preconditions
+                    // separately and consume summaries; they do not replay the
+                    // callee's internal safety obligations.
+                    .local, .imported_callee_obligation, .callee_precondition => false,
+                    .imported_callee_ensures => true,
+                };
+            }
+        };
         const importedSourceKind = struct {
             fn resolve(obligation: PendingObligation, default_callee_name: []const u8) struct {
                 callee_name: []const u8,
@@ -12842,12 +12900,14 @@ pub const Encoder = struct {
                         .local => .imported_callee_obligation,
                         .imported_callee_obligation => .imported_callee_obligation,
                         .imported_callee_ensures => .imported_callee_ensures,
+                        .callee_precondition => .callee_precondition,
                     },
                 };
             }
         };
         if (requires.len == 0 and path_guards.len == 0) {
             for (obligations) |obl| {
+                if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
                 self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
             }
@@ -12859,6 +12919,7 @@ pub const Encoder = struct {
         guard_terms.appendSlice(self.allocator, requires) catch {
             self.recordSoundnessLoss(.inexact_call_summary, "failed to allocate summary obligation guards");
             for (obligations) |obl| {
+                if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
                 self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
             }
@@ -12867,6 +12928,7 @@ pub const Encoder = struct {
         guard_terms.appendSlice(self.allocator, path_guards) catch {
             self.recordSoundnessLoss(.inexact_call_summary, "failed to allocate summary obligation guards");
             for (obligations) |obl| {
+                if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
                 const imported = importedSourceKind.resolve(obl, callee_name);
                 self.addObligationWithSource(obl.ast, imported.callee_name, imported.source_kind);
             }
@@ -12875,6 +12937,7 @@ pub const Encoder = struct {
 
         const precondition_guard = self.encodeAnd(guard_terms.items);
         for (obligations) |obl| {
+            if (!callerVisible.include(self.separate_function_body_verification, obl)) continue;
             const imported = importedSourceKind.resolve(obl, callee_name);
             self.addObligationWithSource(
                 self.encodeImplies(precondition_guard, obl.ast),
@@ -13974,7 +14037,18 @@ pub const Encoder = struct {
     }
 
     fn shouldUseOpaqueImportedSummary(self: *Encoder, op: mlir.MlirOperation) bool {
-        return self.summary_only_imported_calls and self.hasAttribute(op, "ora.imported_call");
+        if (!self.summary_only_imported_calls or !self.hasAttribute(op, "ora.imported_call")) return false;
+
+        // Imported calls default to summary boundaries only when the lowering
+        // attached a verifier contract that the opaque path can consume. Pure
+        // imported helpers without such metadata still use exact body inlining.
+        if (self.hasAttribute(op, "ora.trusted_extern_frame")) return true;
+
+        const owned_callee = self.resolveCalleeName(op) catch return false;
+        defer if (owned_callee) |callee| self.allocator.free(callee);
+        const callee = owned_callee orelse return false;
+        const func_op = self.function_ops.get(callee) orelse return false;
+        return self.functionHasDeclaredModifiesMetadata(func_op);
     }
 
     fn getStringAttr(_: *Encoder, op: mlir.MlirOperation, name: []const u8) ?[]const u8 {

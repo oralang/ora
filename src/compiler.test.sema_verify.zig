@@ -526,7 +526,7 @@ test "compiler lowers guard clauses through runtime assert and assume" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"guard_clause\""));
 }
 
-test "compiler does not duplicate guard lowering when function already starts with same filter" {
+test "compiler keeps guard lowering even when function already starts with same filter" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    guard amount < 10;
@@ -541,11 +541,11 @@ test "compiler does not duplicate guard lowering when function already starts wi
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard violation path: amount < 10\""));
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "\"guard violation path: amount < 10\""));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
-test "compiler removes proven guard clauses after verification" {
+test "compiler keeps proven guard clauses after verification cleanup" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    requires amount < 10;
@@ -574,8 +574,8 @@ test "compiler removes proven guard clauses after verification" {
     const hir_text = try mutable_hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "cf.assert"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "\"guard_clause\""));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "cf.assert"));
 }
 
 test "compiler verification facts respect item and body keys" {

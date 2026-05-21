@@ -4,6 +4,7 @@ const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const source = @import("../source/mod.zig");
+const abi_support = @import("abi.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
 const analysis = @import("analysis.zig");
@@ -39,6 +40,8 @@ const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectLoopCarriedLocals = analysis.collectLoopCarriedLocals;
 const statementMayReturn = analysis.statementMayReturn;
+
+const EnsureExitKind = enum { ok, err };
 
 fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
@@ -139,7 +142,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var locals = try self.cloneLocals(&self.locals);
                 const terminated = try self.lowerBody(function.body, &locals);
                 if (!terminated) {
-                    try @This().emitEnsuresClauses(self, &locals);
+                    try @This().emitEnsuresClauses(self, &locals, .ok, null);
                     if (self.return_type) |return_type| {
                         if (self.typeIsVoid(return_type)) {
                             const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), null, 0);
@@ -165,19 +168,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return locals.clone();
         }
 
-        fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
+        fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv, exit_kind: EnsureExitKind, ok_result_value: ?mlir.MlirValue) anyerror!void {
             if (self.function) |function| {
                 for (function.clauses) |clause| {
-                    if (clause.kind != .ensures) continue;
-                    const condition = try self.lowerExpr(clause.expr, locals);
+                    if (!@This().ensureClauseApplies(clause.kind, exit_kind)) continue;
+                    const condition = try @This().lowerEnsureClauseCondition(self, clause.kind, clause.expr, locals, ok_result_value);
                     const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, ensure);
                 }
             }
             for (self.extra_verification_clauses) |clause| {
-                if (clause.kind != .ensures) continue;
-                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
+                if (!@This().ensureClauseApplies(clause.kind, exit_kind)) continue;
+                const condition = blk: {
+                    const previous_result = self.current_return_value;
+                    if (clause.kind == .ensures_ok and ok_result_value != null) {
+                        self.current_return_value = ok_result_value;
+                    }
+                    defer self.current_return_value = previous_result;
+                    break :blk try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
+                };
                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                 if (clause.verification_context) |context| {
@@ -187,10 +197,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
+        fn lowerEnsureClauseCondition(
+            self: *FunctionLowerer,
+            kind: ast.SpecClauseKind,
+            expr: ast.ExprId,
+            locals: *LocalEnv,
+            ok_result_value: ?mlir.MlirValue,
+        ) anyerror!mlir.MlirValue {
+            const previous_result = self.current_return_value;
+            if (kind == .ensures_ok and ok_result_value != null) {
+                self.current_return_value = ok_result_value;
+            }
+            defer self.current_return_value = previous_result;
+            return self.lowerExpr(expr, locals);
+        }
+
+        fn ensureClauseApplies(kind: ast.SpecClauseKind, exit_kind: EnsureExitKind) bool {
+            return switch (kind) {
+                .ensures => true,
+                .ensures_ok => exit_kind == .ok,
+                .ensures_err => exit_kind == .err,
+                else => false,
+            };
+        }
+
         fn emitGuardClauses(self: *FunctionLowerer, function: ast.FunctionItem, locals: *LocalEnv) anyerror!void {
             for (function.clauses) |clause| {
                 if (clause.kind != .guard) continue;
-                if (@This().functionBodyAlreadyGuards(self, function.body, clause.expr)) continue;
                 try @This().emitRuntimeGuard(self, clause, locals);
             }
         }
@@ -250,98 +283,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, assume_op);
         }
 
-        fn functionBodyAlreadyGuards(self: *FunctionLowerer, body_id: ast.BodyId, guard_expr: ast.ExprId) bool {
-            const body = self.parent.file.body(body_id).*;
-            if (body.statements.len == 0) return false;
-            const first_stmt = self.parent.file.statement(body.statements[0]).*;
-            return switch (first_stmt) {
-                .If => |if_stmt| @This().ifStmtMatchesGuard(self, if_stmt, body.statements.len == 1, guard_expr),
-                else => false,
-            };
-        }
-
-        fn ifStmtMatchesGuard(self: *FunctionLowerer, if_stmt: ast.IfStmt, covers_entire_body: bool, guard_expr: ast.ExprId) bool {
-            if (if_stmt.else_body != null) return false;
-            if (covers_entire_body and @This().exprStructurallyEqual(self, if_stmt.condition, guard_expr)) {
-                return true;
-            }
-            const negated_guard = @This().unwrapLogicalNot(self, if_stmt.condition) orelse return false;
-            if (!@This().exprStructurallyEqual(self, negated_guard, guard_expr)) return false;
-
-            const then_body = self.parent.file.body(if_stmt.then_body).*;
-            if (then_body.statements.len != 1) return false;
-            return switch (self.parent.file.statement(then_body.statements[0]).*) {
-                .Return => true,
-                else => false,
-            };
-        }
-
-        fn unwrapLogicalNot(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.ExprId {
-            return switch (self.parent.file.expression(expr_id).*) {
-                .Group => |group| @This().unwrapLogicalNot(self, group.expr),
-                .Unary => |unary| if (unary.op == .not_) unary.operand else null,
-                else => null,
-            };
-        }
-
-        fn exprStructurallyEqual(self: *FunctionLowerer, lhs_id: ast.ExprId, rhs_id: ast.ExprId) bool {
-            const lhs = self.parent.file.expression(lhs_id).*;
-            const rhs = self.parent.file.expression(rhs_id).*;
-            return switch (lhs) {
-                .Group => |group| @This().exprStructurallyEqual(self, group.expr, rhs_id),
-                .IntegerLiteral => |lit| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .IntegerLiteral => |other| std.mem.eql(u8, lit.text, other.text),
-                    else => false,
-                },
-                .BoolLiteral => |lit| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .BoolLiteral => |other| lit.value == other.value,
-                    else => false,
-                },
-                .Name => |name| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Name => |other| std.mem.eql(u8, name.name, other.name),
-                    else => false,
-                },
-                .Unary => |unary| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Unary => |other| unary.op == other.op and @This().exprStructurallyEqual(self, unary.operand, other.operand),
-                    else => false,
-                },
-                .Binary => |binary| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Binary => |other| binary.op == other.op and
-                        @This().exprStructurallyEqual(self, binary.lhs, other.lhs) and
-                        @This().exprStructurallyEqual(self, binary.rhs, other.rhs),
-                    else => false,
-                },
-                .Field => |field| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Field => |other| std.mem.eql(u8, field.name, other.name) and @This().exprStructurallyEqual(self, field.base, other.base),
-                    else => false,
-                },
-                .Index => |index| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Index => |other| @This().exprStructurallyEqual(self, index.base, other.base) and @This().exprStructurallyEqual(self, index.index, other.index),
-                    else => false,
-                },
-                .Call => |call| switch (rhs) {
-                    .Group => |group| @This().exprStructurallyEqual(self, lhs_id, group.expr),
-                    .Call => |other| blk: {
-                        if (!@This().exprStructurallyEqual(self, call.callee, other.callee)) break :blk false;
-                        if (call.args.len != other.args.len) break :blk false;
-                        for (call.args, other.args) |arg, other_arg| {
-                            if (!@This().exprStructurallyEqual(self, arg, other_arg)) break :blk false;
-                        }
-                        break :blk true;
-                    },
-                    else => false,
-                },
-                else => lhs_id.index() == rhs_id.index(),
-            };
-        }
-
         fn guardMessage(self: *FunctionLowerer, expr_id: ast.ExprId) ![]u8 {
             const range = support.exprRange(self.parent.file, expr_id);
             const source_text = self.parent.sources.file(self.parent.file.file_id).text;
@@ -357,11 +298,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (param_type.kind() != .refinement) continue;
                 const local_id = self.locals.resolvePatternTarget(self.parent.file, parameter.pattern) orelse continue;
                 const param_value = self.locals.getValue(local_id) orelse continue;
-                try @This().insertRefinementGuard(self, param_value, param_type.refinement, parameter.range, patternName(self.parent.file, parameter.pattern));
+                try @This().insertRefinementGuard(self, param_value, param_type.refinement, parameter.range, patternName(self.parent.file, parameter.pattern), "parameter_refinement");
             }
         }
 
-        fn insertRefinementGuard(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType, range: source.TextRange, var_name: ?[]const u8) anyerror!void {
+        fn insertRefinementGuard(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            refinement: sema.RefinementType,
+            range: source.TextRange,
+            var_name: ?[]const u8,
+            verification_context: []const u8,
+        ) anyerror!void {
             if (!sema.refinements.supportsRuntimeGuard(refinement)) return;
 
             const loc = self.parent.location(range);
@@ -384,7 +332,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             mlir.oraOperationSetAttributeByName(op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
             mlir.oraOperationSetAttributeByName(op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
             mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "refinement_guard").attribute);
-            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "parameter_refinement").attribute);
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", verification_context).attribute);
             mlir.oraOperationSetAttributeByName(op, strRef("ora.refinement_kind"), namedStringAttr(self.parent.context, "ora.refinement_kind", refinement.name).attribute);
             if (var_name) |name| {
                 const guard_id = try std.fmt.allocPrint(self.parent.allocator, "guard:{s}:{d}:{d}:{d}:{s}:{s}", .{
@@ -570,6 +518,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn successResultValueForPostcondition(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+            const return_type = self.return_type orelse return value;
+            const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+            if (mlir.oraTypeIsNull(success_type)) {
+                return @This().convertValueForFlow(self, value, return_type, range);
+            }
+            return @This().convertValueForFlow(self, value, success_type, range);
+        }
+
         fn wrapErrorValueForReturn(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
             const return_type = self.return_type orelse return value;
             const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
@@ -586,6 +543,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn returnExprIsErrorShaped(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
             return switch (self.parent.file.expression(expr_id).*) {
                 .ErrorReturn => true,
+                .Name => |name| blk: {
+                    if (self.parent.item_index.lookup(name.name)) |item_id| {
+                        break :blk self.parent.file.item(item_id).* == .ErrorDecl;
+                    }
+                    break :blk false;
+                },
                 .Call => |call| blk: {
                     const callee_name = switch (self.parent.file.expression(call.callee).*) {
                         .Name => |name| name.name,
@@ -994,35 +957,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (self.deferred_return_kind == .none) {
                             if (ret.value) |expr_id| {
                                 const raw_value = try self.lowerExpr(expr_id, locals);
-                                const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                                const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                                const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
+                                const value = if (is_error_return)
                                     try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
                                 else
-                                    try @This().wrapValueForReturn(self, raw_value, ret.range);
+                                    try @This().wrapValueForReturn(self, ok_result.?, ret.range);
                                 self.current_return_value = value;
                                 defer self.current_return_value = null;
-                                if (self.function) |function| {
-                                    for (function.clauses) |clause| {
-                                        if (clause.kind != .ensures) continue;
-                                        const condition = try self.lowerExpr(clause.expr, locals);
-                                        const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                                        if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                                        appendOp(self.block, ensure);
-                                    }
-                                }
-                                for (self.extra_verification_clauses) |clause| {
-                                    if (clause.kind != .ensures) continue;
-                                    const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
-                                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                                    if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                                    if (clause.verification_context) |context| {
-                                        mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
-                                    }
-                                    appendOp(self.block, ensure);
-                                }
+                                try @This().emitEnsuresClauses(self, locals, if (is_error_return) .err else .ok, ok_result);
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, op);
                             } else if (self.return_type) |return_type| {
+                                try @This().emitEnsuresClauses(self, locals, .ok, null);
                                 const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                                 if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
                                     const value = try self.defaultValue(return_type, ret.range);
@@ -1035,6 +983,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                     appendOp(self.block, op);
                                 }
                             } else {
+                                try @This().emitEnsuresClauses(self, locals, .ok, null);
                                 const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
                                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, op);
@@ -1043,36 +992,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         if (ret.value) |expr_id| {
                             const raw_value = try self.lowerExpr(expr_id, locals);
-                            const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                            const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                            const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
+                            const value = if (is_error_return)
                                 try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
                             else
-                                try @This().wrapValueForReturn(self, raw_value, ret.range);
+                                try @This().wrapValueForReturn(self, ok_result.?, ret.range);
                             self.current_return_value = value;
                             defer self.current_return_value = null;
-                            if (self.function) |function| {
-                                for (function.clauses) |clause| {
-                                    if (clause.kind != .ensures) continue;
-                                    const condition = try self.lowerExpr(clause.expr, locals);
-                                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                                    if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                                    appendOp(self.block, ensure);
-                                }
-                            }
-                            for (self.extra_verification_clauses) |clause| {
-                                if (clause.kind != .ensures) continue;
-                                const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
-                                const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                                if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                                if (clause.verification_context) |context| {
-                                    mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
-                                }
-                                appendOp(self.block, ensure);
-                            }
+                            try @This().emitEnsuresClauses(self, locals, if (is_error_return) .err else .ok, ok_result);
                             if (self.deferred_return_value_slot) |slot| {
                                 const store_value = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, slot, null, 0);
                                 if (mlir.oraOperationIsNull(store_value)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, store_value);
                             }
+                        } else {
+                            try @This().emitEnsuresClauses(self, locals, .ok, null);
                         }
 
                         const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
@@ -1085,35 +1020,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                     if (ret.value) |expr_id| {
                         const raw_value = try self.lowerExpr(expr_id, locals);
-                        const value = if (@This().returnExprIsErrorShaped(self, expr_id))
+                        const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                        const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
+                        const value = if (is_error_return)
                             try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
                         else
-                            try @This().wrapValueForReturn(self, raw_value, ret.range);
+                            try @This().wrapValueForReturn(self, ok_result.?, ret.range);
                         self.current_return_value = value;
                         defer self.current_return_value = null;
-                        if (self.function) |function| {
-                            for (function.clauses) |clause| {
-                                if (clause.kind != .ensures) continue;
-                                const condition = try self.lowerExpr(clause.expr, locals);
-                                const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                                if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                                appendOp(self.block, ensure);
-                            }
-                        }
-                        for (self.extra_verification_clauses) |clause| {
-                            if (clause.kind != .ensures) continue;
-                            const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
-                            const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                            if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
-                            if (clause.verification_context) |context| {
-                                mlir.oraOperationSetAttributeByName(ensure, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
-                            }
-                            appendOp(self.block, ensure);
-                        }
+                        try @This().emitEnsuresClauses(self, locals, if (is_error_return) .err else .ok, ok_result);
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, op);
                     } else if (self.return_type) |return_type| {
+                        try @This().emitEnsuresClauses(self, locals, .ok, null);
                         const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                         if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
                             const value = try self.defaultValue(return_type, ret.range);
@@ -1126,6 +1046,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             appendOp(self.block, op);
                         }
                     } else {
+                        try @This().emitEnsuresClauses(self, locals, .ok, null);
                         const op = mlir.oraReturnOpCreate(self.parent.context, loc, null, 0);
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, op);
@@ -1290,10 +1211,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     for (log_stmt.args) |arg| {
                         try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     }
+                    const event_name = blk: {
+                        const log_item_id = self.parent.item_index.lookup(log_stmt.name) orelse break :blk log_stmt.name;
+                        const item = self.parent.file.item(log_item_id).*;
+                        if (item != .LogDecl) break :blk log_stmt.name;
+                        break :blk abi_support.eventWireNameFromLogDecl(self.parent.file, item.LogDecl) orelse log_stmt.name;
+                    };
                     const op = mlir.oraLogOpCreate(
                         self.parent.context,
                         self.parent.location(log_stmt.range),
-                        strRef(log_stmt.name),
+                        strRef(event_name),
                         if (args.items.len == 0) null else args.items.ptr,
                         args.items.len,
                     );
@@ -1754,7 +1681,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const value_type = mlir.oraValueGetType(value);
             const converted = try @This().convertValueForFlow(self, value, target_type, range);
             if (target_sema_type.kind() == .refinement and !mlir.oraTypeEqual(value_type, target_type)) {
-                try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate");
+                try @This().insertRefinementGuard(self, converted, target_sema_type.refinement, range, "aggregate", "refinement_conversion");
             }
             return converted;
         }
@@ -2549,8 +2476,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             is_lock: bool,
         ) anyerror!void {
             const loc = self.parent.location(range);
-            const resource_expr = lockResourceExpr(self.parent.file, path_expr);
-            const resource = try self.lowerExpr(resource_expr, locals);
             const owned_key = buildRuntimeLockKey(self.parent.allocator, self.parent.file, self.parent.resolution, path_expr);
             const key = owned_key orelse {
                 const op = try self.parent.createPlaceholderOp(
@@ -2562,6 +2487,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return;
             };
             defer self.parent.allocator.free(key);
+            const resource = if (lockResourceExpr(self.parent.file, path_expr)) |resource_expr|
+                try self.lowerExpr(resource_expr, locals)
+            else
+                appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 0),
+                );
             const op = if (is_lock)
                 mlir.oraLockOpCreateWithKey(self.parent.context, loc, resource, strRef(key))
             else
@@ -3153,15 +3085,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
-        fn lockResourceExpr(file: *const ast.AstFile, expr_id: ast.ExprId) ast.ExprId {
+        fn lockResourceExpr(file: *const ast.AstFile, expr_id: ast.ExprId) ?ast.ExprId {
             return switch (file.expression(expr_id).*) {
                 .Group => |group| lockResourceExpr(file, group.expr),
-                .Index => |index| switch (file.expression(index.base).*) {
-                    .Name => index.index,
-                    .Group => lockResourceExpr(file, index.base),
-                    else => expr_id,
+                .Index => |index| blk: {
+                    const base_expr = switch (file.expression(index.base).*) {
+                        .Group => |group| group.expr,
+                        else => index.base,
+                    };
+                    break :blk switch (file.expression(base_expr).*) {
+                        .Name => index.index,
+                        else => expr_id,
+                    };
                 },
-                else => expr_id,
+                else => null,
             };
         }
 

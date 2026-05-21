@@ -19,7 +19,8 @@ const verifyExampleWithoutDegradation = h.verifyExampleWithoutDegradation;
 const verifyTextWithoutDegradation = h.verifyTextWithoutDegradation;
 const verifyTextWithoutDegradationWithTimeout = h.verifyTextWithoutDegradationWithTimeout;
 const verifyTextWithoutDegradationWithSummaryInlineDepth = h.verifyTextWithoutDegradationWithSummaryInlineDepth;
-const verifyPackageWithoutDegradationWithImportedSummariesOnly = h.verifyPackageWithoutDegradationWithImportedSummariesOnly;
+const verifyPackageWithoutDegradation = h.verifyPackageWithoutDegradation;
+const verifyPackageWithoutDegradationWithImportedSummaryMode = h.verifyPackageWithoutDegradationWithImportedSummaryMode;
 const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
@@ -32,6 +33,137 @@ const containsEffectSlot = h.containsEffectSlot;
 const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
+
+test "verification keeps public parameter refinement guards for untrusted public input" {
+    const source_text =
+        \\contract C {
+        \\    pub fn accept(
+        \\        min_value: MinValue<u256, 1>,
+        \\        max_value: MaxValue<u256, 100>,
+        \\        in_range: InRange<u256, 1, 100>,
+        \\        basis_points: BasisPoints<u256>,
+        \\        non_zero: NonZero<u256>,
+        \\        target: NonZeroAddress,
+        \\    ) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "accept");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 6), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+}
+
+test "verification applies ensures_ok and ensures_err only to matching error-union exits" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract C {
+        \\    pub fn choose(flag: bool, value: u256) -> !u256 | Rejected
+        \\        ensures_ok(result == value)
+        \\        ensures_err(value == value)
+        \\    {
+        \\        if (!flag) {
+        \\            return Rejected;
+        \\        }
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn fail_only() -> !bool | Rejected
+        \\        ensures_ok(false)
+        \\        ensures_err(true)
+        \\    {
+        \\        return Rejected;
+        \\    }
+        \\
+        \\    pub fn ok_only() -> !bool | Rejected
+        \\        ensures_ok(result == true)
+        \\        ensures_err(false)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var choose = try verifyTextWithoutDegradation(source_text, "choose");
+    defer choose.deinit(testing.allocator);
+    try testing.expect(choose.success);
+    try testing.expect(!choose.degraded);
+    try testing.expectEqual(@as(usize, 0), choose.errors_len);
+
+    var fail_only = try verifyTextWithoutDegradation(source_text, "fail_only");
+    defer fail_only.deinit(testing.allocator);
+    try testing.expect(fail_only.success);
+    try testing.expect(!fail_only.degraded);
+    try testing.expectEqual(@as(usize, 0), fail_only.errors_len);
+
+    var ok_only = try verifyTextWithoutDegradation(source_text, "ok_only");
+    defer ok_only.deinit(testing.allocator);
+    try testing.expect(ok_only.success);
+    try testing.expect(!ok_only.degraded);
+    try testing.expectEqual(@as(usize, 0), ok_only.errors_len);
+}
+
+test "verification reports failing ensures_ok and ensures_err on matching exits" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract C {
+        \\    pub fn bad_ok() -> !bool | Rejected
+        \\        ensures_ok(false)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn bad_err() -> !bool | Rejected
+        \\        ensures_err(false)
+        \\    {
+        \\        return Rejected;
+        \\    }
+        \\}
+    ;
+
+    var bad_ok = try verifyTextWithoutDegradation(source_text, "bad_ok");
+    defer bad_ok.deinit(testing.allocator);
+    try testing.expect(bad_ok.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", bad_ok.error_kinds);
+
+    var bad_err = try verifyTextWithoutDegradation(source_text, "bad_err");
+    defer bad_err.deinit(testing.allocator);
+    try testing.expect(bad_err.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", bad_err.error_kinds);
+}
+
+test "verification loop invariant step excludes break exit paths" {
+    const source_text =
+        \\contract C {
+        \\    pub fn f() -> u256 {
+        \\        var counter: u256 = 0;
+        \\        while (true)
+        \\            invariant counter <= 6
+        \\        {
+        \\            counter = counter + 1;
+        \\            if (counter > 5) {
+        \\                break;
+        \\            }
+        \\        }
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+}
 
 test "verification supports enum constants in stored struct fields without degradation" {
     const source_text =
@@ -380,6 +512,60 @@ test "verification rejects symbolic checked power overflow without degradation" 
     try testing.expect(!result.degraded);
 }
 
+test "verification ignores folded-only private helpers but keeps runtime comptime specializations" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    fn add(a: u256, b: u256) -> u256 { return a + b; }
+        \\    fn mul(a: u256, b: u256) -> u256 { return a * b; }
+        \\
+        \\    fn sum_of_squares(a: u256, b: u256) -> u256 {
+        \\        return add(mul(a, a), mul(b, b));
+        \\    }
+        \\
+        \\    pub fn folded_only() -> u256 {
+        \\        const value: u256 = sum_of_squares(3, 4);
+        \\        return value;
+        \\    }
+        \\
+        \\    fn align_up(comptime alignment: u256, value: u256) -> u256
+        \\        requires(alignment > 0)
+        \\        requires(value <= std.constants.U256_MAX - (alignment - 1))
+        \\    {
+        \\        const mask: u256 = alignment - 1;
+        \\        return (value + mask) - ((value + mask) % alignment);
+        \\    }
+        \\
+        \\    pub fn runtime_specialized(x: u256) -> u256 {
+        \\        return align_up(32, x);
+        \\    }
+        \\
+        \\    pub fn runtime_specialized_checked(x: u256) -> u256
+        \\        requires(x <= std.constants.U256_MAX - 31)
+        \\    {
+        \\        return align_up(32, x);
+        \\    }
+        \\}
+    ;
+
+    var folded = try verifyTextWithoutDegradationWithTimeout(source_text, "folded_only", 5_000);
+    defer folded.deinit(testing.allocator);
+    try testing.expect(folded.success);
+    try testing.expect(!folded.degraded);
+
+    var specialized = try verifyTextWithoutDegradationWithTimeout(source_text, "runtime_specialized", 5_000);
+    defer specialized.deinit(testing.allocator);
+    try testing.expect(!specialized.success);
+    try testing.expect(std.mem.indexOf(u8, specialized.error_kinds, "PreconditionViolation") != null);
+    try testing.expect(!specialized.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "runtime_specialized_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
 test "verification accepts requires helper calls that read storage without degradation" {
     const source_text =
         \\contract Sample {
@@ -562,8 +748,8 @@ test "compiler marks imported-module calls as summary-boundary candidates" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.imported_call"));
 }
 
-test "verification uses imported-module opaque modifies metadata when imported summaries are forced" {
-    var result = try verifyPackageWithoutDegradationWithImportedSummariesOnly(
+test "verification uses imported-module opaque modifies metadata by default" {
+    var result = try verifyPackageWithoutDegradation(
         "ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora",
         "f",
     );
@@ -573,6 +759,29 @@ test "verification uses imported-module opaque modifies metadata when imported s
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqualStrings("", result.soundness_losses);
     try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification imported-summary mode is discriminated from exact imported body inlining" {
+    var exact = try verifyPackageWithoutDegradationWithImportedSummaryMode(
+        "ora-example/smt/modifies/pass_imported_summary_discriminator.ora",
+        "f",
+        false,
+    );
+    defer exact.deinit(testing.allocator);
+    try testing.expect(!exact.success);
+    try testing.expectEqualStrings("InvariantViolation", exact.error_kinds);
+    try testing.expect(!exact.degraded);
+
+    var summary_only = try verifyPackageWithoutDegradation(
+        "ora-example/smt/modifies/pass_imported_summary_discriminator.ora",
+        "f",
+    );
+    defer summary_only.deinit(testing.allocator);
+    try testing.expect(summary_only.success);
+    try testing.expect(!summary_only.degraded);
+    try testing.expectEqual(@as(usize, 0), summary_only.errors_len);
+    try testing.expectEqualStrings("", summary_only.soundness_losses);
+    try testing.expectEqualStrings("", summary_only.precision_notes);
 }
 
 test "verification frames distinct nested map keys across internal callee modifies set" {
@@ -2640,6 +2849,55 @@ test "verification does not vacuously prove branch-local Result unwrap and get_e
     try testing.expect(!result.success);
     try testing.expect(result.errors_len > 0);
     try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects requires-only unreachable branch obligations" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn g(a: NonZeroAddress) -> bool
+        \\        requires a == std.msg.sender()
+        \\        ensures a == std.msg.sender()
+        \\    {
+        \\        let s: NonZeroAddress = std.msg.sender();
+        \\
+        \\        if (s == a) {
+        \\            return true;
+        \\        } else {
+        \\            let z: u256 = 0;
+        \\            let q: u256 = 1 / z;
+        \\            return q == 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "g");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
+    try testing.expect(!result.degraded);
+}
+
+test "verification treats msg.sender as nonzero address" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn fromBuiltinSender() {
+        \\        let caller: NonZeroAddress = std.msg.sender();
+        \\        assert(caller != std.constants.ZERO_ADDRESS, "refinement fact must hold");
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "fromBuiltinSender");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expect(!result.degraded);
 }
 
