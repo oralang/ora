@@ -177,7 +177,7 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(original_source, rebuilt_before);
 
     const graph_before = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), graph_before.modules.len);
+    try testing.expectEqual(@as(usize, 6), graph_before.modules.len);
     const root_before = for (graph_before.modules) |summary| {
         if (summary.module_id == compilation.root_module_id) break summary;
     } else return error.TestUnexpectedResult;
@@ -195,7 +195,7 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(updated_source, rebuilt_after);
 
     const graph_after = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), graph_after.modules.len);
+    try testing.expectEqual(@as(usize, 6), graph_after.modules.len);
     const root_after = for (graph_after.modules) |summary| {
         if (summary.module_id == compilation.root_module_id) break summary;
     } else return error.TestUnexpectedResult;

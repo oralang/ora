@@ -103,6 +103,9 @@ pub fn isComptimeOnlyIntrinsic(name: []const u8) bool {
         "hasField",
         "hasDecl",
         "typeName",
+        "chainId",
+        "structFields",
+        "traitMethods",
         "errorName",
     };
 

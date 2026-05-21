@@ -691,6 +691,27 @@ test "compiler lowers bitfield types as wire integers with metadata attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
 }
 
+test "compiler lowers pinned eip712_name metadata on struct declarations" {
+    const source_text =
+        \\struct PermitV2 {
+        \\    pub const eip712_name = "Permit";
+        \\    owner: address,
+        \\    spender: address,
+        \\    value: u256,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.eip712_name"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Permit\""));
+}
+
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {

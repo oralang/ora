@@ -11,7 +11,7 @@ const PatternId = ids.PatternId;
 pub const Visibility = enum { public, private };
 pub const BindingKind = enum { let_, var_, constant, immutable };
 pub const StorageClass = enum { none, storage, memory, tstore };
-pub const SpecClauseKind = enum { requires, guard, ensures, invariant, modifies };
+pub const SpecClauseKind = enum { requires, guard, ensures, ensures_ok, ensures_err, invariant, modifies };
 pub const ReceiverKind = enum {
     none,
     value_self,
@@ -650,6 +650,7 @@ pub const StructItem = struct {
     is_generic: bool = false,
     template_parameters: []const Parameter,
     fields: []StructField,
+    metadata: []ItemId = &.{},
 };
 
 pub const BitfieldItem = struct {
@@ -703,6 +704,7 @@ pub const LogDeclItem = struct {
     range: source.TextRange,
     name: []const u8,
     fields: []LogField,
+    metadata: []ItemId = &.{},
 };
 
 pub const ErrorDeclItem = struct {

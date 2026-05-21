@@ -7,6 +7,7 @@ const z3_verification = @import("ora_z3_verification");
 
 const h = @import("compiler.test.helpers.zig");
 const compileText = h.compileText;
+const compileTextWithChainId = h.compileTextWithChainId;
 const renderHirTextForSource = h.renderHirTextForSource;
 const renderOraMlirForSource = h.renderOraMlirForSource;
 const renderSirTextForModule = h.renderSirTextForModule;
@@ -3997,6 +3998,446 @@ test "compiler compileError builtin reports user message in comptime block" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "intentional failure"));
+    try testing.expect(!diagnosticMessagesContain(&consteval.diagnostics, "compile error: intentional failure"));
+}
+
+test "compiler compileError is typed as never and merges with surrounding flow" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    @compileError("never branch");
+        \\    return 42;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const compile_error_stmt = ast_file.statement(body.statements[0]).Expr;
+    const ret_stmt = ast_file.statement(body.statements[1]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.never, typecheck.exprType(compile_error_stmt.expr).kind());
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(ret_stmt.value.?).kind());
+}
+
+test "compiler compileError gates generic comptime instantiations" {
+    const source_text =
+        \\comptime fn require_word_sized(comptime T: type) -> u256 {
+        \\    @compileError("generic instantiation rejected");
+        \\    return 1;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        require_word_sized(u256);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&consteval.diagnostics, "generic instantiation rejected"));
+}
+
+test "compiler const eval supports wei and ether literal units" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        1 ether + 50 gwei + 7 wei;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    var expected = try std.math.big.int.Managed.initSet(testing.allocator, 1_000_000_050_000_000_007);
+    defer expected.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
+}
+
+test "compiler @chainId defaults to local dev chain id" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @chainId();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(
+        @as(u64, compiler.compile_options.default_chain_id),
+        try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(u64),
+    );
+}
+
+test "compiler @chainId uses configured chain id" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @chainId();
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileTextWithChainId(source_text, 11155111);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(u64, 11155111), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(u64));
+}
+
+test "compiler @chainId rejects arguments" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @chainId(1);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@chainId expects 0 arguments"));
+}
+
+test "compiler @structFields returns ordered fields" {
+    const source_text =
+        \\struct Point {
+        \\    x: u256,
+        \\    y: u256,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @structFields(Point).len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(u64, 2), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(u64));
+}
+
+test "compiler @structFields preserves source declaration order" {
+    const source_text =
+        \\struct Out {
+        \\    third: bool,
+        \\    first: u256,
+        \\    second: address,
+        \\}
+        \\
+        \\pub fn run() -> string {
+        \\    return comptime {
+        \\        @structFields(Out)[0].name;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualStrings("third", consteval.values[ret_stmt.value.?.index()].?.string);
+}
+
+test "compiler @structFields exposes usable type values" {
+    const source_text =
+        \\struct Wrap {
+        \\    value: u256,
+        \\}
+        \\
+        \\pub fn run() -> bool {
+        \\    return comptime {
+        \\        @structFields(Wrap)[0].type == u256;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler @traitMethods returns ordered methods with signatures" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn balanceOf(self, owner: address) -> u256;
+        \\    fn transfer(self, to: address, value: u256) -> bool;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @traitMethods(ERC20).len + @traitMethods(ERC20)[1].params.len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqual(@as(u64, 4), try consteval.values[ret_stmt.value.?.index()].?.integer.toInt(u64));
+}
+
+test "compiler @traitMethods exposes receiver and return type metadata" {
+    const source_text =
+        \\trait Pair {
+        \\    fn pure_helper() -> bool;
+        \\    fn with_self(self) -> u256;
+        \\}
+        \\
+        \\pub fn first_has_self() -> bool {
+        \\    return comptime {
+        \\        @traitMethods(Pair)[0].has_self;
+        \\    };
+        \\}
+        \\
+        \\pub fn second_returns_u256() -> bool {
+        \\    return comptime {
+        \\        @traitMethods(Pair)[1].return_type == u256;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const first_function = ast_file.item(ast_file.root_items[1]).Function;
+    const first_body = ast_file.body(first_function.body);
+    const first_ret = ast_file.statement(first_body.statements[0]).Return;
+    const second_function = ast_file.item(ast_file.root_items[2]).Function;
+    const second_body = ast_file.body(second_function.body);
+    const second_ret = ast_file.statement(second_body.statements[0]).Return;
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(!consteval.values[first_ret.value.?.index()].?.boolean);
+    try testing.expect(consteval.values[second_ret.value.?.index()].?.boolean);
+}
+
+test "compiler @structFields rejects trait arguments" {
+    const source_text =
+        \\trait Foo {
+        \\    fn bar() -> u256;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @structFields(Foo).len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@structFields expects a struct type, found a trait"));
+}
+
+test "compiler @traitMethods rejects struct arguments" {
+    const source_text =
+        \\struct Foo {
+        \\    x: u256,
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @traitMethods(Foo).len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@traitMethods expects a trait type, found a struct"));
+}
+
+test "compiler @structFields rejects value arguments" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        @structFields(42).len;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@structFields expects a struct type, found a value of type"));
+}
+
+test "compiler corpus covers reflection builtins" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/reflection_builtins.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+}
+
+test "compiler reflection corpus lowers without ora.default_value escaping HIR" {
+    // Regression for required comptime lowering: reflection chains like
+    // @structFields(T)[0].type and @traitMethods(T)[1].return_type must
+    // lower from their const-eval result, never by replaying comptime-only
+    // metadata expressions into runtime HIR and falling back to defaultValue.
+    var compilation = try compilePackage("ora-example/corpus/comptime/reflection_builtins.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.default_value"));
+}
+
+test "compiler required comptime without value fails closed in HIR lowering" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {};
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    try testing.expectError(error.ComptimeValueRequiredForRuntimeLowering, compilation.db.lowerToHir(compilation.root_module_id));
+}
+
+test "compiler corpus covers chainId builtin" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/chain_id.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+}
+
+test "compiler const eval supports all ether unit scales" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        1 kwei + 1 mwei + 1 gwei + 1 microether + 1 milliether + 1 ether;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    var expected = try std.math.big.int.Managed.initSet(testing.allocator, 1_001_001_001_001_001_000);
+    defer expected.deinit();
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
+}
+
+test "compiler ether literal units participate in integer overflow diagnostics" {
+    const source_text =
+        \\pub fn run() -> u32 {
+        \\    return comptime {
+        \\        1 ether;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "does not fit in type 'u32'"));
+}
+
+test "compiler corpus covers ether literal units" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/ether_units.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
 }
 
 test "compiler corpus covers compileError builtin diagnostics" {

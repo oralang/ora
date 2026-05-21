@@ -213,6 +213,8 @@ test "compiler syntax parses guard clauses alongside requires and ensures" {
         \\    requires values >= 0
         \\    guard values < 100
         \\    ensures result >= 0
+        \\    ensures_ok result == values
+        \\    ensures_err values == 0
         \\{
         \\    return values;
         \\}
@@ -230,9 +232,13 @@ test "compiler syntax parses guard clauses alongside requires and ensures" {
     const requires_clause = nthChildNodeOfKind(function.?, .SpecClause, 0);
     const guard_clause = nthChildNodeOfKind(function.?, .SpecClause, 1);
     const ensures_clause = nthChildNodeOfKind(function.?, .SpecClause, 2);
+    const ensures_ok_clause = nthChildNodeOfKind(function.?, .SpecClause, 3);
+    const ensures_err_clause = nthChildNodeOfKind(function.?, .SpecClause, 4);
     try testing.expect(requires_clause != null);
     try testing.expect(guard_clause != null);
     try testing.expect(ensures_clause != null);
+    try testing.expect(ensures_ok_clause != null);
+    try testing.expect(ensures_err_clause != null);
 }
 
 test "compiler syntax parses modifies as reserved spec clause" {

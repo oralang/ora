@@ -335,6 +335,86 @@ test "compiler lowers sema effect summaries onto HIR functions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"transient:pending\""));
 }
 
+test "compiler does not report root locks as persistent storage reads" {
+    const source_text =
+        \\contract Locked {
+        \\    storage var guard: u256 = 0;
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn guarded(value: u256) {
+        \\        @lock(guard);
+        \\        total = value;
+        \\        @unlock(guard);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const guarded = item_index.lookup("guarded").?;
+
+    switch (typecheck.itemEffect(guarded)) {
+        .writes => |effect| {
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+            try testing.expect(effect.has_lock);
+            try testing.expect(effect.has_unlock);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"guard\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"guard\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = [\"total\"]"));
+}
+
+test "compiler includes guard clause reads in effect summaries" {
+    const source_text =
+        \\struct Flags {
+        \\    paused: bool;
+        \\}
+        \\
+        \\contract Guarded {
+        \\    storage var flags: Flags;
+        \\
+        \\    pub fn guarded() -> bool
+        \\        guard !flags.paused
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const guarded = item_index.lookup("guarded").?;
+
+    switch (typecheck.itemEffect(guarded)) {
+        .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "flags", .storage)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"flags\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"reads\""));
+}
+
 test "compiler composes callee effects into caller summaries" {
     const source_text =
         \\contract Effects {

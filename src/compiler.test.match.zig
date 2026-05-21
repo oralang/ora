@@ -1158,7 +1158,7 @@ test "compiler source loader injects embedded std result module" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -1170,7 +1170,7 @@ test "compiler source loader injects embedded std result module" {
     const std_summary = for (graph.modules) |summary| {
         if (summary.module_id == std_module_id) break summary;
     } else return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
+    try testing.expectEqual(@as(usize, 4), std_summary.imports.len);
 }
 
 test "compiler lowers try expressions through real error helper ops" {
@@ -2704,6 +2704,9 @@ test "SMT release matrix probes match between sequential and parallel verificati
         .{ .path = "ora-example/smt/guards/exact_proven.ora", .function_name = "provenExactDivisionReturn" },
         .{ .path = "ora-example/smt/verification/function_contracts_basic.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/function_contracts_old.ora", .function_name = "incrementAndReturn" },
+        .{ .path = "ora-example/smt/verification/guard_runtime_clause.ora", .function_name = "accept" },
+        .{ .path = "ora-example/smt/verification/ensures_ok_error_union.ora", .function_name = "choose" },
+        .{ .path = "ora-example/smt/verification/ensures_err_error_union.ora", .function_name = "choose" },
         .{ .path = "ora-example/smt/verification/ghost_variables.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/ghost_combined.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/loop_invariants.ora", .function_name = "accumulateToStorage" },

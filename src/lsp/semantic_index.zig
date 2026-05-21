@@ -337,6 +337,8 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
             .requires => "    requires(",
             .guard => "    guard(",
             .ensures => "    ensures(",
+            .ensures_ok => "    ensures_ok(",
+            .ensures_err => "    ensures_err(",
             .invariant => "    invariant(",
             .modifies => "    modifies(",
         });
@@ -557,6 +559,8 @@ fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.
             .requires => "    requires(",
             .guard => "    guard(",
             .ensures => "    ensures(",
+            .ensures_ok => "    ensures_ok(",
+            .ensures_err => "    ensures_err(",
             .invariant => "    invariant(",
             .modifies => "    modifies(",
         });

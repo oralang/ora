@@ -87,18 +87,11 @@ pub const CtAggregate = @import("heap.zig").CtAggregate;
 pub const CtEnv = @import("env.zig").CtEnv;
 pub const Scope = @import("env.zig").Scope;
 
-// Re-export evaluator
-pub const Evaluator = @import("eval.zig").Evaluator;
-pub const BinaryOp = @import("eval.zig").BinaryOp;
-pub const UnaryOp = @import("eval.zig").UnaryOp;
+// TEST: eval.zig renamed to __eval_todelete.zig to verify it's dead.
+// Re-exports of Evaluator/BinaryOp/UnaryOp/EvalMode/EvalResult/ControlFlow removed for the test.
 
-// Refactored compiler AST evaluator (migration path for src/compiler/)
+// The actual evaluator (AST walker used by sema, db, lsp)
 pub const compiler_ast_eval = @import("compiler_ast_eval.zig");
-
-// Re-export evaluation mode and result from eval.zig
-pub const EvalMode = @import("eval.zig").EvalMode;
-pub const EvalResult = @import("eval.zig").EvalResult;
-pub const ControlFlow = @import("eval.zig").ControlFlow;
 
 // Run all module tests
 test {
@@ -111,5 +104,4 @@ test {
     _ = @import("pool.zig");
     _ = @import("heap.zig");
     _ = @import("env.zig");
-    _ = @import("eval.zig");
 }

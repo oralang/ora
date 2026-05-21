@@ -454,12 +454,9 @@ test "compiler const eval supports selector builtin for trait methods" {
     const body = ast_file.body(function.body);
     const ret_stmt = ast_file.statement(body.statements[0]).Return;
 
-    var expected = try std.math.big.int.Managed.init(testing.allocator);
-    defer expected.deinit();
-    try expected.setString(16, "a9059cbb");
-
     const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
+    const selector_value = consteval.values[ret_stmt.value.?.index()].?.fixed_bytes;
+    try testing.expectEqualSlices(u8, &.{ 0xa9, 0x05, 0x9c, 0xbb }, selector_value);
 }
 
 test "compiler const eval supports abiSignature builtin for trait methods" {
@@ -503,6 +500,432 @@ test "compiler selector builtin rejects non-function arguments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "function reference"));
 }
 
+test "compiler selector builtin integrates with bytes4 assignments and comparison" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn transfer(self, to: address, value: u256) -> bool;
+        \\}
+        \\pub fn run() -> bool {
+        \\    return comptime {
+        \\        const sel: bytes4 = @selector(ERC20.transfer);
+        \\        sel == @selector(ERC20.transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_body = ast_file.body(ast_file.expression(ret_stmt.value.?).Comptime.body);
+    const decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.pattern_types[decl.pattern.index()].kind());
+    try testing.expectEqual(@as(u8, 4), typecheck.pattern_types[decl.pattern.index()].type.fixed_bytes.len);
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, &.{ 0xa9, 0x05, 0x9c, 0xbb }, consteval.values[decl.value.?.index()].?.fixed_bytes);
+    try testing.expectEqual(true, consteval.values[ret_stmt.value.?.index()].?.boolean);
+}
+
+test "compiler const eval supports bytewise fixed-bytes xor" {
+    const source_text =
+        \\pub fn run() -> bytes4 {
+        \\    return comptime {
+        \\        const lhs: bytes4 = hex"01020304";
+        \\        const rhs: bytes4 = hex"05060708";
+        \\        lhs ^ rhs;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expectEqual(@as(u8, 4), typecheck.exprType(ret_stmt.value.?).fixed_bytes.len);
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, &.{ 0x04, 0x04, 0x04, 0x0c }, consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler trait method reflection exposes selectors" {
+    const source_text =
+        \\trait ERC165 {
+        \\    fn supportsInterface(self, interface_id: bytes4) -> bool;
+        \\}
+        \\pub fn run() -> bytes4 {
+        \\    return comptime {
+        \\        const selector: bytes4 = @traitMethods(ERC165)[0].selector;
+        \\        selector;
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+    const comptime_body = ast_file.body(ast_file.expression(ret_stmt.value.?).Comptime.body);
+    const selector_decl = ast_file.statement(comptime_body.statements[0]).VariableDecl;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expectEqual(@as(u8, 4), typecheck.exprType(ret_stmt.value.?).fixed_bytes.len);
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0xff, 0xc9, 0xa7 }, consteval.values[selector_decl.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler const eval supports eventTopic builtin for log declarations" {
+    const source_text =
+        \\log Transfer(indexed from: address, indexed to: address, value: u256);
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eventTopic(Transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expectEqual(@as(u8, 32), typecheck.exprType(ret_stmt.value.?).fixed_bytes.len);
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Transfer(address,address,uint256)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eventTopic builtin rejects non-event arguments" {
+    const source_text =
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eventTopic(42);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "event reference"));
+}
+
+test "compiler eventTopic builtin supports contract-qualified log references" {
+    const source_text =
+        \\contract Events {
+        \\    log Transfer(indexed from: address, indexed to: address, value: u256);
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eventTopic(Events.Transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Transfer(address,address,uint256)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eventTopic builtin uses pinned event_name metadata" {
+    const source_text =
+        \\log TransferV2(indexed from: address, indexed to: address, value: u256) {
+        \\    pub const event_name = "Transfer";
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eventTopic(TransferV2);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Transfer(address,address,uint256)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eventTopic builtin rejects non-string event_name metadata" {
+    const source_text =
+        \\log Transfer(indexed from: address, indexed to: address, value: u256) {
+        \\    pub const event_name = 42;
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eventTopic(Transfer);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "event_name"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "string literal"));
+}
+
+test "compiler preserves pinned eip712_name metadata on structs" {
+    const source_text =
+        \\struct PermitV2 {
+        \\    pub const eip712_name = "Permit";
+        \\    owner: address,
+        \\    spender: address,
+        \\    value: u256,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 1), struct_item.metadata.len);
+    try testing.expectEqualStrings("Permit", compiler.hir.abi.eip712WireNameFromStructItem(ast_file, struct_item).?);
+}
+
+test "compiler eip712_name metadata falls back to struct identifier" {
+    const source_text =
+        \\struct Permit {
+        \\    owner: address,
+        \\    spender: address,
+        \\    value: u256,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
+
+    try testing.expectEqualStrings("Permit", compiler.hir.abi.eip712WireNameFromStructItem(ast_file, struct_item).?);
+}
+
+test "compiler rejects non-string eip712_name metadata" {
+    const source_text =
+        \\struct Permit {
+        \\    pub const eip712_name = 42;
+        \\    owner: address,
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "eip712_name"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "string literal"));
+}
+
+test "compiler const eval supports eip712TypeHash builtin for ERC-2612 Permit" {
+    const source_text =
+        \\struct Permit {
+        \\    pub const eip712_name = "Permit";
+        \\    owner: address,
+        \\    spender: address,
+        \\    value: u256,
+        \\    nonce: u256,
+        \\    deadline: u256,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(Permit);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expectEqual(@as(u8, 32), typecheck.exprType(ret_stmt.value.?).fixed_bytes.len);
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eip712TypeHash builtin falls back to struct identifier" {
+    const source_text =
+        \\struct Permit {
+        \\    owner: address,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(Permit);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eip712TypeHash builtin uses pinned eip712_name metadata" {
+    const source_text =
+        \\struct PermitV2 {
+        \\    pub const eip712_name = "Permit";
+        \\    owner: address,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(PermitV2);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[1]).Function;
+    const body = ast_file.body(function.body);
+    const ret_stmt = ast_file.statement(body.statements[0]).Return;
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
+}
+
+test "compiler eip712TypeHash builtin rejects non-struct arguments" {
+    const source_text =
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(42);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "struct type"));
+}
+
+test "compiler eip712TypeHash builtin rejects nested struct fields" {
+    const source_text =
+        \\struct Permit {
+        \\    owner: address,
+        \\}
+        \\
+        \\struct Order {
+        \\    permit: Permit,
+        \\    deadline: u256,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(Order);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "nested struct fields"));
+}
+
 test "compiler corpus covers ABI selector and signature builtins" {
     var compilation = try compilePackage("ora-example/corpus/comptime/abi_builtins.ora");
     defer compilation.deinit();
@@ -535,13 +958,135 @@ test "compiler corpus covers ABI selector and signature builtins" {
     try testing.expect(selector_index != null);
     try testing.expect(signature_index != null);
 
-    var expected_selector = try std.math.big.int.Managed.init(testing.allocator);
-    defer expected_selector.deinit();
-    try expected_selector.setString(16, "a9059cbb");
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, &.{ 0xa9, 0x05, 0x9c, 0xbb }, consteval.values[selector_index.?].?.fixed_bytes);
+    try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[signature_index.?].?.string);
+}
+
+test "compiler corpus covers ABI eventTopic builtin" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/event_topic.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("EventTopicCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var topic_index: ?usize = null;
+    var qualified_topic_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const body = ast_file.body(item.Function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, item.Function.name, "transfer_topic")) {
+            topic_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, item.Function.name, "transfer_topic_qualified")) {
+            qualified_topic_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(topic_index != null);
+    try testing.expect(qualified_topic_index != null);
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Transfer(address,address,uint256)", &expected, .{});
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expect(consteval.values[selector_index.?].?.integer.eql(expected_selector));
-    try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[signature_index.?].?.string);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[topic_index.?].?.fixed_bytes);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[qualified_topic_index.?].?.fixed_bytes);
+}
+
+test "compiler corpus covers ABI eip712TypeHash builtin" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/eip712_type_hash.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("Eip712TypeHashCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var type_hash_index: ?usize = null;
+    var qualified_type_hash_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const body = ast_file.body(item.Function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, item.Function.name, "permit_type_hash")) {
+            type_hash_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, item.Function.name, "permit_type_hash_qualified")) {
+            qualified_type_hash_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(type_hash_index != null);
+    try testing.expect(qualified_type_hash_index != null);
+
+    var expected: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)", &expected, .{});
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[type_hash_index.?].?.fixed_bytes);
+    try testing.expectEqualSlices(u8, expected[0..], consteval.values[qualified_type_hash_index.?].?.fixed_bytes);
+}
+
+test "compiler corpus covers std interfaceId helper" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/interface_id.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("InterfaceIdCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var erc165_index: ?usize = null;
+    var mini_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const function = item.Function;
+        const body = ast_file.body(function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, item.Function.name, "erc165_id")) {
+            erc165_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, item.Function.name, "mini_id")) {
+            mini_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(erc165_index != null);
+    try testing.expect(mini_index != null);
+
+    var balance_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("balanceOf(address)", &balance_hash, .{});
+    var transfer_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("transfer(address,uint256)", &transfer_hash, .{});
+    const mini_expected = [_]u8{
+        balance_hash[0] ^ transfer_hash[0],
+        balance_hash[1] ^ transfer_hash[1],
+        balance_hash[2] ^ transfer_hash[2],
+        balance_hash[3] ^ transfer_hash[3],
+    };
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expectEqualSlices(u8, &.{ 0x01, 0xff, 0xc9, 0xa7 }, consteval.values[erc165_index.?].?.fixed_bytes);
+    try testing.expectEqualSlices(u8, mini_expected[0..], consteval.values[mini_index.?].?.fixed_bytes);
 }
 
 test "compiler corpus rejects selector misuse" {

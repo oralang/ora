@@ -163,6 +163,16 @@ const Resolver = struct {
             .Field => |field| {
                 if (field.value) |expr_id| try self.resolveExpr(expr_id, env);
             },
+            .Struct => |struct_item| {
+                for (struct_item.metadata) |metadata_id| {
+                    try self.resolveItem(metadata_id, env);
+                }
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.metadata) |metadata_id| {
+                    try self.resolveItem(metadata_id, env);
+                }
+            },
             .Constant => |constant| try self.resolveExpr(constant.value, env),
             .GhostBlock => |ghost_block| try self.resolveBody(ghost_block.body, env),
             else => {},
@@ -299,7 +309,7 @@ const Resolver = struct {
 
     fn resolveSpecClause(self: *Resolver, clause: ast.SpecClause, env: *const Env) anyerror!void {
         try self.resolveExprWithOptions(clause.expr, env, .{
-            .allow_result_name = clause.kind == .ensures,
+            .allow_result_name = clause.kind == .ensures or clause.kind == .ensures_ok,
             .modifies_clause = clause.kind == .modifies,
         });
     }

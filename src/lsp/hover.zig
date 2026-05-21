@@ -171,6 +171,8 @@ const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "requires", "Precondition — must hold when the function is called." },
     .{ "guard", "Runtime-enforced precondition — checked at runtime and assumed after it passes." },
     .{ "ensures", "Postcondition — guaranteed to hold when the function returns." },
+    .{ "ensures_ok", "Success postcondition — guaranteed to hold on successful error-union returns." },
+    .{ "ensures_err", "Error postcondition — guaranteed to hold on error-union returns." },
     .{ "invariant", "Contract or loop invariant — preserved across state transitions." },
     .{ "ghost", "Ghost declaration — exists only for verification, not compiled." },
     .{ "assert", "Verification assertion — checked by the prover." },

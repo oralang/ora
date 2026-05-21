@@ -549,6 +549,7 @@ const TypeChecker = struct {
     try_scope_depth: usize = 0,
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
+    current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
     diagnostics: *diagnostics.DiagnosticList,
@@ -763,6 +764,21 @@ const TypeChecker = struct {
         return bindings;
     }
 
+    fn visitSpecClauseExpr(self: *TypeChecker, clause: ast.SpecClause) !void {
+        const previous_clause_kind = self.current_spec_clause_kind;
+        self.current_spec_clause_kind = clause.kind;
+        defer self.current_spec_clause_kind = previous_clause_kind;
+        try self.visitExpr(clause.expr);
+    }
+
+    fn currentResultType(self: *const TypeChecker) Type {
+        const return_type = self.current_return_type orelse return .{ .unknown = {} };
+        if (self.current_spec_clause_kind == .ensures_ok) {
+            if (return_type.payloadType()) |payload_type| return payload_type.*;
+        }
+        return return_type;
+    }
+
     fn visitItem(self: *TypeChecker, item_id: ast.ItemId) anyerror!void {
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
@@ -788,6 +804,7 @@ const TypeChecker = struct {
                         });
                     }
                 }
+                try self.checkLogMetadata(log_decl);
             },
             .Function => |function| {
                 try self.validateConstructorFunction(function);
@@ -824,10 +841,10 @@ const TypeChecker = struct {
                         try self.collectModifiesClauseSlots(clause, &declared_modifies);
                         continue;
                     }
-                    if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
+                    if (clause.kind != .ensures and clause.kind != .ensures_ok and self.exprContainsResult(clause.expr)) {
                         try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
                     }
-                    try self.visitExpr(clause.expr);
+                    try self.visitSpecClauseExpr(clause);
                 }
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
@@ -883,10 +900,10 @@ const TypeChecker = struct {
                             try self.validateModifiesClause(clause);
                             continue;
                         }
-                        if (clause.kind == .requires and self.exprContainsResult(clause.expr)) {
+                        if (clause.kind != .ensures and clause.kind != .ensures_ok and self.exprContainsResult(clause.expr)) {
                             try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
                         }
-                        try self.visitExpr(clause.expr);
+                        try self.visitSpecClauseExpr(clause);
                     }
                 }
                 try self.recordTraitInterface(item_id, trait_item);
@@ -968,7 +985,10 @@ const TypeChecker = struct {
                     self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
                 }
             },
-            .Struct => |struct_item| try self.validateRuntimeAdtCycleForStruct(item_id, struct_item),
+            .Struct => |struct_item| {
+                try self.checkStructMetadata(struct_item);
+                try self.validateRuntimeAdtCycleForStruct(item_id, struct_item);
+            },
             .Enum => |enum_item| {
                 try self.validateEnumVariantPayloadTypes(enum_item);
                 try self.validateEnumVariantValues(enum_item);
@@ -977,6 +997,48 @@ const TypeChecker = struct {
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
+        }
+    }
+
+    fn checkLogMetadata(self: *TypeChecker, log_decl: ast.LogDeclItem) !void {
+        var seen_event_name: ?source.TextRange = null;
+        for (log_decl.metadata) |metadata_id| {
+            const metadata = self.file.item(metadata_id).*;
+            if (metadata != .Constant) continue;
+
+            try self.visitItem(metadata_id);
+            const constant = metadata.Constant;
+            if (!std.mem.eql(u8, constant.name, "event_name")) continue;
+
+            if (seen_event_name) |_| {
+                try self.emitRangeError(constant.range, "duplicate log metadata constant 'event_name'", .{});
+            }
+            seen_event_name = constant.range;
+
+            if (self.file.expression(constant.value).* != .StringLiteral) {
+                try self.emitRangeError(constant.range, "log metadata 'event_name' must be a string literal", .{});
+            }
+        }
+    }
+
+    fn checkStructMetadata(self: *TypeChecker, struct_item: ast.StructItem) !void {
+        var seen_eip712_name: ?source.TextRange = null;
+        for (struct_item.metadata) |metadata_id| {
+            const metadata = self.file.item(metadata_id).*;
+            if (metadata != .Constant) continue;
+
+            try self.visitItem(metadata_id);
+            const constant = metadata.Constant;
+            if (!std.mem.eql(u8, constant.name, "eip712_name")) continue;
+
+            if (seen_eip712_name) |_| {
+                try self.emitRangeError(constant.range, "duplicate struct metadata constant 'eip712_name'", .{});
+            }
+            seen_eip712_name = constant.range;
+
+            if (self.file.expression(constant.value).* != .StringLiteral) {
+                try self.emitRangeError(constant.range, "struct metadata 'eip712_name' must be a string literal", .{});
+            }
         }
     }
 
@@ -1990,6 +2052,7 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
+                self.assignForPatternTypes(for_stmt);
                 if (for_stmt.range_end) |end_expr| try self.visitExpr(end_expr);
                 for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
                 try self.visitBody(for_stmt.body);
@@ -2206,14 +2269,14 @@ const TypeChecker = struct {
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
                     .Name => |name| if (std.mem.eql(u8, name.name, "result"))
-                        (self.current_return_type orelse .{ .unknown = {} })
+                        self.currentResultType()
                     else
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
             },
             .Result => {
-                self.expr_types[expr_id.index()] = self.current_return_type orelse .{ .unknown = {} };
+                self.expr_types[expr_id.index()] = self.currentResultType();
             },
             .Unary => |unary| {
                 try self.visitExpr(unary.operand);
@@ -2314,6 +2377,18 @@ const TypeChecker = struct {
                 }
             },
             .Builtin => |builtin| {
+                if (std.mem.eql(u8, builtin.name, "selector") or
+                    std.mem.eql(u8, builtin.name, "abiSignature") or
+                    std.mem.eql(u8, builtin.name, "eventTopic") or
+                    std.mem.eql(u8, builtin.name, "eip712TypeHash") or
+                    std.mem.eql(u8, builtin.name, "structFields") or
+                    std.mem.eql(u8, builtin.name, "traitMethods"))
+                {
+                    self.expr_types[expr_id.index()] = self.builtinReturnType(builtin);
+                    try self.checkBuiltinArguments(expr_id, builtin);
+                    return;
+                }
+
                 for (builtin.args) |arg| try self.visitExpr(arg);
                 if (std.mem.eql(u8, builtin.name, "lock") or std.mem.eql(u8, builtin.name, "unlock")) {
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
@@ -3297,11 +3372,26 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "keccak256")) {
             try self.checkKeccak256BuiltinArguments(builtin);
         }
+        if (std.mem.eql(u8, builtin.name, "chainId")) {
+            try self.checkChainIdBuiltinArguments(builtin);
+        }
         if (std.mem.eql(u8, builtin.name, "compileError")) {
             try self.checkCompileErrorBuiltinArguments(builtin);
         }
         if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
             try self.checkAbiFunctionReferenceBuiltinArguments(builtin);
+        }
+        if (std.mem.eql(u8, builtin.name, "eventTopic")) {
+            try self.checkEventReferenceBuiltinArguments(builtin);
+        }
+        if (std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
+            try self.checkEip712TypeHashArguments(builtin);
+        }
+        if (std.mem.eql(u8, builtin.name, "structFields")) {
+            try self.checkReflectionBuiltinArguments(builtin, "structFields", "struct", TypeChecker.resolveBuiltinStructReference);
+        }
+        if (std.mem.eql(u8, builtin.name, "traitMethods")) {
+            try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference);
         }
         if (std.mem.eql(u8, builtin.name, "concat")) {
             try self.checkConcatBuiltinArguments(builtin);
@@ -3326,6 +3416,12 @@ const TypeChecker = struct {
         }
     }
 
+    fn checkChainIdBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 0) {
+            try self.emitRangeError(builtin.range, "@chainId expects 0 arguments", .{});
+        }
+    }
+
     fn checkCompileErrorBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
         if (builtin.args.len != 1) {
             try self.emitRangeError(builtin.range, "@compileError expects 1 argument", .{});
@@ -3347,6 +3443,189 @@ const TypeChecker = struct {
         if (self.resolveBuiltinFunctionReferenceType(builtin.args[0]) == null) {
             try self.emitRangeError(builtin.range, "@{s} requires a function reference", .{builtin.name});
         }
+    }
+
+    fn checkEventReferenceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@eventTopic expects 1 argument", .{});
+            return;
+        }
+
+        if (self.resolveBuiltinEventReference(builtin.args[0]) == null) {
+            try self.emitRangeError(builtin.range, "@eventTopic requires an event reference", .{});
+        }
+    }
+
+    fn checkEip712TypeHashArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@eip712TypeHash expects 1 argument", .{});
+            return;
+        }
+
+        const struct_id = self.resolveBuiltinStructReference(builtin.args[0]) orelse {
+            try self.emitRangeError(builtin.range, "@eip712TypeHash expects a struct type", .{});
+            return;
+        };
+
+        const struct_item = self.file.item(struct_id).Struct;
+        for (struct_item.fields) |field| {
+            const field_type = try self.resolveTypeExpr(field.type_expr);
+            if (self.typeContainsStructReference(field_type)) {
+                try self.emitRangeError(builtin.range, "@eip712TypeHash does not yet support nested struct fields", .{});
+                return;
+            }
+        }
+    }
+
+    fn checkReflectionBuiltinArguments(
+        self: *TypeChecker,
+        builtin: ast.BuiltinExpr,
+        comptime builtin_name: []const u8,
+        comptime kind_word: []const u8,
+        comptime resolve: fn (*const TypeChecker, ast.ExprId) ?ast.ItemId,
+    ) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+
+        if (resolve(self, builtin.args[0]) == null and !self.reflectionArgumentIsGenericTypeValue(builtin.args[0])) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects a " ++ kind_word ++ " type, found {s}", .{
+                self.reflectionArgumentKindDescription(builtin.args[0]),
+            });
+        }
+    }
+
+    fn reflectionArgumentIsGenericTypeValue(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.reflectionArgumentIsGenericTypeValue(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk false;
+                break :blk switch (binding) {
+                    .pattern => |pattern_id| if (self.pattern_types[pattern_id.index()].type.name()) |name|
+                        std.mem.eql(u8, name, "type")
+                    else
+                        false,
+                    .item => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    /// Resolves `Name` or `Contract.Member` paths to an item id, recursing
+    /// through `.Group` wrappers. Caller filters by item tag.
+    fn resolveBuiltinItemReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resolveBuiltinItemReference(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                break :blk switch (binding) {
+                    .item => |item_id| item_id,
+                    .pattern => null,
+                };
+            },
+            .Field => |field| blk: {
+                const base_item_id = self.resolveBuiltinItemReference(field.base) orelse break :blk null;
+                const contract = switch (self.file.item(base_item_id).*) {
+                    .Contract => |contract| contract,
+                    else => break :blk null,
+                };
+                for (contract.members) |member_id| {
+                    const member_name = switch (self.file.item(member_id).*) {
+                        .LogDecl => |log| log.name,
+                        .Struct => |s| s.name,
+                        .Function => |f| f.name,
+                        .Bitfield => |b| b.name,
+                        .Enum => |e| e.name,
+                        .Constant => |c| c.name,
+                        .ErrorDecl => |e| e.name,
+                        else => continue,
+                    };
+                    if (std.mem.eql(u8, member_name, field.name)) break :blk member_id;
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    fn resolveBuiltinEventReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .LogDecl) item_id else null;
+    }
+
+    fn resolveBuiltinStructReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .Struct) item_id else null;
+    }
+
+    fn resolveBuiltinTraitReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .Trait) item_id else null;
+    }
+
+    fn reflectionArgumentKindDescription(self: *TypeChecker, expr_id: ast.ExprId) []const u8 {
+        if (self.resolveBuiltinItemReference(expr_id)) |item_id| {
+            return switch (self.file.item(item_id).*) {
+                .Struct => "a struct",
+                .Trait => "a trait",
+                .Contract => "a contract",
+                .Enum => "an enum",
+                .Bitfield => "a bitfield",
+                .Function => "a function",
+                .LogDecl => "an event",
+                .TypeAlias => "a type alias",
+                else => "a non-type item",
+            };
+        }
+
+        switch (self.file.expression(expr_id).*) {
+            .Name => |name| {
+                const ty = self.typeValueNameType(name.name);
+                switch (ty.kind()) {
+                    .integer, .bool, .string, .address, .bytes, .fixed_bytes, .void => return "a primitive type",
+                    .struct_ => return "a struct",
+                    .contract => return "a contract",
+                    .enum_ => return "an enum",
+                    .bitfield => return "a bitfield",
+                    else => {},
+                }
+            },
+            .TypeValue => return "a type",
+            else => {},
+        }
+
+        self.visitExpr(expr_id) catch {};
+        const arg_type = self.expr_types[expr_id.index()];
+        if (arg_type.kind() != .unknown) {
+            return std.fmt.allocPrint(self.arena, "a value of type '{s}'", .{
+                diagnosticTypeDisplayName(self, arg_type),
+            }) catch "a value";
+        }
+        return "an unknown value";
+    }
+
+    fn typeContainsStructReference(self: *const TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .struct_ => true,
+            .refinement => |refinement| self.typeContainsStructReference(refinement.base_type.*),
+            .array => |array| self.typeContainsStructReference(array.element_type.*),
+            .slice => |slice| self.typeContainsStructReference(slice.element_type.*),
+            .tuple => |elements| {
+                for (elements) |element| {
+                    if (self.typeContainsStructReference(element)) return true;
+                }
+                return false;
+            },
+            .anonymous_struct => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (self.typeContainsStructReference(field.ty)) return true;
+                }
+                return false;
+            },
+            else => false,
+        };
     }
 
     fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
@@ -4390,6 +4669,12 @@ const TypeChecker = struct {
                 }
                 self.expr_types[expr_id.index()] = expected_type;
             },
+            .BytesLiteral => |literal| {
+                if (expected_type.kind() != .fixed_bytes) return;
+                if (literal.text.len % 2 != 0) return;
+                if (literal.text.len / 2 != expected_type.fixed_bytes.len) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
             .StructLiteral => |struct_literal| {
                 if (struct_literal.type_expr != null or struct_literal.type_name.len != 0) return;
                 self.expr_types[expr_id.index()] = expected_type;
@@ -4798,7 +5083,7 @@ const TypeChecker = struct {
             return .{ .unknown = {} };
         }
 
-        if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256")) {
+        if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256") or std.mem.eql(u8, builtin.name, "chainId")) {
             return descriptorFromPathName(self.file, self.item_index, "u256");
         }
 
@@ -4806,8 +5091,20 @@ const TypeChecker = struct {
             return .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
         }
 
+        if (std.mem.eql(u8, builtin.name, "eventTopic") or std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
+            return .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } };
+        }
+
         if (std.mem.eql(u8, builtin.name, "compileError")) {
-            return .{ .unknown = {} };
+            return .{ .never = {} };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "structFields")) {
+            return self.reflectionSliceType(self.structFieldReflectionType());
+        }
+
+        if (std.mem.eql(u8, builtin.name, "traitMethods")) {
+            return self.reflectionSliceType(self.traitMethodReflectionType());
         }
 
         if (std.mem.eql(u8, builtin.name, "concat") or std.mem.eql(u8, builtin.name, "slice")) {
@@ -4827,6 +5124,43 @@ const TypeChecker = struct {
         return .{ .unknown = {} };
     }
 
+    fn reflectionTypeType(self: *const TypeChecker) Type {
+        _ = self;
+        return .{ .named = .{ .name = "type" } };
+    }
+
+    fn reflectionSliceType(self: *const TypeChecker, element: Type) Type {
+        const stored = self.arena.create(Type) catch return .{ .unknown = {} };
+        stored.* = element;
+        return .{ .slice = .{ .element_type = stored } };
+    }
+
+    fn structFieldReflectionType(self: *const TypeChecker) Type {
+        const fields = self.arena.alloc(model.AnonymousStructField, 2) catch return .{ .unknown = {} };
+        fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
+        fields[1] = .{ .name = "type", .ty = self.reflectionTypeType() };
+        return .{ .anonymous_struct = .{ .fields = fields } };
+    }
+
+    fn traitMethodReflectionType(self: *const TypeChecker) Type {
+        const type_element = self.arena.create(Type) catch return .{ .unknown = {} };
+        type_element.* = self.reflectionTypeType();
+
+        const string_element = self.arena.create(Type) catch return .{ .unknown = {} };
+        string_element.* = .{ .string = {} };
+
+        // Keep this field order in sync with buildTraitMethodsCtValue.
+        const fields = self.arena.alloc(model.AnonymousStructField, 7) catch return .{ .unknown = {} };
+        fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
+        fields[1] = .{ .name = "params", .ty = .{ .slice = .{ .element_type = type_element } } };
+        fields[2] = .{ .name = "return_type", .ty = self.reflectionTypeType() };
+        fields[3] = .{ .name = "has_self", .ty = .{ .bool = {} } };
+        fields[4] = .{ .name = "call_kind", .ty = .{ .string = {} } };
+        fields[5] = .{ .name = "declared_errors", .ty = .{ .slice = .{ .element_type = string_element } } };
+        fields[6] = .{ .name = "selector", .ty = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } } };
+        return .{ .anonymous_struct = .{ .fields = fields } };
+    }
+
     fn builtinDivisionOperandType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
         if (builtin.args.len == 0) return .{ .unknown = {} };
         const lhs = self.expr_types[builtin.args[0].index()];
@@ -4843,6 +5177,12 @@ const TypeChecker = struct {
         self.current_function_item = item_id;
         defer self.current_function_item = previous_function_item;
         var state = EffectCollectorState.init();
+        for (function.clauses) |clause| {
+            switch (clause.kind) {
+                .requires, .guard, .ensures, .ensures_ok, .ensures_err => try self.collectExprEffects(clause.expr, &state),
+                .invariant, .modifies => {},
+            }
+        }
         try self.collectBodyEffects(function.body, &state);
         return self.effectFromState(state);
     }
@@ -6244,7 +6584,7 @@ const TypeChecker = struct {
                 };
                 break :blk self.typeValueNameType(name.name).kind() != .unknown;
             },
-            else => false,
+            else => if (self.expr_types[expr_id.index()].name()) |name| std.mem.eql(u8, name, "type") else false,
         };
     }
 
@@ -6283,7 +6623,7 @@ const TypeChecker = struct {
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
         if (std.mem.eql(u8, field_name, "len")) {
             switch (base_type.kind()) {
-                .string, .bytes => return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
+                .string, .bytes, .array, .slice => return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
                 else => {},
             }
         }
@@ -6804,6 +7144,28 @@ const TypeChecker = struct {
                 if (tuple_index >= elements.len) break :blk .{ .unknown = {} };
                 break :blk elements[tuple_index];
             },
+            else => .{ .unknown = {} },
+        };
+    }
+
+    fn assignForPatternTypes(self: *TypeChecker, for_stmt: ast.ForStmt) void {
+        const item_type = self.forIterableItemType(self.expr_types[for_stmt.iterable.index()]);
+        self.pattern_types[for_stmt.item_pattern.index()] = LocatedType.unlocated(item_type);
+        if (for_stmt.index_pattern) |index_pattern| {
+            self.pattern_types[index_pattern.index()] = LocatedType.unlocated(.{ .integer = .{
+                .bits = 256,
+                .signed = false,
+                .spelling = "u256",
+            } });
+        }
+    }
+
+    fn forIterableItemType(self: *const TypeChecker, iterable_type: Type) Type {
+        _ = self;
+        if (iterable_type.elementType()) |element| return element.*;
+        return switch (iterable_type) {
+            .bytes, .string => .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } },
+            .integer => .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
             else => .{ .unknown = {} },
         };
     }
@@ -7917,6 +8279,7 @@ fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
+    if (lhs.kind() == .fixed_bytes and rhs.kind() == .fixed_bytes and sameConcreteType(lhs, rhs)) return lhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
     return lhs;
 }
@@ -8030,7 +8393,7 @@ fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
 fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
     if (lhs_type.kind() != rhs_type.kind()) return false;
     return switch (lhs_type) {
-        .unknown, .void, .bool, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -8097,6 +8460,7 @@ fn binaryOpName(op: ast.BinaryOp) []const u8 {
 fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
     switch (ty) {
         .unknown => try buffer.appendSlice(allocator, "unknown"),
+        .never => try buffer.appendSlice(allocator, "never"),
         .void => try buffer.appendSlice(allocator, "void"),
         .bool => try buffer.appendSlice(allocator, "bool"),
         .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "integer"),
@@ -8179,6 +8543,7 @@ fn diagnosticTypeDisplayName(self: *TypeChecker, ty: Type) []const u8 {
 fn typeDisplayName(ty: Type) []const u8 {
     return switch (ty) {
         .unknown => "unknown",
+        .never => "never",
         .void => "void",
         .bool => "bool",
         .integer => |integer| integer.spelling orelse "integer",

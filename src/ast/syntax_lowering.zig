@@ -215,14 +215,18 @@ pub fn mixin(Builder: type) type {
             else
                 &.{};
             var fields: std.ArrayList(StructField) = .{};
+            var metadata: std.ArrayList(ItemId) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
-                    .node => |field_node| {
-                        if (field_node.kind() != .StructField) continue;
-                        try fields.append(self.allocator, try Lowering.lowerStructFieldNode(self, field_node));
+                    .node => |child_node| {
+                        switch (child_node.kind()) {
+                            .StructField => try fields.append(self.allocator, try Lowering.lowerStructFieldNode(self, child_node)),
+                            .ConstantItem => try metadata.append(self.allocator, try Lowering.lowerConstantItemNode(self, child_node)),
+                            else => {},
+                        }
                     },
                 }
             }
@@ -233,6 +237,7 @@ pub fn mixin(Builder: type) type {
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .metadata = try metadata.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -1318,7 +1323,7 @@ pub fn mixin(Builder: type) type {
             return switch (token.kind()) {
                 .IntegerLiteral, .BinaryLiteral, .HexLiteral => Support.pushExpr(self, .{ .IntegerLiteral = .{
                     .range = node.range(),
-                    .text = tokenText(token),
+                    .text = try Lowering.integerLiteralText(self, node, token),
                 } }),
                 .StringLiteral, .RawStringLiteral, .CharacterLiteral => Support.pushExpr(self, .{ .StringLiteral = .{
                     .range = node.range(),
@@ -1338,6 +1343,11 @@ pub fn mixin(Builder: type) type {
                 } }),
                 else => Lowering.malformedExpr(self, node, "unsupported literal token"),
             };
+        }
+
+        fn integerLiteralText(self: *Builder, node: SyntaxNode, token: SyntaxToken) ![]const u8 {
+            const unit_token = nthDirectToken(node, 1) orelse return tokenText(token);
+            return try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ tokenText(token), tokenText(unit_token) });
         }
 
         fn lowerTypeValueExprNode(self: *Builder, node: SyntaxNode) !ExprId {
@@ -1928,13 +1938,17 @@ pub fn mixin(Builder: type) type {
         fn lowerLogDeclItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing log declaration name");
             var fields: std.ArrayList(nodes.LogField) = .{};
+            var metadata: std.ArrayList(ItemId) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
-                    .node => |field_node| {
-                        if (field_node.kind() != .LogField) continue;
-                        try fields.append(self.allocator, try Lowering.lowerLogFieldNode(self, field_node));
+                    .node => |child_node| {
+                        switch (child_node.kind()) {
+                            .LogField => try fields.append(self.allocator, try Lowering.lowerLogFieldNode(self, child_node)),
+                            .ConstantItem => try metadata.append(self.allocator, try Lowering.lowerConstantItemNode(self, child_node)),
+                            else => {},
+                        }
                     },
                 }
             }
@@ -1942,6 +1956,7 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .name = tokenText(name_token),
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .metadata = try metadata.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -2003,6 +2018,8 @@ pub fn mixin(Builder: type) type {
                 .Requires => .requires,
                 .Guard => .guard,
                 .Ensures => .ensures,
+                .EnsuresOk => .ensures_ok,
+                .EnsuresErr => .ensures_err,
                 .Modifies => .modifies,
                 else => blk: {
                     _ = try Lowering.malformedExpr(self, node, "invalid specification keyword");
@@ -2400,7 +2417,7 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
 
 fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
         else => false,
     };
 }

@@ -9,6 +9,10 @@ pub fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
 }
 
+pub fn compileTextWithChainId(source_text: []const u8, chain_id: u64) !compiler.driver.Compilation {
+    return compiler.compileSourceWithOptions(testing.allocator, "test.ora", source_text, .{ .chain_id = chain_id });
+}
+
 pub fn renderHirTextForSource(source_text: []const u8) ![]u8 {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -329,9 +333,17 @@ pub fn verifyTextWithoutDegradationWithSummaryInlineDepth(
     };
 }
 
-pub fn verifyPackageWithoutDegradationWithImportedSummariesOnly(
+pub fn verifyPackageWithoutDegradation(
     root_path: []const u8,
     function_name: ?[]const u8,
+) !VerificationProbeSummary {
+    return verifyPackageWithoutDegradationWithImportedSummaryMode(root_path, function_name, null);
+}
+
+pub fn verifyPackageWithoutDegradationWithImportedSummaryMode(
+    root_path: []const u8,
+    function_name: ?[]const u8,
+    summary_only_imported_calls: ?bool,
 ) !VerificationProbeSummary {
     var compilation = try compilePackage(root_path);
     defer compilation.deinit();
@@ -340,7 +352,7 @@ pub fn verifyPackageWithoutDegradationWithImportedSummariesOnly(
     var verifier = try z3_verification.VerificationPass.init(testing.allocator);
     errdefer verifier.deinit();
     verifier.filter_function_name = function_name;
-    verifier.setSummaryOnlyImportedCalls(true);
+    if (summary_only_imported_calls) |enabled| verifier.setSummaryOnlyImportedCalls(enabled);
 
     var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
     errdefer result.deinit();

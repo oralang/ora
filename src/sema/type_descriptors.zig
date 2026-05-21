@@ -156,6 +156,8 @@ pub fn inferItemType(allocator: std.mem.Allocator, file: *const ast.AstFile, ite
 pub fn mergeExprType(current: Type, next: Type) Type {
     if (current.kind() == .unknown) return next;
     if (next.kind() == .unknown) return current;
+    if (current.kind() == .never) return next;
+    if (next.kind() == .never) return current;
     if (typeEql(current, next)) return current;
     if (commonIntegerType(current, next)) |merged| return merged;
     return .{ .unknown = {} };
@@ -164,7 +166,7 @@ pub fn mergeExprType(current: Type, next: Type) Type {
 pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
-        .unknown, .void, .bool, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -214,6 +216,8 @@ pub fn parseFixedBytesType(name: []const u8) ?model.FixedBytesType {
 
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) return true;
+    if (actual_type.kind() == .never) return true;
+    if (expected_type.kind() == .never) return actual_type.kind() == .never;
     if (typeEql(expected_type, actual_type)) return true;
 
     if (expected_type.kind() == .refinement and actual_type.kind() == .refinement) {

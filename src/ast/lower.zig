@@ -132,7 +132,13 @@ const Validator = struct {
                     _ = try self.expectExpr(clause.expr, clause.range, "function clause references invalid expression id");
                 }
             },
-            .Struct => |struct_item| try self.validateStructFields(struct_item.fields, "struct field"),
+            .Struct => |struct_item| {
+                try self.validateStructFields(struct_item.fields, "struct field");
+                for (struct_item.metadata) |metadata_id| {
+                    _ = try self.expectItem(metadata_id, item_range, "struct references invalid metadata item id");
+                }
+                try self.validateItemScope(struct_item.metadata, "struct metadata scope");
+            },
             .Bitfield => |bitfield| {
                 if (bitfield.base_type) |type_id| {
                     _ = try self.expectType(type_id, item_range, "bitfield references invalid base type id");
@@ -178,7 +184,13 @@ const Validator = struct {
                 _ = try self.expectType(type_alias.target_type, item_range, "type alias references invalid target type id");
                 try self.validateParameters(type_alias.template_parameters, "type alias parameter");
             },
-            .LogDecl => |log_decl| try self.validateLogFields(log_decl.fields),
+            .LogDecl => |log_decl| {
+                try self.validateLogFields(log_decl.fields);
+                for (log_decl.metadata) |metadata_id| {
+                    _ = try self.expectItem(metadata_id, item_range, "log declaration references invalid metadata item id");
+                }
+                try self.validateItemScope(log_decl.metadata, "log metadata scope");
+            },
             .ErrorDecl => |error_decl| try self.validateParameters(error_decl.parameters, "error parameter"),
             .GhostBlock => |ghost_block| {
                 _ = try self.expectBody(ghost_block.body, item_range, "ghost block references invalid body id");

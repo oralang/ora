@@ -117,6 +117,7 @@ pub const ResolvedBinding = Binding;
 
 pub const TypeKind = enum {
     unknown,
+    never,
     void,
     bool,
     integer,
@@ -216,6 +217,7 @@ pub const RefinementType = struct {
 
 pub const Type = union(TypeKind) {
     unknown: void,
+    never: void,
     void: void,
     bool: void,
     integer: IntegerType,
@@ -357,6 +359,7 @@ pub const ResolvedCall = struct {
 
 pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
     switch (ty) {
+        .never => try buffer.appendSlice(allocator, "never"),
         .bool => try buffer.appendSlice(allocator, "bool"),
         .address => try buffer.appendSlice(allocator, "address"),
         .string => try buffer.appendSlice(allocator, "string"),
@@ -497,6 +500,7 @@ pub const ConstValue = union(enum) {
     integer: BigInt,
     boolean: bool,
     address: u160,
+    fixed_bytes: []const u8,
     string: []const u8,
     tuple: []const ConstValue,
 };

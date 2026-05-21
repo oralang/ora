@@ -1064,14 +1064,15 @@ const CompilerAbiGenerator = struct {
             });
         }
 
-        const signature = try self.buildSignature(log_decl.name, signature_types.items);
+        const event_name = compiler_abi.eventWireNameFromLogDecl(ctx.file, log_decl) orelse log_decl.name;
+        const signature = try self.buildSignature(event_name, signature_types.items);
         const id = try self.buildCallableId(contract_name, signature);
         try self.ensureCallableIdUnique(id);
 
         try self.callables.append(self.allocator, .{
             .id = id,
             .kind = .event,
-            .name = log_decl.name,
+            .name = event_name,
             .signature = signature,
             .selector = null,
             .inputs = try inputs.toOwnedSlice(self.allocator),

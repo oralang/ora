@@ -408,6 +408,7 @@ const Lowerer = struct {
 
     pub fn lowerSemaType(self: *Lowerer, ty: sema.Type, range: source.TextRange) mlir.MlirType {
         return switch (ty) {
+            .never => support.defaultIntegerType(self.context),
             .bool => support.boolType(self.context),
             .integer => |integer| if (integer.spelling) |name| support.lowerPathType(self.context, name) else support.defaultIntegerType(self.context),
             .address => support.addressType(self.context),

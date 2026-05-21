@@ -64,6 +64,8 @@ test "keywords: error handling and verification keywords recognized" {
         .{ .source = "catch", .expected = .Catch },
         .{ .source = "requires", .expected = .Requires },
         .{ .source = "ensures", .expected = .Ensures },
+        .{ .source = "ensures_ok", .expected = .EnsuresOk },
+        .{ .source = "ensures_err", .expected = .EnsuresErr },
         .{ .source = "invariant", .expected = .Invariant },
         .{ .source = "ghost", .expected = .Ghost },
         .{ .source = "assert", .expected = .Assert },

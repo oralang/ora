@@ -104,7 +104,7 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
         switch (clause.kind) {
             .requires => requires_count += 1,
             .guard => guard_count += 1,
-            .ensures => ensures_count += 1,
+            .ensures, .ensures_ok, .ensures_err => ensures_count += 1,
             .invariant => invariant_count += 1,
             .modifies => modifies_count += 1,
         }

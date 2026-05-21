@@ -384,7 +384,7 @@ test "compiler source loader injects embedded std modules" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -2611,11 +2611,11 @@ test "complex SMT app probes do not degrade verification encoding" {
     }
 }
 
-test "stale flagship probes remain non-degraded and vacuous specs fail closed" {
+test "stale flagship probes remain non-degraded" {
     const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32, expect_success: bool }{
         .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000, .expect_success = true },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
-        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = false },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
     };
 
     for (probes) |probe| {

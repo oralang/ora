@@ -1061,6 +1061,24 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     const text = try integer.toString(self.allocator, 10, .lower);
                     break :blk mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
                 },
+                .fixed_bytes => |bytes| blk: {
+                    if (sema_type != .fixed_bytes or sema_type.fixed_bytes.len != bytes.len) break :blk null;
+                    var value_int = try std.math.big.int.Managed.initSet(self.allocator, 0);
+                    for (bytes) |byte| {
+                        var shifted = try std.math.big.int.Managed.init(self.allocator);
+                        try std.math.big.int.Managed.shiftLeft(&shifted, &value_int, 8);
+                        var byte_int = try std.math.big.int.Managed.initSet(self.allocator, byte);
+                        var next = try std.math.big.int.Managed.init(self.allocator);
+                        try std.math.big.int.Managed.bitOr(&next, &shifted, &byte_int);
+                        value_int = next;
+                    }
+                    if (value_int.toInt(i64)) |small| {
+                        break :blk mlir.oraIntegerAttrCreateI64FromType(result_type, small);
+                    } else |_| {}
+
+                    const text = try value_int.toString(self.allocator, 10, .lower);
+                    break :blk mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
+                },
                 .boolean => |boolean| mlir.oraBoolAttrCreate(self.context, boolean),
                 .address => |address| blk: {
                     if (!mlir.oraTypeEqual(result_type, support.addressType(self.context))) break :blk null;
@@ -1088,6 +1106,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const loc = self.location(struct_item.range);
             const op = mlir.oraStructDeclOpCreate(self.context, loc, strRef(struct_item.name));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            const eip712_name = abi_support.eip712WireNameFromStructItem(self.file, struct_item) orelse struct_item.name;
+            mlir.oraOperationSetAttributeByName(op, strRef("ora.eip712_name"), mlir.oraStringAttrCreate(self.context, strRef(eip712_name)));
 
             if (struct_item.fields.len > 0) {
                 const field_names = try self.allocator.alloc(mlir.MlirAttribute, struct_item.fields.len);
@@ -1268,7 +1288,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn lowerLogDecl(self: *Lowerer, item_id: ast.ItemId, log_decl: ast.LogDeclItem, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(log_decl.range);
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            const event_name = abi_support.eventWireNameFromLogDecl(self.file, log_decl) orelse log_decl.name;
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", log_decl.name));
+            try attrs.append(self.allocator, namedStringAttr(self.context, "ora.event_name", event_name));
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.log_decl", true));
 
             if (log_decl.fields.len > 0) {

@@ -148,6 +148,25 @@ test "abi manifest includes functions errors events effects and hashed type ids"
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"event\"") != null);
 }
 
+test "abi manifest uses pinned event_name metadata for event wire identity" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract Test {
+        \\    log TransferV2(indexed from: address, amount: u256) {
+        \\        pub const event_name = "Transfer";
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    try testing.expect(findCallable(contract_abi, .event, "TransferV2") == null);
+    const transfer = findCallable(contract_abi, .event, "Transfer") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Transfer(address,uint256)", transfer.signature);
+}
+
 test "abi emits one bundle for multiple contracts and disambiguates callable ids" {
     const allocator = testing.allocator;
     const source =

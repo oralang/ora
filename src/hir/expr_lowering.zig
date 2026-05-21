@@ -70,9 +70,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn tryLowerConstEvalValue(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?mlir.MlirValue {
             const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
-            if (@This().exprDependsOnRuntimeState(self, expr_id)) return null;
-            if (@This().exprDependsOnMutablePatternLocals(self, expr_id)) return null;
             const expr = self.parent.file.expression(expr_id).*;
+            const is_required_comptime = expr == .Comptime;
+            if (!is_required_comptime) {
+                if (@This().exprDependsOnRuntimeState(self, expr_id)) return null;
+                if (@This().exprDependsOnMutablePatternLocals(self, expr_id)) return null;
+            }
             switch (expr) {
                 .Binary, .Unary, .Comptime, .Group, .Call, .Builtin, .Tuple => {},
                 .Field => {},
@@ -93,7 +96,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const result_type = self.parent.lowerExprType(expr_id);
             if (mlir.oraTypeIsNull(result_type)) return null;
             const loc = self.parent.location(exprRange(self.parent.file, expr_id));
-            return try @This().lowerPersistedConstValue(self, value, self.parent.typecheck.exprType(expr_id), result_type, loc);
+            const lowered = try @This().lowerPersistedConstValue(self, value, self.parent.typecheck.exprType(expr_id), result_type, loc);
+            if (lowered == null and is_required_comptime) return error.ComptimeValueNotRuntimeLowerable;
+            return lowered;
         }
 
         fn lowerPersistedConstValue(
@@ -110,6 +115,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         mlir.oraIntegerAttrCreateI64FromType(result_type, small)
                     else |_| blk2: {
                         const text = try integer.toString(self.parent.allocator, 10, .lower);
+                        defer self.parent.allocator.free(text);
+                        break :blk2 mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
+                    };
+                    break :blk appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, result_type, attr));
+                },
+                .fixed_bytes => |bytes| blk: {
+                    if (sema_type != .fixed_bytes or sema_type.fixed_bytes.len != bytes.len) break :blk null;
+                    if (!mlir.oraTypeIsAInteger(result_type)) break :blk null;
+                    var value_int = try std.math.big.int.Managed.initSet(self.parent.allocator, 0);
+                    for (bytes) |byte| {
+                        var shifted = try std.math.big.int.Managed.init(self.parent.allocator);
+                        try std.math.big.int.Managed.shiftLeft(&shifted, &value_int, 8);
+                        var byte_int = try std.math.big.int.Managed.initSet(self.parent.allocator, byte);
+                        var next = try std.math.big.int.Managed.init(self.parent.allocator);
+                        try std.math.big.int.Managed.bitOr(&next, &shifted, &byte_int);
+                        value_int = next;
+                    }
+                    const attr = if (value_int.toInt(i64)) |small|
+                        mlir.oraIntegerAttrCreateI64FromType(result_type, small)
+                    else |_| blk2: {
+                        const text = try value_int.toString(self.parent.allocator, 10, .lower);
                         defer self.parent.allocator.free(text);
                         break :blk2 mlir.oraIntegerAttrGetFromString(result_type, strRef(text));
                     };
@@ -199,6 +225,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk @This().exprDependsOnRuntimeState(self, field.base);
                 },
+                .Index => |index| @This().exprDependsOnRuntimeState(self, index.base) or @This().exprDependsOnRuntimeState(self, index.index),
                 else => false,
             };
         }
@@ -369,28 +396,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Switch => |switch_expr| try self.lowerSwitchExpr(expr_id, switch_expr, locals),
                 .ExternalProxy => |_| error.UnsupportedExternTraitLowering,
-                .Comptime => |comptime_expr| blk: {
-                    var child_locals = try self.cloneLocals(locals);
-                    const body = self.parent.file.body(comptime_expr.body).*;
-                    if (body.statements.len == 0) break :blk try self.defaultValue(self.parent.lowerExprType(expr_id), comptime_expr.range);
-
-                    var index: usize = 0;
-                    while (index + 1 < body.statements.len) : (index += 1) {
-                        _ = try self.lowerStmt(body.statements[index], &child_locals);
-                    }
-
-                    const last_stmt = self.parent.file.statement(body.statements[body.statements.len - 1]).*;
-                    break :blk switch (last_stmt) {
-                        .Expr => |expr_stmt| try self.lowerExpr(expr_stmt.expr, &child_locals),
-                        .Return => |ret| if (ret.value) |value|
-                            try self.lowerExpr(value, &child_locals)
-                        else
-                            try self.defaultValue(self.parent.lowerExprType(expr_id), comptime_expr.range),
-                        else => blk2: {
-                            _ = try self.lowerStmt(body.statements[body.statements.len - 1], &child_locals);
-                            break :blk2 try self.defaultValue(self.parent.lowerExprType(expr_id), comptime_expr.range);
-                        },
-                    };
+                .Comptime => {
+                    return error.ComptimeValueRequiredForRuntimeLowering;
                 },
                 .ErrorReturn => |error_return| blk: {
                     var args: std.ArrayList(mlir.MlirValue) = .{};
@@ -1506,7 +1513,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn externSummaryHasEnsures(ast_method: ?ast.nodes.TraitMethod) bool {
             const method = ast_method orelse return false;
             for (method.clauses) |clause| {
-                if (clause.kind == .ensures) return true;
+                if (clause.kind == .ensures or clause.kind == .ensures_ok) return true;
             }
             return false;
         }
@@ -1536,7 +1543,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var combined: ?mlir.MlirValue = null;
             for (method.clauses) |clause| {
-                if (clause.kind != .ensures) continue;
+                if (clause.kind != .ensures and clause.kind != .ensures_ok) continue;
                 var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
                 const condition = try self.lowerExpr(clause.expr, &clause_locals);
                 combined = if (combined) |acc| blk: {

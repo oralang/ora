@@ -87,7 +87,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const stdlib_embedded_mod = b.createModule(.{
+        .root_source_file = b.path("src/stdlib_embedded.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     ora_imports_mod.addImport("ora_lexer", ora_lexer_mod);
+    ora_imports_mod.addImport("stdlib_embedded", stdlib_embedded_mod);
 
     const ora_fmt_mod = b.createModule(.{
         .root_source_file = b.path("src/fmt/mod.zig"),
@@ -426,6 +432,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     import_resolver_test_mod.addImport("ora_lexer", ora_lexer_mod);
+    import_resolver_test_mod.addImport("stdlib_embedded", stdlib_embedded_mod);
     import_resolver_test_mod.addImport("ora_types", ora_types_mod);
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
