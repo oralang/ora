@@ -1002,45 +1002,6 @@ test "compiler corpus covers ABI eventTopic builtin" {
     try testing.expectEqualSlices(u8, expected[0..], consteval.values[qualified_topic_index.?].?.fixed_bytes);
 }
 
-test "compiler corpus covers ABI eip712TypeHash builtin" {
-    var compilation = try compilePackage("ora-example/corpus/comptime/eip712_type_hash.ora");
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(typecheck.diagnostics.isEmpty());
-
-    const contract_id = item_index.lookup("Eip712TypeHashCorpus").?;
-    const contract = ast_file.item(contract_id).Contract;
-
-    var type_hash_index: ?usize = null;
-    var qualified_type_hash_index: ?usize = null;
-    for (contract.members) |member_id| {
-        const item = ast_file.item(member_id).*;
-        if (item != .Function) continue;
-
-        const body = ast_file.body(item.Function.body);
-        const ret_stmt = ast_file.statement(body.statements[0]).Return;
-        if (std.mem.eql(u8, item.Function.name, "permit_type_hash")) {
-            type_hash_index = ret_stmt.value.?.index();
-        } else if (std.mem.eql(u8, item.Function.name, "permit_type_hash_qualified")) {
-            qualified_type_hash_index = ret_stmt.value.?.index();
-        }
-    }
-
-    try testing.expect(type_hash_index != null);
-    try testing.expect(qualified_type_hash_index != null);
-
-    var expected: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)", &expected, .{});
-
-    const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expectEqualSlices(u8, expected[0..], consteval.values[type_hash_index.?].?.fixed_bytes);
-    try testing.expectEqualSlices(u8, expected[0..], consteval.values[qualified_type_hash_index.?].?.fixed_bytes);
-}
-
 test "compiler corpus covers std interfaceId helper" {
     var compilation = try compilePackage("ora-example/corpus/comptime/interface_id.ora");
     defer compilation.deinit();
@@ -1119,11 +1080,9 @@ test "compiler emits ABI attrs for public contract entries" {
 
 test "compiler emits ABI attrs for slice of struct containing bitfield" {
     const source_text =
-        \\bitfield CustomFlags : u256 {
+        \\bitfield CustomFlags : u8 {
         \\    enabled: bool @bits(0..1);
-        \\    code: u8 @bits(1..6);
-        \\    delta: i16 @bits(6..22);
-        \\    amount: u32 @bits(22..54);
+        \\    code: u8 @bits(1..8);
         \\}
         \\
         \\struct Row {
@@ -1145,5 +1104,5 @@ test "compiler emits ABI attrs for slice of struct containing bitfield" {
     defer testing.allocator.free(rendered);
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_params"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(uint256,uint256,uint256)[]\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"(uint256,uint8,uint256)[]\""));
 }

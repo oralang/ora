@@ -13,8 +13,32 @@ const module_lowering = @import("module_lowering.zig");
 const refinement_cleanup = @import("refinement_cleanup.zig");
 const support = @import("support.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
+const abi_layout_context = @import("../abi/layout_context.zig");
 
 pub const abi = @import("abi.zig");
+
+pub const abi_layout_test_support = struct {
+    pub fn mixin(TestLowerer: type, TestContractLowerer: type, TestFunctionLowerer: type, TestHirSymbolKind: type) type {
+        const ModuleLowering = module_lowering.mixin(TestLowerer, TestContractLowerer, TestFunctionLowerer, TestHirSymbolKind);
+        return struct {
+            pub fn abiLayoutForType(self: *TestLowerer, ty: sema.Type) anyerror![]const u8 {
+                return ModuleLowering.abiLayoutForType(self, ty);
+            }
+
+            pub fn abiLayoutForTypeExpr(self: *TestLowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
+                return ModuleLowering.abiLayoutForTypeExpr(self, type_expr_id);
+            }
+
+            pub fn staticAbiWordCountForType(self: *TestLowerer, ty: sema.Type) ?usize {
+                return ModuleLowering.staticAbiWordCountForType(self, ty);
+            }
+
+            pub fn staticAbiWordCountForTypeExpr(self: *TestLowerer, type_expr_id: ast.TypeExprId) ?usize {
+                return ModuleLowering.staticAbiWordCountForTypeExpr(self, type_expr_id);
+            }
+        };
+    }
+};
 
 pub const ModuleQuery = struct {
     context: *anyopaque,
@@ -386,12 +410,13 @@ const Lowerer = struct {
     }
 
     pub fn errorTypeHasPayload(self: *const Lowerer, ty: sema.Type) bool {
-        const error_name = ty.name() orelse return false;
-        const item_id = self.item_index.lookup(error_name) orelse return false;
-        return switch (self.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => false,
+        const ctx = abi_layout_context.LayoutContext{
+            .allocator = self.allocator,
+            .file = self.file,
+            .item_index = self.item_index,
+            .typecheck = self.typecheck,
         };
+        return ctx.errorTypeHasPayload(ty);
     }
 
     pub fn errorUnionRequiresWideCarrier(self: *const Lowerer, ty: sema.Type) bool {

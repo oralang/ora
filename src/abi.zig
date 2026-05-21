@@ -6,6 +6,7 @@ const std = @import("std");
 const crypto = std.crypto;
 const compiler = @import("compiler.zig");
 const compiler_abi = @import("hir/abi.zig");
+const compiler_abi_layout_context = @import("abi/layout_context.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
 const sema_refinements = @import("sema/refinements.zig");
 
@@ -1106,148 +1107,24 @@ const CompilerAbiGenerator = struct {
     }
 
     fn resolvePublicResultInputType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) !ResolvedType {
-        const error_union = switch (ty) {
-            .error_union => |error_union| error_union,
-            else => return error.UnsupportedAbiType,
-        };
-        if (error_union.error_types.len != 1) return error.UnsupportedAbiType;
-        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.payload_type.*)) return error.UnsupportedAbiType;
-        const payload_words = self.publicAbiStaticWordCount(ctx, error_union.payload_type.*);
-
-        const payload = error_union.payload_type.*;
-        if (!self.publicAbiErrorTypeHasPayload(ctx, error_union.error_types[0])) {
-            return self.resolveTupleType(ctx, &.{ .bool, payload });
+        const layout_ctx = self.layoutContext(ctx);
+        const plan = layout_ctx.planResultCarrier(ty) orelse return error.UnsupportedAbiType;
+        const bool_ty: compiler.sema.Type = .bool;
+        if (plan.err) |err| {
+            const elements = [_]compiler.sema.Type{ bool_ty, plan.payload, err };
+            return self.resolveTupleType(ctx, &elements);
         }
-        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.error_types[0])) return error.UnsupportedAbiType;
-        const error_words = self.publicAbiStaticWordCount(ctx, error_union.error_types[0]);
-        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return error.UnsupportedAbiType;
-        return self.resolveTupleType(ctx, &.{ .bool, payload, error_union.error_types[0] });
+        const elements = [_]compiler.sema.Type{ bool_ty, plan.payload };
+        return self.resolveTupleType(ctx, &elements);
     }
 
-    fn publicAbiSupportsResultCarrierType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        if (self.publicAbiStaticWordCount(ctx, ty) != null) return true;
-        return switch (ty) {
-            .bytes, .string => true,
-            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(ctx, slice.element_type.*),
-            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(ctx, array.element_type.*),
-            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(ctx, refinement.base_type.*),
-            else => false,
+    fn layoutContext(self: *CompilerAbiGenerator, ctx: CompilerModuleContext) compiler_abi_layout_context.LayoutContext {
+        return .{
+            .allocator = self.allocator,
+            .file = ctx.file,
+            .item_index = ctx.item_index,
+            .typecheck = ctx.typecheck,
         };
-    }
-
-    fn publicAbiSupportsResultDynamicArrayElement(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
-            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(ctx, refinement.base_type.*),
-            .named => |named| blk: {
-                const item_id = ctx.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (ctx.file.item(item_id).*) {
-                    .Enum, .Bitfield => true,
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn publicAbiErrorTypeHasPayload(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        _ = self;
-        const name = ty.name() orelse return true;
-        const item_id = ctx.item_index.lookup(name) orelse return true;
-        return switch (ctx.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => true,
-        };
-    }
-
-    fn publicAbiStaticWordCount(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) ?usize {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
-            .refinement => |refinement| self.publicAbiStaticWordCount(ctx, refinement.base_type.*),
-            .tuple => |elements| blk: {
-                var total: usize = 0;
-                for (elements) |element| {
-                    total += self.publicAbiStaticWordCount(ctx, element) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .array => |array| blk: {
-                const len = array.len orelse break :blk null;
-                const element_words = self.publicAbiStaticWordCount(ctx, array.element_type.*) orelse break :blk null;
-                break :blk element_words * len;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                var total: usize = 0;
-                for (struct_type.fields) |field| {
-                    total += self.publicAbiStaticWordCount(ctx, field.ty) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
-            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
-                if (parseIntegerSpelling(named.name) != null) break :blk 1;
-                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
-                const item_id = ctx.item_index.lookup(named.name) orelse break :blk null;
-                break :blk switch (ctx.file.item(item_id).*) {
-                    .Enum, .Bitfield => 1,
-                    .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, named.name),
-                    .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, named.name),
-                    .ErrorDecl => |error_decl| blk2: {
-                        var total: usize = 0;
-                        for (error_decl.parameters) |parameter| {
-                            total += self.publicAbiStaticWordCount(ctx, ctx.typecheck.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
-                        }
-                        break :blk2 total;
-                    },
-                    else => null,
-                };
-            },
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForNamedStruct(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        return switch (ctx.file.item(item_id).*) {
-            .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, name),
-            .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, name),
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForStructDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        const struct_item = switch (ctx.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (struct_item.fields) |field| {
-            total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr) catch return null) orelse return null;
-        }
-        return total;
-    }
-
-    fn publicAbiStaticWordCountForContractDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        const contract_item = switch (ctx.file.item(item_id).*) {
-            .Contract => |contract_item| contract_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (contract_item.members) |member_id| {
-            switch (ctx.file.item(member_id).*) {
-                .Field => |field| {
-                    if (field.type_expr) |type_expr| {
-                        total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, type_expr) catch return null) orelse return null;
-                    } else return null;
-                },
-                else => {},
-            }
-        }
-        return total;
     }
 
     fn appendEffectFlags(

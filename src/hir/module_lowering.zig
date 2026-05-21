@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
+const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
@@ -1478,108 +1479,36 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return buffer.toOwnedSlice(self.allocator);
         }
 
-        fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
-            return switch (ty) {
-                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
-                .refinement => |refinement| @This().staticAbiWordCountForType(self, refinement.base_type.*),
-                .error_union => |error_union| blk: {
-                    const payload_words = @This().staticAbiWordCountForType(self, error_union.payload_type.*) orelse break :blk null;
-                    break :blk switch (@This().publicResultInputMode(self, ty)) {
-                        .narrow_payloadless => 1 + payload_words,
-                        .wide_payloadless => 1 + payload_words,
-                        .wide_single_error => 1 + payload_words + (@This().resultInputPayloadAbiWordCount(self, error_union.error_types[0]) orelse break :blk null),
-                        .none => null,
-                    };
-                },
-                .tuple => |elements| blk: {
-                    var total: usize = 0;
-                    for (elements) |element| {
-                        const words = @This().staticAbiWordCountForType(self, element) orelse return null;
-                        total += words;
-                    }
-                    break :blk total;
-                },
-                .array => |array| blk: {
-                    const len = array.len orelse return null;
-                    const element_words = @This().staticAbiWordCountForType(self, array.element_type.*) orelse return null;
-                    break :blk element_words * len;
-                },
-                .struct_ => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
-                .contract => |named| @This().staticAbiWordCountForNamedStruct(self, named.name),
-                .named => |named| @This().staticAbiWordCountForNamedType(self, named.name),
-                else => null,
+        fn abiLayoutContext(self: *Lowerer) abi_layout_context.LayoutContext {
+            return .{
+                .allocator = self.allocator,
+                .file = self.file,
+                .item_index = self.item_index,
+                .typecheck = self.typecheck,
             };
         }
 
-        fn abiLayoutForPrimitiveName(self: *Lowerer, name: []const u8) ![]const u8 {
-            if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address") or std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) {
-                return self.allocator.dupe(u8, name);
-            }
-            if (abi_support.parseFixedBytesSpelling(name)) |_| return self.allocator.dupe(u8, name);
-            if (std.mem.eql(u8, name, "u256")) return self.allocator.dupe(u8, "uint256");
-            if (std.mem.eql(u8, name, "i256")) return self.allocator.dupe(u8, "int256");
-            if (std.mem.startsWith(u8, name, "u")) return std.fmt.allocPrint(self.allocator, "uint{s}", .{name[1..]});
-            if (std.mem.startsWith(u8, name, "i")) return std.fmt.allocPrint(self.allocator, "int{s}", .{name[1..]});
-            return error.UnsupportedAbiType;
+        pub fn staticAbiWordCountForType(self: *Lowerer, ty: sema.Type) ?usize {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.staticWordCountForType(ty);
         }
 
         pub fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
-            return switch (ty) {
-                .bool, .address, .string, .bytes, .fixed_bytes, .integer => abi_support.canonicalAbiType(self.allocator, ty),
-                .enum_ => |named| @This().abiLayoutForNamedEnum(self, named.name),
-                .bitfield => |named| @This().abiLayoutForNamedBitfield(self, named.name),
-                .refinement => |refinement| @This().abiLayoutForType(self, refinement.base_type.*),
-                .error_union => |error_union| blk: {
-                    const payload = try @This().abiLayoutForType(self, error_union.payload_type.*);
-                    defer self.allocator.free(payload);
-                    break :blk switch (@This().publicResultInputMode(self, ty)) {
-                        .narrow_payloadless => std.fmt.allocPrint(self.allocator, "(bool,{s})", .{payload}),
-                        .wide_payloadless => std.fmt.allocPrint(self.allocator, "(bool,{s})", .{payload}),
-                        .wide_single_error => blk2: {
-                            const err_payload = try @This().abiLayoutForType(self, error_union.error_types[0]);
-                            defer self.allocator.free(err_payload);
-                            break :blk2 std.fmt.allocPrint(self.allocator, "(bool,{s},{s})", .{ payload, err_payload });
-                        },
-                        .none => error.UnsupportedAbiType,
-                    };
-                },
-                .array => |array| blk: {
-                    const element = try @This().abiLayoutForType(self, array.element_type.*);
-                    defer self.allocator.free(element);
-                    if (array.len) |len| break :blk std.fmt.allocPrint(self.allocator, "{s}[{d}]", .{ element, len });
-                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                },
-                .slice => |slice| blk: {
-                    const element = try @This().abiLayoutForType(self, slice.element_type.*);
-                    defer self.allocator.free(element);
-                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                },
-                .tuple => |elements| blk: {
-                    var parts: std.ArrayList([]const u8) = .{};
-                    defer {
-                        for (parts.items) |part| self.allocator.free(part);
-                        parts.deinit(self.allocator);
-                    }
-                    for (elements) |element| try parts.append(self.allocator, try @This().abiLayoutForType(self, element));
-                    const joined = try std.mem.join(self.allocator, ",", parts.items);
-                    defer self.allocator.free(joined);
-                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
-                },
-                .struct_ => |named| @This().abiLayoutForNamedStruct(self, named.name),
-                .contract => |named| @This().abiLayoutForNamedStruct(self, named.name),
-                .named => |named| @This().abiLayoutForNamedType(self, named.name),
-                else => error.UnsupportedAbiType,
-            };
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.canonicalAbiTypeForType(ty);
+        }
+
+        fn publicResultInputMode(self: *Lowerer, ty: sema.Type) abi_layout_context.ResultInputMode {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.publicResultInputMode(ty);
         }
 
         fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) ?i64 {
+            if (@This().publicResultInputMode(self, ty) != .narrow_payloadless) return null;
             const error_union = switch (ty) {
                 .error_union => |error_union| error_union,
                 else => return null,
             };
-            if (error_union.error_types.len != 1) return null;
-            if (@This().resultInputPayloadAbiWordCount(self, error_union.payload_type.*) != 1) return null;
-            if (self.errorTypeHasPayload(error_union.error_types[0])) return null;
 
             const error_name = error_union.error_types[0].name() orelse return null;
             if (self.item_index.lookup(error_name)) |item_id| {
@@ -1592,319 +1521,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return @intCast(abi_support.keccakSelectorValue(signature));
         }
 
-        fn publicResultInputMode(self: *Lowerer, ty: sema.Type) enum { none, narrow_payloadless, wide_payloadless, wide_single_error } {
-            const error_union = switch (ty) {
-                .error_union => |error_union| error_union,
-                else => return .none,
-            };
-            if (error_union.error_types.len != 1) return .none;
-            if (!@This().resultInputCarrierShapeSupported(self, error_union.payload_type.*)) return .none;
-            const payload_words = @This().staticAbiWordCountForType(self, error_union.payload_type.*);
-            if (!self.errorTypeHasPayload(error_union.error_types[0])) {
-                if (payload_words == 1 and @This().resultInputPayloadFitsNarrowCarrier(self, error_union.payload_type.*) and @This().publicResultInputErrorId(self, ty) != null) {
-                    return .narrow_payloadless;
-                }
-                return .wide_payloadless;
-            }
-            if (!@This().resultInputCarrierShapeSupported(self, error_union.error_types[0])) return .none;
-            const error_words = @This().staticAbiWordCountForType(self, error_union.error_types[0]);
-            if (payload_words == 1 and (error_words == null or error_words.? > 1)) return .none;
-            return .wide_single_error;
+        pub fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.canonicalAbiTypeForTypeExpr(type_expr_id);
         }
 
-        fn resultInputCarrierShapeSupported(self: *Lowerer, ty: sema.Type) bool {
-            if (@This().staticAbiWordCountForType(self, ty) != null) return true;
-            return switch (ty) {
-                .bytes, .string => true,
-                .slice => |slice| @This().resultInputDynamicArrayElementSupported(self, slice.element_type.*),
-                .array => |array| array.len == null and @This().resultInputDynamicArrayElementSupported(self, array.element_type.*),
-                .refinement => |refinement| @This().resultInputCarrierShapeSupported(self, refinement.base_type.*),
-                else => false,
-            };
-        }
-
-        fn resultInputDynamicArrayElementSupported(self: *Lowerer, ty: sema.Type) bool {
-            return switch (ty) {
-                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
-                .refinement => |refinement| @This().resultInputDynamicArrayElementSupported(self, refinement.base_type.*),
-                .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .Enum, .Bitfield => true,
-                        else => false,
-                    };
-                },
-                else => false,
-            };
-        }
-
-        fn resultInputPayloadFitsNarrowCarrier(self: *Lowerer, ty: sema.Type) bool {
-            return switch (ty) {
-                .bool => true,
-                .address => true,
-                .integer => |integer| (integer.bits orelse 256) <= 255,
-                .refinement => |refinement| @This().resultInputPayloadFitsNarrowCarrier(self, refinement.base_type.*),
-                else => false,
-            };
-        }
-
-        fn resultInputPayloadAbiWordCount(self: *Lowerer, ty: sema.Type) ?usize {
-            return switch (ty) {
-                .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
-                .refinement => |refinement| @This().resultInputPayloadAbiWordCount(self, refinement.base_type.*),
-                .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk null;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .Enum, .Bitfield => 1,
-                        .ErrorDecl => |error_decl| if (error_decl.parameters.len == 1)
-                            @This().resultInputPayloadAbiWordCount(self, self.typecheck.pattern_types[error_decl.parameters[0].pattern.index()].type)
-                        else
-                            null,
-                        else => null,
-                    };
-                },
-                else => null,
-            };
-        }
-
-        fn abiLayoutForNamedType(self: *Lowerer, name: []const u8) anyerror![]const u8 {
-            if (abi_support.parseFixedBytesSpelling(name)) |_| return self.allocator.dupe(u8, name);
-            if (self.typecheck.instantiatedEnumByName(name)) |_| return @This().abiLayoutForNamedEnum(self, name);
-            if (self.typecheck.instantiatedBitfieldByName(name)) |bitfield| {
-                return @This().abiLayoutForBitfieldBaseType(self, bitfield.base_type);
-            }
-            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
-            return switch (self.file.item(item_id).*) {
-                .Enum => @This().abiLayoutForNamedEnum(self, name),
-                .Bitfield => |bitfield| @This().abiLayoutForBitfieldBaseTypeExpr(self, bitfield.base_type),
-                .ErrorDecl => |error_decl| blk: {
-                    if (error_decl.parameters.len == 0) break :blk self.allocator.dupe(u8, "uint256");
-                    if (error_decl.parameters.len == 1) {
-                        break :blk @This().abiLayoutForType(self, self.typecheck.pattern_types[error_decl.parameters[0].pattern.index()].type);
-                    }
-                    var parts: std.ArrayList([]const u8) = .{};
-                    defer {
-                        for (parts.items) |part| self.allocator.free(part);
-                        parts.deinit(self.allocator);
-                    }
-                    for (error_decl.parameters) |parameter| {
-                        try parts.append(self.allocator, try @This().abiLayoutForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type));
-                    }
-                    const joined = try std.mem.join(self.allocator, ",", parts.items);
-                    defer self.allocator.free(joined);
-                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
-                },
-                else => @This().abiLayoutForNamedStruct(self, name),
-            };
-        }
-
-        fn abiLayoutForNamedBitfield(self: *Lowerer, name: []const u8) anyerror![]const u8 {
-            return @This().abiLayoutForNamedType(self, name);
-        }
-
-        fn abiLayoutForNamedEnum(self: *Lowerer, name: []const u8) anyerror![]const u8 {
-            if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
-                if (@This().instantiatedEnumHasPayload(instantiated)) return error.UnsupportedAbiType;
-                if (instantiated.repr_type) |repr| return @This().abiLayoutForType(self, repr);
-                return self.allocator.dupe(u8, "uint256");
-            }
-            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
-            return switch (self.file.item(item_id).*) {
-                .Enum => |enum_item| blk: {
-                    if (@This().enumItemHasPayload(enum_item)) break :blk error.UnsupportedAbiType;
-                    break :blk if (enum_item.base_type) |base_type|
-                        @This().abiLayoutForTypeExpr(self, base_type)
-                    else
-                        self.allocator.dupe(u8, "uint256");
-                },
-                else => error.UnsupportedAbiType,
-            };
-        }
-
-        fn abiLayoutForBitfieldBaseType(self: *Lowerer, base_type: ?sema.Type) anyerror![]const u8 {
-            if (base_type) |resolved| return @This().abiLayoutForType(self, resolved);
-            return self.allocator.dupe(u8, "uint256");
-        }
-
-        fn abiLayoutForBitfieldBaseTypeExpr(self: *Lowerer, base_type: ?ast.TypeExprId) anyerror![]const u8 {
-            if (base_type) |type_expr| return @This().abiLayoutForTypeExpr(self, type_expr);
-            return self.allocator.dupe(u8, "uint256");
-        }
-
-        fn abiLayoutForNamedStruct(self: *Lowerer, name: []const u8) anyerror![]const u8 {
-            if (self.typecheck.instantiatedStructByName(name)) |instantiated| {
-                var parts: std.ArrayList([]const u8) = .{};
-                defer {
-                    for (parts.items) |part| self.allocator.free(part);
-                    parts.deinit(self.allocator);
-                }
-                for (instantiated.fields) |field| try parts.append(self.allocator, try @This().abiLayoutForType(self, field.ty));
-                const joined = try std.mem.join(self.allocator, ",", parts.items);
-                defer self.allocator.free(joined);
-                return std.fmt.allocPrint(self.allocator, "({s})", .{joined});
-            }
-
-            const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
-            return switch (self.file.item(item_id).*) {
-                .Struct => |struct_item| blk: {
-                    var parts: std.ArrayList([]const u8) = .{};
-                    defer {
-                        for (parts.items) |part| self.allocator.free(part);
-                        parts.deinit(self.allocator);
-                    }
-                    for (struct_item.fields) |field| try parts.append(self.allocator, try @This().abiLayoutForTypeExpr(self, field.type_expr));
-                    const joined = try std.mem.join(self.allocator, ",", parts.items);
-                    defer self.allocator.free(joined);
-                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
-                },
-                else => error.UnsupportedAbiType,
-            };
-        }
-
-        fn staticAbiWordCountForNamedType(self: *Lowerer, name: []const u8) ?usize {
-            if (abi_support.parseFixedBytesSpelling(name) != null) return 1;
-            if (self.typecheck.instantiatedEnumByName(name)) |_| return 1;
-            if (self.typecheck.instantiatedBitfieldByName(name)) |_| return 1;
-            const item_id = self.item_index.lookup(name) orelse return null;
-            return switch (self.file.item(item_id).*) {
-                .Enum => 1,
-                .Bitfield => 1,
-                .ErrorDecl => |error_decl| blk: {
-                    if (error_decl.parameters.len == 0) break :blk 1;
-                    var total: usize = 0;
-                    for (error_decl.parameters) |parameter| {
-                        const words = @This().staticAbiWordCountForType(self, self.typecheck.pattern_types[parameter.pattern.index()].type) orelse break :blk null;
-                        total += words;
-                    }
-                    break :blk total;
-                },
-                else => @This().staticAbiWordCountForNamedStruct(self, name),
-            };
-        }
-
-        fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
-            return switch (self.file.typeExpr(type_expr_id).*) {
-                .Path => |path| blk: {
-                    const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                    break :blk @This().abiLayoutForPrimitiveName(self, trimmed) catch @This().abiLayoutForNamedType(self, trimmed);
-                },
-                .Generic => |generic| blk: {
-                    if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
-                        break :blk switch (generic.args[0]) {
-                            .Type => |type_expr| @This().abiLayoutForTypeExpr(self, type_expr),
-                            else => error.UnsupportedAbiType,
-                        };
-                    }
-                    if (std.mem.eql(u8, generic.name, "map")) break :blk error.UnsupportedAbiType;
-                    if ((std.mem.eql(u8, generic.name, "slice") or std.mem.eql(u8, generic.name, "array")) and generic.args.len > 0) {
-                        break :blk switch (generic.args[0]) {
-                            .Type => |type_expr| blk2: {
-                                const element = try @This().abiLayoutForTypeExpr(self, type_expr);
-                                defer self.allocator.free(element);
-                                break :blk2 std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                            },
-                            else => error.UnsupportedAbiType,
-                        };
-                    }
-                    break :blk @This().abiLayoutForNamedStruct(self, generic.name);
-                },
-                .Tuple => |tuple| blk: {
-                    var parts: std.ArrayList([]const u8) = .{};
-                    defer {
-                        for (parts.items) |part| self.allocator.free(part);
-                        parts.deinit(self.allocator);
-                    }
-                    for (tuple.elements) |element| try parts.append(self.allocator, try @This().abiLayoutForTypeExpr(self, element));
-                    const joined = try std.mem.join(self.allocator, ",", parts.items);
-                    defer self.allocator.free(joined);
-                    break :blk std.fmt.allocPrint(self.allocator, "({s})", .{joined});
-                },
-                .Array => |array| blk: {
-                    const element = try @This().abiLayoutForTypeExpr(self, array.element);
-                    defer self.allocator.free(element);
-                    const size_text = switch (array.size) {
-                        .Integer => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
-                        else => "",
-                    };
-                    if (size_text.len == 0) break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                    break :blk std.fmt.allocPrint(self.allocator, "{s}[{s}]", .{ element, size_text });
-                },
-                .Slice => |slice| blk: {
-                    const element = try @This().abiLayoutForTypeExpr(self, slice.element);
-                    defer self.allocator.free(element);
-                    break :blk std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
-                },
-                else => error.UnsupportedAbiType,
-            };
-        }
-
-        fn staticAbiWordCountForNamedStruct(self: *Lowerer, name: []const u8) ?usize {
-            if (self.typecheck.instantiatedStructByName(name)) |instantiated| {
-                var total: usize = 0;
-                for (instantiated.fields) |field| {
-                    const words = @This().staticAbiWordCountForType(self, field.ty) orelse return null;
-                    total += words;
-                }
-                return total;
-            }
-
-            const item_id = self.item_index.lookup(name) orelse return null;
-            return switch (self.file.item(item_id).*) {
-                .Struct => |struct_item| blk: {
-                    var total: usize = 0;
-                    for (struct_item.fields) |field| {
-                        const words = @This().staticAbiWordCountForTypeExpr(self, field.type_expr) orelse return null;
-                        total += words;
-                    }
-                    break :blk total;
-                },
-                else => null,
-            };
-        }
-
-        fn staticAbiWordCountForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) ?usize {
-            return switch (self.file.typeExpr(type_expr_id).*) {
-                .Path => |path| blk: {
-                    const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                    if (std.mem.eql(u8, trimmed, "bool") or std.mem.eql(u8, trimmed, "address")) break :blk 1;
-                    if (support.parseSignedIntegerType(trimmed) != null) break :blk 1;
-                    break :blk @This().staticAbiWordCountForNamedStruct(self, trimmed);
-                },
-                .Generic => |generic| blk: {
-                    if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
-                        break :blk switch (generic.args[0]) {
-                            .Type => |type_expr| @This().staticAbiWordCountForTypeExpr(self, type_expr),
-                            else => null,
-                        };
-                    }
-                    if (std.mem.eql(u8, generic.name, "map")) break :blk null;
-                    if (generic.args.len > 0) {
-                        break :blk switch (generic.args[0]) {
-                            .Type => |type_expr| @This().staticAbiWordCountForTypeExpr(self, type_expr),
-                            else => null,
-                        };
-                    }
-                    break :blk @This().staticAbiWordCountForNamedStruct(self, generic.name);
-                },
-                .Tuple => |tuple| blk: {
-                    var total: usize = 0;
-                    for (tuple.elements) |element| {
-                        const words = @This().staticAbiWordCountForTypeExpr(self, element) orelse return null;
-                        total += words;
-                    }
-                    break :blk total;
-                },
-                .Array => |array| blk: {
-                    const len = switch (array.size) {
-                        .Integer => |literal| std.fmt.parseInt(usize, std.mem.trim(u8, literal.text, " \t\n\r"), 10) catch return null,
-                        else => return null,
-                    };
-                    const element_words = @This().staticAbiWordCountForTypeExpr(self, array.element) orelse return null;
-                    break :blk element_words * len;
-                },
-                .Slice => null,
-                else => null,
-            };
+        pub fn staticAbiWordCountForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) ?usize {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.staticWordCountForTypeExpr(type_expr_id);
         }
 
         pub fn bitfieldFieldSign(self: *const Lowerer, type_expr_id: ast.TypeExprId) u8 {
