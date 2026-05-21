@@ -3,6 +3,7 @@ set -eu
 
 registry="src/refinements/root.zig"
 tablegen="src/mlir/ora/td/OraTypes.td"
+docs="website/docs/compiler/what-ora-proves.md plan_smt.md"
 grep_output="${TMPDIR:-/tmp}/ora_refinement_registry_sync_grep.$$"
 trap 'rm -f "$grep_output"' EXIT INT HUP TERM
 
@@ -47,6 +48,15 @@ printf '%s\n' "$entries" | while read -r name native; do
     [ "$native" = "false" ] ||
       fail "$tablegen is missing native MLIR type for refinement '$name'"
   fi
+done
+
+for doc in $docs; do
+  [ -f "$doc" ] || fail "missing refinement docs surface $doc"
+  printf '%s\n' "$entries" | while read -r name _native; do
+    needle='`'"$name"'`'
+    grep -F "$needle" "$doc" >/dev/null ||
+      fail "$doc is missing backtick-wrapped refinement '$needle'"
+  done
 done
 
 echo "check-refinement-registry-sync: ok"

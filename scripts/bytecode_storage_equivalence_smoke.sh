@@ -353,7 +353,7 @@ compile_bytecode() {
 
   echo "Compiling $source" >&2
   rm -f "$output"
-  "$ORA_BIN" --emit-bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
+  "$ORA_BIN" --emit=bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
 
   read_compiled_bytecode "$output"
 }
@@ -364,7 +364,7 @@ compile_bytecode_without_verification() {
 
   echo "Compiling $source with --no-verify for deployed-runtime smoke" >&2
   rm -f "$output"
-  "$ORA_BIN" --no-verify --emit-bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
+  "$ORA_BIN" --no-verify --emit=bytecode -o "$output" "$source" >&2 || fail "bytecode compilation failed for $source"
 
   read_compiled_bytecode "$output"
 }

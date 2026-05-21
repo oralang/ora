@@ -174,7 +174,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     if not has_error and not timed_out:
         try:
             mlir_result = subprocess.run(
-                [compiler_path, "--verify", "--emit-mlir", str(file_path)],
+                [compiler_path, "--verify", "--emit=mlir:ora", str(file_path)],
                 capture_output=True,
                 timeout=timeout_s
             )

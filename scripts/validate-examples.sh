@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ORA_BIN="$PROJECT_ROOT/zig-out/bin/ora"
-EMIT_FLAG="--emit-mlir"
+EMIT_FLAG="--emit=mlir:ora"
 FAIL_FAST=0
 QUIET=0
 MAX_ERROR_LINES=8
@@ -33,12 +33,12 @@ USAGE
 
 emit_mode_to_flag() {
   case "$1" in
-    mlir) echo "--emit-mlir" ;;
-    sir) echo "--emit-mlir=sir" ;;
-    sir-text) echo "--emit-sir-text" ;;
-    bytecode) echo "--emit-bytecode" ;;
-    abi) echo "--emit-abi" ;;
-    abi-extras) echo "--emit-abi-extras" ;;
+    mlir) echo "--emit=mlir:ora" ;;
+    sir) echo "--emit=mlir:sir" ;;
+    sir-text) echo "--emit=sir-text" ;;
+    bytecode) echo "--emit=bytecode" ;;
+    abi) echo "--emit=abi" ;;
+    abi-extras) echo "--emit=abi:extras" ;;
     *) return 1 ;;
   esac
 }

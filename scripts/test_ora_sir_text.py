@@ -2,7 +2,7 @@
 """
 Ora SIR Text Emission Test Script
 
-Tests all .ora example files for --emit-sir-text and reports results.
+Tests all .ora example files for --emit=sir-text and reports results.
 Usage: python3 scripts/test_ora_sir_text.py [--subdir apps] [--timeout 30]
 """
 
@@ -59,7 +59,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
 
     try:
         result = subprocess.run(
-            [compiler_path, "--emit-sir-text", str(file_path)],
+            [compiler_path, "--emit=sir-text", str(file_path)],
             capture_output=True, timeout=timeout_s
         )
         timed_out = False
@@ -156,7 +156,7 @@ def main():
     files = find_ora_files(args.base_dir, args.subdirs)
     if args.subdirs:
         print(f"Filter: {', '.join(args.subdirs)}")
-    print(f"Testing {len(files)} files with --emit-sir-text\n")
+    print(f"Testing {len(files)} files with --emit=sir-text\n")
 
     results = []
     for i, f in enumerate(files, 1):

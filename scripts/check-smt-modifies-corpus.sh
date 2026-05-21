@@ -173,7 +173,7 @@ run_opaque_pass() {
   log_file="$(mktemp)"
 
   echo "[pass] opaque-summary $source"
-  "$ORA_BIN" build --verify=full --verify-max-summary-inline-depth=0 -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
+  ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH=0 "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
   assert_query_budget "$out_dir" "$source" "opaque-summary"
   if grep -q "precision_note" "$log_file"; then
     echo "error: opaque-summary run for $source emitted precision notes" >&2
@@ -191,7 +191,7 @@ run_imported_summary_pass() {
   log_file="$(mktemp)"
 
   echo "[pass] imported-summary $source"
-  "$ORA_BIN" build --verify=full --verify-imported-summaries-only -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
+  "$ORA_BIN" build --verify=full -o "$out_dir" "$PROJECT_ROOT/$source" >"$log_file" 2>&1
   assert_query_budget "$out_dir" "$source" "imported-summary"
   if grep -q "precision_note" "$log_file"; then
     echo "error: imported-summary run for $source emitted precision notes" >&2

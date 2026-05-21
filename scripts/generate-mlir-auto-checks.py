@@ -54,7 +54,7 @@ def main() -> int:
 
         try:
             proc = subprocess.run(
-                [str(ORA_BIN), "--emit-mlir", str(path)],
+                [str(ORA_BIN), "--emit=mlir:ora", str(path)],
                 cwd=REPO,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -124,8 +124,6 @@ def parse_args() -> argparse.Namespace:
 def compiler_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("ORA_Z3_TIMEOUT_MS", "10000")
-    env.pop("ORA_Z3_PARALLEL", None)
-    env.pop("ORA_Z3_WORKERS", None)
     return env
 
 
