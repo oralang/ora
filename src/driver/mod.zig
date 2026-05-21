@@ -5,7 +5,8 @@ const db = @import("../db/mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
-const embedded_stdlib = @import("../stdlib_embedded.zig");
+const embedded_stdlib = import_graph.embedded_stdlib;
+const compile_options = @import("../compile_options.zig");
 
 fn compilerPhaseDebugEnabled() bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
@@ -35,8 +36,26 @@ pub const Compilation = struct {
     }
 };
 
+pub const CompilePackageOptions = struct {
+    resolver_options: import_graph.ResolverOptions = .{},
+    compile_options: compile_options.CompileOptions = .{},
+};
+
 pub fn compilePackage(allocator: std.mem.Allocator, root_path: []const u8) !Compilation {
-    return compilePackageWithResolverOptions(allocator, root_path, .{});
+    return compilePackageWithOptions(allocator, root_path, .{});
+}
+
+pub fn compilePackageWithOptions(
+    allocator: std.mem.Allocator,
+    root_path: []const u8,
+    options: CompilePackageOptions,
+) !Compilation {
+    compilerPhaseLog("load-package begin root={s}", .{root_path});
+    var compilation = try loadPackageSources(allocator, root_path, options.resolver_options);
+    errdefer compilation.deinit();
+    compilation.db.setCompileOptions(options.compile_options);
+    try finishCompilation(&compilation);
+    return compilation;
 }
 
 pub fn compilePackageWithResolverOptions(
@@ -44,8 +63,10 @@ pub fn compilePackageWithResolverOptions(
     root_path: []const u8,
     resolver_options: import_graph.ResolverOptions,
 ) !Compilation {
-    compilerPhaseLog("load-package begin root={s}", .{root_path});
-    var compilation = try loadPackageSources(allocator, root_path, resolver_options);
+    return compilePackageWithOptions(allocator, root_path, .{ .resolver_options = resolver_options });
+}
+
+fn finishCompilation(compilation: *Compilation) !void {
     compilerPhaseLog("load-package done modules={d}", .{compilation.db.sources.modules.items.len});
     compilerPhaseLog("module-graph begin", .{});
     const module_graph = try compilation.db.moduleGraph(compilation.package_id);
@@ -70,7 +91,7 @@ pub fn compilePackageWithResolverOptions(
         const typecheck = try compilation.db.moduleTypeCheck(module_id);
         compilerPhaseLog("module {s} typecheck", .{module.name});
         if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
-            return compilation;
+            return;
         }
         _ = try compilation.db.constEval(module_id);
         compilerPhaseLog("module {s} consteval", .{module.name});
@@ -80,12 +101,16 @@ pub fn compilePackageWithResolverOptions(
     compilerPhaseLog("root lower-to-hir begin", .{});
     _ = try compilation.db.lowerToHir(compilation.root_module_id);
     compilerPhaseLog("root lower-to-hir done", .{});
-    return compilation;
 }
 
 pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, text: []const u8) !Compilation {
+    return compileSourceWithOptions(allocator, path, text, .{});
+}
+
+pub fn compileSourceWithOptions(allocator: std.mem.Allocator, path: []const u8, text: []const u8, options: compile_options.CompileOptions) !Compilation {
     var compiler_db = db.CompilerDb.init(allocator);
     errdefer compiler_db.deinit();
+    compiler_db.setCompileOptions(options);
 
     const package_id = try compiler_db.addPackage("main");
     try addEmbeddedStdModules(&compiler_db, package_id);
@@ -123,36 +148,8 @@ fn loadPackageSources(
         defer if (embedded_source == null) allocator.free(source_text);
 
         const file_id = try compiler_db.addSourceFile(module_info.resolved_path, source_text);
-        const module_name = if (embedded_stdlib.byLogicalPath("std")) |std_module|
-            if (std.mem.eql(u8, module_info.resolved_path, std_module.resolved_path))
-                std_module.logical_path
-            else if (embedded_stdlib.byLogicalPath("std/bytes")) |bytes_module|
-                if (std.mem.eql(u8, module_info.resolved_path, bytes_module.resolved_path))
-                    bytes_module.logical_path
-                else if (embedded_stdlib.byLogicalPath("std/constants")) |constants_module|
-                    if (std.mem.eql(u8, module_info.resolved_path, constants_module.resolved_path))
-                        constants_module.logical_path
-                    else if (embedded_stdlib.byLogicalPath("std/result")) |result_module|
-                        if (std.mem.eql(u8, module_info.resolved_path, result_module.resolved_path))
-                            result_module.logical_path
-                        else
-                            std.fs.path.stem(module_info.resolved_path)
-                    else
-                        std.fs.path.stem(module_info.resolved_path)
-                else
-                    std.fs.path.stem(module_info.resolved_path)
-            else if (embedded_stdlib.byLogicalPath("std/constants")) |constants_module|
-                if (std.mem.eql(u8, module_info.resolved_path, constants_module.resolved_path))
-                    constants_module.logical_path
-                else if (embedded_stdlib.byLogicalPath("std/result")) |result_module|
-                    if (std.mem.eql(u8, module_info.resolved_path, result_module.resolved_path))
-                        result_module.logical_path
-                    else
-                        std.fs.path.stem(module_info.resolved_path)
-                else
-                    std.fs.path.stem(module_info.resolved_path)
-            else
-                std.fs.path.stem(module_info.resolved_path)
+        const module_name = if (embedded_stdlib.byResolvedPath(module_info.resolved_path)) |module|
+            module.logical_path
         else
             std.fs.path.stem(module_info.resolved_path);
         const module_id = try compiler_db.addModule(package_id, file_id, module_name);

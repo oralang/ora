@@ -6,6 +6,7 @@ const hir = @import("../hir/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const syntax = @import("../syntax/mod.zig");
+const compile_options = @import("../compile_options.zig");
 
 fn compilerPhaseDebugEnabled() bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
@@ -91,6 +92,7 @@ const VerificationCache = struct {
 
 pub const CompilerDb = struct {
     allocator: std.mem.Allocator,
+    options: compile_options.CompileOptions,
     sources: source.SourceStore,
     syntax_slots: std.ArrayList(?*syntax.ParseResult),
     ast_slots: std.ArrayList(?*ast.LowerResult),
@@ -109,6 +111,7 @@ pub const CompilerDb = struct {
     pub fn init(allocator: std.mem.Allocator) CompilerDb {
         return .{
             .allocator = allocator,
+            .options = .{},
             .sources = source.SourceStore.init(allocator),
             .syntax_slots = .{},
             .ast_slots = .{},
@@ -141,6 +144,20 @@ pub const CompilerDb = struct {
         deinitSlots(self.allocator, &self.module_verification_slots);
         deinitSlots(self.allocator, &self.hir_slots);
         self.sources.deinit();
+    }
+
+    pub fn setCompileOptions(self: *CompilerDb, options: compile_options.CompileOptions) void {
+        if (self.options.chain_id == options.chain_id) return;
+        self.options = options;
+        for (self.consteval_slots.items) |*slot| {
+            clearPtrSlot(self.allocator, sema.ConstEvalResult, slot);
+        }
+        for (self.consteval_tainted_slots.items) |*tainted| {
+            tainted.* = false;
+        }
+        for (self.hir_slots.items) |*slot| {
+            clearPtrSlot(self.allocator, hir.LoweringResult, slot);
+        }
     }
 
     pub fn addSourceFile(self: *CompilerDb, path: []const u8, text: []const u8) !source.FileId {
@@ -342,6 +359,7 @@ pub const CompilerDb = struct {
         const result = try self.allocator.create(sema.ConstEvalResult);
         result.* = try comptime_eval.constEval(self.allocator, ast_file, .{
             .module_id = module_id,
+            .chain_id = self.options.chain_id,
             .type_query = .{
                 .context = self,
                 .ensure_typecheck = ensureTypeCheckedForComptime,

@@ -18,16 +18,14 @@ pub const CliOptions = struct {
     emit_bytecode: bool = false,
     emit_cfg: bool = false,
     emit_cfg_mode: ?[]const u8 = null,
+    emit_abi: bool = false,
+    emit_abi_solidity: bool = false,
+    emit_abi_extras: bool = false,
     cpp_lowering_stub: bool = false,
     canonicalize_mlir: bool = true,
     validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
-    verify_calls: ?bool = null,
-    verify_state: ?bool = null,
-    /// null means "use the encoder default"; zero is an explicit summary-only cap.
-    verify_max_summary_inline_depth: ?u32 = null,
-    verify_imported_summaries_only: bool = false,
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
@@ -52,12 +50,96 @@ pub const CliOptions = struct {
     fmt_width: ?u32 = null,
     show_version: bool = false,
     metrics: bool = false,
+    chain_id: ?u64 = null,
 };
 
 pub const ParseError = error{
     MissingArgument,
     UnknownArgument,
 };
+
+fn parseEmitList(opts: *CliOptions, spec: []const u8) ParseError!void {
+    var iter = std.mem.splitScalar(u8, spec, ',');
+    while (iter.next()) |raw_item| {
+        const item = std.mem.trim(u8, raw_item, " \t\r\n");
+        if (item.len == 0) return error.UnknownArgument;
+
+        if (std.mem.eql(u8, item, "tokens")) {
+            opts.emit_tokens = true;
+        } else if (std.mem.eql(u8, item, "ast")) {
+            opts.emit_ast = true;
+        } else if (std.mem.startsWith(u8, item, "ast:")) {
+            opts.emit_ast = true;
+            opts.emit_ast_format = item["ast:".len..];
+        } else if (std.mem.eql(u8, item, "typed-ast")) {
+            opts.emit_typed_ast = true;
+        } else if (std.mem.startsWith(u8, item, "typed-ast:")) {
+            opts.emit_typed_ast = true;
+            opts.emit_typed_ast_format = item["typed-ast:".len..];
+        } else if (std.mem.eql(u8, item, "mlir") or std.mem.eql(u8, item, "mlir:ora")) {
+            opts.emit_mlir = true;
+        } else if (std.mem.eql(u8, item, "mlir:sir")) {
+            opts.emit_mlir_sir = true;
+        } else if (std.mem.eql(u8, item, "mlir:both")) {
+            opts.emit_mlir = true;
+            opts.emit_mlir_sir = true;
+        } else if (std.mem.eql(u8, item, "sir-text")) {
+            opts.emit_sir_text = true;
+        } else if (std.mem.eql(u8, item, "bytecode")) {
+            opts.emit_bytecode = true;
+        } else if (std.mem.eql(u8, item, "cfg") or std.mem.eql(u8, item, "cfg:ora")) {
+            opts.emit_cfg = true;
+            opts.emit_cfg_mode = if (std.mem.eql(u8, item, "cfg:ora")) "ora" else opts.emit_cfg_mode;
+        } else if (std.mem.eql(u8, item, "cfg:sir")) {
+            opts.emit_cfg = true;
+            opts.emit_cfg_mode = "sir";
+        } else if (std.mem.eql(u8, item, "smt-report")) {
+            opts.emit_smt_report = true;
+        } else if (std.mem.eql(u8, item, "abi")) {
+            opts.emit_abi = true;
+        } else if (std.mem.eql(u8, item, "abi:solidity") or std.mem.eql(u8, item, "abi-solidity")) {
+            opts.emit_abi_solidity = true;
+        } else if (std.mem.eql(u8, item, "abi:extras") or std.mem.eql(u8, item, "abi-extras")) {
+            opts.emit_abi_extras = true;
+        } else {
+            return error.UnknownArgument;
+        }
+    }
+}
+
+fn parseMlirDebugList(opts: *CliOptions, spec: []const u8) ParseError!void {
+    var iter = std.mem.splitScalar(u8, spec, ',');
+    while (iter.next()) |raw_item| {
+        const item = std.mem.trim(u8, raw_item, " \t\r\n");
+        if (item.len == 0) return error.UnknownArgument;
+
+        if (std.mem.eql(u8, item, "verify-each")) {
+            opts.mlir_verify_each_pass = true;
+        } else if (std.mem.eql(u8, item, "timing")) {
+            opts.mlir_pass_timing = true;
+        } else if (std.mem.eql(u8, item, "statistics")) {
+            opts.mlir_pass_statistics = true;
+        } else if (std.mem.eql(u8, item, "print-op-on-diagnostic")) {
+            opts.mlir_print_op_on_diagnostic = true;
+        } else if (std.mem.startsWith(u8, item, "print-ir:")) {
+            const mode = item["print-ir:".len..];
+            if (!std.ascii.eqlIgnoreCase(mode, "before") and
+                !std.ascii.eqlIgnoreCase(mode, "after") and
+                !std.ascii.eqlIgnoreCase(mode, "before-after") and
+                !std.ascii.eqlIgnoreCase(mode, "all"))
+            {
+                return error.UnknownArgument;
+            }
+            opts.mlir_print_ir = mode;
+        } else if (std.mem.startsWith(u8, item, "print-ir-pass:")) {
+            opts.mlir_print_ir_pass = item["print-ir-pass:".len..];
+        } else if (std.mem.startsWith(u8, item, "crash-reproducer:")) {
+            opts.mlir_crash_reproducer = item["crash-reproducer:".len..];
+        } else {
+            return error.UnknownArgument;
+        }
+    }
+}
 
 pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     var opts = CliOptions{};
@@ -69,55 +151,12 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.output_dir = args[i + 1];
             i += 2;
-        } else if (std.mem.eql(u8, arg, "--emit-tokens")) {
-            opts.emit_tokens = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-ast")) {
-            opts.emit_ast = true;
-            i += 1;
-        } else if (std.mem.startsWith(u8, arg, "--emit-ast=")) {
-            opts.emit_ast = true;
-            opts.emit_ast_format = arg["--emit-ast=".len..];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-typed-ast")) {
-            opts.emit_typed_ast = true;
-            i += 1;
-        } else if (std.mem.startsWith(u8, arg, "--emit-typed-ast=")) {
-            opts.emit_typed_ast = true;
-            opts.emit_typed_ast_format = arg["--emit-typed-ast=".len..];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-mlir")) {
-            opts.emit_mlir = true;
-            i += 1;
-        } else if (std.mem.startsWith(u8, arg, "--emit-mlir=")) {
-            const mode = arg["--emit-mlir=".len..];
-            if (std.ascii.eqlIgnoreCase(mode, "ora")) {
-                opts.emit_mlir = true;
-            } else if (std.ascii.eqlIgnoreCase(mode, "sir")) {
-                opts.emit_mlir_sir = true;
-            } else if (std.ascii.eqlIgnoreCase(mode, "both")) {
-                opts.emit_mlir = true;
-                opts.emit_mlir_sir = true;
-            } else {
-                return error.UnknownArgument;
-            }
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-sir-text")) {
-            opts.emit_sir_text = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-bytecode")) {
-            opts.emit_bytecode = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-cfg")) {
-            opts.emit_cfg = true;
-            i += 1;
-        } else if (std.mem.startsWith(u8, arg, "--emit-cfg=")) {
-            const mode = arg["--emit-cfg=".len..];
-            if (!std.ascii.eqlIgnoreCase(mode, "ora") and !std.ascii.eqlIgnoreCase(mode, "sir")) {
-                return error.UnknownArgument;
-            }
-            opts.emit_cfg = true;
-            opts.emit_cfg_mode = mode;
+        } else if (std.mem.eql(u8, arg, "--emit")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            try parseEmitList(&opts, args[i + 1]);
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--emit=")) {
+            try parseEmitList(&opts, arg["--emit=".len..]);
             i += 1;
         } else if (std.mem.eql(u8, arg, "--cpp-lowering-stub")) {
             opts.cpp_lowering_stub = true;
@@ -136,29 +175,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--no-verify")) {
             opts.verify_z3 = false;
             i += 1;
-        } else if (std.mem.eql(u8, arg, "--verify-calls")) {
-            opts.verify_calls = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--no-verify-calls")) {
-            opts.verify_calls = false;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--verify-state")) {
-            opts.verify_state = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--no-verify-state")) {
-            opts.verify_state = false;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--verify-max-summary-inline-depth")) {
-            if (i + 1 >= args.len) return error.MissingArgument;
-            opts.verify_max_summary_inline_depth = std.fmt.parseInt(u32, args[i + 1], 10) catch return error.UnknownArgument;
-            i += 2;
-        } else if (std.mem.startsWith(u8, arg, "--verify-max-summary-inline-depth=")) {
-            const depth = arg["--verify-max-summary-inline-depth=".len..];
-            opts.verify_max_summary_inline_depth = std.fmt.parseInt(u32, depth, 10) catch return error.UnknownArgument;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--verify-imported-summaries-only")) {
-            opts.verify_imported_summaries_only = true;
-            i += 1;
         } else if (std.mem.eql(u8, arg, "--verify-stats")) {
             opts.verify_stats = true;
             i += 1;
@@ -171,8 +187,12 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.eql(u8, arg, "--minimize-cores")) {
             opts.minimize_cores = true;
             i += 1;
-        } else if (std.mem.eql(u8, arg, "--emit-smt-report")) {
-            opts.emit_smt_report = true;
+        } else if (std.mem.eql(u8, arg, "--mlir-debug")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            try parseMlirDebugList(&opts, args[i + 1]);
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--mlir-debug=")) {
+            try parseMlirDebugList(&opts, arg["--mlir-debug=".len..]);
             i += 1;
         } else if (std.mem.eql(u8, arg, "--mlir-pass-pipeline")) {
             if (i + 1 >= args.len) return error.MissingArgument;
@@ -180,55 +200,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 2;
         } else if (std.mem.startsWith(u8, arg, "--mlir-pass-pipeline=")) {
             opts.mlir_pass_pipeline = arg["--mlir-pass-pipeline=".len..];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-verify-each-pass")) {
-            opts.mlir_verify_each_pass = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-pass-timing")) {
-            opts.mlir_pass_timing = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-pass-statistics")) {
-            opts.mlir_pass_statistics = true;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-print-ir")) {
-            if (i + 1 >= args.len) return error.MissingArgument;
-            const mode = args[i + 1];
-            if (!std.ascii.eqlIgnoreCase(mode, "before") and
-                !std.ascii.eqlIgnoreCase(mode, "after") and
-                !std.ascii.eqlIgnoreCase(mode, "before-after") and
-                !std.ascii.eqlIgnoreCase(mode, "all"))
-            {
-                return error.UnknownArgument;
-            }
-            opts.mlir_print_ir = mode;
-            i += 2;
-        } else if (std.mem.startsWith(u8, arg, "--mlir-print-ir=")) {
-            const mode = arg["--mlir-print-ir=".len..];
-            if (!std.ascii.eqlIgnoreCase(mode, "before") and
-                !std.ascii.eqlIgnoreCase(mode, "after") and
-                !std.ascii.eqlIgnoreCase(mode, "before-after") and
-                !std.ascii.eqlIgnoreCase(mode, "all"))
-            {
-                return error.UnknownArgument;
-            }
-            opts.mlir_print_ir = mode;
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-print-ir-pass")) {
-            if (i + 1 >= args.len) return error.MissingArgument;
-            opts.mlir_print_ir_pass = args[i + 1];
-            i += 2;
-        } else if (std.mem.startsWith(u8, arg, "--mlir-print-ir-pass=")) {
-            opts.mlir_print_ir_pass = arg["--mlir-print-ir-pass=".len..];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-crash-reproducer")) {
-            if (i + 1 >= args.len) return error.MissingArgument;
-            opts.mlir_crash_reproducer = args[i + 1];
-            i += 2;
-        } else if (std.mem.startsWith(u8, arg, "--mlir-crash-reproducer=")) {
-            opts.mlir_crash_reproducer = arg["--mlir-crash-reproducer=".len..];
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "--mlir-print-op-on-diagnostic")) {
-            opts.mlir_print_op_on_diagnostic = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             opts.debug = true;
@@ -250,6 +221,17 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             i += 1;
         } else if (std.mem.eql(u8, arg, "--no-canonicalize")) {
             opts.canonicalize_mlir = false;
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--chain-id")) {
+            if (i + 1 >= args.len) return error.MissingArgument;
+            opts.chain_id = std.fmt.parseInt(u64, args[i + 1], 0) catch {
+                return error.UnknownArgument;
+            };
+            i += 2;
+        } else if (std.mem.startsWith(u8, arg, "--chain-id=")) {
+            opts.chain_id = std.fmt.parseInt(u64, arg["--chain-id=".len..], 0) catch {
+                return error.UnknownArgument;
+            };
             i += 1;
         } else if (std.mem.eql(u8, arg, "fmt")) {
             opts.fmt = true;
@@ -289,10 +271,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
 test "parse verify mode and toggles" {
     const args = [_][]const u8{
         "--verify=full",
-        "--verify-calls",
-        "--no-verify-state",
-        "--verify-max-summary-inline-depth=0",
-        "--verify-imported-summaries-only",
         "--verify-stats",
         "--explain",
         "--z3-proofs",
@@ -303,10 +281,6 @@ test "parse verify mode and toggles" {
     try std.testing.expect(parsed.verify_z3);
     try std.testing.expect(parsed.verify_mode != null);
     try std.testing.expect(std.mem.eql(u8, parsed.verify_mode.?, "full"));
-    try std.testing.expect(parsed.verify_calls != null and parsed.verify_calls.?);
-    try std.testing.expect(parsed.verify_state != null and !parsed.verify_state.?);
-    try std.testing.expectEqual(@as(?u32, 0), parsed.verify_max_summary_inline_depth);
-    try std.testing.expect(parsed.verify_imported_summaries_only);
     try std.testing.expect(parsed.verify_stats);
     try std.testing.expect(parsed.explain_cores);
     try std.testing.expect(parsed.z3_proofs);
@@ -316,21 +290,6 @@ test "parse verify mode and toggles" {
 test "parse invalid verify mode fails" {
     const args = [_][]const u8{"--verify=turbo"};
     try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
-}
-
-test "parse invalid summary inline depth fails" {
-    const args = [_][]const u8{"--verify-max-summary-inline-depth=full"};
-    try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
-}
-
-test "parse invalid spaced summary inline depth fails" {
-    const args = [_][]const u8{ "--verify-max-summary-inline-depth", "full" };
-    try std.testing.expectError(error.UnknownArgument, parseArgs(args[0..]));
-}
-
-test "parse missing summary inline depth fails" {
-    const args = [_][]const u8{"--verify-max-summary-inline-depth"};
-    try std.testing.expectError(error.MissingArgument, parseArgs(args[0..]));
 }
 
 test "parse debug-info flag" {

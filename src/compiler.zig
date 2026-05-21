@@ -6,6 +6,7 @@ pub const sema = @import("sema/mod.zig");
 pub const hir = @import("hir/mod.zig");
 pub const db = @import("db/mod.zig");
 pub const driver = @import("driver/mod.zig");
+pub const compile_options = @import("compile_options.zig");
 
 pub const CompilerDb = db.CompilerDb;
 pub const FileId = source.FileId;
@@ -27,5 +28,7 @@ pub const HirModuleHandle = hir.HirModuleHandle;
 pub const HirItemHandle = hir.HirItemHandle;
 pub const comptime_eval = @import("comptime/compiler_ast_eval.zig");
 pub const compilePackage = driver.compilePackage;
+pub const compilePackageWithOptions = driver.compilePackageWithOptions;
 pub const compilePackageWithResolverOptions = driver.compilePackageWithResolverOptions;
 pub const compileSource = driver.compileSource;
+pub const compileSourceWithOptions = driver.compileSourceWithOptions;

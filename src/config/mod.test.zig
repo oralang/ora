@@ -21,6 +21,7 @@ test "config: parse ora.toml targets and compiler output" {
         \\
         \\[compiler]
         \\output_dir = "build"
+        \\chain_id = 11155111
         \\init_args = ["owner=0x1111111111111111111111111111111111111111", "cap=1000"]
         \\
         \\[[targets]]
@@ -28,6 +29,7 @@ test "config: parse ora.toml targets and compiler output" {
         \\kind = "contract"
         \\root = "contracts/Token.ora"
         \\include_paths = ["contracts", "lib"]
+        \\chain_id = 8453
         \\init_args = ["cap=42"]
         \\
         \\[[targets]]
@@ -47,6 +49,7 @@ test "config: parse ora.toml targets and compiler output" {
     try testing.expectEqualStrings("0.1", parsed.schema_version);
     try testing.expect(parsed.compiler_output_dir != null);
     try testing.expectEqualStrings("build", parsed.compiler_output_dir.?);
+    try testing.expectEqual(@as(?u64, 11155111), parsed.compiler_chain_id);
     try testing.expectEqual(@as(usize, 2), parsed.compiler_init_args.len);
     try testing.expectEqualStrings("owner", parsed.compiler_init_args[0].name);
     try testing.expectEqualStrings("0x1111111111111111111111111111111111111111", parsed.compiler_init_args[0].value);
@@ -61,6 +64,7 @@ test "config: parse ora.toml targets and compiler output" {
     try testing.expectEqual(@as(usize, 2), parsed.targets[0].include_paths.len);
     try testing.expectEqualStrings("contracts", parsed.targets[0].include_paths[0]);
     try testing.expectEqualStrings("lib", parsed.targets[0].include_paths[1]);
+    try testing.expectEqual(@as(?u64, 8453), parsed.targets[0].chain_id);
     try testing.expectEqual(@as(usize, 1), parsed.targets[0].init_args.len);
     try testing.expectEqualStrings("cap", parsed.targets[0].init_args[0].name);
     try testing.expectEqualStrings("42", parsed.targets[0].init_args[0].value);

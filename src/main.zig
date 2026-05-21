@@ -38,10 +38,6 @@ const MlirOptions = struct {
     validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
-    verify_calls: ?bool = null,
-    verify_state: ?bool = null,
-    verify_max_summary_inline_depth: ?u32 = null,
-    verify_imported_summaries_only: bool = false,
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
@@ -59,6 +55,7 @@ const MlirOptions = struct {
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
     suppress_artifact_logs: bool = false,
+    chain_id: u64 = compiler.compile_options.default_chain_id,
     metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -77,6 +74,24 @@ const MlirOptions = struct {
         return .Basic; // Final fallback
     }
 };
+
+const ChainIdSelection = struct {
+    cli_chain_id: ?u64,
+
+    fn resolve(self: ChainIdSelection, compiler_chain_id: ?u64, target_chain_id: ?u64) u64 {
+        return self.cli_chain_id orelse target_chain_id orelse compiler_chain_id orelse compiler.compile_options.default_chain_id;
+    }
+};
+
+const CompileContext = struct {
+    include_roots: ?[]const []const u8,
+    resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
+};
+
+fn compileOptionsForChain(chain_id: u64) compiler.compile_options.CompileOptions {
+    return .{ .chain_id = chain_id };
+}
 
 const OptimizationLevel = enum {
     None,
@@ -179,7 +194,7 @@ const InitTemplates = struct {
         \\
         \\## Commands
         \\- `ora build`
-        \\- `ora emit --emit-typed-ast contracts/main.ora`
+        \\- `ora emit --emit=typed-ast contracts/main.ora`
     ;
 };
 
@@ -191,7 +206,11 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_mlir_sir or
         parsed.emit_sir_text or
         parsed.emit_bytecode or
-        parsed.emit_cfg;
+        parsed.emit_cfg or
+        parsed.emit_smt_report or
+        parsed.emit_abi or
+        parsed.emit_abi_solidity or
+        parsed.emit_abi_extras;
 }
 
 fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) !DebugCliOptions {
@@ -431,14 +450,13 @@ pub fn main() !void {
     const emit_bytecode: bool = parsed.emit_bytecode;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
+    const emit_abi: bool = parsed.emit_abi;
+    const emit_abi_solidity: bool = parsed.emit_abi_solidity;
+    const emit_abi_extras: bool = parsed.emit_abi_extras;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const validate_mlir: bool = parsed.validate_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
-    const verify_calls: ?bool = parsed.verify_calls;
-    const verify_state: ?bool = parsed.verify_state;
-    const verify_max_summary_inline_depth: ?u32 = parsed.verify_max_summary_inline_depth;
-    const verify_imported_summaries_only: bool = parsed.verify_imported_summaries_only;
     const verify_stats: bool = parsed.verify_stats;
     const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
     const z3_proofs: bool = parsed.z3_proofs;
@@ -469,6 +487,8 @@ pub fn main() !void {
     const fmt_stdout: bool = parsed.fmt_stdout;
     const fmt_width: ?u32 = parsed.fmt_width;
     const metrics_enabled: bool = parsed.metrics;
+    const cli_chain_id: ?u64 = parsed.chain_id;
+    const chain_ids = ChainIdSelection{ .cli_chain_id = cli_chain_id };
 
     var metrics = Metrics.init(metrics_enabled);
 
@@ -494,7 +514,7 @@ pub fn main() !void {
         .None => if (emit_flags_requested) .Emit else .Build,
     };
     if (command_kind == .Build and emit_flags_requested) {
-        std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
+        std.debug.print("error: build mode does not accept emit selectors. Use 'ora emit --emit=<list> ...' for debug outputs.\n", .{});
         std.process.exit(2);
     }
 
@@ -509,18 +529,18 @@ pub fn main() !void {
     }
 
     if ((mlir_verify_each_pass or mlir_pass_timing) and mlir_pass_pipeline == null) {
-        std.debug.print("error: --mlir-verify-each-pass and --mlir-pass-timing require --mlir-pass-pipeline.\n", .{});
+        std.debug.print("error: MLIR debug options verify-each and timing require --mlir-pass-pipeline.\n", .{});
         std.process.exit(2);
     }
 
     if (mlir_print_ir_pass != null and mlir_print_ir == null) {
-        std.debug.print("error: --mlir-print-ir-pass requires --mlir-print-ir.\n", .{});
+        std.debug.print("error: MLIR debug option print-ir-pass requires print-ir:<mode>.\n", .{});
         std.process.exit(2);
     }
 
     if (command_kind == .Emit) {
         // if no --emit-X flag is set, default to MLIR generation
-        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
+        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
             emit_mlir = true; // Default: emit MLIR
         }
         if ((emit_sir_text or emit_bytecode or (emit_cfg and emit_cfg_mode != null and std.ascii.eqlIgnoreCase(emit_cfg_mode.?, "sir"))) and !emit_mlir_sir) {
@@ -543,10 +563,6 @@ pub fn main() !void {
         .validate_mlir = validate_mlir,
         .verify_z3 = verify_z3,
         .verify_mode = verify_mode,
-        .verify_calls = verify_calls,
-        .verify_state = verify_state,
-        .verify_max_summary_inline_depth = verify_max_summary_inline_depth,
-        .verify_imported_summaries_only = verify_imported_summaries_only,
         .verify_stats = verify_stats,
         .explain_cores = explain_cores,
         .z3_proofs = z3_proofs,
@@ -563,18 +579,20 @@ pub fn main() !void {
         .cpp_lowering_stub = cpp_lowering_stub,
         .persist_ora_mlir = false,
         .persist_sir_mlir = false,
+        .chain_id = cli_chain_id orelse compiler.compile_options.default_chain_id,
         .metrics = &metrics,
     };
 
     if (command_kind == .Debug) {
         const debug_options = debug_cli.?;
         const file_path = parsed.input_file.?;
-        const resolver = try discoverResolverOptionsForFile(allocator, file_path);
-        defer if (resolver.include_roots) |include_roots| {
+        const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+        defer if (compile_context.include_roots) |include_roots| {
             freeResolvedIncludeRoots(allocator, include_roots);
         };
 
         var debug_mlir_options = mlir_options;
+        debug_mlir_options.chain_id = compile_context.chain_id;
         debug_mlir_options.emit_mlir = false;
         debug_mlir_options.emit_mlir_sir = true;
         debug_mlir_options.emit_sir_text = true;
@@ -607,7 +625,7 @@ pub fn main() !void {
             file_path,
             parsed.output_dir,
             debug_mlir_options,
-            resolver.options,
+            compile_context.resolver_options,
         );
         defer allocator.free(artifact_root);
 
@@ -649,6 +667,7 @@ pub fn main() !void {
 
         var build_resolver_options: import_graph.ResolverOptions = .{};
         var build_output_dir: ?[]const u8 = output_dir;
+        var build_chain_id = mlir_options.chain_id;
         if (input_file) |build_file_path| {
             const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
             const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
@@ -666,6 +685,9 @@ pub fn main() !void {
                     std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
                     std.process.exit(2);
                 };
+
+                const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
+                build_chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
 
                 if (target_idx_opt) |target_idx| {
                     const target = loaded.config.targets[target_idx];
@@ -739,17 +761,20 @@ pub fn main() !void {
             }
         }
 
+        var build_mlir_options = mlir_options;
+        build_mlir_options.chain_id = build_chain_id;
+
         const build_result = if (input_file) |build_file_path|
             runBuildArtifacts(
                 allocator,
                 build_file_path,
                 build_output_dir,
-                mlir_options,
+                build_mlir_options,
                 build_resolver_options,
                 if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
             )
         else
-            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options);
+            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, chain_ids);
 
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
@@ -771,14 +796,24 @@ pub fn main() !void {
 
     const file_path = input_file.?;
 
-    const resolver = try discoverResolverOptionsForFile(allocator, file_path);
-    defer if (resolver.include_roots) |include_roots| {
+    const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+    defer if (compile_context.include_roots) |include_roots| {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
-    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
-        std.debug.print("error: emit requires an explicit --emit-* mode.\n", .{});
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
+        std.debug.print("error: emit requires an explicit --emit=<list> mode.\n", .{});
         std.process.exit(2);
+    }
+
+    var emit_mlir_options = mlir_options;
+    emit_mlir_options.chain_id = compile_context.chain_id;
+
+    if (emit_abi or emit_abi_solidity or emit_abi_extras) {
+        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, debug_enabled, false) catch |err| switch (err) {
+            error.MissingContract => std.process.exit(2),
+            else => return err,
+        };
     }
 
     if (emit_tokens) {
@@ -788,11 +823,11 @@ pub fn main() !void {
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, resolver.options, &metrics, debug_enabled);
-    } else if (emit_cfg or emit_sir_text or emit_bytecode) {
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, resolver.options, debug_enabled);
-    } else {
-        try runCompilerMlirEmit(allocator, file_path, mlir_options, resolver.options, debug_enabled);
+        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled);
+    } else if (emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report) {
+        try runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+    } else if (emit_mlir or emit_mlir_sir) {
+        try runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -902,10 +937,10 @@ fn runBuildArtifacts(
     try std.fs.cwd().makePath(verify_dir);
     try std.fs.cwd().makePath(mlir_dir);
 
-    try validateConfiguredInitArgs(allocator, file_path, resolver_options, configured_init_args);
+    try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
     // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.debug_enabled, true);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -1039,7 +1074,7 @@ fn runDebugArtifacts(
     defer allocator.free(abi_dir);
     try std.fs.cwd().makePath(abi_dir);
 
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.debug_enabled, true);
 
     var debug_mlir_options = base_options;
     debug_mlir_options.output_dir = artifact_root;
@@ -1499,11 +1534,15 @@ fn validateConfiguredInitArgs(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
     configured_init_args: []const project_config.InitArg,
 ) !void {
     if (configured_init_args.len == 0) return;
 
-    var compilation = try compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options);
+    var compilation = try compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(chain_id),
+    });
     defer compilation.deinit();
 
     const module = compilation.db.sources.module(compilation.root_module_id);
@@ -1601,6 +1640,7 @@ fn runBuildFromDiscoveredConfig(
     allocator: std.mem.Allocator,
     cli_output_dir: ?[]const u8,
     base_options: MlirOptions,
+    chain_ids: ChainIdSelection,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -1659,11 +1699,14 @@ fn runBuildFromDiscoveredConfig(
         try stdout.print("Building target '{s}' from {s}\n", .{ target.name, root_path });
         try stdout.flush();
 
+        var target_options = base_options;
+        target_options.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id);
+
         try runBuildArtifacts(
             allocator,
             root_path,
             target_output,
-            base_options,
+            target_options,
             .{
                 .include_roots = include_roots,
             },
@@ -1672,13 +1715,11 @@ fn runBuildFromDiscoveredConfig(
     }
 }
 
-fn discoverResolverOptionsForFile(
+fn discoverCompileContextForFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-) !struct {
-    include_roots: ?[]const []const u8,
-    options: import_graph.ResolverOptions,
-} {
+    chain_ids: ChainIdSelection,
+) !CompileContext {
     const start_dir = std.fs.path.dirname(file_path) orelse ".";
     const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
         std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
@@ -1688,7 +1729,8 @@ fn discoverResolverOptionsForFile(
     if (loaded_opt == null) {
         return .{
             .include_roots = null,
-            .options = .{},
+            .resolver_options = .{},
+            .chain_id = chain_ids.resolve(null, null),
         };
     }
 
@@ -1708,15 +1750,17 @@ fn discoverResolverOptionsForFile(
         };
         return .{
             .include_roots = include_roots,
-            .options = .{
+            .resolver_options = .{
                 .include_roots = include_roots,
             },
+            .chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id),
         };
     }
 
     return .{
         .include_roots = null,
-        .options = .{},
+        .resolver_options = .{},
+        .chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, null),
     };
 }
 
@@ -1728,7 +1772,6 @@ fn printUsage() !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
-    const default_summary_inline_depth = @import("z3/encoder.zig").Encoder.default_max_summary_inline_depth;
     try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
     try stdout.print("       ora build [options]\n", .{});
@@ -1743,18 +1786,11 @@ fn printUsage() !void {
     try stdout.print("                           If <file.ora> is omitted, builds all [[targets]] from ora.toml\n", .{});
     try stdout.print("                           Outputs: bytecode, ABI, Ora/SIR MLIR, SIR text, SMT report\n", .{});
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
-    try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
+    try stdout.print("  emit                   - Debug emission mode (use --emit=<list>)\n", .{});
     try stdout.print("  debug                  - Compile debugger artifacts and launch the Ora EVM debugger\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
-    try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
-    try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
-    try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
-    try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
-    try stdout.print("  --emit-mlir[=ora|sir|both] - Emit MLIR (default mode: ora)\n", .{});
-    try stdout.print("  --emit-sir-text        - Emit Sensei SIR text IR (after conversion)\n", .{});
-    try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
-    try stdout.print("  --emit-cfg[=ora|sir]   - Generate control flow graph (default: ora)\n", .{});
+    try stdout.print("  --emit=<list>          - Comma list: tokens, ast[:json|tree], typed-ast[:json|tree], mlir[:ora|sir|both], sir-text, bytecode, cfg[:ora|sir], abi[:solidity|extras], smt-report\n", .{});
+    try stdout.print("  --chain-id <id>        - Chain id exposed to @chainId() (default: 31337; overrides ora.toml)\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
     try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
@@ -1768,28 +1804,15 @@ fn printUsage() !void {
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
     try stdout.print("  --mlir-pass-pipeline <pipeline> - Run custom MLIR pass pipeline on Ora MLIR\n", .{});
-    try stdout.print("  --mlir-verify-each-pass - Enable verifier while running custom pass pipeline\n", .{});
-    try stdout.print("  --mlir-pass-timing     - Enable MLIR pass timing for custom pass pipeline\n", .{});
-    try stdout.print("  --mlir-pass-statistics - Print operation-count stats across MLIR stages\n", .{});
-    try stdout.print("  --mlir-print-ir=before|after|before-after|all - Print stage MLIR snapshots\n", .{});
-    try stdout.print("  --mlir-print-ir-pass <stage-filter> - Filter snapshots by stage name\n", .{});
-    try stdout.print("  --mlir-crash-reproducer <path> - Save current MLIR when a stage fails\n", .{});
-    try stdout.print("  --mlir-print-op-on-diagnostic - Print module snapshot with MLIR diagnostics\n", .{});
+    try stdout.print("  --mlir-debug=<list>    - Comma list: verify-each, timing, statistics, print-ir:<mode>, print-ir-pass:<name>, crash-reproducer:<path>, print-op-on-diagnostic\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
-    try stdout.print("  --verify-calls         - Enable call reasoning in Z3 encoder (default)\n", .{});
-    try stdout.print("  --no-verify-calls      - Disable call reasoning (treat calls as unknown)\n", .{});
-    try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
-    try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
-    try stdout.print("  --verify-max-summary-inline-depth <n> - Cap internal summary inlining depth (default: {d})\n", .{default_summary_inline_depth});
-    try stdout.print("  --verify-imported-summaries-only - Treat imported-module calls as verifier summary boundaries\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
-    try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
@@ -2318,6 +2341,13 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.Cons
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
         .address => |address| try std.fmt.allocPrint(allocator, "0x{x:0>40}", .{address}),
+        .fixed_bytes => |bytes| blk: {
+            var out = try std.ArrayList(u8).initCapacity(allocator, 2 + bytes.len * 2);
+            errdefer out.deinit(allocator);
+            try out.appendSlice(allocator, "0x");
+            for (bytes) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+            break :blk try out.toOwnedSlice(allocator);
+        },
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
         .tuple => |elements| blk: {
             var parts: std.ArrayList([]const u8) = .{};
@@ -3431,6 +3461,7 @@ fn buildExecutableLineMap(
 fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
     switch (ty) {
         .unknown => try writer.writeAll("unknown"),
+        .never => try writer.writeAll("never"),
         .void => try writer.writeAll("void"),
         .bool => try writer.writeAll("bool"),
         .string => try writer.writeAll("string"),
@@ -3645,6 +3676,7 @@ fn runCompilerAstEmit(
     format: []const u8,
     include_types: bool,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
     m: *Metrics,
     debug_enabled: bool,
 ) !void {
@@ -3653,7 +3685,10 @@ fn runCompilerAstEmit(
     const stdout = &stdout_writer.interface;
 
     m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(chain_id),
+    }) catch |err| {
         m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
@@ -3694,7 +3729,10 @@ fn runCompilerMlirEmit(
     const m = mlir_options.metrics;
 
     m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(mlir_options.chain_id),
+    }) catch |err| {
         m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
@@ -3775,7 +3813,10 @@ fn runMlirEmitAdvanced(
     const mlir_allocator = mlir_arena.allocator();
 
     m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(mlir_options.chain_id),
+    }) catch |err| {
         m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
@@ -3817,10 +3858,6 @@ fn runMlirEmitAdvanced(
                 return error.InvalidVerificationMode;
             }
         }
-        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
-        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
-        if (mlir_options.verify_max_summary_inline_depth) |depth| verifier.setMaxSummaryInlineDepth(depth);
-        verifier.setSummaryOnlyImportedCalls(mlir_options.verify_imported_summaries_only);
         verifier.setVerifyStats(mlir_options.verify_stats);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
@@ -3865,10 +3902,6 @@ fn runMlirEmitAdvanced(
                 return error.InvalidVerificationMode;
             }
         }
-        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
-        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
-        if (mlir_options.verify_max_summary_inline_depth) |depth| verifier.setMaxSummaryInlineDepth(depth);
-        verifier.setSummaryOnlyImportedCalls(mlir_options.verify_imported_summaries_only);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
@@ -4401,13 +4434,18 @@ fn runAbiEmit(
     emit_abi_solidity: bool,
     emit_abi_extras: bool,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
     debug_enabled: bool,
+    allow_missing_contract: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(chain_id),
+    }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         return;
     };
@@ -4415,7 +4453,15 @@ fn runAbiEmit(
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
-    var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
+    var contract_abi = lib.abi.generateCompilerAbi(allocator, &compilation) catch |err| switch (err) {
+        error.MissingContract => {
+            if (allow_missing_contract) return;
+            try stdout.print("error: ABI generation requires at least one contract declaration in '{s}'.\n", .{file_path});
+            try stdout.flush();
+            return err;
+        },
+        else => return err,
+    };
     defer contract_abi.deinit();
 
     const base_name = std.fs.path.stem(file_path);
@@ -5567,7 +5613,7 @@ test "build config init_args: validates init parameters" {
         .{ .name = "enabled", .value = "true" },
     };
 
-    try validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]);
+    try validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]);
 }
 
 test "build config init_args: unknown init arg errors" {
@@ -5596,7 +5642,7 @@ test "build config init_args: unknown init arg errors" {
         .{ .name = "missing", .value = "10" },
     };
 
-    try std.testing.expectError(error.UnknownInitArg, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.UnknownInitArg, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "build config init_args: missing init function errors" {
@@ -5622,7 +5668,7 @@ test "build config init_args: missing init function errors" {
         .{ .name = "seed", .value = "10" },
     };
 
-    try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "build config init_args: invalid constructor shape errors" {
@@ -5648,7 +5694,7 @@ test "build config init_args: invalid constructor shape errors" {
         .{ .name = "seed", .value = "10" },
     };
 
-    try std.testing.expectError(error.InvalidInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.InvalidInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "init command: scaffolds new project layout" {
