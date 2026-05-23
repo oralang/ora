@@ -259,6 +259,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAbiEncodeWithSelectorOp : public OpConversionPattern<ora::AbiEncodeWithSelectorOp>
+        {
+        public:
+            using OpConversionPattern<ora::AbiEncodeWithSelectorOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AbiEncodeWithSelectorOp op,
+                typename ora::AbiEncodeWithSelectorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertExternalCallOp : public OpConversionPattern<ora::ExternalCallOp>
         {
         public:

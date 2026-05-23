@@ -1025,6 +1025,7 @@ public:
         if (enable_func)
         {
             patterns.add<ConvertAbiEncodeOp>(typeConverter, ctx);
+            patterns.add<ConvertAbiEncodeWithSelectorOp>(typeConverter, ctx);
             patterns.add<ConvertExternalCallOp>(typeConverter, ctx);
             patterns.add<ConvertAbiDecodeOp>(typeConverter, ctx);
         }
@@ -1788,6 +1789,7 @@ public:
             phase4Target.addIllegalOp<ora::BaseToRefinementOp>();
             phase4Target.addIllegalOp<ora::RefinementToBaseOp>();
             phase4Target.addIllegalOp<ora::AbiEncodeOp>();
+            phase4Target.addIllegalOp<ora::AbiEncodeWithSelectorOp>();
             phase4Target.addIllegalOp<ora::ExternalCallOp>();
             phase4Target.addIllegalOp<ora::AbiDecodeOp>();
             phase4Target.addIllegalOp<ora::Keccak256Op>();
@@ -2185,6 +2187,36 @@ public:
                 signalPassFailure();
                 return;
             }
+
+            // Final tuple-create conversion can leave ptr_view/source
+            // materialization casts after their aggregate user is rewritten.
+            // Collapse live ptr views to their SIR pointer carrier, then sweep
+            // dead materializations before the post-conversion illegal-op scan.
+            SmallVector<mlir::UnrealizedConversionCastOp, 8> finalPtrViews;
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
+                            if (ora::hasMaterializationKind(op, mat_kind::kPtrView) &&
+                                op.getNumOperands() == 1 &&
+                                op.getNumResults() == 1 &&
+                                llvm::isa<sir::PtrType>(op.getOperand(0).getType()))
+                            {
+                                finalPtrViews.push_back(op);
+                            }
+                        });
+            for (auto op : finalPtrViews)
+            {
+                op.getResult(0).replaceAllUsesWith(op.getOperand(0));
+                op.erase();
+            }
+
+            SmallVector<mlir::UnrealizedConversionCastOp, 8> deadFinalCasts;
+            module.walk([&](mlir::UnrealizedConversionCastOp op)
+                        {
+                            if (llvm::all_of(op.getResults(), [](Value result) { return result.use_empty(); }))
+                                deadFinalCasts.push_back(op);
+                        });
+            for (auto op : deadFinalCasts)
+                op.erase();
         }
 
         // Guard: fail if any lowering-phase dialect ops remain after all lowering phases.

@@ -514,8 +514,9 @@ LogicalResult ConvertConcatOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Convert ora.slice → allocate [len][copied bytes]
-// Layout: [len: u256][bytes...]
+// Convert ora.slice → allocate a dynamic value.
+// - string/bytes slices use byte lengths: [len: u256][bytes...]
+// - memref slices use element counts: [len: u256][32-byte element slots...]
 // -----------------------------------------------------------------------------
 LogicalResult ConvertSliceOp::matchAndRewrite(
     Operation *op,
@@ -539,6 +540,38 @@ LogicalResult ConvertSliceOp::matchAndRewrite(
     Value start = ensureU256(rewriter, loc, operands[1]);
     Value length = ensureU256(rewriter, loc, operands[2]);
     Value headerSize = constU256(rewriter, loc, evm::kWordBytes);
+
+    if (auto resultMemRef = llvm::dyn_cast<mlir::MemRefType>(op->getResult(0).getType()))
+    {
+        if (resultMemRef.getRank() != 1 || !resultMemRef.isDynamicDim(0))
+            return rewriter.notifyMatchFailure(op, "ora.slice memref result must be rank-1 dynamic");
+
+        Value elementSlotBytes = constU256(rewriter, loc, evm::kWordBytes);
+        Value startBytes = rewriter.create<sir::MulOp>(loc, u256Type, start, elementSlotBytes);
+        Value payloadBytes = rewriter.create<sir::MulOp>(loc, u256Type, length, elementSlotBytes);
+        Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, payloadBytes, headerSize);
+
+        Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+        rewriter.create<sir::StoreOp>(loc, base, length);
+
+        Value sourcePayload = source;
+        if (auto sourceMemRef = llvm::dyn_cast<mlir::MemRefType>(op->getOperand(0).getType()))
+        {
+            if (!sourceMemRef.hasStaticShape())
+                sourcePayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, headerSize);
+        }
+        else
+        {
+            sourcePayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, headerSize);
+        }
+        Value sourceStart = rewriter.create<sir::AddPtrOp>(loc, ptrType, sourcePayload, startBytes);
+        Value resultPayload = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, headerSize);
+        rewriter.create<sir::MCopyOp>(loc, resultPayload, sourceStart, payloadBytes);
+
+        rewriter.replaceOp(op, base);
+        return success();
+    }
+
     Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, length, headerSize);
 
     Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);

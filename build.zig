@@ -110,6 +110,13 @@ pub fn build(b: *std.Build) void {
     mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
     mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
     mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
+    const mlir_helpers_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/helpers.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
+    mlir_helpers_mod.addImport("ora_types", ora_types_mod);
 
     // modules can depend on one another using the `std.Build.Module.addImport` function.
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
@@ -117,11 +124,13 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("ora_lib", lib_mod);
     exe_mod.addImport("ora_imports", ora_imports_mod);
     exe_mod.addImport("mlir_c_api", mlir_c_mod);
+    exe_mod.addImport("mlir_helpers", mlir_helpers_mod);
     exe_mod.addImport("log", log_mod);
     exe_mod.addImport("ora_lexer", ora_lexer_mod);
     exe_mod.addImport("ora_types", ora_types_mod);
     exe_mod.addImport("ora_refinements", ora_refinements_mod);
     lib_mod.addImport("mlir_c_api", mlir_c_mod);
+    lib_mod.addImport("mlir_helpers", mlir_helpers_mod);
     lib_mod.addImport("log", log_mod);
     lib_mod.addImport("ora_types", ora_types_mod);
     lib_mod.addImport("ora_refinements", ora_refinements_mod);
@@ -390,6 +399,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     abi_test_mod.addImport("ora_root", lib_mod);
+    abi_test_mod.addImport("mlir_c_api", mlir_c_mod);
     const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
     linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     linkZ3Libraries(b, abi_tests, z3_step, target);
@@ -656,6 +666,15 @@ pub fn build(b: *std.Build) void {
     });
     const check_lock_guarding_step = b.step("check-lock-guarding", "Run lock guard insertion static checks");
     check_lock_guarding_step.dependOn(&lock_guarding_cmd.step);
+
+    // zig build check-abi-layout-ownership
+    const abi_layout_ownership_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-abi-layout-ownership.sh",
+    });
+    const check_abi_layout_ownership_step = b.step("check-abi-layout-ownership", "Run ABI layout source-of-truth static checks");
+    check_abi_layout_ownership_step.dependOn(&abi_layout_ownership_cmd.step);
+    test_step.dependOn(&abi_layout_ownership_cmd.step);
 
     // zig build check-smt-modifies-corpus
     const smt_modifies_corpus_cmd = b.addSystemCommand(&[_][]const u8{

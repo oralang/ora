@@ -829,6 +829,14 @@ extern "C"
         MlirLocation loc,
         MlirType resultType);
 
+    /// Create a memref.alloca operation with dynamic sizes
+    MLIR_CAPI_EXPORTED MlirOperation oraMemrefAllocaDynamicOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirType resultType,
+        const MlirValue *dynamicSizes,
+        size_t numDynamicSizes);
+
     /// Create a memref.load operation
     MLIR_CAPI_EXPORTED MlirOperation oraMemrefLoadOpCreate(
         MlirContext ctx,
@@ -1258,8 +1266,18 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirOperation oraAbiEncodeOpCreate(
         MlirContext ctx,
         MlirLocation loc,
+        MlirAttribute layout,
+        const MlirValue *operands,
+        size_t numOperands,
+        MlirType resultType);
+
+    /// Create an ora.abi_encode_with_selector operation
+    MLIR_CAPI_EXPORTED MlirOperation oraAbiEncodeWithSelectorOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
         MlirAttribute selector,
         MlirAttribute argTypes,
+        MlirAttribute layout,
         const MlirValue *operands,
         size_t numOperands,
         MlirType resultType);

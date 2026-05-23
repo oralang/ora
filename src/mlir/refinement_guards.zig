@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const c = @import("mlir_c_api").c;
-const h = @import("helpers.zig");
+const h = @import("mlir_helpers");
 
 pub fn cleanupRefinementGuards(
     ctx: c.MlirContext,

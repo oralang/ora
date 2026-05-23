@@ -1234,6 +1234,17 @@ namespace mlir
 
         ::mlir::LogicalResult AbiEncodeOp::verify()
         {
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AbiEncodeWithSelectorOp::verify()
+        {
             auto selectorAttr = (*this)->getAttr("selector");
             if (!selectorAttr)
                 return emitOpError("requires 'selector' attribute");
@@ -1253,6 +1264,11 @@ namespace mlir
                 if (!llvm::isa<::mlir::StringAttr>(attr))
                     return emitOpError("'arg_types' entries must be string attributes");
             }
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
 
             return success();
         }

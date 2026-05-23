@@ -1217,13 +1217,31 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
     auto ctx = rewriter.getContext();
     auto memrefType = op.getType();
 
-    // Get memref shape and element type
     if (!memrefType.hasStaticShape())
     {
-        DBG("ConvertMemRefAllocOp: dynamic shape not supported");
-        return failure();
+        if (memrefType.getRank() != 1 || !memrefType.isDynamicDim(0) || adaptor.getDynamicSizes().size() != 1)
+        {
+            DBG("ConvertMemRefAllocOp: unsupported dynamic memref shape");
+            return failure();
+        }
+
+        auto u256Type = sir::U256Type::get(ctx);
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        Value length = ensureU256Value(rewriter, loc, adaptor.getDynamicSizes().front());
+        Value elementSize = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32ULL));
+        Value payloadSize = rewriter.create<sir::MulOp>(loc, u256Type, length, elementSize);
+        Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, payloadSize, elementSize);
+        Value mallocResult = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+        rewriter.create<sir::StoreOp>(loc, mallocResult, length);
+        rewriter.replaceOp(op, mallocResult);
+        DBG("ConvertMemRefAllocOp: converted dynamic alloca to malloc");
+        return success();
     }
 
+    // Get memref shape and element type
     // Calculate total size: num_elements * element_size (32 bytes for u256)
     int64_t numElements = 1;
     for (int64_t dim : memrefType.getShape())

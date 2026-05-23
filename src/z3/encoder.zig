@@ -5600,7 +5600,10 @@ pub const Encoder = struct {
             return try self.encodePrecompileOp(mlir_op, precompile_entry, operands);
         }
 
-        if (std.mem.eql(u8, op_name, "ora.abi_encode") or std.mem.eql(u8, op_name, "ora.abi_decode")) {
+        if (std.mem.eql(u8, op_name, "ora.abi_encode") or
+            std.mem.eql(u8, op_name, "ora.abi_encode_with_selector") or
+            std.mem.eql(u8, op_name, "ora.abi_decode"))
+        {
             return try self.encodeOpaqueBoundaryResult(mlir_op, op_name, operands, 0);
         }
 

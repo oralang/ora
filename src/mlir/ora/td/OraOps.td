@@ -1777,12 +1777,25 @@ def Ora_ErrorGetErrorOp : Ora_PureOp<"error.get_error"> {
 //===----------------------------------------------------------------------===//
 
 def Ora_AbiEncodeOp : Ora_Op<"abi_encode"> {
-  let summary = "ABI-encode external call arguments";
+  let summary = "ABI-encode payload arguments";
   let description = [{
-    Encodes arguments into calldata format for an external call.
+    Encodes arguments into ABI payload format without a function selector.
   }];
 
-  let arguments = (ins AnyAttr:$selector, AnyAttr:$arg_types, Variadic<AnyType>:$operands);
+  let arguments = (ins AnyAttr:$layout, Variadic<AnyType>:$operands);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$operands attr-dict `:` functional-type(operands, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_AbiEncodeWithSelectorOp : Ora_Op<"abi_encode_with_selector"> {
+  let summary = "ABI-encode selector-prefixed external call arguments";
+  let description = [{
+    Encodes arguments into external-call calldata format: selector ++ payload.
+  }];
+
+  let arguments = (ins AnyAttr:$selector, AnyAttr:$arg_types, AnyAttr:$layout, Variadic<AnyType>:$operands);
   let results = (outs AnyType:$result);
 
   let assemblyFormat = "$operands attr-dict `:` functional-type(operands, results)";

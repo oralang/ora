@@ -1647,6 +1647,34 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return converted;
             }
 
+            const value_is_pointer_backed =
+                mlir.oraTypeIsAShaped(value_type) or
+                mlir.oraTupleTypeGetNumElements(value_type) != 0 or
+                mlir.oraAnonymousStructTypeGetFieldCount(value_type) != 0 or
+                mlir.oraTypeIsAAdt(value_type);
+            if (target_is_int and mlir.oraIntegerTypeGetWidth(target_type) == 256 and value_is_pointer_backed) {
+                // Static memrefs used as pointer tables store aggregate handles in
+                // i256 slots. The conversion pipeline materializes the cast as the
+                // runtime pointer word after aggregate lowering.
+                const op = mlir.oraUnrealizedConversionCastOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
+            const target_is_pointer_backed =
+                mlir.oraTypeIsAShaped(target_type) or
+                mlir.oraTupleTypeGetNumElements(target_type) != 0 or
+                mlir.oraAnonymousStructTypeGetFieldCount(target_type) != 0 or
+                mlir.oraTypeIsAAdt(target_type);
+            if (value_is_int and mlir.oraIntegerTypeGetWidth(value_type) == 256 and target_is_pointer_backed) {
+                // The inverse path is needed when pointer-backed aggregate
+                // handles are read back out of i256 slots, for example nested
+                // slice literals materialized through static pointer tables.
+                const op = mlir.oraUnrealizedConversionCastOpCreate(self.parent.context, loc, value, target_type);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                return appendValueOp(self.block, op);
+            }
+
             if (!(value_is_int and target_is_int)) return value;
 
             const value_width = mlir.oraIntegerTypeGetWidth(value_type);

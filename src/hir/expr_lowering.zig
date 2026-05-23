@@ -3,6 +3,8 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const abi_support = @import("abi.zig");
+const abi_runtime_encoder = @import("../abi/runtime_encoder.zig");
+const abi_layout_context = @import("../abi/layout_context.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
@@ -1580,46 +1582,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             try @This().emitExternSummaryRequires(self, resolved.ast_method, locals, encode_args.items);
 
-            var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
-            defer arg_type_attrs.deinit(self.parent.allocator);
-            var signature_parts: std.ArrayList([]const u8) = .{};
-            defer {
-                for (signature_parts.items) |part| self.parent.allocator.free(part);
-                signature_parts.deinit(self.parent.allocator);
-            }
-            for (resolved.method.param_types) |param_type| {
-                const abi_type = try self.parent.abiLayoutForType(param_type);
-                defer self.parent.allocator.free(abi_type);
-                try arg_type_attrs.append(self.parent.allocator, mlir.oraStringAttrCreate(self.parent.context, strRef(abi_type)));
-                try signature_parts.append(self.parent.allocator, try self.parent.allocator.dupe(u8, abi_type));
-            }
-            const arg_types_attr = mlir.oraArrayAttrCreate(self.parent.context, @intCast(arg_type_attrs.items.len), if (arg_type_attrs.items.len == 0) null else arg_type_attrs.items.ptr);
-
             var return_type_attrs: [1]mlir.MlirAttribute = .{undefined};
             const abi_return = try abi_support.externReturnAbiType(self.parent.allocator, resolved.method.return_type);
             defer self.parent.allocator.free(abi_return);
             return_type_attrs[0] = mlir.oraStringAttrCreate(self.parent.context, strRef(abi_return));
             const return_types_attr = mlir.oraArrayAttrCreate(self.parent.context, 1, &return_type_attrs);
 
-            const signature = try abi_support.signatureForAbiTypes(
+            const layout_context: abi_layout_context.LayoutContext = .{
+                .allocator = self.parent.allocator,
+                .file = self.parent.file,
+                .item_index = self.parent.item_index,
+                .typecheck = self.parent.typecheck,
+            };
+            const encode_op = try abi_runtime_encoder.createAbiEncodeWithSelectorOp(
                 self.parent.allocator,
-                resolved.method.name,
-                signature_parts.items,
-            );
-            defer self.parent.allocator.free(signature);
-            const selector_text = try abi_support.keccakSelectorHex(self.parent.allocator, signature);
-            defer self.parent.allocator.free(selector_text);
-            const selector_value = try std.fmt.parseUnsigned(u32, selector_text[2..], 16);
-            const selector_type = mlir.oraIntegerTypeCreate(self.parent.context, 32);
-            const selector_attr = mlir.oraIntegerAttrCreateI64FromType(selector_type, selector_value);
-
-            const encode_op = mlir.oraAbiEncodeOpCreate(
                 self.parent.context,
                 loc,
-                selector_attr,
-                arg_types_attr,
-                if (encode_args.items.len == 0) null else encode_args.items.ptr,
-                encode_args.items.len,
+                layout_context,
+                resolved.method.name,
+                resolved.method.param_types,
+                encode_args.items,
                 defaultIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
@@ -2658,7 +2640,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var value = try self.lowerExpr(builtin.args[0], locals);
             value = try @This().unwrapRefinementForCast(self, value, builtin.range);
-            value = try @This().convertBuiltinCastValue(self, value, concrete_target, builtin.range, checked);
+            if (try @This().lowerStaticArrayToSliceCast(self, value, concrete_target, builtin.range)) |slice_value| {
+                value = slice_value;
+            } else {
+                value = try @This().convertBuiltinCastValue(self, value, concrete_target, builtin.range, checked);
+            }
 
             if (!mlir.oraTypeIsNull(target_ref_base) and !mlir.oraTypeEqual(mlir.oraValueGetType(value), target_type)) {
                 const wrap_op = mlir.oraBaseToRefinementOpCreate(
@@ -2672,6 +2658,81 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return value;
+        }
+
+        fn lowerStaticArrayToSliceCast(
+            self: *FunctionLowerer,
+            value: mlir.MlirValue,
+            target_type: mlir.MlirType,
+            range: source.TextRange,
+        ) anyerror!?mlir.MlirValue {
+            if (!mlir.oraTypeIsAShaped(target_type) or
+                mlir.oraShapedTypeGetRank(target_type) != 1 or
+                mlir.oraShapedTypeHasStaticShape(target_type))
+            {
+                return null;
+            }
+
+            const value_type = mlir.oraValueGetType(value);
+            if (!mlir.oraTypeIsAShaped(value_type) or
+                mlir.oraShapedTypeGetRank(value_type) != 1 or
+                !mlir.oraShapedTypeHasStaticShape(value_type))
+            {
+                return null;
+            }
+
+            const value_element_type = mlir.oraShapedTypeGetElementType(value_type);
+            const target_element_type = mlir.oraShapedTypeGetElementType(target_type);
+            const len = mlir.oraShapedTypeGetDimSize(value_type, 0);
+            if (len < 0) return null;
+            // Empty array literals carry no element evidence, so [] may lower
+            // with the fallback i256 element type. The cast still materializes
+            // a real zero-length target slice, such as memref<?x!ora.string>.
+            if (len != 0 and !mlir.oraTypeEqual(value_element_type, target_element_type)) return null;
+
+            const loc = self.parent.location(range);
+            const u256_type = mlir.oraIntegerTypeCreate(self.parent.context, 256);
+            const raw_length = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, u256_type, @intCast(len)));
+            const length = try @This().convertIndexToIndexType(self, raw_length, range);
+            const alloc = mlir.oraMemrefAllocaDynamicOpCreate(
+                self.parent.context,
+                loc,
+                target_type,
+                &[_]mlir.MlirValue{length},
+                1,
+            );
+            if (mlir.oraOperationIsNull(alloc)) return error.MlirOperationCreationFailed;
+            const slice = appendValueOp(self.block, alloc);
+
+            for (0..@intCast(len)) |index| {
+                const raw_index = appendValueOp(
+                    self.block,
+                    createIntegerConstant(self.parent.context, loc, u256_type, @intCast(index)),
+                );
+                const index_value = try @This().convertIndexToIndexType(self, raw_index, range);
+                const loaded = mlir.oraMemrefLoadOpCreate(
+                    self.parent.context,
+                    loc,
+                    value,
+                    &[_]mlir.MlirValue{index_value},
+                    1,
+                    value_element_type,
+                );
+                if (mlir.oraOperationIsNull(loaded)) return error.MlirOperationCreationFailed;
+                const loaded_value = appendValueOp(self.block, loaded);
+                const store = mlir.oraMemrefStoreOpCreate(
+                    self.parent.context,
+                    loc,
+                    loaded_value,
+                    slice,
+                    &[_]mlir.MlirValue{index_value},
+                    1,
+                );
+                if (mlir.oraOperationIsNull(store)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, store);
+            }
+
+            return slice;
         }
 
         fn lowerBitcastBuiltin(

@@ -3581,6 +3581,36 @@ MlirOperation oraMemrefAllocaOpCreate(MlirContext ctx, MlirLocation loc, MlirTyp
     }
 }
 
+MlirOperation oraMemrefAllocaDynamicOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, const MlirValue *dynamicSizes, size_t numDynamicSizes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type memrefType = unwrap(resultType);
+        auto memrefTy = llvm::dyn_cast<mlir::MemRefType>(memrefType);
+        if (!memrefTy)
+        {
+            return {nullptr};
+        }
+
+        SmallVector<Value, 4> sizes;
+        sizes.reserve(numDynamicSizes);
+        for (size_t i = 0; i < numDynamicSizes; ++i)
+        {
+            sizes.push_back(unwrap(dynamicSizes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::AllocaOp>(location, memrefTy, sizes);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraMemrefLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirValue memref, const MlirValue *indices, size_t numIndices, MlirType resultType)
 {
     try
@@ -5181,7 +5211,7 @@ MlirOperation oraMethodCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStrin
     }
 }
 
-MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute selector, MlirAttribute argTypes, const MlirValue *operands, size_t numOperands, MlirType resultType)
+MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute layout, const MlirValue *operands, size_t numOperands, MlirType resultType)
 {
     try
     {
@@ -5194,8 +5224,33 @@ MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttrib
             state.addOperands(unwrap(operands[i]));
         }
         state.addTypes(resultTy);
+        state.addAttribute("layout", unwrap(layout));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAbiEncodeWithSelectorOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute selector, MlirAttribute argTypes, MlirAttribute layout, const MlirValue *operands, size_t numOperands, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.abi_encode_with_selector");
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
         state.addAttribute("selector", unwrap(selector));
         state.addAttribute("arg_types", unwrap(argTypes));
+        state.addAttribute("layout", unwrap(layout));
 
         Operation *op = Operation::create(state);
         return wrap(op);
