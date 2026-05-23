@@ -3372,6 +3372,9 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "keccak256")) {
             try self.checkKeccak256BuiltinArguments(builtin);
         }
+        if (std.mem.eql(u8, builtin.name, "abiEncode")) {
+            try self.checkAbiEncodeBuiltinArguments(builtin);
+        }
         if (std.mem.eql(u8, builtin.name, "chainId")) {
             try self.checkChainIdBuiltinArguments(builtin);
         }
@@ -3414,6 +3417,92 @@ const TypeChecker = struct {
                 diagnosticTypeDisplayName(self, arg_type),
             }),
         }
+    }
+
+    fn checkAbiEncodeBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@abiEncode expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+
+        const arg_type = self.expr_types[builtin.args[0].index()];
+        if (self.abiEncodeIsUnsupported(arg_type)) {
+            try self.emitRangeError(builtin.range, "@abiEncode: type '{s}' has no ABI representation", .{
+                diagnosticTypeDisplayName(self, arg_type),
+            });
+        }
+    }
+
+    fn abiEncodeIsUnsupported(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .bool, .address, .fixed_bytes, .integer, .bitfield, .void => false,
+            .enum_ => |named| self.enumHasPayload(named.name),
+            .string, .bytes => false,
+            .slice => |slice| self.abiEncodeIsUnsupported(slice.element_type.*),
+            .array => |array| self.abiEncodeIsUnsupported(array.element_type.*),
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (self.abiEncodeIsUnsupported(element)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (self.abiEncodeIsUnsupported(field.ty)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            .struct_ => |named| self.abiEncodeStructIsUnsupported(named.name),
+            .named => |named| self.abiEncodeNamedIsUnsupported(named.name),
+            .refinement => |refinement| self.abiEncodeIsUnsupported(refinement.base_type.*),
+            else => true,
+        };
+    }
+
+    fn abiEncodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
+        if (parseIntegerSpelling(name) != null) return false;
+        if (parseFixedBytesSpelling(name) != null) return false;
+        if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
+        if (self.instantiatedBitfieldByName(name)) |_| return false;
+        if (self.instantiatedStructByName(name)) |_| return self.abiEncodeStructIsUnsupported(name);
+
+        const item_id = self.item_index.lookup(name) orelse return true;
+        return switch (self.file.item(item_id).*) {
+            .Enum => self.enumHasPayload(name),
+            .Bitfield => false,
+            .Struct => self.abiEncodeStructIsUnsupported(name),
+            .TypeAlias => |type_alias| self.abiEncodeIsUnsupported(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return true),
+            else => true,
+        };
+    }
+
+    fn abiEncodeStructIsUnsupported(self: *TypeChecker, name: []const u8) bool {
+        if (self.instantiatedStructByName(name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (self.abiEncodeIsUnsupported(field.ty)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const item_id = self.item_index.lookup(name) orelse return true;
+        const struct_item = switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return true,
+        };
+        for (struct_item.fields) |field| {
+            const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return true;
+            if (self.abiEncodeIsUnsupported(field_type)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     fn checkChainIdBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
@@ -5085,6 +5174,10 @@ const TypeChecker = struct {
 
         if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256") or std.mem.eql(u8, builtin.name, "chainId")) {
             return descriptorFromPathName(self.file, self.item_index, "u256");
+        }
+
+        if (std.mem.eql(u8, builtin.name, "abiEncode")) {
+            return .{ .bytes = {} };
         }
 
         if (std.mem.eql(u8, builtin.name, "selector")) {

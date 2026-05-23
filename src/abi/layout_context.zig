@@ -116,7 +116,7 @@ pub const LayoutContext = struct {
 
     fn normalizeType(self: *const LayoutContext, arena: std.mem.Allocator, ty: sema.Type) anyerror!sema.Type {
         return switch (ty) {
-            .bool, .address, .string, .bytes, .fixed_bytes, .integer => ty,
+            .void, .bool, .address, .string, .bytes, .fixed_bytes, .integer => ty,
             .enum_ => |named| self.normalizeEnum(arena, named.name),
             .bitfield => |named| self.normalizeBitfield(arena, named.name),
             .named => |named| self.normalizeNamed(arena, named.name),

@@ -1,0 +1,133 @@
+struct AbiEncodeProfile {
+    id: u256,
+    name: string,
+}
+
+contract AbiEncodeDynamicCorpus {
+    pub fn string_len() -> u256 {
+        return comptime {
+            @abiEncode("hello").len;
+        };
+    }
+
+    pub fn string_head_offset() -> u256 {
+        return comptime {
+            @abiEncode("hello")[31];
+        };
+    }
+
+    pub fn string_payload_len() -> u256 {
+        return comptime {
+            @abiEncode("hello")[63];
+        };
+    }
+
+    pub fn string_first_byte() -> u256 {
+        return comptime {
+            @abiEncode("hello")[64];
+        };
+    }
+
+    pub fn bytes_aligned_len() -> u256 {
+        return comptime {
+            const payload: bytes = hex"000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+            @abiEncode(payload).len;
+        };
+    }
+
+    pub fn mixed_tuple_second_offset() -> u256 {
+        return comptime {
+            @abiEncode((@cast(u256, 1), "hello"))[63];
+        };
+    }
+
+    pub fn empty_dynamic_pair_len() -> u256 {
+        return comptime {
+            const payload: bytes = hex"";
+            @abiEncode(("", payload)).len;
+        };
+    }
+
+    pub fn dynamic_array_len() -> u256 {
+        return comptime {
+            const values = @cast(slice[u256], [1, 2, 3]);
+            @abiEncode(values).len;
+        };
+    }
+
+    pub fn dynamic_array_head_offset() -> u256 {
+        return comptime {
+            const values = @cast(slice[u256], [1, 2, 3]);
+            @abiEncode(values)[31];
+        };
+    }
+
+    pub fn dynamic_array_payload_len() -> u256 {
+        return comptime {
+            const values = @cast(slice[u256], [1, 2, 3]);
+            @abiEncode(values)[63];
+        };
+    }
+
+    pub fn dynamic_array_first_value() -> u256 {
+        return comptime {
+            const values = @cast(slice[u256], [1, 2, 3]);
+            @abiEncode(values)[95];
+        };
+    }
+
+    pub fn dynamic_address_array_second_tail_byte() -> u256 {
+        return comptime {
+            const values = @cast(slice[address], [0x0000000000000000000000000000000000000001, 0x1234567890abcdef1234567890abcdef12345678]);
+            @abiEncode(values)[127];
+        };
+    }
+
+    pub fn dynamic_string_array_len() -> u256 {
+        return comptime {
+            const values = @cast(slice[string], ["a", "bb"]);
+            @abiEncode(values).len;
+        };
+    }
+
+    pub fn dynamic_string_array_first_offset() -> u256 {
+        return comptime {
+            const values = @cast(slice[string], ["a", "bb"]);
+            @abiEncode(values)[95];
+        };
+    }
+
+    pub fn nested_dynamic_array_second_value() -> u256 {
+        return comptime {
+            const first = @cast(slice[u256], [1, 2]);
+            const second = @cast(slice[u256], [3]);
+            const values = @cast(slice[slice[u256]], [first, second]);
+            @abiEncode(values)[287];
+        };
+    }
+
+    pub fn nested_dynamic_string_arrays_len() -> u256 {
+        return comptime {
+            const first = @cast(slice[string], ["a", "bb"]);
+            const second = @cast(slice[string], []);
+            const values = @cast(slice[slice[string]], [first, second]);
+            @abiEncode(values).len;
+        };
+    }
+
+    pub fn dynamic_struct_len() -> u256 {
+        return comptime {
+            const value: AbiEncodeProfile = AbiEncodeProfile { id: 1, name: "hello" };
+            @abiEncode(value).len;
+        };
+    }
+
+    pub fn dynamic_struct_array_len() -> u256 {
+        return comptime {
+            const first: AbiEncodeProfile = AbiEncodeProfile { id: 1, name: "a" };
+            const second: AbiEncodeProfile = AbiEncodeProfile { id: 2, name: "bb" };
+            const values = @cast(slice[AbiEncodeProfile], [first, second]);
+            @abiEncode(values).len;
+        };
+    }
+}

@@ -128,6 +128,7 @@ pub fn fromType(allocator: std.mem.Allocator, ty: sema.Type) anyerror!LayoutNode
 
 fn fromTypeAtPath(allocator: std.mem.Allocator, ty: sema.Type, path: []const ValuePathSegment) anyerror!LayoutNode {
     return switch (ty) {
+        .void => .{ .tuple = .{ .path = try clonePath(allocator, path), .elements = try allocator.alloc(LayoutNode, 0) } },
         .bool => staticWordNode(allocator, path, .bool),
         .address => staticWordNode(allocator, path, .address),
         .string => .{ .dynamic_bytes = .{ .path = try clonePath(allocator, path), .kind = .string } },

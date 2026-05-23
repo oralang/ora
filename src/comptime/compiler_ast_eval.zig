@@ -9,6 +9,8 @@ const refinements = @import("../sema/refinements.zig");
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 const hir_abi = @import("../hir/abi.zig");
+const abi_layout_context = @import("../abi/layout_context.zig");
+const abi_comptime_encoder = @import("../abi/comptime_encoder.zig");
 const compile_options = @import("../compile_options.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
@@ -106,6 +108,7 @@ pub const TypeQuery = struct {
     context: *anyopaque,
     ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
     module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.TypeCheckResult,
+    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ItemIndexResult,
     const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ConstEvalResult,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
     lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
@@ -1563,6 +1566,23 @@ const ConstEvaluator = struct {
         return try type_query.module_typecheck(type_query.context, module_id);
     }
 
+    fn currentItemIndex(self: *ConstEvaluator) !?*const model.ItemIndexResult {
+        const module_id = self.module_id orelse return null;
+        const type_query = self.type_query orelse return null;
+        return try type_query.item_index(type_query.context, module_id);
+    }
+
+    fn currentLayoutContext(self: *ConstEvaluator) !?abi_layout_context.LayoutContext {
+        const typecheck = (try self.currentTypeCheckResult()) orelse (try self.currentModuleTypeCheckResult()) orelse return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
+        return .{
+            .allocator = self.allocator,
+            .file = self.file,
+            .item_index = item_index,
+            .typecheck = typecheck,
+        };
+    }
+
     fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const model.ConstEvalResult {
         const type_query = self.type_query orelse return null;
         return try type_query.const_eval(type_query.context, module_id);
@@ -2481,6 +2501,105 @@ const ConstEvaluator = struct {
         return true;
     }
 
+    fn evalAbiEncodeBuiltin(self: *ConstEvaluator, builtin: ast.BuiltinExpr) anyerror!?ConstValue {
+        if (builtin.args.len != 1) return null;
+        const arg_id = builtin.args[0];
+        if (self.isEmptyTupleLiteral(arg_id)) {
+            return .{ .fixed_bytes = try self.allocator.alloc(u8, 0) };
+        }
+        if (try self.evalAbiEncodeVoidCallArgument(arg_id)) {
+            return .{ .fixed_bytes = try self.allocator.alloc(u8, 0) };
+        }
+        const typecheck = (try self.currentTypeCheckResult()) orelse (try self.currentModuleTypeCheckResult()) orelse return null;
+        const arg_type = typecheck.exprType(arg_id);
+        const layout_context = (try self.currentLayoutContext()) orelse return null;
+        var layout = layout_context.layoutForType(arg_type) catch return null;
+        defer layout.deinit(self.allocator);
+        if (arg_type.kind() == .void or layout.staticWordCount() == 0) {
+            return .{ .fixed_bytes = try self.allocator.alloc(u8, 0) };
+        }
+
+        const value: abi_comptime_encoder.ComptimeAbiValue = if (try self.evalExprCtValue(arg_id)) |ct_value|
+            .{ .ct = ct_value }
+        else if (try self.evalExpr(arg_id)) |const_value|
+            .{ .constant = const_value }
+        else
+            return null;
+
+        return .{ .fixed_bytes = try abi_comptime_encoder.encodeComptimeValue(self.allocator, &self.env.heap, layout, value) };
+    }
+
+    fn evalAbiEncodeVoidCallArgument(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.evalAbiEncodeVoidCallArgument(group.expr),
+            .Call => |call| blk: {
+                const callable = self.lookupCallableFunction(call.callee) orelse break :blk false;
+                const function = callable.function;
+                if (function.return_type != null) break :blk false;
+
+                const arg_values = (try self.materializeCallArgumentCtValues(callable, call, false)) orelse break :blk true;
+                const previous_file = self.file;
+                const previous_module_id = self.module_id;
+                const previous_key = self.current_typecheck_key;
+                const previous_contract = self.current_contract;
+                self.file = callable.file;
+                self.module_id = callable.module_id;
+                self.current_typecheck_key = .{ .item = callable.item_id };
+                self.current_contract = callable.contract_id;
+                defer {
+                    self.file = previous_file;
+                    self.module_id = previous_module_id;
+                    self.current_typecheck_key = previous_key;
+                    self.current_contract = previous_contract;
+                }
+
+                try self.ensureTypeChecked(.{ .item = callable.item_id });
+                if (!(try self.callableFunctionIsPure(callable.item_id))) break :blk true;
+                if (self.functionStage(function) == .runtime_only) {
+                    self.recordCtError(error_mod.CtError.stageViolation(
+                        self.sourceSpan(call.range),
+                        function.name,
+                    ));
+                    break :blk true;
+                }
+                if (self.call_depth >= self.env.config.max_recursion_depth) {
+                    self.recordCtError(error_mod.CtError.init(
+                        .recursion_limit,
+                        self.sourceSpan(call.range),
+                        "comptime recursion depth exceeded",
+                    ));
+                    break :blk true;
+                }
+
+                self.env.pushScope(false) catch break :blk true;
+                defer self.env.popScope();
+                try self.bindCallArguments(function, arg_values);
+
+                self.call_depth += 1;
+                defer self.call_depth -= 1;
+
+                for (function.clauses) |clause| {
+                    if (clause.kind != .requires and clause.kind != .guard) continue;
+                    const condition = (try self.evalExprUncached(clause.expr)) orelse break :blk true;
+                    const truthy = self.constConditionTruthy(condition) orelse break :blk true;
+                    if (!truthy) break :blk true;
+                }
+
+                _ = try self.evalComptimeBodyControlCtValue(function.body, false);
+                break :blk true;
+            },
+            else => false,
+        };
+    }
+
+    fn isEmptyTupleLiteral(self: *ConstEvaluator, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Tuple => |tuple| tuple.elements.len == 0,
+            .Group => |group| self.isEmptyTupleLiteral(group.expr),
+            else => false,
+        };
+    }
+
     fn evalBuiltin(self: *ConstEvaluator, builtin: ast.BuiltinExpr) anyerror!?ConstValue {
         if (std.mem.eql(u8, builtin.name, "chainId")) {
             if (builtin.args.len != 0) return null;
@@ -2540,6 +2659,10 @@ const ConstEvaluator = struct {
             if (builtin.args.len != 1) return null;
             const event_ref = (try self.resolveAbiEventReference(builtin.args[0])) orelse return null;
             return .{ .fixed_bytes = try keccakFixedBytes(self.allocator, event_ref.signature) };
+        }
+
+        if (std.mem.eql(u8, builtin.name, "abiEncode")) {
+            return try self.evalAbiEncodeBuiltin(builtin);
         }
 
         if (std.mem.eql(u8, builtin.name, "eip712TypeHash")) {

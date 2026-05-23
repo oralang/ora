@@ -364,6 +364,7 @@ pub const CompilerDb = struct {
                 .context = self,
                 .ensure_typecheck = ensureTypeCheckedForComptime,
                 .module_typecheck = moduleTypeCheckForComptime,
+                .item_index = itemIndexForComptime,
                 .const_eval = constEvalForComptime,
                 .ast_file = astFileForComptime,
                 .lookup_item = lookupItemForComptime,
