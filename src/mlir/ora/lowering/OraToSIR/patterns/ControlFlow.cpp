@@ -3765,10 +3765,10 @@ namespace
 
         if (std::optional<uint64_t> staticCount = staticMemRefElementCount(ownerOp, node))
         {
-            // TODO(M5): @cast(slice[T], [..]) is currently a no-op in Ora
-            // MLIR, so the runtime value is still a fixed memref without a
-            // [len][data...] slice header. Cast lowering should eventually
-            // materialize a real runtime slice and remove this branch.
+            // Source casts from fixed arrays to slices materialize runtime
+            // slices before reaching the encoder. This path remains for
+            // static pointer-slot memrefs used by isolated layout/materializer
+            // tests and aggregate storage that is already fixed-size in IR.
             return DynamicArraySource{
                 source,
                 constU256(rewriter, loc, *staticCount),
