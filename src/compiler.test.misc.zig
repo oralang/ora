@@ -2539,6 +2539,12 @@ test "ora dialect exposes external call ops through C API" {
         mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("uint256")),
     };
     const arg_types_attr = mlir.oraArrayAttrCreate(ctx, arg_type_attrs.len, &arg_type_attrs);
+    const layout_attr = mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("tuple(static(address),static(uint256))"));
+    const encode_attrs = [_]mlir.MlirNamedAttribute{
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("selector")), selector_attr),
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("arg_types")), arg_types_attr),
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("layout")), layout_attr),
+    };
     const return_type_attrs = [_]mlir.MlirAttribute{
         mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("bool")),
     };
@@ -2560,7 +2566,20 @@ test "ora dialect exposes external call ops through C API" {
     const amount = mlir.oraOperationGetResult(amount_const, 0);
 
     const encode_operands = [_]mlir.MlirValue{ target, amount };
-    const encode_op = mlir.oraAbiEncodeOpCreate(ctx, loc, selector_attr, arg_types_attr, &encode_operands, encode_operands.len, i256_ty);
+    const encode_result_types = [_]mlir.MlirType{i256_ty};
+    const encode_op = mlir.oraOperationCreate(
+        ctx,
+        loc,
+        mlir.oraStringRefCreateFromCString("ora.abi_encode_with_selector"),
+        &encode_operands,
+        encode_operands.len,
+        &encode_result_types,
+        encode_result_types.len,
+        &encode_attrs,
+        encode_attrs.len,
+        0,
+        false,
+    );
     mlir.oraBlockAppendOwnedOperation(body, encode_op);
 
     const calldata = mlir.oraOperationGetResult(encode_op, 0);
@@ -2586,7 +2605,7 @@ test "ora dialect exposes external call ops through C API" {
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode_with_selector"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));

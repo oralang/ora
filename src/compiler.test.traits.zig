@@ -433,7 +433,8 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode_with_selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "layout"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.external_call"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_decode"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"staticcall\""));
@@ -508,14 +509,130 @@ test "compiler lowers extern trait calls with aggregate and enum parameters to A
         \\}
     ;
 
-    const hir_text = try renderHirTextForSource(source_text);
-    defer testing.allocator.free(hir_text);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode"));
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const hir_text = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_encode_with_selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "layout"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"(address,uint256)\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"uint8\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"(uint256,bool)\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.external_call"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const sir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (sir_text_ref.data != null) mlir.oraStringRefFree(sir_text_ref);
+    const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, sir_text, 1, "sir.staticcall"));
+    try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.abi_encode_with_selector"));
+    try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.external_call"));
+}
+
+test "compiler runtime ABI layout parser accepts serialized static shapes" {
+    const cases = [_]struct {
+        source: []const u8,
+        layout: []const u8,
+    }{
+        .{
+            .source =
+            \\extern trait Sink {
+            \\    staticcall fn submit(self, a: u8, b: i128, c: bool, d: address, e: bytes4) -> bool;
+            \\}
+            \\
+            \\error ExternalCallFailed;
+            \\
+            \\contract Vault {
+            \\    storage var target: address;
+            \\
+            \\    pub fn probe(a: u8, b: i128, c: bool, d: address, e: bytes4) -> !bool | ExternalCallFailed {
+            \\        return external<Sink>(target, gas: 50000).submit(a, b, c, d, e);
+            \\    }
+            \\}
+            ,
+            .layout = "tuple(static(uint8),static(int128),static(bool),static(address),static(bytes4))",
+        },
+        .{
+            .source =
+            \\extern trait Sink {
+            \\    staticcall fn submit(self, values: [u256; 2]) -> bool;
+            \\}
+            \\
+            \\error ExternalCallFailed;
+            \\
+            \\contract Vault {
+            \\    storage var target: address;
+            \\
+            \\    pub fn probe(values: [u256; 2]) -> !bool | ExternalCallFailed {
+            \\        return external<Sink>(target, gas: 50000).submit(values);
+            \\    }
+            \\}
+            ,
+            .layout = "tuple(array(2,static(uint256)))",
+        },
+        .{
+            .source =
+            \\extern trait Sink {
+            \\    staticcall fn submit(self, quote: (u256, bool)) -> bool;
+            \\}
+            \\
+            \\error ExternalCallFailed;
+            \\
+            \\contract Vault {
+            \\    storage var target: address;
+            \\
+            \\    pub fn probe(amount: u256, flag: bool) -> !bool | ExternalCallFailed {
+            \\        return external<Sink>(target, gas: 50000).submit((amount, flag));
+            \\    }
+            \\}
+            ,
+            .layout = "tuple(tuple(static(uint256),static(bool)))",
+        },
+        .{
+            .source =
+            \\extern trait Sink {
+            \\    staticcall fn ping(self) -> bool;
+            \\}
+            \\
+            \\error ExternalCallFailed;
+            \\
+            \\contract Vault {
+            \\    storage var target: address;
+            \\
+            \\    pub fn probe() -> !bool | ExternalCallFailed {
+            \\        return external<Sink>(target, gas: 50000).ping();
+            \\    }
+            \\}
+            ,
+            .layout = "tuple()",
+        },
+    };
+
+    for (cases) |case| {
+        var compilation = try compileText(case.source);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+        defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+        const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+
+        try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, case.layout));
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+        const sir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+        defer if (sir_text_ref.data != null) mlir.oraStringRefFree(sir_text_ref);
+        const sir_text = sir_text_ref.data[0..sir_text_ref.length];
+        try testing.expect(std.mem.containsAtLeast(u8, sir_text, 1, "sir.staticcall"));
+        try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.abi_encode_with_selector"));
+        try testing.expect(!std.mem.containsAtLeast(u8, sir_text, 1, "ora.external_call"));
+    }
 }
 
 test "compiler lowers zero-payload extern trait errors clauses into selector matching" {

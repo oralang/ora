@@ -108,6 +108,7 @@ pub fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
         "ora.tuple_create",
         "ora.tuple_extract",
         "ora.abi_encode",
+        "ora.abi_encode_with_selector",
         "ora.external_call",
         "ora.abi_decode",
         "ora.assert",

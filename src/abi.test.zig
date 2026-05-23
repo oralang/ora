@@ -10,6 +10,7 @@ const abi_layout = ora_root.abi_layout;
 const abi_layout_context = ora_root.abi_layout_context;
 const compiler = ora_root.compiler;
 const hir_module_lowering = compiler.hir.abi_layout_test_support;
+const mlir = @import("mlir_c_api").c;
 
 const AbiFixture = struct {
     compilation: compiler.driver.Compilation,
@@ -31,6 +32,127 @@ fn generateAbiForSource(allocator: std.mem.Allocator, source: []const u8) !AbiFi
     };
 }
 
+fn createOraMlirContext() mlir.MlirContext {
+    const ctx = mlir.oraContextCreate();
+    const registry = mlir.oraDialectRegistryCreate();
+    mlir.oraRegisterAllDialects(registry);
+    mlir.oraContextAppendDialectRegistry(ctx, registry);
+    mlir.oraDialectRegistryDestroy(registry);
+    mlir.oraContextLoadAllAvailableDialects(ctx);
+    _ = mlir.oraDialectRegister(ctx);
+    return ctx;
+}
+
+fn parseOraModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
+    const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
+    if (mlir.oraModuleIsNull(module)) return error.TestUnexpectedResult;
+    return module;
+}
+
+fn renderSirTextForModule(ctx: mlir.MlirContext, module: mlir.MlirModule) ![]u8 {
+    const sir_text_ref = mlir.oraEmitSIRText(ctx, module);
+    defer if (sir_text_ref.data != null) mlir.oraStringRefFree(sir_text_ref);
+    if (sir_text_ref.data == null) return error.TestUnexpectedResult;
+    return try testing.allocator.dupe(u8, sir_text_ref.data[0..sir_text_ref.length]);
+}
+
+fn serializeAbiLayoutForType(ty: compiler.sema.Type) ![]const u8 {
+    const layout = try abi_layout.fromType(testing.allocator, ty);
+    defer layout.deinit(testing.allocator);
+    return abi_layout.serializeForMlirAttr(testing.allocator, layout);
+}
+
+const ExpectedSirNeedleCount = struct {
+    needle: []const u8,
+    count: usize,
+};
+
+fn expectSerializedAbiLayoutParsesToStaticSir(
+    ty: compiler.sema.Type,
+    expected_layout: []const u8,
+    args: []const u8,
+    operands: []const u8,
+    operand_types: []const u8,
+    expected_store_count: usize,
+    expected_needles: []const ExpectedSirNeedleCount,
+) !void {
+    const layout = try serializeAbiLayoutForType(ty);
+    defer testing.allocator.free(layout);
+    try testing.expectEqualStrings(expected_layout, layout);
+
+    const text = try std.fmt.allocPrint(testing.allocator,
+        \\module {{
+        \\  ora.contract @C {{
+        \\    func.func @encode({s}) {{
+        \\      %encoded = "ora.abi_encode"({s}) {{layout = "{s}"}} : ({s}) -> !ora.int<256, false>
+        \\      ora.return
+        \\    }}
+        \\  }}
+        \\}}
+    , .{ args, operands, layout, operand_types });
+    defer testing.allocator.free(text);
+
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const rendered = try renderSirTextForModule(ctx, module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+    try testing.expectEqual(expected_store_count, std.mem.count(u8, rendered, "mstore256"));
+    for (expected_needles) |expected| {
+        try testing.expectEqual(expected.count, std.mem.count(u8, rendered, expected.needle));
+    }
+}
+
+fn expectSerializedAbiLayoutParsesToDynamicSir(
+    ty: compiler.sema.Type,
+    expected_layout: []const u8,
+    args: []const u8,
+    operands: []const u8,
+    operand_types: []const u8,
+    expected_needles: []const []const u8,
+) !void {
+    const layout = try serializeAbiLayoutForType(ty);
+    defer testing.allocator.free(layout);
+    try testing.expectEqualStrings(expected_layout, layout);
+
+    const text = try std.fmt.allocPrint(testing.allocator,
+        \\module {{
+        \\  ora.contract @C {{
+        \\    func.func @encode({s}) {{
+        \\      %encoded = "ora.abi_encode"({s}) {{layout = "{s}"}} : ({s}) -> !ora.int<256, false>
+        \\      ora.return
+        \\    }}
+        \\  }}
+        \\}}
+    , .{ args, operands, layout, operand_types });
+    defer testing.allocator.free(text);
+
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const rendered = try renderSirTextForModule(ctx, module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+    for (expected_needles) |needle| {
+        try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, needle));
+    }
+}
+
 fn findCallable(contract_abi: *const abi.ContractAbi, kind: abi.CallableKind, name: []const u8) ?*const abi.AbiCallable {
     for (contract_abi.callables) |*callable| {
         if (callable.kind == kind and std.mem.eql(u8, callable.name, name)) {
@@ -38,6 +160,137 @@ fn findCallable(contract_abi: *const abi.ContractAbi, kind: abi.CallableKind, na
         }
     }
     return null;
+}
+
+test "abi layout serializer is consumed by OraToSIR parser with matching static decisions" {
+    const u256_ty: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u8_ty: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const i16_ty: compiler.sema.Type = .{ .integer = .{ .bits = 16, .signed = true, .spelling = "i16" } };
+    const bytes4_ty: compiler.sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+
+    const flat_types = [_]compiler.sema.Type{ u8_ty, i16_ty, .bool, .address, bytes4_ty };
+    const flat_ty: compiler.sema.Type = .{ .tuple = flat_types[0..] };
+    try expectSerializedAbiLayoutParsesToStaticSir(
+        flat_ty,
+        "tuple(static(uint8),static(int16),static(bool),static(address),static(bytes4))",
+        "%a0: !ora.int<256, false>, %a1: !ora.int<256, false>, %a2: !ora.int<256, false>, %a3: !ora.int<256, false>, %a4: !ora.int<256, false>",
+        "%a0, %a1, %a2, %a3, %a4",
+        "!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>",
+        5,
+        &.{
+            .{ .needle = "signextend", .count = 1 },
+            .{ .needle = "shl", .count = 1 },
+            .{ .needle = "and", .count = 4 },
+        },
+    );
+
+    const array_element_ty = u256_ty;
+    const fixed_array_ty: compiler.sema.Type = .{ .array = .{ .element_type = &array_element_ty, .len = 2 } };
+    const array_param_types = [_]compiler.sema.Type{fixed_array_ty};
+    const array_param_list_ty: compiler.sema.Type = .{ .tuple = array_param_types[0..] };
+    try expectSerializedAbiLayoutParsesToStaticSir(
+        array_param_list_ty,
+        "tuple(array(2,static(uint256)))",
+        "%values: memref<2xi256>",
+        "%values",
+        "memref<2xi256>",
+        2,
+        &.{.{ .needle = "mload256", .count = 2 }},
+    );
+
+    const empty_ty: compiler.sema.Type = .{ .tuple = &.{} };
+    try expectSerializedAbiLayoutParsesToStaticSir(
+        empty_ty,
+        "tuple()",
+        "",
+        "",
+        "",
+        0,
+        &.{},
+    );
+}
+
+test "abi layout serializer is consumed by OraToSIR parser for dynamic array layouts" {
+    const u256_ty: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const bool_ty: compiler.sema.Type = .bool;
+    const bytes_ty: compiler.sema.Type = .bytes;
+    const string_ty: compiler.sema.Type = .string;
+
+    // Dynamic-element array layouts are fed through static pointer-slot
+    // memrefs here so this isolated test stays focused on parser and
+    // materializer support. End-to-end runtime-count behavior is covered by
+    // the cross-layer ABI parity tests.
+    const string_slice_ty: compiler.sema.Type = .{ .slice = .{ .element_type = &string_ty } };
+    const string_slice_params = [_]compiler.sema.Type{string_slice_ty};
+    const string_slice_param_list_ty: compiler.sema.Type = .{ .tuple = string_slice_params[0..] };
+    try expectSerializedAbiLayoutParsesToDynamicSir(
+        string_slice_param_list_ty,
+        "tuple(array(dynamic,dynamic(string)))",
+        "%values: memref<2xi256>",
+        "%values",
+        "memref<2xi256>",
+        &.{ "mload256", "mcopy" },
+    );
+
+    const u256_slice_ty: compiler.sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const nested_u256_slice_ty: compiler.sema.Type = .{ .slice = .{ .element_type = &u256_slice_ty } };
+    const nested_u256_slice_params = [_]compiler.sema.Type{nested_u256_slice_ty};
+    const nested_u256_slice_param_list_ty: compiler.sema.Type = .{ .tuple = nested_u256_slice_params[0..] };
+    try expectSerializedAbiLayoutParsesToDynamicSir(
+        nested_u256_slice_param_list_ty,
+        "tuple(array(dynamic,array(dynamic,static(uint256))))",
+        "%values: memref<2xi256>",
+        "%values",
+        "memref<2xi256>",
+        &.{ "mload256", "mstore256" },
+    );
+
+    const tuple_elems = [_]compiler.sema.Type{ u256_ty, string_ty };
+    const dynamic_tuple_ty: compiler.sema.Type = .{ .tuple = tuple_elems[0..] };
+    const dynamic_tuple_slice_ty: compiler.sema.Type = .{ .slice = .{ .element_type = &dynamic_tuple_ty } };
+    const dynamic_tuple_slice_params = [_]compiler.sema.Type{dynamic_tuple_slice_ty};
+    const dynamic_tuple_slice_param_list_ty: compiler.sema.Type = .{ .tuple = dynamic_tuple_slice_params[0..] };
+    try expectSerializedAbiLayoutParsesToDynamicSir(
+        dynamic_tuple_slice_param_list_ty,
+        "tuple(array(dynamic,tuple(static(uint256),dynamic(string))))",
+        "%values: memref<2xi256>",
+        "%values",
+        "memref<2xi256>",
+        &.{ "mload256", "mcopy" },
+    );
+
+    const struct_fields = [_]compiler.sema.AnonymousStructField{
+        .{ .name = "id", .ty = u256_ty },
+        .{ .name = "name", .ty = string_ty },
+    };
+    const dynamic_struct_ty: compiler.sema.Type = .{ .anonymous_struct = .{ .fields = struct_fields[0..] } };
+    const dynamic_struct_params = [_]compiler.sema.Type{dynamic_struct_ty};
+    const dynamic_struct_param_list_ty: compiler.sema.Type = .{ .tuple = dynamic_struct_params[0..] };
+    try expectSerializedAbiLayoutParsesToDynamicSir(
+        dynamic_struct_param_list_ty,
+        "tuple(tuple(static(uint256),dynamic(string)))",
+        "%value: i256",
+        "%value",
+        "i256",
+        &.{ "mload256", "mcopy" },
+    );
+
+    const inner_tuple_elems = [_]compiler.sema.Type{ string_ty, u256_ty };
+    const inner_tuple_ty: compiler.sema.Type = .{ .tuple = inner_tuple_elems[0..] };
+    const middle_tuple_elems = [_]compiler.sema.Type{ inner_tuple_ty, bytes_ty };
+    const middle_tuple_ty: compiler.sema.Type = .{ .tuple = middle_tuple_elems[0..] };
+    const deep_tuple_elems = [_]compiler.sema.Type{ middle_tuple_ty, bool_ty };
+    const deep_tuple_ty: compiler.sema.Type = .{ .tuple = deep_tuple_elems[0..] };
+    const deep_tuple_params = [_]compiler.sema.Type{deep_tuple_ty};
+    const deep_tuple_param_list_ty: compiler.sema.Type = .{ .tuple = deep_tuple_params[0..] };
+    try expectSerializedAbiLayoutParsesToDynamicSir(
+        deep_tuple_param_list_ty,
+        "tuple(tuple(tuple(tuple(dynamic(string),static(uint256)),dynamic(bytes)),static(bool)))",
+        "%value: i256",
+        "%value",
+        "i256",
+        &.{ "mload256", "mcopy" },
+    );
 }
 
 const FunctionRef = struct {

@@ -774,6 +774,69 @@ test "OraToSIR rejects missing strict storage slot metadata" {
     try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
 }
 
+test "OraToSIR rejects malformed ABI layout attributes" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const malformed_layouts = [_][]const u8{
+        "",
+        "static(weird)",
+        "tuple(",
+        "tuple(static(uint256)",
+        "tuple(static(uint256))extra",
+        "array(abc,static(uint256))",
+        "array(dynamic,dynamic(weird))",
+    };
+
+    for (malformed_layouts) |layout| {
+        const text = try std.fmt.allocPrint(testing.allocator,
+            \\module {{
+            \\  ora.contract @C {{
+            \\    func.func @encode(%value: !ora.int<256, false>) {{
+            \\      %encoded = "ora.abi_encode"(%value) {{layout = "{s}"}} : (!ora.int<256, false>) -> !ora.int<256, false>
+            \\      ora.return
+            \\    }}
+            \\  }}
+            \\}}
+        , .{layout});
+        defer testing.allocator.free(text);
+
+        const module = try parseOraModule(ctx, text);
+        defer mlir.oraModuleDestroy(module);
+
+        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+        try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+    }
+}
+
+test "OraToSIR accepts bare single-value ABI layout attributes" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @encode(%value: !ora.int<256, false>) {
+        \\      %encoded = "ora.abi_encode"(%value) {layout = "static(uint256)"} : (!ora.int<256, false>) -> !ora.int<256, false>
+        \\      ora.return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.malloc"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+}
+
 test "compiler storage layout manifest matches SIR slot usage" {
     const source_text =
         \\contract LayoutProbe {
