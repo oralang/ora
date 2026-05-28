@@ -8,6 +8,7 @@ const ora_root = @import("ora_root");
 const abi = ora_root.abi;
 const abi_layout = ora_root.abi_layout;
 const abi_layout_context = ora_root.abi_layout_context;
+const abi_comptime_decoder = ora_root.abi_comptime_decoder;
 const compiler = ora_root.compiler;
 const hir_module_lowering = compiler.hir.abi_layout_test_support;
 const mlir = @import("mlir_c_api").c;
@@ -66,6 +67,91 @@ const ExpectedSirNeedleCount = struct {
     needle: []const u8,
     count: usize,
 };
+
+var noop_resolver_context: u8 = 0;
+
+fn noopTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
+    return null;
+}
+
+fn noopStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+    return null;
+}
+
+fn noopEnumVariantCount(_: *anyopaque, _: []const u8) ?usize {
+    return null;
+}
+
+fn noopAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
+    return .{
+        .context = &noop_resolver_context,
+        .typeIdForType = noopTypeIdForType,
+        .structFields = noopStructFields,
+        .enumVariantCount = noopEnumVariantCount,
+    };
+}
+
+test "abi decode error ordinals are stable for runtime C++ mapping" {
+    const DecodeError = abi_comptime_decoder.DecodeError;
+
+    try testing.expectEqual(@as(u32, 0), @intFromEnum(DecodeError.truncated_buffer));
+    try testing.expectEqual(@as(u32, 1), @intFromEnum(DecodeError.oversize_buffer));
+    try testing.expectEqual(@as(u32, 2), @intFromEnum(DecodeError.buffer_size_exceeded));
+    try testing.expectEqual(@as(u32, 3), @intFromEnum(DecodeError.non_canonical_padding));
+    try testing.expectEqual(@as(u32, 4), @intFromEnum(DecodeError.invalid_bool_value));
+    try testing.expectEqual(@as(u32, 5), @intFromEnum(DecodeError.invalid_address));
+    try testing.expectEqual(@as(u32, 6), @intFromEnum(DecodeError.invalid_fixed_bytes));
+    try testing.expectEqual(@as(u32, 7), @intFromEnum(DecodeError.enum_out_of_range));
+    try testing.expectEqual(@as(u32, 8), @intFromEnum(DecodeError.depth_limit_exceeded));
+    try testing.expectEqual(@as(u32, 9), @intFromEnum(DecodeError.array_length_exceeded));
+    try testing.expectEqual(@as(u32, 10), @intFromEnum(DecodeError.refinement_violation));
+    try testing.expectEqual(@as(u32, 11), @intFromEnum(DecodeError.non_canonical_encoding));
+    try testing.expectEqual(@as(u32, 12), @intFromEnum(DecodeError.invalid_offset));
+    try testing.expectEqual(@as(u32, 13), @intFromEnum(DecodeError.length_overflow));
+    try testing.expectEqual(@as(u32, 14), @intFromEnum(DecodeError.string_length_exceeded));
+}
+
+test "abi comptime decoder prioritizes decode errors over oversize" {
+    var heap = ora_root.comptime_eval.CtHeap.init(testing.allocator);
+    defer heap.deinit();
+
+    const bool_layout: abi_layout.LayoutNode = .{ .static_word = .{
+        .path = .{},
+        .encoding = .bool,
+    } };
+    const target_type: compiler.sema.Type = .{ .bool = {} };
+    const resolver = noopAbiDecodeResolver();
+
+    const invalid_bool_plus_extra =
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    const invalid = try abi_comptime_decoder.decodeComptimeValue(
+        testing.allocator,
+        &heap,
+        resolver,
+        bool_layout,
+        target_type,
+        invalid_bool_plus_extra,
+    );
+    try testing.expectEqual(abi_comptime_decoder.DecodeError.invalid_bool_value, invalid.err);
+
+    const valid_bool_plus_extra =
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" ++
+        "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    const oversize = try abi_comptime_decoder.decodeComptimeValue(
+        testing.allocator,
+        &heap,
+        resolver,
+        bool_layout,
+        target_type,
+        valid_bool_plus_extra,
+    );
+    try testing.expectEqual(abi_comptime_decoder.DecodeError.oversize_buffer, oversize.err);
+}
 
 fn expectSerializedAbiLayoutParsesToStaticSir(
     ty: compiler.sema.Type,

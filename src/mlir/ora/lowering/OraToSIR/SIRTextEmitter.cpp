@@ -534,17 +534,11 @@ namespace
             std::string t = names.allocateName("sel_t");
             std::string inv = names.allocateName("sel_inv");
             std::string f = names.allocateName("sel_f");
-            // Reuse existing zero const or emit one.
-            std::string zero;
-            std::string zeroKey = formatConstKey(APInt(256, 0));
-            auto zIt = names.constNames.find(zeroKey);
-            if (zIt != names.constNames.end())
-                zero = names.nameFor(zIt->second);
-            else
-            {
-                zero = names.allocateName("sel_zero");
-                os << zero << " = const 0x0\n" << ind;
-            }
+            // Select expansion may be emitted inside CFG blocks. Emit a local
+            // zero so the generated text never references a const from a
+            // sibling block that does not dominate this select.
+            std::string zero = names.allocateName("sel_zero");
+            os << zero << " = const 0x0\n" << ind;
             // mask = 0 - cond  (0→0, 1→0xFF..FF)
             os << mask << " = sub " << zero << " " << condN << "\n" << ind;
             os << t << " = and " << mask << " " << trueN << "\n" << ind;

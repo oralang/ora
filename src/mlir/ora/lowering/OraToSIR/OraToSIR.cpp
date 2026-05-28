@@ -1898,7 +1898,7 @@ public:
                             Value tag = asU256(castOp.getOperand(0));
                             Value payload = asU256(castOp.getOperand(1));
                             Value one = b.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
-                            Value shifted = b.create<sir::ShlOp>(loc, u256Ty, payload, one);
+                            Value shifted = b.create<sir::ShlOp>(loc, u256Ty, one, payload);
                             Value packed = b.create<sir::OrOp>(loc, u256Ty, shifted, tag);
                             castOp.getResult(0).replaceAllUsesWith(packed);
                             b.eraseOp(castOp);

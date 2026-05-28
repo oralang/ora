@@ -82,6 +82,43 @@ fn expectOrderedNeedles(haystack: []const u8, needles: []const []const u8) !void
     }
 }
 
+// Runtime abiDecode structural helpers pin the guard shape for each decoded
+// category: static head-only values, dynamic byte-padded values (string/bytes
+// and the current mixed tuple), and dynamic word-only arrays such as slice[u256].
+fn expectStaticAbiDecodeGuardBeforePayloadLoad(fn_text: []const u8) !void {
+    const branch_index = std.mem.indexOf(u8, fn_text, " ? @") orelse return error.TestUnexpectedResult;
+    const before_guard = fn_text[0..branch_index];
+    const after_guard = fn_text[branch_index..];
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, before_guard, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, after_guard, 1, "mload256"));
+}
+
+fn expectDynamicAbiDecodeGuardChain(fn_text: []const u8) !void {
+    const branch_index = std.mem.indexOf(u8, fn_text, " ? @") orelse return error.TestUnexpectedResult;
+    const before_guard = fn_text[0..branch_index];
+    const after_guard = fn_text[branch_index..];
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, before_guard, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, after_guard, 2, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, after_guard, 1, "mload8"));
+}
+
+fn expectDynamicAbiDecodeWordGuardChain(fn_text: []const u8) !void {
+    const branch_index = std.mem.indexOf(u8, fn_text, " ? @") orelse return error.TestUnexpectedResult;
+    const before_guard = fn_text[0..branch_index];
+    const after_guard = fn_text[branch_index..];
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, before_guard, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, after_guard, 2, "mload256"));
+}
+
+fn expectMixedDynamicTupleCarrierShape(fn_text: []const u8) !void {
+    const first_malloc = std.mem.indexOf(u8, fn_text, "malloc") orelse return error.TestUnexpectedResult;
+    const after_malloc = fn_text[first_malloc..];
+    // The dedicated mixed dynamic tuple branch allocates a 2-slot tuple carrier,
+    // stores the static u256, then stores the string/bytes tail pointer.
+    try expectOrderedNeedles(after_malloc, &.{ "malloc", "mstore256", "const 0x20", "add", "mstore256" });
+    try testing.expect(std.mem.containsAtLeast(u8, fn_text, 2, "malloc"));
+}
+
 test "compiler lowers runtime keccak256 through OraToSIR" {
     const source_text =
         \\pub fn hash(data: bytes) -> u256 {
@@ -160,6 +197,1092 @@ test "compiler lowers Err discard patterns through OraToSIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "c2 = const 0x2"));
+}
+
+test "compiler converts runtime abiDecode scalar memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_scalar(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(u256, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_scalar");
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_scalar:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bool memory result with canonical validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_bool(payload: bytes) -> bool {
+        \\        let decoded = @abiDecode(bool, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => false,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_bool:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "or"));
+    const decode_fn = try functionSlice(rendered, "decode_bool");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bool oversize priority through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_bool_priority() -> u256 {
+        \\        let decoded = @abiDecode(bool, hex"00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000");
+        \\        return match (decoded) {
+        \\            Ok(_) => 99,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_bool_priority");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    // The oversize branch must be gated by the decoded Result tag so an earlier
+    // decode error (invalid bool here) is not overwritten by oversize_buffer.
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "iszero"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "0x4"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "0x1"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode u8 memory result with canonical padding validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_u8(payload: bytes) -> u8 {
+        \\        let decoded = @abiDecode(u8, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_u8:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    const decode_fn = try functionSlice(rendered, "decode_u8");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode address memory result with canonical prefix validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_address(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(address, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_address:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    const decode_fn = try functionSlice(rendered, "decode_address");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bounds refinements with refinement validation" {
+    const source_text =
+        \\type PositiveAmount = MinValue<u256, 1>;
+        \\type SmallAmount = MaxValue<u256, 10>;
+        \\type RangedAmount = InRange<u256, 2, 8>;
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\type SignedFloor = MinValue<i8, -5>;
+        \\type SignedNonNegative = MinValue<i8, 0>;
+        \\type NestedAmount = MinValue<MaxValue<u256, 10>, 1>;
+        \\contract Decode {
+        \\    pub fn decode_positive(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(PositiveAmount, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_small(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(SmallAmount, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_range(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(RangedAmount, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_positive_u8(payload: bytes) -> u8 {
+        \\        let decoded = @abiDecode(PositiveByte, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_signed_i8(payload: bytes) -> i8 {
+        \\        let decoded = @abiDecode(SignedFloor, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_signed_i8_zero(payload: bytes) -> i8 {
+        \\        let decoded = @abiDecode(SignedNonNegative, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn decode_nested(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(NestedAmount, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_positive");
+
+    // Full-word u256 canonical decode emits no lt/gt comparison. Refined
+    // targets now also get static length checks, so counts below distinguish
+    // refinement comparisons from the length-check comparisons.
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+
+    const max_decode_fn = try functionSlice(rendered, "decode_small");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(max_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, max_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, max_decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, max_decode_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, max_decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, max_decode_fn, 1, "bitcast"));
+
+    const range_decode_fn = try functionSlice(rendered, "decode_range");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(range_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, range_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, range_decode_fn, 2, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, range_decode_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, range_decode_fn, 1, "and"));
+    try testing.expect(!std.mem.containsAtLeast(u8, range_decode_fn, 1, "bitcast"));
+
+    const positive_u8_decode_fn = try functionSlice(rendered, "decode_positive_u8");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(positive_u8_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 2, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, positive_u8_decode_fn, 1, "bitcast"));
+
+    const signed_i8_decode_fn = try functionSlice(rendered, "decode_signed_i8");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(signed_i8_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, signed_i8_decode_fn, 1, "bitcast"));
+
+    const signed_i8_zero_decode_fn = try functionSlice(rendered, "decode_signed_i8_zero");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(signed_i8_zero_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, signed_i8_zero_decode_fn, 1, "bitcast"));
+
+    const nested_decode_fn = try functionSlice(rendered, "decode_nested");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(nested_decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, nested_decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, nested_decode_fn, 2, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, nested_decode_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, nested_decode_fn, 1, "and"));
+    try testing.expect(!std.mem.containsAtLeast(u8, nested_decode_fn, 1, "bitcast"));
+}
+
+test "compiler converts runtime abiDecode NonZeroAddress memory result with refinement validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_owner(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(NonZeroAddress, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_owner");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "iszero"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode i8 memory result with canonical sign extension" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_i8(payload: bytes) -> i8 {
+        \\        let decoded = @abiDecode(i8, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_i8:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    const decode_fn = try functionSlice(rendered, "decode_i8");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode i256 memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_i256(payload: bytes) -> i256 {
+        \\        let decoded = @abiDecode(i256, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_i256");
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_i256:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "signextend"));
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode fixed bytes memory result with canonical padding validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_bytes4(payload: bytes) -> bytes4 {
+        \\        let decoded = @abiDecode(bytes4, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => hex"00000000",
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_bytes4:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "eq"));
+    const decode_fn = try functionSlice(rendered, "decode_bytes4");
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bytes1 memory result with canonical padding validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_bytes1(payload: bytes) -> bytes1 {
+        \\        let decoded = @abiDecode(bytes1, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => hex"00",
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_bytes1");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bytes32 memory result without padding validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_bytes32(payload: bytes) -> bytes32 {
+        \\        let decoded = @abiDecode(bytes32, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => hex"0000000000000000000000000000000000000000000000000000000000000000",
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_bytes32");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "shr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode enum memory result with range validation" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\contract Decode {
+        \\    pub fn decode_status(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(Status, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_status");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode bitfield memory result with declared width validation" {
+    const source_text =
+        \\bitfield Flags: u8 {
+        \\    enabled: bool @0;
+        \\    mode: u7 @1;
+        \\}
+        \\contract Decode {
+        \\    pub fn decode_flags(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(Flags, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_flags");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode void memory result with empty bytes validation" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_void(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(void, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_void");
+
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode dynamic string and bytes memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_string(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_bytes(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(bytes, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_values(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(values) => values[0] + values[1],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_addresses(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                if (values[0] == 0x0000000000000000000000000000000000000001) {
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_bools(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                if (values[0]) {
+        \\                    if (values[1]) {
+        \\                        return 2;
+        \\                    }
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_tags(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        match (decoded) {
+        \\            Ok(tags) => {
+        \\                const expected: bytes4 = hex"aabbccdd";
+        \\                if (tags[0] == expected) {
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_tag_one(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[bytes1], payload);
+        \\        match (decoded) {
+        \\            Ok(tags) => {
+        \\                const expected: bytes1 = hex"aa";
+        \\                if (tags[0] == expected) {
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_tag_full(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode(slice[bytes32], payload);
+        \\        match (decoded) {
+        \\            Ok(tags) => {
+        \\                const expected: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                if (tags[0] == expected) {
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_pair_text(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_pair_bytes(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_pair_values(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0] + value.1[1],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_pair_addresses(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                if (value.1[0] == 0x0000000000000000000000000000000000000001) {
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_pair_bools(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                if (value.1[0]) {
+        \\                    if (value.1[1]) {
+        \\                        return value.0 + 2;
+        \\                    }
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_pair_tags(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const expected: bytes4 = hex"aabbccdd";
+        \\                if (value.1[0] == expected) {
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_pair_tag_one(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[bytes1]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const expected: bytes1 = hex"aa";
+        \\                if (value.1[0] == expected) {
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn decode_pair_tag_full(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, slice[bytes32]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const expected: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                if (value.1[0] == expected) {
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const string_fn = try functionSlice(rendered, "decode_string");
+    const bytes_fn = try functionSlice(rendered, "decode_bytes");
+    const values_fn = try functionSlice(rendered, "decode_values");
+    const addresses_fn = try functionSlice(rendered, "decode_addresses");
+    const bools_fn = try functionSlice(rendered, "decode_bools");
+    const tags_fn = try functionSlice(rendered, "decode_tags");
+    const tag_one_fn = try functionSlice(rendered, "decode_tag_one");
+    const tag_full_fn = try functionSlice(rendered, "decode_tag_full");
+    const pair_text_fn = try functionSlice(rendered, "decode_pair_text");
+    const pair_bytes_fn = try functionSlice(rendered, "decode_pair_bytes");
+    const pair_values_fn = try functionSlice(rendered, "decode_pair_values");
+    const pair_addresses_fn = try functionSlice(rendered, "decode_pair_addresses");
+    const pair_bools_fn = try functionSlice(rendered, "decode_pair_bools");
+    const pair_tags_fn = try functionSlice(rendered, "decode_pair_tags");
+    const pair_tag_one_fn = try functionSlice(rendered, "decode_pair_tag_one");
+    const pair_tag_full_fn = try functionSlice(rendered, "decode_pair_tag_full");
+
+    for ([_][]const u8{ string_fn, bytes_fn }) |decode_fn| {
+        try expectDynamicAbiDecodeGuardChain(decode_fn);
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "mload256"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mload8"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "div"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "mul"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sub"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 3, "lt"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "gt"));
+        try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    }
+    try expectDynamicAbiDecodeWordGuardChain(values_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, values_fn, 2, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, values_fn, 1, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, values_fn, 2, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, values_fn, 2, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, values_fn, 1, "mload8"));
+    try testing.expect(!std.mem.containsAtLeast(u8, values_fn, 1, "bitcast"));
+    try expectDynamicAbiDecodeWordGuardChain(addresses_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, addresses_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, addresses_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeWordGuardChain(bools_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, bools_fn, 1, "or"));
+    try testing.expect(!std.mem.containsAtLeast(u8, bools_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeWordGuardChain(tags_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 1, "shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tags_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeWordGuardChain(tag_one_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_one_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeWordGuardChain(tag_full_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_full_fn, 2, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "shr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeGuardChain(pair_text_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 1, "mload8"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 1, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 1, "sub"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_text_fn, 2, "gt"));
+    try expectMixedDynamicTupleCarrierShape(pair_text_fn);
+    try expectDynamicAbiDecodeGuardChain(pair_bytes_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 1, "mload8"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 1, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 1, "sub"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bytes_fn, 2, "gt"));
+    try expectMixedDynamicTupleCarrierShape(pair_bytes_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_values_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 3, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 1, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 3, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_values_fn, 2, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_values_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_values_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_addresses_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 4, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_addresses_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_addresses_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_addresses_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_bools_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 4, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 1, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_bools_fn, 1, "or"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_bools_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_bools_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_tags_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 2, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 4, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 4, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 1, "shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tags_fn, 1, "eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_tags_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_tags_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_tag_one_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 2, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 4, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 4, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 2, "gt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_one_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_tag_one_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_tag_one_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_tag_full_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 4, "mload256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 2, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 4, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 2, "mul"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 4, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_tag_full_fn, 2, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_tag_full_fn, 1, "shr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_tag_full_fn, 1, "shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_tag_full_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_tag_full_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+}
+
+test "compiler converts runtime abiDecode u256 tuple memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_pair(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, u256), payload);
+        \\        return match (decoded) {
+        \\            Ok(pair) => pair.0 + pair.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_pair");
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn decode_pair:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "mload256"));
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "const 0x20"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.tuple_create"));
+}
+
+test "compiler converts runtime abiDecode mixed static tuple memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_pair(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, bool), payload);
+        \\        return match (decoded) {
+        \\            Ok(pair) => pair.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_pair");
+
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "mload256"));
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "or"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "bitcast"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.tuple_create"));
+}
+
+test "compiler converts runtime abiDecode nested static tuple memory result through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_nested(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecode((u256, (bool, u256)), payload);
+        \\        return match (decoded) {
+        \\            Ok(pair) => pair.0 + pair.1.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const decode_fn = try functionSlice(rendered, "decode_nested");
+
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 3, "mload256"));
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(decode_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "const 0x20"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 2, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "or"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "gt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.tuple_create"));
 }
 
 test "compiler lowers guard clauses to runtime revert through OraToSIR" {
@@ -774,7 +1897,7 @@ test "OraToSIR rejects missing strict storage slot metadata" {
     try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
 }
 
-test "OraToSIR rejects malformed ABI layout attributes" {
+test "OraToSIR rejects malformed ABI encode and decode layout attributes" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);
 
@@ -788,24 +1911,42 @@ test "OraToSIR rejects malformed ABI layout attributes" {
         "array(dynamic,dynamic(weird))",
     };
 
-    for (malformed_layouts) |layout| {
-        const text = try std.fmt.allocPrint(testing.allocator,
-            \\module {{
-            \\  ora.contract @C {{
-            \\    func.func @encode(%value: !ora.int<256, false>) {{
-            \\      %encoded = "ora.abi_encode"(%value) {{layout = "{s}"}} : (!ora.int<256, false>) -> !ora.int<256, false>
-            \\      ora.return
-            \\    }}
-            \\  }}
-            \\}}
-        , .{layout});
-        defer testing.allocator.free(text);
+    const cases = [_]struct {
+        fn_name: []const u8,
+        body: []const u8,
+    }{
+        .{
+            .fn_name = "encode",
+            .body = "%encoded = \"ora.abi_encode\"(%value) {{layout = \"{s}\"}} : (!ora.int<256, false>) -> !ora.int<256, false>",
+        },
+        .{
+            .fn_name = "decode",
+            .body = "%decoded = \"ora.abi_decode\"(%returndata) {{return_types = [\"u256\"], layout = \"{s}\", source = \"returndata\", failure_mode = \"error_union\"}} : (!ora.bytes) -> !ora.int<256, false>",
+        },
+    };
 
-        const module = try parseOraModule(ctx, text);
-        defer mlir.oraModuleDestroy(module);
+    inline for (cases) |case| {
+        for (malformed_layouts) |layout| {
+            const body = try std.fmt.allocPrint(testing.allocator, case.body, .{layout});
+            defer testing.allocator.free(body);
+            const text = try std.fmt.allocPrint(testing.allocator,
+                \\module {{
+                \\  ora.contract @C {{
+                \\    func.func @{s}(%value: !ora.int<256, false>, %returndata: !ora.bytes) {{
+                \\      {s}
+                \\      ora.return
+                \\    }}
+                \\  }}
+                \\}}
+            , .{ case.fn_name, body });
+            defer testing.allocator.free(text);
 
-        try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
-        try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+            const module = try parseOraModule(ctx, text);
+            defer mlir.oraModuleDestroy(module);
+
+            try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+            try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+        }
     }
 }
 

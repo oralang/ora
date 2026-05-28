@@ -2323,7 +2323,10 @@ const Parser = struct {
         if (self.at(.Less)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.typeAtGreaterToken()) {
-                if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+                if (self.atSignedIntegerTypeArg()) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                } else if (self.atIntegerTypeArg()) {
                     try children.append(self.allocator, .{ .token = self.bump() });
                 } else {
                     try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .GreaterGreater }) });
@@ -2341,7 +2344,10 @@ const Parser = struct {
         if (!std.mem.containsAtLeast(green.TokenKind, stops, 1, &.{.LeftParen}) and self.at(.LeftParen)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightParen)) {
-                if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+                if (self.atSignedIntegerTypeArg()) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                } else if (self.atIntegerTypeArg()) {
                     try children.append(self.allocator, .{ .token = self.bump() });
                 } else {
                     try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
@@ -2357,6 +2363,17 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.GenericType, children.items);
         }
         return self.finishNode(SyntaxKind.PathType, children.items);
+    }
+
+    fn atIntegerTypeArg(self: *const Parser) bool {
+        return self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral);
+    }
+
+    // Token-level face for signed integer generic type args. Keep in sync
+    // with nodeCouldBeSignedIntegerCallStyleTypeArg below.
+    fn atSignedIntegerTypeArg(self: *const Parser) bool {
+        return self.at(.Minus) and
+            (self.peekKind(1) == .IntegerLiteral or self.peekKind(1) == .BinaryLiteral or self.peekKind(1) == .HexLiteral);
     }
 
     fn parseTypeErrorNode(self: *Parser, message: []const u8) anyerror!green.GreenNodeId {
@@ -2493,7 +2510,8 @@ const Parser = struct {
                     std.mem.eql(u8, builtin_name.?, "bitCast") or
                     std.mem.eql(u8, builtin_name.?, "truncate") or
                     std.mem.eql(u8, builtin_name.?, "sizeOf") or
-                    std.mem.eql(u8, builtin_name.?, "typeName")) and
+                    std.mem.eql(u8, builtin_name.?, "typeName") or
+                    std.mem.eql(u8, builtin_name.?, "abiDecode")) and
                 !self.at(.RightParen))
             {
                 try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
@@ -3035,21 +3053,8 @@ const Parser = struct {
     fn nodeCouldBeCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
         return switch (self.nodes.items[node_id.index()].kind) {
             .NameExpr, .PathType, .GenericType => true,
-            .Literal => blk: {
-                const node = self.nodes.items[node_id.index()];
-                var i: usize = 0;
-                while (i < node.children_len) : (i += 1) {
-                    const child = self.children.items[node.children_start + i];
-                    switch (child) {
-                        .token => |token_id| switch (self.tokens.items[token_id.index()].kind) {
-                            .IntegerLiteral, .BinaryLiteral, .HexLiteral => break :blk true,
-                            else => {},
-                        },
-                        .node => {},
-                    }
-                }
-                break :blk false;
-            },
+            .Literal => self.nodeCouldBeIntegerCallStyleTypeArg(node_id),
+            .UnaryExpr => self.nodeCouldBeSignedIntegerCallStyleTypeArg(node_id),
             .GroupExpr => blk: {
                 const node = self.nodes.items[node_id.index()];
                 var i: usize = 0;
@@ -3058,6 +3063,64 @@ const Parser = struct {
                     switch (child) {
                         .token => {},
                         .node => |child_id| break :blk self.nodeCouldBeCallStyleTypeArg(child_id),
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn nodeCouldBeIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        const node = self.nodes.items[node_id.index()];
+        var i: usize = 0;
+        while (i < node.children_len) : (i += 1) {
+            const child = self.children.items[node.children_start + i];
+            switch (child) {
+                .token => |token_id| switch (self.tokens.items[token_id.index()].kind) {
+                    .IntegerLiteral, .BinaryLiteral, .HexLiteral => return true,
+                    else => {},
+                },
+                .node => {},
+            }
+        }
+        return false;
+    }
+
+    fn nodeCouldBeSignedIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        // Node-level face for signed integer call-style type args. Keep in sync
+        // with atSignedIntegerTypeArg above for the token-level generic parser.
+        const node = self.nodes.items[node_id.index()];
+        var saw_minus = false;
+        var i: usize = 0;
+        while (i < node.children_len) : (i += 1) {
+            const child = self.children.items[node.children_start + i];
+            switch (child) {
+                .token => |token_id| {
+                    if (self.tokens.items[token_id.index()].kind == .Minus) saw_minus = true;
+                },
+                .node => |child_id| if (saw_minus) {
+                    return self.nodeCouldBeGroupedIntegerCallStyleTypeArg(child_id);
+                },
+            }
+        }
+        return false;
+    }
+
+    fn nodeCouldBeGroupedIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        return switch (self.nodes.items[node_id.index()].kind) {
+            .Literal => self.nodeCouldBeIntegerCallStyleTypeArg(node_id),
+            .UnaryExpr => self.nodeCouldBeSignedIntegerCallStyleTypeArg(node_id),
+            .GroupExpr => blk: {
+                // Recursive over a finite syntax tree; group nesting is bounded
+                // by source nesting and cannot cycle.
+                const node = self.nodes.items[node_id.index()];
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| break :blk self.nodeCouldBeGroupedIntegerCallStyleTypeArg(child_id),
                     }
                 }
                 break :blk false;

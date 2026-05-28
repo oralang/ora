@@ -631,6 +631,38 @@ test "compiler does not type-check generic call type args as runtime arguments" 
     try testing.expect(type_diags.isEmpty());
 }
 
+test "compiler preserves negative integer args in expression-lowered generic calls" {
+    const source_text =
+        \\struct FloorBox(comptime MIN: i256) {
+        \\    value: MinValue<i8, MIN>,
+        \\}
+        \\
+        \\contract Math {
+        \\    fn keep(comptime MIN: i256, value: MinValue<i8, MIN>) -> MinValue<i8, MIN> {
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn make(value: MinValue<i8, -5>) -> FloorBox(-5) {
+        \\        let kept = keep(-5, value);
+        \\        return FloorBox(-5) { value: kept };
+        \\    }
+        \\
+        \\    pub fn make_double_neg(value: MinValue<i8, 5>) -> FloorBox<5> {
+        \\        let kept = keep(--5, value);
+        \\        return FloorBox(--5) { value: kept };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(module_typecheck.diagnostics.isEmpty());
+    try testing.expect(module_typecheck.instantiatedStructByName("FloorBox___5") != null);
+    try testing.expect(module_typecheck.instantiatedStructByName("FloorBox__5") != null);
+}
+
 test "compiler type-checks runtime arguments of generic calls" {
     const source_text =
         \\contract Math {
@@ -1154,6 +1186,22 @@ test "compiler forwards nested aliases into generic struct instantiation" {
     try testing.expectEqualStrings("Pair__Pair__u256", param_type.name().?);
     try testing.expect(typecheck.instantiatedStructByName("Pair__u256") != null);
     try testing.expect(typecheck.instantiatedStructByName("Pair__Pair__u256") != null);
+}
+
+test "compiler corpus covers type aliases" {
+    var compilation = try compilePackage("ora-example/corpus/types/compound/type_alias.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Pair__Pair__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<4xi256>"));
 }
 
 test "compiler monomorphizes generic structs for top-level constants" {

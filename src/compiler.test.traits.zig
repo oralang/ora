@@ -80,6 +80,16 @@ fn sirFunctionText(sir_text: []const u8, fn_name: []const u8) ![]const u8 {
     return sir_text[fn_start..fn_end];
 }
 
+fn mlirFunctionText(module_text: []const u8, fn_name: []const u8) ![]const u8 {
+    const fn_needle = try std.fmt.allocPrint(testing.allocator, "func.func @{s}", .{fn_name});
+    defer testing.allocator.free(fn_needle);
+
+    const fn_start = std.mem.indexOf(u8, module_text, fn_needle) orelse return error.TestExpectedEqual;
+    const after_start = module_text[fn_start + fn_needle.len ..];
+    const fn_end = if (std.mem.indexOf(u8, after_start, "\n  func.func @")) |idx| fn_start + fn_needle.len + idx else module_text.len;
+    return module_text[fn_start..fn_end];
+}
+
 fn expectSirBlockOperandsAreLocal(sir_text: []const u8, block_name: []const u8, op_name: []const u8) !void {
     var locals = std.ArrayList([]const u8){};
     defer locals.deinit(testing.allocator);
@@ -437,6 +447,7 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "layout"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.external_call"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256))"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"staticcall\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"ERC20\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balanceOf\""));
@@ -470,6 +481,11 @@ test "compiler converts trusted extern trait summaries through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256))"));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -712,6 +728,11 @@ test "compiler converts extern trait calls through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256))"));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -786,6 +807,12 @@ test "compiler converts call-kind extern traits with bool and address returns th
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(bool))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(address))"));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -799,6 +826,13 @@ test "compiler converts call-kind extern traits with bool and address returns th
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"staticcall\""));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+
+    const send_fn = try mlirFunctionText(rendered, "send");
+    const owner_fn = try mlirFunctionText(rendered, "currentOwner");
+    try testing.expect(std.mem.containsAtLeast(u8, send_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, owner_fn, 1, "sir.and"));
+    try testing.expect(!std.mem.containsAtLeast(u8, send_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, owner_fn, 1, "ora.abi_decode"));
 }
 
 test "compiler converts extern trait calls with narrow integer returns through SIR" {
@@ -806,6 +840,7 @@ test "compiler converts extern trait calls with narrow integer returns through S
         \\extern trait ERC20 {
         \\    staticcall fn decimals(self) -> u8;
         \\    staticcall fn basisPoints(self) -> u16;
+        \\    staticcall fn signedDelta(self) -> i8;
         \\}
         \\
         \\error ExternalCallFailed;
@@ -820,6 +855,10 @@ test "compiler converts extern trait calls with narrow integer returns through S
         \\    pub fn feeBps() -> !u16 | ExternalCallFailed {
         \\        return external<ERC20>(token, gas: 50000).basisPoints();
         \\    }
+        \\
+        \\    pub fn delta() -> !i8 | ExternalCallFailed {
+        \\        return external<ERC20>(token, gas: 50000).signedDelta();
+        \\    }
         \\}
     ;
 
@@ -827,6 +866,13 @@ test "compiler converts extern trait calls with narrow integer returns through S
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint8))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint16))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(int8))"));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -836,6 +882,19 @@ test "compiler converts extern trait calls with narrow integer returns through S
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.load"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+
+    const decimals_fn = try mlirFunctionText(rendered, "tokenDecimals");
+    const fee_fn = try mlirFunctionText(rendered, "feeBps");
+    const delta_fn = try mlirFunctionText(rendered, "delta");
+    try testing.expect(std.mem.containsAtLeast(u8, decimals_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, fee_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.and"));
+    // Returndata projection is success-only today: signed narrow values are
+    // masked, not canonicalized through the memory/result sign-extension path.
+    try testing.expect(!std.mem.containsAtLeast(u8, delta_fn, 1, "sir.signextend"));
+    try testing.expect(!std.mem.containsAtLeast(u8, decimals_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, fee_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, delta_fn, 1, "ora.abi_decode"));
 }
 
 test "compiler converts extern trait calls with dynamic bytes and string returns through SIR" {
@@ -874,6 +933,70 @@ test "compiler converts extern trait calls with dynamic bytes and string returns
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatasize"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
+test "compiler converts extern trait fixed bytes returns using ABI layout" {
+    const source_text =
+        \\extern trait Tagger {
+        \\    staticcall fn tag1(self) -> bytes1;
+        \\    staticcall fn tag(self) -> bytes4;
+        \\    staticcall fn tag32(self) -> bytes32;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var target: address;
+        \\
+        \\    pub fn tagOne() -> !bytes1 | ExternalCallFailed {
+        \\        return external<Tagger>(target, gas: 50000).tag1();
+        \\    }
+        \\
+        \\    pub fn tagView() -> !bytes4 | ExternalCallFailed {
+        \\        return external<Tagger>(target, gas: 50000).tag();
+        \\    }
+        \\
+        \\    pub fn tagFull() -> !bytes32 | ExternalCallFailed {
+        \\        return external<Tagger>(target, gas: 50000).tag32();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(bytes1))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(bytes4))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(bytes32))"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+
+    const tag_one_fn = try mlirFunctionText(rendered, "tagOne");
+    const tag_view_fn = try mlirFunctionText(rendered, "tagView");
+    const tag_full_fn = try mlirFunctionText(rendered, "tagFull");
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.shr"));
+    // Returndata bytesN projection extracts the high N bytes only. The
+    // memory/result validation path would shift back up before comparing.
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "sir.shr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "sir.shl"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_one_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_view_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "ora.abi_decode"));
 }
 
 test "compiler converts extern trait calls with static struct returns through SIR" {
@@ -1169,6 +1292,13 @@ test "compiler converts extern trait calls with tuple returns through SIR" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256),static(bool))"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "tuple(tuple(static(uint256),static(bool)))"));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));

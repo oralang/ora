@@ -182,9 +182,20 @@ pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: m
 fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
     if (index >= args.len) return null;
     return switch (args[index]) {
-        .Integer => |literal| parseU256Literal(literal.text),
+        .Integer => |literal| parseRefinementIntLiteral(literal.text),
         else => null,
     };
+}
+
+fn parseRefinementIntLiteral(text: []const u8) ?u256 {
+    if (std.mem.startsWith(u8, text, "-")) {
+        const magnitude = parseU256Literal(text[1..]) orelse return null;
+        return @as(u256, 0) -% magnitude;
+    }
+    if (std.mem.startsWith(u8, text, "+")) {
+        return parseU256Literal(text[1..]);
+    }
+    return parseU256Literal(text);
 }
 
 fn parseU256Literal(text: []const u8) ?u256 {
@@ -202,6 +213,18 @@ test "HIR refinement type builder follows registry native type classification" {
     const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } };
 
     try std.testing.expect(buildRefinementType(ctx, "NonZero", base_type, &.{type_arg}) == null);
+
+    const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!mlir.oraTypeIsNull(min_type));
+}
+
+test "HIR refinement type builder preserves negative bounds as u256 two's-complement limbs" {
+    const ctx = try createContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const base_type = mlir.oraIntegerTypeCreate(ctx, 8);
+    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
+    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 2 }, .text = "-5" } };
 
     const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));

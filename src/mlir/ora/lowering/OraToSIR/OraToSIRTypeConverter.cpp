@@ -56,7 +56,7 @@ namespace
             return intType.getWidth();
         if (llvm::isa<ora::BoolType>(type))
             return 1u;
-        if (llvm::isa<ora::AddressType>(type))
+        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
             return 160u;
         if (auto enumType = llvm::dyn_cast<ora::EnumType>(type))
             return getOraBitWidth(enumType.getReprType());

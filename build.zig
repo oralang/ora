@@ -676,6 +676,15 @@ pub fn build(b: *std.Build) void {
     check_abi_layout_ownership_step.dependOn(&abi_layout_ownership_cmd.step);
     test_step.dependOn(&abi_layout_ownership_cmd.step);
 
+    // zig build check-sir-shift-operand-order
+    const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-sir-shift-operand-order.sh",
+    });
+    const check_sir_shift_operand_order_step = b.step("check-sir-shift-operand-order", "Run SIR shift operand-order static checks");
+    check_sir_shift_operand_order_step.dependOn(&sir_shift_operand_order_cmd.step);
+    test_step.dependOn(&sir_shift_operand_order_cmd.step);
+
     // zig build check-smt-modifies-corpus
     const smt_modifies_corpus_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",

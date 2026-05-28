@@ -16,6 +16,7 @@ pub const ast_arena = @import("ora_types").ast_arena;
 pub const abi = @import("abi.zig");
 pub const abi_layout = @import("abi/layout.zig");
 pub const abi_layout_context = @import("abi/layout_context.zig");
+pub const abi_comptime_decoder = @import("abi/comptime_decoder.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler.zig");
 

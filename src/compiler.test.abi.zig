@@ -44,6 +44,19 @@ fn expectAbiEncodeReturnBytes(source_text: []const u8, function_name: []const u8
     try expectHexBytes(expected_hex, consteval.values[value_index].?.fixed_bytes);
 }
 
+fn expectComptimeIntegerReturn(source_text: []const u8, function_name: []const u8, expected: i128) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const value_index = try rootFunctionReturnValueIndex(&compilation, function_name);
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+    try testing.expectEqual(expected, try consteval.values[value_index].?.integer.toInt(i128));
+}
+
 fn expectHexBytes(expected_hex: []const u8, actual: []const u8) !void {
     const hex = if (std.mem.startsWith(u8, expected_hex, "0x")) expected_hex[2..] else expected_hex;
     try testing.expectEqual(@as(usize, 0), hex.len % 2);
@@ -112,6 +125,14 @@ fn valueForToken(values: *const std.StringHashMap(u256), token: []const u8) ?u25
     return parseSirIntLiteral(token) orelse values.get(token);
 }
 
+fn signedLessThanU256(lhs: u256, rhs: u256) bool {
+    const sign_bit: u256 = @as(u256, 1) << 255;
+    const lhs_negative = (lhs & sign_bit) != 0;
+    const rhs_negative = (rhs & sign_bit) != 0;
+    if (lhs_negative != rhs_negative) return lhs_negative;
+    return lhs < rhs;
+}
+
 fn writeU256WordClipped(buffer: []u8, offset: usize, value: u256) void {
     for (0..32) |index| {
         const absolute = offset + index;
@@ -138,9 +159,10 @@ fn parseOraModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
     return module;
 }
 
-// This is a narrow interpreter for SIR emitted by the OraToSIR ABI materializer.
-// Its operation semantics for const/large_const/add/mul/and/or/shl/signextend,
-// mload256, and mstore256 must stay aligned with SIR runtime semantics.
+// This is a narrow interpreter for SIR emitted by the OraToSIR ABI materializer
+// and runtime decoder parity tests. Its handled SIR ops intentionally track the
+// ops those lowerings emit; when a new ABI path emits a new op, extend this
+// interpreter in the same slice so parity failures stay attributable.
 fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, payload_len: usize, prefix_len: usize) ![]u8 {
     const fn_text = try functionSlice(sir_text, function_name);
     const total_len = payload_len + prefix_len;
@@ -172,6 +194,8 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
     defer values.deinit();
     var pointers = std.StringHashMap(Pointer).init(testing.allocator);
     defer pointers.deinit();
+    var allocation_order = std.ArrayList([]const u8){};
+    defer allocation_order.deinit(testing.allocator);
     var stores = std.ArrayList(Store){};
     defer stores.deinit(testing.allocator);
     var pointer_stores = std.ArrayList(PointerStore){};
@@ -181,15 +205,32 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
     const Eval = struct {
         values: *std.StringHashMap(u256),
         pointers: *std.StringHashMap(Pointer),
+        allocation_order: *std.ArrayList([]const u8),
         stores: *std.ArrayList(Store),
         pointer_stores: *std.ArrayList(PointerStore),
         selected_base: *?[]const u8,
+        expected_total_len: usize,
+
+        fn ptrForToken(self: *@This(), token: []const u8) ?Pointer {
+            if (self.pointers.get(token)) |ptr| return ptr;
+            const address = valueForToken(self.values, token) orelse return null;
+            if (address > std.math.maxInt(usize)) return null;
+            return .{ .base = "__absolute", .offset = @intCast(address), .size = null };
+        }
+
+        fn captureReturnBuffer(self: *@This(), outputs: []const []const u8) void {
+            if (outputs.len < 2) return;
+            const len = valueForToken(self.values, outputs[1]) orelse return;
+            if (len != self.expected_total_len) return;
+            const ptr = self.pointers.get(outputs[0]) orelse return;
+            self.selected_base.* = ptr.base;
+        }
 
         fn executeLine(self: *@This(), tokens: []const []const u8) !void {
             if (tokens.len == 0) return;
 
             if (std.mem.eql(u8, tokens[0], "mstore256") and tokens.len >= 3) {
-                const ptr = self.pointers.get(tokens[1]) orelse return;
+                const ptr = self.ptrForToken(tokens[1]) orelse return;
                 if (valueForToken(self.values, tokens[2])) |value| {
                     try self.stores.append(testing.allocator, .{ .base = ptr.base, .offset = ptr.offset, .value = value });
                 } else if (self.pointers.get(tokens[2])) |stored_ptr| {
@@ -241,11 +282,12 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 const size = valueForToken(self.values, tokens[3]) orelse return;
                 if (size > std.math.maxInt(usize)) return;
                 try self.pointers.put(name, .{ .base = name, .offset = 0, .size = @intCast(size) });
+                try self.allocation_order.append(testing.allocator, name);
                 return;
             }
 
             if (std.mem.eql(u8, op, "mload256") and tokens.len >= 4) {
-                const ptr = self.pointers.get(tokens[3]) orelse return;
+                const ptr = self.ptrForToken(tokens[3]) orelse return;
                 var pointer_store_index = self.pointer_stores.items.len;
                 while (pointer_store_index > 0) {
                     pointer_store_index -= 1;
@@ -266,6 +308,24 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                         break;
                     }
                 }
+                if (!self.values.contains(name)) try self.values.put(name, 0);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "mload8") and tokens.len >= 4) {
+                const ptr = self.ptrForToken(tokens[3]) orelse return;
+                var byte: u256 = 0;
+                var index = self.stores.items.len;
+                while (index > 0) {
+                    index -= 1;
+                    const store = self.stores.items[index];
+                    if (!std.mem.eql(u8, store.base, ptr.base)) continue;
+                    if (ptr.offset < store.offset or ptr.offset >= store.offset + 32) continue;
+                    const shift: u8 = @intCast((31 - (ptr.offset - store.offset)) * 8);
+                    byte = @intCast((store.value >> shift) & 0xff);
+                    break;
+                }
+                try self.values.put(name, byte);
                 return;
             }
 
@@ -288,7 +348,32 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 return;
             }
 
+            if (std.mem.eql(u8, op, "sub") and tokens.len >= 5) {
+                const lhs = valueForToken(self.values, tokens[3]) orelse return;
+                const rhs = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, lhs -% rhs);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "not") and tokens.len >= 4) {
+                const value = valueForToken(self.values, tokens[3]) orelse return;
+                try self.values.put(name, ~value);
+                return;
+            }
+
             if (std.mem.eql(u8, op, "and") and tokens.len >= 5) {
+                if (valueForToken(self.values, tokens[3])) |lhs| {
+                    if (self.pointers.get(tokens[4])) |rhs_ptr| {
+                        if (lhs == ~@as(u256, 0)) try self.pointers.put(name, rhs_ptr) else if (lhs == 0) try self.values.put(name, 0);
+                        return;
+                    }
+                }
+                if (self.pointers.get(tokens[3])) |lhs_ptr| {
+                    if (valueForToken(self.values, tokens[4])) |rhs| {
+                        if (rhs == ~@as(u256, 0)) try self.pointers.put(name, lhs_ptr) else if (rhs == 0) try self.values.put(name, 0);
+                        return;
+                    }
+                }
                 const lhs = valueForToken(self.values, tokens[3]) orelse return;
                 const rhs = valueForToken(self.values, tokens[4]) orelse return;
                 try self.values.put(name, lhs & rhs);
@@ -296,9 +381,28 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
             }
 
             if (std.mem.eql(u8, op, "or") and tokens.len >= 5) {
+                if (self.pointers.get(tokens[3])) |lhs_ptr| {
+                    if (valueForToken(self.values, tokens[4])) |rhs| {
+                        if (rhs == 0) try self.pointers.put(name, lhs_ptr);
+                        return;
+                    }
+                }
+                if (valueForToken(self.values, tokens[3])) |lhs| {
+                    if (self.pointers.get(tokens[4])) |rhs_ptr| {
+                        if (lhs == 0) try self.pointers.put(name, rhs_ptr);
+                        return;
+                    }
+                }
                 const lhs = valueForToken(self.values, tokens[3]) orelse return;
                 const rhs = valueForToken(self.values, tokens[4]) orelse return;
                 try self.values.put(name, lhs | rhs);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "xor") and tokens.len >= 5) {
+                const lhs = valueForToken(self.values, tokens[3]) orelse return;
+                const rhs = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, lhs ^ rhs);
                 return;
             }
 
@@ -317,10 +421,45 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 return;
             }
 
+            if (std.mem.eql(u8, op, "eq") and tokens.len >= 5) {
+                const lhs = valueForToken(self.values, tokens[3]) orelse return;
+                const rhs = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, if (lhs == rhs) 1 else 0);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "select") and tokens.len >= 6) {
+                const condition = valueForToken(self.values, tokens[3]) orelse return;
+                const true_value = valueForToken(self.values, tokens[4]) orelse return;
+                const false_value = valueForToken(self.values, tokens[5]) orelse return;
+                try self.values.put(name, if (condition != 0) true_value else false_value);
+                return;
+            }
+
             if (std.mem.eql(u8, op, "lt") and tokens.len >= 5) {
                 const lhs = valueForToken(self.values, tokens[3]) orelse return;
                 const rhs = valueForToken(self.values, tokens[4]) orelse return;
                 try self.values.put(name, if (lhs < rhs) 1 else 0);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "gt") and tokens.len >= 5) {
+                const lhs = valueForToken(self.values, tokens[3]) orelse return;
+                const rhs = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, if (lhs > rhs) 1 else 0);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "slt") and tokens.len >= 5) {
+                const lhs = valueForToken(self.values, tokens[3]) orelse return;
+                const rhs = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, if (signedLessThanU256(lhs, rhs)) 1 else 0);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "iszero") and tokens.len >= 4) {
+                const value = valueForToken(self.values, tokens[3]) orelse return;
+                try self.values.put(name, if (value == 0) 1 else 0);
                 return;
             }
 
@@ -331,6 +470,17 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                     try self.values.put(name, 0);
                 } else {
                     try self.values.put(name, value << @intCast(shift));
+                }
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "shr") and tokens.len >= 5) {
+                const shift = valueForToken(self.values, tokens[3]) orelse return;
+                const value = valueForToken(self.values, tokens[4]) orelse return;
+                if (shift >= 256) {
+                    try self.values.put(name, 0);
+                } else {
+                    try self.values.put(name, value >> @intCast(shift));
                 }
                 return;
             }
@@ -401,9 +551,11 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
     var eval: Eval = .{
         .values = &values,
         .pointers = &pointers,
+        .allocation_order = &allocation_order,
         .stores = &stores,
         .pointer_stores = &pointer_stores,
         .selected_base = &selected_base,
+        .expected_total_len = total_len,
     };
 
     const Interpreter = struct {
@@ -449,7 +601,10 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 const tokens = token_buf[0..count];
                 if (tokens.len == 0) continue;
 
-                if (std.mem.eql(u8, tokens[0], "return")) return;
+                if (std.mem.eql(u8, tokens[0], "return") or std.mem.eql(u8, tokens[0], "iret")) {
+                    self.eval.captureReturnBuffer(block.outputs);
+                    return;
+                }
 
                 if (std.mem.eql(u8, tokens[0], "=>")) {
                     if (tokens.len >= 2 and std.mem.startsWith(u8, tokens[1], "@")) {
@@ -483,14 +638,16 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
     try interpreter.executeBlock(entry_index, &.{});
 
     if (selected_base == null) {
-        var pointer_it = pointers.iterator();
-        while (pointer_it.next()) |entry| {
-            const ptr = entry.value_ptr.*;
+        var index = allocation_order.items.len;
+        while (index > 0) {
+            index -= 1;
+            const name = allocation_order.items[index];
+            const ptr = pointers.get(name) orelse continue;
             // The ABI materializer's output allocation is identified by its exact
-            // byte size. If future lowering emits scratch allocations with the same
-            // size, this selector should become call-site-aware.
+            // byte size. Prefer the latest matching allocation so literal bytes
+            // buffers with the same size do not mask a later return allocation.
             if (ptr.size != null and ptr.size.? == total_len) {
-                selected_base = entry.key_ptr.*;
+                selected_base = name;
                 break;
             }
         }
@@ -512,6 +669,38 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
 
 fn extractRuntimeAbiPayloadFromSir(sir_text: []const u8, function_name: []const u8, payload_len: usize) ![]u8 {
     return extractAbiBytesFromSir(sir_text, function_name, payload_len, 4);
+}
+
+fn extractRuntimeReturnBytesFromSir(sir_text: []const u8, function_name: []const u8, payload_len: usize) ![]u8 {
+    return extractAbiBytesFromSir(sir_text, function_name, payload_len, 0);
+}
+
+fn u256FromAbiWord(word: []const u8) !u256 {
+    try testing.expectEqual(@as(usize, 32), word.len);
+    var value: u256 = 0;
+    for (word) |byte| {
+        value <<= 8;
+        value |= byte;
+    }
+    return value;
+}
+
+fn expectRuntimeU256Return(source_text: []const u8, function_name: []const u8, expected: u256) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const payload = try extractRuntimeReturnBytesFromSir(rendered, function_name, 32);
+    defer testing.allocator.free(payload);
+    const actual = try u256FromAbiWord(payload);
+    try testing.expectEqual(expected, actual);
 }
 
 fn rootFunctionReturnValueIndex(compilation: anytype, function_name: []const u8) !usize {
@@ -1049,6 +1238,7 @@ test "compiler abiEncode encodes static arrays structs enum bitfield and empty v
         \\    enabled: u1,
         \\    mode: u7,
         \\}
+        \\fn noop() {}
         \\pub fn run() -> bytes {
         \\    return comptime {
         \\        @abiEncode(@cast(Flags, 3));
@@ -1114,6 +1304,3163 @@ test "compiler abiEncode strips refinements to base ABI type" {
 
     // cast abi-encode "f(uint256)" 5
     try expectAbiEncodeReturnBytes(source_text, "run", "0000000000000000000000000000000000000000000000000000000000000005");
+}
+
+test "compiler abiDecode decodes strict static values at comptime" {
+    const scalar_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"0000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(scalar_source, "run", 5);
+
+    const array_source =
+        \\type PairValues = [u256; 2];
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(PairValues, hex"00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(values) => values[0] + values[1],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(array_source, "run", 5);
+
+    const struct_source =
+        \\struct Pair {
+        \\    amount: u256,
+        \\    ok: bool,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Pair, hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(pair) => pair.amount,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(struct_source, "run", 7);
+}
+
+test "compiler abiDecode rejects malformed static encodings as Result errors" {
+    const invalid_bool_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(invalid_bool_source, "run", 1);
+
+    const truncated_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"0001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(truncated_source, "run", 1);
+}
+
+test "compiler abiDecode covers static primitive enum bitfield and refinement cases" {
+    const address_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(address, hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(address_source, "run", 120);
+
+    const fixed_bytes_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[0] + @abiEncode(value)[3],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(fixed_bytes_source, "run", 391);
+
+    const enum_source =
+        \\enum Status: u8 {
+        \\    Active,
+        \\    Paused,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Status, hex"0000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(enum_source, "run", 1);
+
+    const bitfield_source =
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Flags, hex"0000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(bitfield_source, "run", 3);
+
+    const refinement_source =
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonZeroU256, hex"0000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(refinement_source, "run", 5);
+}
+
+test "compiler abiDecode maps strict static validation failures to Err" {
+    const noncanonical_uint_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u8, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(noncanonical_uint_source, "run", 1);
+
+    const invalid_address_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(address, hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(invalid_address_source, "run", 1);
+
+    const invalid_fixed_bytes_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(invalid_fixed_bytes_source, "run", 1);
+
+    const enum_out_of_range_source =
+        \\enum Status: u8 {
+        \\    Active,
+        \\    Paused,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Status, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(enum_out_of_range_source, "run", 1);
+
+    const refinement_violation_source =
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonZeroU256, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(refinement_violation_source, "run", 1);
+
+    const signed_refinement_violation_source =
+        \\type NonNegativeI8 = MinValue<i8, 0>;
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonNegativeI8, @abiEncode(@cast(i8, -1)));
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(signed_refinement_violation_source, "run", 1);
+
+    const oversize_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(oversize_source, "run", 1);
+}
+
+test "compiler abiDecode runtime memory result matches comptime oracle" {
+    const comptime_source =
+        \\enum Status: u8 { Active, Paused }
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\type SignedFloor = MinValue<i8, -5>;
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\type AtLeastFive = MinValue<u256, 5>;
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\pub fn ok_u256() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"0000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_u8() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u8, hex"0000000000000000000000000000000000000000000000000000000000000007");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_i8() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(i8, hex"0000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_i256() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(i256, hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(address, hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_bytes4() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_bitfield() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Flags, hex"0000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_enum() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Status, hex"0000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bool), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_u256_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, u256), hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000008");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + value.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_nested_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, (bool, u256)), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000009");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + value.1.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_refined_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((NonZeroU256, bool), hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_bytes1() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes1, hex"aa00000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_bytes32() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes32, hex"11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_positive_byte() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(PositiveByte, hex"0000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_nonzero_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonZeroAddress, hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_min_boundary() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(AtLeastFive, hex"0000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_signed_refinement_boundary() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(SignedFloor, hex"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffb");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_void() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(void, hex"");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_string() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_bytes() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(values) => values[0] + values[1] + values[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_bool_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(values) => @abiEncode(values)[95] + @abiEncode(values)[159],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_fixed_bytes_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000000");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes4 = hex"aabbccdd";
+        \\                const second: bytes4 = hex"01020304";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    out = 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_fixed_bytes1_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes1], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aa000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes1 = hex"aa";
+        \\                const second: bytes1 = hex"01";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    out = 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_fixed_bytes32_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes32], hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                const second: bytes32 = hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    out = 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_dynamic_address_array() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_bytes_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0] + value.1[1] + value.1[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_address_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + @abiEncode(value.1)[95],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_bool_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + @abiEncode(value.1)[95] + @abiEncode(value.1)[159],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_fixed_bytes_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000000");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes4 = hex"aabbccdd";
+        \\                const second: bytes4 = hex"01020304";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    out = value.0 + 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_fixed_bytes1_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes1]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aa000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes1 = hex"aa";
+        \\                const second: bytes1 = hex"01";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    out = value.0 + 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn ok_mixed_dynamic_fixed_bytes32_array_tuple() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes32]), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        var out: u256 = 0;
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                const second: bytes32 = hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    out = value.0 + 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        }
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_truncated() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"0001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_bool() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_u8_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u8, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_i8_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(i8, hex"00000000000000000000000000000000000000000000000000000000000000fb");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(address, hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_fixed_bytes() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_enum_range() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Status, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_refinement() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonZeroU256, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_bitfield_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Flags, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_positive_byte() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(PositiveByte, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_nonzero_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(NonZeroAddress, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_min_boundary() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(AtLeastFive, hex"0000000000000000000000000000000000000000000000000000000000000004");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_signed_refinement() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(SignedFloor, hex"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_void_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(void, hex"00");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_string_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000100001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000161ff000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_head_budget() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_array_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_invalid_bool() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_bool_array_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bool], hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_invalid_fixed_bytes() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_fixed_bytes_array_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd00000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd00000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_invalid_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000201000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_dynamic_address_array_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[address], hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_invalid_address() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000201000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_address_array_tuple_tail_too_short() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[address]), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bool_array_tuple_invalid_bool() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[bool]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_string_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000100001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000161ff000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_tuple_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000100001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_padding() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000001aaff000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_bytes_tuple_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, bytes), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_offset() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_truncated_length() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_length_exceeded() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_head_budget() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn err_mixed_dynamic_array_tuple_oversize() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, slice[u256]), hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    const runtime_source =
+        \\enum Status: u8 { Active, Paused }
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\type SignedFloor = MinValue<i8, -5>;
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\type AtLeastFive = MinValue<u256, 5>;
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\contract Decode {
+        \\    pub fn ok_u256() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000005";
+        \\        let decoded = @abiDecode(u256, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_u8() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007";
+        \\        let decoded = @abiDecode(u8, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_i8() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000005";
+        \\        let decoded = @abiDecode(i8, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_i256() -> u256 {
+        \\        let payload = hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\        let decoded = @abiDecode(i256, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_address() -> u256 {
+        \\        let payload = hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode(address, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_bytes4() -> u256 {
+        \\        let payload = hex"aabbccdd00000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(bytes4, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_bitfield() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000003";
+        \\        let decoded = @abiDecode(Flags, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_enum() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(Status, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_mixed_tuple() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, bool), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_u256_tuple() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000008";
+        \\        let decoded = @abiDecode((u256, u256), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_nested_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000009";
+        \\        let decoded = @abiDecode((u256, (bool, u256)), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1.1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_refined_tuple() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((NonZeroU256, bool), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_bytes1() -> u256 {
+        \\        let payload = hex"aa00000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(bytes1, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_bytes32() -> u256 {
+        \\        let payload = hex"11223344556677889900aabbccddeeff00112233445566778899aabbccddeeff";
+        \\        let decoded = @abiDecode(bytes32, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_positive_byte() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(PositiveByte, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => @cast(u256, value),
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_nonzero_address() -> u256 {
+        \\        let payload = hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode(NonZeroAddress, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_min_boundary() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000005";
+        \\        let decoded = @abiDecode(AtLeastFive, payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_signed_refinement_boundary() -> u256 {
+        \\        let payload = hex"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffb";
+        \\        let decoded = @abiDecode(SignedFloor, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_void() -> u256 {
+        \\        let payload = hex"";
+        \\        let decoded = @abiDecode(void, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_string() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_bytes() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(bytes, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_dynamic_array() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(values) => values[0] + values[1] + values[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_dynamic_bool_array() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                if (values[0]) {
+        \\                    if (values[2]) {
+        \\                        return 2;
+        \\                    }
+        \\                    return 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_dynamic_fixed_bytes_array() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes4 = hex"aabbccdd";
+        \\                const second: bytes4 = hex"01020304";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    return 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_dynamic_fixed_bytes1_array() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aa000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[bytes1], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes1 = hex"aa";
+        \\                const second: bytes1 = hex"01";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    return 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_dynamic_fixed_bytes32_array() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\        let decoded = @abiDecode(slice[bytes32], payload);
+        \\        match (decoded) {
+        \\            Ok(values) => {
+        \\                const first: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                const second: bytes32 = hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\                if (values[0] == first and values[1] == second) {
+        \\                    return 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_dynamic_address_array() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_mixed_dynamic_tuple() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_mixed_dynamic_bytes_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_mixed_dynamic_array_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0] + value.1[1] + value.1[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\    pub fn ok_mixed_dynamic_address_array_tuple() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                if (value.1[0] == 0x0000000000000000000000000000000000000001) {
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_mixed_dynamic_bool_array_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                if (value.1[0]) {
+        \\                    if (value.1[2]) {
+        \\                        return value.0 + 2;
+        \\                    }
+        \\                    return value.0 + 1;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_mixed_dynamic_fixed_bytes_array_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes4 = hex"aabbccdd";
+        \\                const second: bytes4 = hex"01020304";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    return value.0 + 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_mixed_dynamic_fixed_bytes1_array_tuple() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aa000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bytes1]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes1 = hex"aa";
+        \\                const second: bytes1 = hex"01";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    return value.0 + 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn ok_mixed_dynamic_fixed_bytes32_array_tuple() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\        let decoded = @abiDecode((u256, slice[bytes32]), payload);
+        \\        match (decoded) {
+        \\            Ok(value) => {
+        \\                const first: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\                const second: bytes32 = hex"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        \\                if (value.1[0] == first and value.1[1] == second) {
+        \\                    return value.0 + 2;
+        \\                }
+        \\                return 0;
+        \\            }
+        \\            Err(_) => {
+        \\                return 0;
+        \\            }
+        \\        }
+        \\    }
+        \\    pub fn err_truncated() -> u256 {
+        \\        let payload = hex"0001";
+        \\        let decoded = @abiDecode(u256, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_oversize() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(u256, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_bool() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000002";
+        \\        let decoded = @abiDecode(bool, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_u8_padding() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000100";
+        \\        let decoded = @abiDecode(u8, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_i8_padding() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000fb";
+        \\        let decoded = @abiDecode(i8, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_address() -> u256 {
+        \\        let payload = hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode(address, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_fixed_bytes() -> u256 {
+        \\        let payload = hex"aabbccdd00000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(bytes4, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_enum_range() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000002";
+        \\        let decoded = @abiDecode(Status, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_refinement() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(NonZeroU256, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_bitfield_padding() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000100";
+        \\        let decoded = @abiDecode(Flags, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_positive_byte() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(PositiveByte, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_nonzero_address() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(NonZeroAddress, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_min_boundary() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000004";
+        \\        let decoded = @abiDecode(AtLeastFive, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_signed_refinement() -> u256 {
+        \\        let payload = hex"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa";
+        \\        let decoded = @abiDecode(SignedFloor, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_void_oversize() -> u256 {
+        \\        let payload = hex"00";
+        \\        let decoded = @abiDecode(void, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_offset() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_truncated_length() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_length_overflow() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_string_length_exceeded() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000100001";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_padding() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000161ff000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_oversize() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_offset() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_truncated_length() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_length_overflow() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_length_exceeded() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_head_budget() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_array_oversize() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_invalid_bool() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_offset() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_truncated_length() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_length_overflow() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_length_exceeded() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_bool_array_tail_too_short() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[bool], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_invalid_fixed_bytes() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_offset() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_truncated_length() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_length_overflow() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_length_exceeded() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_tail_too_short() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd00000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[bytes4], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_tail_too_short() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_tail_too_short() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd00000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_invalid_address() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000201000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_offset() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_truncated_length() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_length_overflow() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_length_exceeded() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_dynamic_address_array_tail_too_short() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode(slice[address], payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_string_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000100001";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_padding() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000161ff000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_oversize() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000100001";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_padding() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000001aaff000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_oversize() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, bytes), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_invalid_address() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000201000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_tail_too_short() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[address]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_invalid_bool() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[bool]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_offset() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_truncated_length() -> u256 {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_length_overflow() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_length_exceeded() -> u256 {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000008001";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_head_budget() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_oversize() -> u256 {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000007000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        \\        let decoded = @abiDecode((u256, slice[u256]), payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    const cases = [_]struct {
+        name: []const u8,
+        expected: u256,
+    }{
+        .{ .name = "ok_u256", .expected = 5 },
+        .{ .name = "ok_u8", .expected = 7 },
+        .{ .name = "ok_i8", .expected = 5 },
+        .{ .name = "ok_i256", .expected = 1 },
+        .{ .name = "ok_address", .expected = 1 },
+        .{ .name = "ok_bytes4", .expected = 1 },
+        .{ .name = "ok_bitfield", .expected = 1 },
+        .{ .name = "ok_enum", .expected = 1 },
+        .{ .name = "ok_mixed_tuple", .expected = 7 },
+        .{ .name = "ok_u256_tuple", .expected = 13 },
+        .{ .name = "ok_nested_tuple", .expected = 16 },
+        .{ .name = "ok_refined_tuple", .expected = 5 },
+        .{ .name = "ok_bytes1", .expected = 1 },
+        .{ .name = "ok_bytes32", .expected = 1 },
+        .{ .name = "ok_positive_byte", .expected = 1 },
+        .{ .name = "ok_nonzero_address", .expected = 1 },
+        .{ .name = "ok_min_boundary", .expected = 5 },
+        .{ .name = "ok_signed_refinement_boundary", .expected = 1 },
+        .{ .name = "ok_void", .expected = 1 },
+        .{ .name = "ok_string", .expected = 1 },
+        .{ .name = "ok_bytes", .expected = 1 },
+        .{ .name = "ok_dynamic_array", .expected = 6 },
+        .{ .name = "ok_dynamic_bool_array", .expected = 2 },
+        .{ .name = "ok_dynamic_fixed_bytes_array", .expected = 2 },
+        .{ .name = "ok_dynamic_fixed_bytes1_array", .expected = 2 },
+        .{ .name = "ok_dynamic_fixed_bytes32_array", .expected = 2 },
+        .{ .name = "ok_dynamic_address_array", .expected = 1 },
+        .{ .name = "ok_mixed_dynamic_tuple", .expected = 111 },
+        .{ .name = "ok_mixed_dynamic_bytes_tuple", .expected = 177 },
+        .{ .name = "ok_mixed_dynamic_array_tuple", .expected = 13 },
+        .{ .name = "ok_mixed_dynamic_address_array_tuple", .expected = 8 },
+        .{ .name = "ok_mixed_dynamic_bool_array_tuple", .expected = 9 },
+        .{ .name = "ok_mixed_dynamic_fixed_bytes_array_tuple", .expected = 9 },
+        .{ .name = "ok_mixed_dynamic_fixed_bytes1_array_tuple", .expected = 9 },
+        .{ .name = "ok_mixed_dynamic_fixed_bytes32_array_tuple", .expected = 9 },
+        .{ .name = "err_truncated", .expected = 1 },
+        .{ .name = "err_oversize", .expected = 1 },
+        .{ .name = "err_bool", .expected = 1 },
+        .{ .name = "err_u8_padding", .expected = 1 },
+        .{ .name = "err_i8_padding", .expected = 1 },
+        .{ .name = "err_address", .expected = 1 },
+        .{ .name = "err_fixed_bytes", .expected = 1 },
+        .{ .name = "err_enum_range", .expected = 1 },
+        .{ .name = "err_bitfield_padding", .expected = 1 },
+        .{ .name = "err_refinement", .expected = 1 },
+        .{ .name = "err_positive_byte", .expected = 1 },
+        .{ .name = "err_nonzero_address", .expected = 1 },
+        .{ .name = "err_min_boundary", .expected = 1 },
+        .{ .name = "err_signed_refinement", .expected = 1 },
+        .{ .name = "err_void_oversize", .expected = 1 },
+        .{ .name = "err_dynamic_offset", .expected = 1 },
+        .{ .name = "err_dynamic_truncated_length", .expected = 1 },
+        .{ .name = "err_dynamic_length_overflow", .expected = 1 },
+        .{ .name = "err_dynamic_string_length_exceeded", .expected = 1 },
+        .{ .name = "err_dynamic_padding", .expected = 1 },
+        .{ .name = "err_dynamic_oversize", .expected = 1 },
+        .{ .name = "err_dynamic_array_offset", .expected = 1 },
+        .{ .name = "err_dynamic_array_truncated_length", .expected = 1 },
+        .{ .name = "err_dynamic_array_length_overflow", .expected = 1 },
+        .{ .name = "err_dynamic_array_length_exceeded", .expected = 1 },
+        .{ .name = "err_dynamic_array_head_budget", .expected = 1 },
+        .{ .name = "err_dynamic_array_oversize", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_invalid_bool", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_offset", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_truncated_length", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_length_overflow", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_length_exceeded", .expected = 1 },
+        .{ .name = "err_dynamic_bool_array_tail_too_short", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_invalid_fixed_bytes", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_offset", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_truncated_length", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_length_overflow", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_length_exceeded", .expected = 1 },
+        .{ .name = "err_dynamic_fixed_bytes_array_tail_too_short", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_invalid_address", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_offset", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_truncated_length", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_length_overflow", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_length_exceeded", .expected = 1 },
+        .{ .name = "err_dynamic_address_array_tail_too_short", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_invalid_address", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_tail_too_short", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_invalid_bool", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_tail_too_short", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_tail_too_short", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_string_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_padding", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_tuple_oversize", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_padding", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_oversize", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_offset", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_truncated_length", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_length_overflow", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_length_exceeded", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_head_budget", .expected = 1 },
+        .{ .name = "err_mixed_dynamic_array_tuple_oversize", .expected = 1 },
+    };
+
+    inline for (cases) |case| {
+        try expectComptimeIntegerReturn(comptime_source, case.name, @intCast(case.expected));
+        try expectRuntimeU256Return(runtime_source, case.name, case.expected);
+    }
+}
+
+test "compiler abiDecode round-trips encoder M2 static corpus" {
+    const scalar_tuple_source =
+        \\type Scalars = (u256, bool);
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: Scalars = (1, true);
+        \\        let decoded = @abiDecode(Scalars, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip.0 + @abiEncode(roundtrip.1)[31],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(scalar_tuple_source, "run", 2);
+
+    const signed_negative_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(i256, @abiEncode(@cast(i256, -1)));
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(signed_negative_source, "run", 255);
+
+    const array_source =
+        \\type PairValues = [u256; 2];
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: PairValues = [1, 2];
+        \\        let decoded = @abiDecode(PairValues, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(values) => values[0] + values[1],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(array_source, "run", 3);
+
+    const struct_source =
+        \\struct Pair {
+        \\    amount: u256,
+        \\    ok: bool,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: Pair = Pair { amount: 7, ok: true };
+        \\        let decoded = @abiDecode(Pair, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(pair) => pair.amount + @abiEncode(pair.ok)[31],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(struct_source, "run", 8);
+
+    const enum_source =
+        \\enum Status: u8 { Active, Paused }
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Status, @abiEncode(Status.Paused));
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(enum_source, "run", 1);
+
+    const bitfield_source =
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Flags, @abiEncode(@cast(Flags, 3)));
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(bitfield_source, "run", 3);
+
+    const void_source =
+        \\fn noop() {}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(void, @abiEncode(noop()));
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(void_source, "run", 1);
+
+    const single_tuple_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(u256, @abiEncode((@cast(u256, 5),)));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(single_tuple_source, "run", 5);
+
+    const refinement_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: MinValue<u256, 1> = @cast(MinValue<u256, 1>, 5);
+        \\        let decoded = @abiDecode(MinValue<u256, 1>, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(refinement_source, "run", 5);
+}
+
+test "compiler abiDecode decodes dynamic ABI values at comptime" {
+    const string_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, @abiEncode("hello"));
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(string_source, "run", 104);
+
+    const bytes_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const payload: bytes = hex"deadbeef";
+        \\        let decoded = @abiDecode(bytes, @abiEncode(payload));
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[64] + @abiEncode(value)[67],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(bytes_source, "run", 461);
+
+    const mixed_tuple_source =
+        \\type Payload = (u256, string);
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: Payload = (7, "hello");
+        \\        let decoded = @abiDecode(Payload, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip.0 + @abiEncode(roundtrip.1)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(mixed_tuple_source, "run", 111);
+
+    const uint_array_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const values = @cast(slice[u256], [1, 2, 3]);
+        \\        let decoded = @abiDecode(slice[u256], @abiEncode(values));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0] + roundtrip[1] + roundtrip[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(uint_array_source, "run", 6);
+
+    const string_array_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const values = @cast(slice[string], ["a", "bb"]);
+        \\        let decoded = @abiDecode(slice[string], @abiEncode(values));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => @abiEncode(roundtrip[0])[64] + @abiEncode(roundtrip[1])[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(string_array_source, "run", 195);
+
+    const nested_array_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const first = @cast(slice[u256], [1, 2]);
+        \\        const second = @cast(slice[u256], [3]);
+        \\        const values = @cast(slice[slice[u256]], [first, second]);
+        \\        let decoded = @abiDecode(slice[slice[u256]], @abiEncode(values));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0][1] + roundtrip[1][0],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(nested_array_source, "run", 5);
+
+    const dynamic_struct_source =
+        \\struct Profile {
+        \\    id: u256,
+        \\    name: string,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: Profile = Profile { id: 1, name: "hello" };
+        \\        let decoded = @abiDecode(Profile, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip.id + @abiEncode(roundtrip.name)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(dynamic_struct_source, "run", 105);
+
+    const fixed_dynamic_array_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: [string; 3] = ["a", "bb", "ccc"];
+        \\        let decoded = @abiDecode([string; 3], @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => @abiEncode(roundtrip[0])[64] + @abiEncode(roundtrip[1])[64] + @abiEncode(roundtrip[2])[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(fixed_dynamic_array_source, "run", 294);
+
+    const dynamic_struct_array_source =
+        \\struct Profile {
+        \\    id: u256,
+        \\    name: string,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const first: Profile = Profile { id: 1, name: "a" };
+        \\        const second: Profile = Profile { id: 2, name: "bb" };
+        \\        const value = @cast(slice[Profile], [first, second]);
+        \\        let decoded = @abiDecode(slice[Profile], @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0].id + roundtrip[1].id + @abiEncode(roundtrip[0].name)[64] + @abiEncode(roundtrip[1].name)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(dynamic_struct_array_source, "run", 198);
+
+    const deeply_nested_tuple_source =
+        \\type Deep = (((((string, u256), bytes), bool), u256), bool);
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const payload: bytes = hex"deadbeef";
+        \\        const value: Deep = ((((("hello", @cast(u256, 7)), payload), true), @cast(u256, 9)), false);
+        \\        let decoded = @abiDecode(Deep, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(deeply_nested_tuple_source, "run", 1);
+}
+
+test "compiler abiDecode decodes cast-anchored dynamic ABI bytes at comptime" {
+    const string_source =
+        // cast abi-encode "f(string)" "hello" | payload without selector
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => @abiEncode(value)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(string_source, "run", 104);
+
+    const uint_array_source =
+        // cast abi-encode "f(uint256[])" "[1,2,3]" | payload without selector
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
+        \\        let out = match (decoded) {
+        \\            Ok(values) => values[0] + values[1] + values[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(uint_array_source, "run", 6);
+
+    const mixed_tuple_source =
+        // cast abi-encode "f(uint256,string)" 7 "hello" | payload without selector
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.0 + @abiEncode(value.1)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(mixed_tuple_source, "run", 111);
+
+    const dynamic_struct_source =
+        // cast abi-encode "f((uint256,string))" "(1,hello)" | payload without selector
+        \\struct Profile {
+        \\    id: u256,
+        \\    name: string,
+        \\}
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(Profile, hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value.id + @abiEncode(value.name)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(dynamic_struct_source, "run", 105);
+}
+
+test "compiler abiDecode rejects malformed dynamic ABI encodings as Result errors" {
+    const offset_too_small_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(offset_too_small_source, "run", 1);
+
+    const offset_too_large_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000040");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(offset_too_large_source, "run", 1);
+
+    const dynamic_padding_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000161ff000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(dynamic_padding_source, "run", 1);
+
+    const trailing_bytes_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(trailing_bytes_source, "run", 1);
+
+    const array_head_budget_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(array_head_budget_source, "run", 1);
+
+    const array_length_exceeded_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecode(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000008001");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(array_length_exceeded_source, "run", 1);
+}
+
+test "compiler abiDecode accepts fixed bytes second argument values" {
+    const fixed_bytes_arg_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const payload: bytes32 = hex"0000000000000000000000000000000000000000000000000000000000000005";
+        \\        let decoded = @abiDecode(u256, payload);
+        \\        let out = match (decoded) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(fixed_bytes_arg_source, "run", 5);
+}
+
+test "compiler lowers runtime abiDecode builtin to memory result op" {
+    const source_text =
+        \\pub fn decode_scalar(payload: bytes) -> u256 {
+        \\    let decoded = @abiDecode(u256, payload);
+        \\    return match (decoded) {
+        \\        Ok(value) => value,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+        \\
+        \\pub fn decode_pair(payload: bytes) -> u256 {
+        \\    let decoded = @abiDecode((u256, bool), payload);
+        \\    return match (decoded) {
+        \\        Ok(value) => value.0,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+        \\
+        \\pub fn decode_string(payload: bytes) -> u256 {
+        \\    let decoded = @abiDecode(string, payload);
+        \\    return match (decoded) {
+        \\        Ok(_) => 1,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+        \\
+        \\pub fn decode_bytes(payload: bytes) -> u256 {
+        \\    let decoded = @abiDecode(bytes, payload);
+        \\    return match (decoded) {
+        \\        Ok(_) => 1,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "source = \"memory\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 4, "failure_mode = \"result\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256),static(bool))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(dynamic(string))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(dynamic(bytes))"));
 }
 
 test "compiler abiEncode encodes dynamic string and bytes values" {
@@ -2617,6 +5964,94 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             ,
             .needle = "@abiEncode: type 'map<address, u256>' has no ABI representation",
         },
+        .{
+            .source =
+            \\pub fn run() -> u256 {
+            \\    return comptime {
+            \\        let decoded = @abiDecode();
+            \\        0;
+            \\    };
+            \\}
+            ,
+            .needle = "@abiDecode expects 2 arguments, found 0",
+        },
+        .{
+            .source =
+            \\pub fn run() -> u256 {
+            \\    return comptime {
+            \\        let decoded = @abiDecode(Exact<u256, 5>, hex"0000000000000000000000000000000000000000000000000000000000000005");
+            \\        0;
+            \\    };
+            \\}
+            ,
+            .needle = "@abiDecode: type 'Exact<u256, 5>' has no ABI representation",
+        },
+        .{
+            .source =
+            \\type NonZeroAmount = NonZero<u256>;
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(NonZeroAmount, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\struct Pair { left: u256, right: u256 }
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(Pair, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode((string, u256), payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode([string; 3], payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(slice[string], payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(slice[slice[u256]], payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
+        .{
+            .source =
+            \\struct Profile { name: string, score: u256 }
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(Profile, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecode does not yet support target type",
+        },
     };
 
     for (cases) |case| {
@@ -2682,6 +6117,96 @@ test "compiler corpus covers static abiEncode builtin" {
             // cast abi-encode "f()"
             .expected = 0,
         },
+    };
+
+    for (cases) |case| {
+        var value_index: ?usize = null;
+        for (contract.members) |member_id| {
+            const item = ast_file.item(member_id).*;
+            if (item != .Function or !std.mem.eql(u8, item.Function.name, case.name)) continue;
+            const body = ast_file.body(item.Function.body);
+            const ret_stmt = ast_file.statement(body.statements[0]).Return;
+            value_index = ret_stmt.value.?.index();
+            break;
+        }
+        try testing.expect(value_index != null);
+        try testing.expectEqual(case.expected, try consteval.values[value_index.?].?.integer.toInt(i128));
+    }
+}
+
+test "compiler corpus covers static abiDecode builtin" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/abi_decode_static.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("AbiDecodeStaticCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+
+    const Case = struct {
+        name: []const u8,
+        expected: i128,
+    };
+    const cases = [_]Case{
+        .{ .name = "scalar_value", .expected = 5 },
+        .{ .name = "array_sum", .expected = 5 },
+        .{ .name = "struct_amount", .expected = 7 },
+        .{ .name = "fixed_bytes_sum", .expected = 391 },
+        .{ .name = "enum_ok", .expected = 1 },
+        .{ .name = "bitfield_last_byte", .expected = 3 },
+        .{ .name = "refinement_ok", .expected = 5 },
+        .{ .name = "malformed_is_err", .expected = 1 },
+    };
+
+    for (cases) |case| {
+        var value_index: ?usize = null;
+        for (contract.members) |member_id| {
+            const item = ast_file.item(member_id).*;
+            if (item != .Function or !std.mem.eql(u8, item.Function.name, case.name)) continue;
+            const body = ast_file.body(item.Function.body);
+            const ret_stmt = ast_file.statement(body.statements[0]).Return;
+            value_index = ret_stmt.value.?.index();
+            break;
+        }
+        try testing.expect(value_index != null);
+        try testing.expectEqual(case.expected, try consteval.values[value_index.?].?.integer.toInt(i128));
+    }
+}
+
+test "compiler corpus covers dynamic abiDecode builtin" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/abi_decode_dynamic.ora");
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const contract_id = item_index.lookup("AbiDecodeDynamicCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+
+    const Case = struct {
+        name: []const u8,
+        expected: i128,
+    };
+    const cases = [_]Case{
+        .{ .name = "string_first_byte", .expected = 104 },
+        .{ .name = "bytes_edge_sum", .expected = 461 },
+        .{ .name = "mixed_tuple_sum", .expected = 111 },
+        .{ .name = "dynamic_array_sum", .expected = 6 },
+        .{ .name = "dynamic_string_array_sum", .expected = 195 },
+        .{ .name = "nested_dynamic_array_sum", .expected = 5 },
+        .{ .name = "dynamic_struct_sum", .expected = 105 },
+        .{ .name = "malformed_offset_is_err", .expected = 1 },
     };
 
     for (cases) |case| {
