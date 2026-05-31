@@ -1010,6 +1010,7 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
     const address_tuple_ty: sema.Type = .{ .tuple = &address_tuple_elems };
 
     const single_offset = "0000000000000000000000000000000000000000000000000000000000000000";
+    const single_invalid_offset = "0000000000000000000000000000000000000000000000010000000000000000";
     const single_truncated_length = "0000000000000000000000000000000000000000000000000000000000000020";
     const single_string_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000020" ++
         "0000000000000000000000000000000000000000000000000000000000100001";
@@ -1033,6 +1034,8 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
 
     const mixed_offset = "0000000000000000000000000000000000000000000000000000000000000007" ++
         "0000000000000000000000000000000000000000000000000000000000000000";
+    const mixed_invalid_offset = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000010000000000000000";
     const mixed_truncated_length = "0000000000000000000000000000000000000000000000000000000000000007" ++
         "0000000000000000000000000000000000000000000000000000000000000040";
     const mixed_string_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000007" ++
@@ -1070,17 +1073,29 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
     };
     const cases = [_]ExactVariantCase{
         .{ .name = "err_dynamic_offset", .ora_type = "string", .target_type = string_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_invalid_offset", .ora_type = "string", .target_type = string_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_dynamic_bytes_offset", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_bytes_invalid_offset", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_dynamic_array_offset", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_array_invalid_offset", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_dynamic_bool_array_offset", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_bool_array_invalid_offset", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_dynamic_fixed_bytes_array_offset", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_fixed_bytes_array_invalid_offset", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_dynamic_address_array_offset", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_address_array_invalid_offset", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_tuple_offset", .ora_type = "(u256, string)", .target_type = string_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_tuple_invalid_offset", .ora_type = "(u256, string)", .target_type = string_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_bytes_tuple_offset", .ora_type = "(u256, bytes)", .target_type = bytes_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_invalid_offset", .ora_type = "(u256, bytes)", .target_type = bytes_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_array_tuple_offset", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_array_tuple_invalid_offset", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_bool_array_tuple_offset", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_invalid_offset", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_offset", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_invalid_offset", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
         .{ .name = "err_mixed_dynamic_address_array_tuple_offset", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_invalid_offset", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_invalid_offset, .expected = .invalid_offset },
 
         .{ .name = "err_dynamic_truncated_length", .ora_type = "string", .target_type = string_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
         .{ .name = "err_dynamic_bytes_truncated_length", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
@@ -4899,6 +4914,13 @@ test "compiler abiDecode N4b runtime mutation fuzz matches comptime oracle" {
         ora_type: []const u8,
         payload_hex: []const u8,
     }{
+        // N4b external-oracle strategy: deterministic fuzz still explores
+        // generated byte strings against the trusted comptime oracle, while
+        // this seed corpus keeps the runtime fuzz harness anchored to concrete
+        // Solidity-compatible ABI payloads. The dynamic canonical seeds mirror
+        // the cast-anchored vectors in "abiDecode decodes cast-anchored dynamic
+        // ABI bytes at comptime"; malformed seeds then mutate those same shape
+        // families to pin the runtime-vs-comptime error boundary.
         .{ .name = "rt_n4b_valid_u8", .ora_type = "u8", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000007" },
         .{ .name = "rt_n4b_invalid_bool", .ora_type = "bool", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000002" },
         .{ .name = "rt_n4b_valid_string", .ora_type = "string", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000" },

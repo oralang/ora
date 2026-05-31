@@ -356,6 +356,9 @@ test "compiler abiDecode N3b4 validates public calldata bool and address params 
         \\    pub fn accept(flag: bool, owner: address, amount: u8, delta: i8, tag: bytes4) -> bool {
         \\        return true;
         \\    }
+        \\    pub fn full(signed: i256, tag: bytes32) -> bool {
+        \\        return true;
+        \\    }
         \\}
     ;
 
@@ -386,6 +389,13 @@ test "compiler abiDecode N3b4 validates public calldata bool and address params 
     try expectOrderedNeedles(main_fn, &.{ "n_accept = calldataload", "eq n_accept", ": @abi_decode_revert_3" });
     try expectOrderedNeedles(main_fn, &.{ "arg_accept = calldataload", "eq arg_accept", ": @abi_decode_revert_3" });
     try expectOrderedNeedles(main_fn, &.{ "arg_accept_0 = calldataload", "eq arg_accept_0", "? @accept_exec : @abi_decode_revert_6" });
+    const accept_full_call = std.mem.indexOf(u8, main_fn, "icall @full") orelse return error.TestUnexpectedResult;
+    const accept_full_label = std.mem.lastIndexOf(u8, main_fn[0..accept_full_call], "full_exec") orelse return error.TestUnexpectedResult;
+    const accept_full_slice = main_fn[accept_full_label..accept_full_call];
+    try testing.expect(std.mem.containsAtLeast(u8, accept_full_slice, 2, "calldataload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, accept_full_slice, 1, "signextend"));
+    try testing.expect(!std.mem.containsAtLeast(u8, accept_full_slice, 1, "shr"));
+    try testing.expect(!std.mem.containsAtLeast(u8, accept_full_slice, 1, "shl"));
     try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_3", "const 0x3", "mstore256", "revert" });
     try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_4", "const 0x4", "mstore256", "revert" });
     try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_5", "const 0x5", "mstore256", "revert" });

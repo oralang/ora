@@ -784,6 +784,8 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         Finish finish,
         bool permissive)
     {
+        auto offsetOverflowBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
+        auto offsetCheckBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
         auto invalidOffsetBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
         auto minLengthBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
         auto lengthTruncatedBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
@@ -796,6 +798,18 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
 
         rewriter.setInsertionPointToEnd(decodeBlock);
         Value offsetWord = decodeAbiU256FromMemory(rewriter, loc, basePtr, offsetWordByteOffset);
+        Value offsetExceedsUsize = rewriter.create<sir::GtOp>(
+            loc,
+            u256Type,
+            offsetWord,
+            constU256(rewriter, loc, llvm::APInt::getLowBitsSet(256, 64)));
+        rewriter.create<sir::CondBrOp>(loc, offsetExceedsUsize, ValueRange{}, ValueRange{}, offsetOverflowBlock, offsetCheckBlock);
+
+        rewriter.setInsertionPointToStart(offsetOverflowBlock);
+        if (failed(branchDynamicErr(AbiDecodeError::InvalidOffset, constU256(rewriter, loc, 0))))
+            return failure();
+
+        rewriter.setInsertionPointToStart(offsetCheckBlock);
         Value offsetOk = permissive
                              ? constU256(rewriter, loc, 1)
                              : rewriter.create<sir::EqOp>(loc, u256Type, offsetWord, constU256(rewriter, loc, expectedOffset)).getResult();
