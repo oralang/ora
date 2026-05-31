@@ -2303,6 +2303,110 @@ test "compiler abiDecodePermissive runtime preserves hard error variants" {
     try expectRuntimeAbiDecodeErrors(source, &cases);
 }
 
+test "compiler abiDecodePermissive runtime decodes documented non-canonical values" {
+    const cases = [_]ExpectedU256Return{
+        .{ .name = "u8_value", .expected = 10 },
+        .{ .name = "bool_value", .expected = 1 },
+        .{ .name = "address_value", .expected = 120 },
+        .{ .name = "bytes4_value", .expected = 391 },
+        .{ .name = "dynamic_values", .expected = 267 },
+        .{ .name = "slice_values", .expected = 9 },
+        .{ .name = "mixed_tuple", .expected = 104 },
+    };
+
+    const source =
+        \\contract Decode {
+        \\    pub fn u8_value() -> u256 {
+        \\        let decoded_u8 = @abiDecodePermissive(u8, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        return match (decoded_u8) {
+        \\            Ok(value) => 10 + @cast(u256, value),
+        \\            Err(_) => 900,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn bool_value() -> u256 {
+        \\        let decoded_bool = @abiDecodePermissive(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        var out: u256 = 900;
+        \\        match (decoded_bool) {
+        \\            Ok(value) => {
+        \\                if (value) {
+        \\                    out = 1;
+        \\                } else {
+        \\                    out = 2;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        };
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn address_value() -> u256 {
+        \\        let decoded_address = @abiDecodePermissive(address, hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        var out: u256 = 900;
+        \\        match (decoded_address) {
+        \\            Ok(value) => {
+        \\                if (value == 0x1234567890abcdef1234567890abcdef12345678) {
+        \\                    out = 120;
+        \\                } else {
+        \\                    out = 901;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        };
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn bytes4_value() -> u256 {
+        \\        let decoded_bytes = @abiDecodePermissive(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000001");
+        \\        var out: u256 = 900;
+        \\        match (decoded_bytes) {
+        \\            Ok(value) => {
+        \\                const expected: bytes4 = hex"aabbccdd";
+        \\                if (value == expected) {
+        \\                    out = 391;
+        \\                } else {
+        \\                    out = 901;
+        \\                }
+        \\            }
+        \\            Err(_) => {}
+        \\        };
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn dynamic_values() -> u256 {
+        \\        let shifted = @abiDecodePermissive(string, hex"00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        let shifted_score = match (shifted) {
+        \\            Ok(value) => value[0],
+        \\            Err(_) => 900,
+        \\        };
+        \\        let padded = @abiDecodePermissive(bytes, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001aaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        let padded_score = match (padded) {
+        \\            Ok(value) => value[0],
+        \\            Err(_) => 900,
+        \\        };
+        \\        return shifted_score + padded_score;
+        \\    }
+        \\
+        \\    pub fn slice_values() -> u256 {
+        \\        let decoded = @abiDecodePermissive(slice[u256], hex"00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000005");
+        \\        return match (decoded) {
+        \\            Ok(values) => values[0] + values[1],
+        \\            Err(_) => 900,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn mixed_tuple() -> u256 {
+        \\        let decoded = @abiDecodePermissive((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 900,
+        \\        };
+        \\    }
+        \\}
+    ;
+    try expectRuntimeU256Returns(source, &cases);
+}
+
 test "compiler abiDecode runtime memory result matches comptime oracle" {
     const comptime_source =
         \\enum Status: u8 { Active, Paused }
