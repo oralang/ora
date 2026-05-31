@@ -635,6 +635,7 @@ pub const FunctionItem = struct {
     is_ghost: bool = false,
     is_comptime: bool = false,
     is_generic: bool = false,
+    abi_decode_permissive: bool = false,
     visibility: Visibility,
     parameters: []Parameter,
     return_type: ?TypeExprId,

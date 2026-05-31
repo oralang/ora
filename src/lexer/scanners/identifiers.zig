@@ -96,12 +96,12 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
 
 fn isValidBuiltin(name: []const u8) bool {
     const valid = [_][]const u8{
-        "divTrunc",        "divFloor",          "divCeil",         "divExact",        "divMod",          "divmod",
-        "cast",            "truncate",          "addWithOverflow", "subWithOverflow", "mulWithOverflow", "divWithOverflow",
-        "modWithOverflow", "powerWithOverflow", "negWithOverflow", "shlWithOverflow", "shrWithOverflow", "bitCast",
-        "bits",            "concat",            "slice",           "compileError",    "selector",        "abiSignature",
-        "eventTopic",      "eip712TypeHash",    "abiEncode",       "abiDecode",       "chainId",         "structFields",
-        "traitMethods",
+        "divTrunc",        "divFloor",          "divCeil",         "divExact",        "divMod",              "divmod",
+        "cast",            "truncate",          "addWithOverflow", "subWithOverflow", "mulWithOverflow",     "divWithOverflow",
+        "modWithOverflow", "powerWithOverflow", "negWithOverflow", "shlWithOverflow", "shrWithOverflow",     "bitCast",
+        "bits",            "concat",            "slice",           "compileError",    "selector",            "abiSignature",
+        "eventTopic",      "eip712TypeHash",    "abiEncode",       "abiDecode",       "abiDecodePermissive", "decodePermissive",
+        "chainId",         "structFields",      "traitMethods",
     };
     for (valid) |v| {
         if (std.mem.eql(u8, name, v)) return true;

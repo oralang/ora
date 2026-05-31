@@ -481,6 +481,38 @@ test "debug-probe malformed public calldata reverts before body effects" {
         try expectProbeContains(case.name, valid_stdout, expected_success_output);
     }
 
+    const permissive_payload =
+        // bool=2 (non-canonical true), address has non-zero high padding, and
+        // string offset/padding are non-canonical. @decodePermissive accepts
+        // those canonicality violations while preserving hard bounds checks.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0100000000000000000000001234567890abcdef1234567890abcdef12345678" ++
+        "0000000000000000000000000000000000000000000000000000000000000080" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "41ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    const permissive_calldata = try calldataHexForPayloadHex(allocator, "accept_permissive(bool,address,string)", permissive_payload);
+    defer allocator.free(permissive_calldata);
+    const permissive_stdout = try runDebugProbe(allocator, fixture, out_dir, permissive_calldata, "48");
+    defer allocator.free(permissive_stdout);
+    try expectProbeContains("decodePermissive public calldata", permissive_stdout, "reverted: false");
+    try expectProbeContains("decodePermissive public calldata", permissive_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000041");
+    try expectProbeContains("decodePermissive public calldata", permissive_stdout, "binding touched [storage_field] value=9");
+
+    const permissive_truncated_payload =
+        // Hard errors remain strict under @decodePermissive: the dynamic string
+        // length word is missing, so this must still revert with TruncatedBuffer.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0100000000000000000000001234567890abcdef1234567890abcdef12345678" ++
+        "0000000000000000000000000000000000000000000000000000000000000080";
+    const permissive_truncated_calldata = try calldataHexForPayloadHex(allocator, "accept_permissive(bool,address,string)", permissive_truncated_payload);
+    defer allocator.free(permissive_truncated_calldata);
+    const permissive_truncated_stdout = try runDebugProbe(allocator, fixture, out_dir, permissive_truncated_calldata, "48");
+    defer allocator.free(permissive_truncated_stdout);
+    try expectProbeContains("decodePermissive public calldata hard error", permissive_truncated_stdout, "reverted: true");
+    try expectProbeContains("decodePermissive public calldata hard error", permissive_truncated_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000000");
+    try expectProbeOmits("decodePermissive public calldata hard error", permissive_truncated_stdout, "binding touched [storage_field] value=9");
+
     const constructor_fixture: Fixture = .{
         .name = "abi_decode_constructor_revert",
         .source_relpath = "tests/debug_artifacts/abi_decode_constructor_revert/abi_decode_constructor_revert.ora",

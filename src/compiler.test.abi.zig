@@ -4,8 +4,8 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
-const abi_layout = ora_root.abi_layout;
 const abi_comptime_decoder = ora_root.abi_comptime_decoder;
+const abi_comptime_decoder_test_support = ora_root.abi_comptime_decoder_test_support;
 
 const h = @import("compiler.test.helpers.zig");
 const compileText = h.compileText;
@@ -64,6 +64,11 @@ const ExpectedDecodeError = struct {
     expected_variant: u32,
 };
 
+const ExpectedU256Return = struct {
+    name: []const u8,
+    expected: u256,
+};
+
 var noop_decode_resolver_context: u8 = 0;
 
 fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
@@ -118,28 +123,13 @@ fn expectComptimeDecoderErrorForType(
     payload_hex: []const u8,
     expected: abi_comptime_decoder.DecodeError,
 ) !void {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var layout = try abi_layout.fromType(allocator, target_type);
-    defer layout.deinit(allocator);
-
-    const bytes = try decodeHexBytes(payload_hex);
-    defer testing.allocator.free(bytes);
-
-    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
-    defer heap.deinit();
-
-    const decoded = try abi_comptime_decoder.decodeComptimeValue(
-        allocator,
-        &heap,
-        noopAbiDecodeResolver(),
-        layout,
+    try abi_comptime_decoder_test_support.expectDecodeErrorForType(
+        testing.allocator,
         target_type,
-        bytes,
+        payload_hex,
+        noopAbiDecodeResolver(),
+        expected,
     );
-    try testing.expectEqual(expected, decoded.err);
 }
 
 fn expectedHexByteLen(expected_hex: []const u8) !usize {
@@ -775,6 +765,53 @@ fn expectRuntimeU256Return(source_text: []const u8, function_name: []const u8, e
     try testing.expectEqual(expected, actual);
 }
 
+fn collectComptimeU256Returns(
+    allocator: std.mem.Allocator,
+    source_text: []const u8,
+    function_names: []const []const u8,
+) ![]ExpectedU256Return {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+
+    const expected = try allocator.alloc(ExpectedU256Return, function_names.len);
+    errdefer allocator.free(expected);
+    for (function_names, 0..) |function_name, index| {
+        const value_index = try rootFunctionReturnValueIndex(&compilation, function_name);
+        expected[index] = .{
+            .name = function_name,
+            .expected = try consteval.values[value_index].?.integer.toInt(u256),
+        };
+    }
+    return expected;
+}
+
+fn expectRuntimeU256Returns(source_text: []const u8, cases: []const ExpectedU256Return) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    for (cases) |case| {
+        const payload = try extractRuntimeReturnBytesFromSir(rendered, case.name, 32);
+        defer testing.allocator.free(payload);
+        const actual = try u256FromAbiWord(payload);
+        try testing.expectEqual(case.expected, actual);
+    }
+}
+
 fn expectRuntimeAbiDecodeErrors(source_text: []const u8, cases: []const ExpectedDecodeError) !void {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -1078,6 +1115,97 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
     try expectRuntimeAbiDecodeErrors(runtime_source.items, expected_runtime.items);
 }
 
+test "compiler abiDecode static error fixtures expose exact error variants" {
+    const cases = [_]ExpectedDecodeError{
+        .{ .name = "err_truncated", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.truncated_buffer) },
+        .{ .name = "err_oversize", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.oversize_buffer) },
+        .{ .name = "err_bool", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.invalid_bool_value) },
+        .{ .name = "err_u8_padding", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.non_canonical_padding) },
+        .{ .name = "err_i8_padding", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.non_canonical_padding) },
+        .{ .name = "err_address", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.invalid_address) },
+        .{ .name = "err_fixed_bytes", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.invalid_fixed_bytes) },
+        .{ .name = "err_enum_range", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.enum_out_of_range) },
+        .{ .name = "err_bitfield_padding", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.non_canonical_padding) },
+        .{ .name = "err_refinement", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+        .{ .name = "err_positive_byte", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+        .{ .name = "err_nonzero_address", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+        .{ .name = "err_min_boundary", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+        .{ .name = "err_signed_refinement", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+    };
+
+    const runtime_source =
+        \\enum Status: u8 { Active, Paused }
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\type AtLeastFive = MinValue<u256, 5>;
+        \\type SignedFloor = MinValue<i8, -5>;
+        \\type Owner = NonZeroAddress<address>;
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\contract Decode {
+        \\    pub fn err_truncated() -> Result<u256, AbiDecodeError> {
+        \\        let payload = hex"0001";
+        \\        return @abiDecode(u256, payload);
+        \\    }
+        \\    pub fn err_oversize() -> Result<u256, AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000050000000000000000000000000000000000000000000000000000000000000000";
+        \\        return @abiDecode(u256, payload);
+        \\    }
+        \\    pub fn err_bool() -> Result<bool, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000002";
+        \\        return @abiDecode(bool, payload);
+        \\    }
+        \\    pub fn err_u8_padding() -> Result<u8, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000100";
+        \\        return @abiDecode(u8, payload);
+        \\    }
+        \\    pub fn err_i8_padding() -> Result<i8, AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000fb";
+        \\        return @abiDecode(i8, payload);
+        \\    }
+        \\    pub fn err_address() -> Result<address, AbiDecodeError> {
+        \\        let payload = hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678";
+        \\        return @abiDecode(address, payload);
+        \\    }
+        \\    pub fn err_fixed_bytes() -> Result<bytes4, AbiDecodeError> {
+        \\        let payload = hex"aabbccdd00000000000000000000000000000000000000000000000000000001";
+        \\        return @abiDecode(bytes4, payload);
+        \\    }
+        \\    pub fn err_enum_range() -> Result<Status, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000002";
+        \\        return @abiDecode(Status, payload);
+        \\    }
+        \\    pub fn err_bitfield_padding() -> Result<Flags, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000100";
+        \\        return @abiDecode(Flags, payload);
+        \\    }
+        \\    pub fn err_refinement() -> Result<NonZeroU256, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        return @abiDecode(NonZeroU256, payload);
+        \\    }
+        \\    pub fn err_positive_byte() -> Result<PositiveByte, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        return @abiDecode(PositiveByte, payload);
+        \\    }
+        \\    pub fn err_nonzero_address() -> Result<Owner, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000000";
+        \\        return @abiDecode(Owner, payload);
+        \\    }
+        \\    pub fn err_min_boundary() -> Result<AtLeastFive, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000004";
+        \\        return @abiDecode(AtLeastFive, payload);
+        \\    }
+        \\    pub fn err_signed_refinement() -> Result<SignedFloor, AbiDecodeError> {
+        \\        let payload = hex"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffa";
+        \\        return @abiDecode(SignedFloor, payload);
+        \\    }
+        \\}
+    ;
+    try expectRuntimeAbiDecodeErrors(runtime_source, &cases);
+}
+
 fn rootFunctionReturnValueIndex(compilation: anytype, function_name: []const u8) !usize {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
@@ -1115,6 +1243,86 @@ fn expectRuntimeAbiPayloadMatchesComptimeAndCast(
     const payload = try extractRuntimeAbiPayloadFromSir(rendered, runtime_function_name, try expectedHexByteLen(expected_hex));
     defer testing.allocator.free(payload);
     try expectHexBytes(expected_hex, payload);
+}
+
+const RuntimeAbiDecodeFuzzCase = struct {
+    name: []const u8,
+    ora_type: []const u8,
+    payload_hex: []const u8,
+};
+
+const RuntimeAbiDecodeFuzzBytes = struct {
+    state: u64,
+
+    fn next(self: *RuntimeAbiDecodeFuzzBytes) u8 {
+        self.state = self.state *% 6364136223846793005 +% 1442695040888963407;
+        return @truncate(self.state >> 56);
+    }
+
+    fn fill(self: *RuntimeAbiDecodeFuzzBytes, bytes: []u8) void {
+        for (bytes) |*byte| byte.* = self.next();
+    }
+};
+
+fn allocHexBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const hex = try allocator.alloc(u8, bytes.len * 2);
+    errdefer allocator.free(hex);
+    for (bytes, 0..) |byte, index| {
+        hex[index * 2] = std.fmt.hex_charset[byte >> 4];
+        hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
+    }
+    return hex;
+}
+
+fn appendRuntimeAbiDecodeFuzzFunction(
+    source: *std.ArrayList(u8),
+    case: RuntimeAbiDecodeFuzzCase,
+    comptime_mode: bool,
+) !void {
+    const function_source = if (comptime_mode)
+        try std.fmt.allocPrint(testing.allocator,
+            \\    pub fn {s}() -> u256 {{
+            \\        return comptime {{
+            \\            let decoded = @abiDecode({s}, hex"{s}");
+            \\            let out = match (decoded) {{
+            \\                Ok(_) => 1000,
+            \\                Err(_) => 1,
+            \\            }};
+            \\            out;
+            \\        }};
+            \\    }}
+            \\
+        , .{ case.name, case.ora_type, case.payload_hex })
+    else
+        try std.fmt.allocPrint(testing.allocator,
+            \\    pub fn {s}() -> u256 {{
+            \\        let payload = hex"{s}";
+            \\        let decoded = @abiDecode({s}, payload);
+            \\        return match (decoded) {{
+            \\            Ok(_) => 1000,
+            \\            Err(_) => 1,
+            \\        }};
+            \\    }}
+            \\
+        , .{ case.name, case.payload_hex, case.ora_type });
+    defer testing.allocator.free(function_source);
+    try source.appendSlice(testing.allocator, function_source);
+}
+
+fn appendRuntimeAbiDecodeFuzzPrelude(source: *std.ArrayList(u8), open_contract: bool) !void {
+    try source.appendSlice(testing.allocator,
+        \\enum Status: u8 { Active, Paused }
+        \\type NonZeroU256 = MinValue<u256, 1>;
+        \\bitfield Flags: u8 {
+        \\    enabled: u1,
+        \\    mode: u7,
+        \\}
+        \\
+    );
+    if (open_contract) try source.appendSlice(testing.allocator,
+        \\contract Decode {
+        \\
+    );
 }
 
 test "compiler abi generation uses compiler pipeline for public abi" {
@@ -1945,6 +2153,154 @@ test "compiler abiDecode maps strict static validation failures to Err" {
         \\}
     ;
     try expectComptimeIntegerReturn(oversize_source, "run", 1);
+}
+
+test "compiler abiDecodePermissive accepts documented non-canonical comptime inputs" {
+    const scalar_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        let decoded_u8 = @abiDecodePermissive(u8, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        let u8_score = match (decoded_u8) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 900,
+        \\        };
+        \\        let decoded_bool = @abiDecodePermissive(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
+        \\        let bool_score = match (decoded_bool) {
+        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Err(_) => 900,
+        \\        };
+        \\        let decoded_address = @abiDecodePermissive(address, hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678");
+        \\        let address_score = match (decoded_address) {
+        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Err(_) => 900,
+        \\        };
+        \\        let decoded_bytes = @abiDecodePermissive(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000001");
+        \\        let bytes_score = match (decoded_bytes) {
+        \\            Ok(value) => @abiEncode(value)[0] + @abiEncode(value)[3],
+        \\            Err(_) => 900,
+        \\        };
+        \\        u8_score + bool_score + address_score + bytes_score;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(scalar_source, "run", 512);
+
+    const dynamic_source =
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        // Non-canonical top-level offset leaves a 32-byte gap before the string tail.
+        \\        let shifted = @abiDecodePermissive(string, hex"00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        let shifted_score = match (shifted) {
+        \\            Ok(value) => value[0],
+        \\            Err(_) => 900,
+        \\        };
+        \\        // Canonical offset and length, but non-zero dynamic padding.
+        \\        let padded = @abiDecodePermissive(bytes, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001aaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        let padded_score = match (padded) {
+        \\            Ok(value) => value[0],
+        \\            Err(_) => 900,
+        \\        };
+        \\        // Trailing bytes are accepted by the permissive surface and discarded on re-encode.
+        \\        let trailing = @abiDecodePermissive(string, hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000016100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+        \\        let trailing_score = match (trailing) {
+        \\            Ok(value) => @abiEncode(value)[64],
+        \\            Err(_) => 900,
+        \\        };
+        \\        shifted_score + padded_score + trailing_score;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(dynamic_source, "run", 364);
+}
+
+test "compiler abiDecodePermissive preserves hard errors at comptime" {
+    const source =
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\pub fn truncated() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecodePermissive(string, hex"0000000000000000000000000000000000000000000000000000000000000020");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn length_overflow() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecodePermissive(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\pub fn refinement() -> u256 {
+        \\    return comptime {
+        \\        let decoded = @abiDecodePermissive(PositiveByte, hex"0000000000000000000000000000000000000000000000000000000000000100");
+        \\        let out = match (decoded) {
+        \\            Ok(_) => 0,
+        \\            Err(_) => 1,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(source, "truncated", 1);
+    try expectComptimeIntegerReturn(source, "length_overflow", 1);
+    try expectComptimeIntegerReturn(source, "refinement", 1);
+}
+
+test "compiler abiDecodePermissive agrees with strict on canonical bytes at comptime" {
+    const source =
+        \\type Payload = (u256, string);
+        \\pub fn run() -> u256 {
+        \\    return comptime {
+        \\        const value: Payload = (7, "hello");
+        \\        const payload = @abiEncode(value);
+        \\        let strict = @abiDecode(Payload, payload);
+        \\        let permissive = @abiDecodePermissive(Payload, payload);
+        \\        let strict_score = match (strict) {
+        \\            Ok(decoded) => decoded.0 + @abiEncode(decoded.1)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        let permissive_score = match (permissive) {
+        \\            Ok(decoded) => decoded.0 + @abiEncode(decoded.1)[64],
+        \\            Err(_) => 0,
+        \\        };
+        \\        strict_score + permissive_score;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(source, "run", 222);
+}
+
+test "compiler abiDecodePermissive runtime preserves hard error variants" {
+    const cases = [_]ExpectedDecodeError{
+        .{ .name = "truncated", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.truncated_buffer) },
+        .{ .name = "length_overflow", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.length_overflow) },
+        .{ .name = "refinement", .expected_variant = @intFromEnum(abi_comptime_decoder.DecodeError.refinement_violation) },
+    };
+
+    const source =
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\contract Decode {
+        \\    pub fn truncated() -> Result<string, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000020";
+        \\        return @abiDecodePermissive(string, payload);
+        \\    }
+        \\    pub fn length_overflow() -> Result<string, AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecodePermissive(string, payload);
+        \\    }
+        \\    pub fn refinement() -> Result<PositiveByte, AbiDecodeError> {
+        \\        let payload = hex"0000000000000000000000000000000000000000000000000000000000000100";
+        \\        return @abiDecodePermissive(PositiveByte, payload);
+        \\    }
+        \\}
+    ;
+    try expectRuntimeAbiDecodeErrors(source, &cases);
 }
 
 test "compiler abiDecode runtime memory result matches comptime oracle" {
@@ -4312,6 +4668,102 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
     }
 }
 
+test "compiler abiDecode N4b runtime mutation fuzz matches comptime oracle" {
+    const Shape = struct { ora_type: []const u8 };
+    const shapes = [_]Shape{
+        .{ .ora_type = "u256" },
+        .{ .ora_type = "u8" },
+        .{ .ora_type = "bool" },
+        .{ .ora_type = "address" },
+        .{ .ora_type = "bytes4" },
+        .{ .ora_type = "string" },
+        .{ .ora_type = "bytes" },
+        .{ .ora_type = "slice[u256]" },
+        .{ .ora_type = "slice[bool]" },
+        .{ .ora_type = "slice[bytes4]" },
+        .{ .ora_type = "slice[address]" },
+        .{ .ora_type = "(u256, string)" },
+        .{ .ora_type = "(u256, bytes)" },
+        .{ .ora_type = "(u256, slice[u256])" },
+        .{ .ora_type = "(u256, slice[bool])" },
+        .{ .ora_type = "(u256, slice[bytes4])" },
+        .{ .ora_type = "(u256, slice[address])" },
+        .{ .ora_type = "Status" },
+        .{ .ora_type = "Flags" },
+        .{ .ora_type = "NonZeroU256" },
+    };
+
+    var cases = std.ArrayList(RuntimeAbiDecodeFuzzCase){};
+    defer {
+        for (cases.items) |case| {
+            testing.allocator.free(case.name);
+            testing.allocator.free(case.payload_hex);
+        }
+        cases.deinit(testing.allocator);
+    }
+
+    const structured = [_]struct {
+        name: []const u8,
+        ora_type: []const u8,
+        payload_hex: []const u8,
+    }{
+        .{ .name = "rt_n4b_valid_u8", .ora_type = "u8", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000007" },
+        .{ .name = "rt_n4b_invalid_bool", .ora_type = "bool", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000002" },
+        .{ .name = "rt_n4b_valid_string", .ora_type = "string", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000" },
+        .{ .name = "rt_n4b_bad_string_padding", .ora_type = "string", .payload_hex = "000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000016100000000000000000000000000000000000000000000000000000000000001" },
+        .{ .name = "rt_n4b_valid_u256_array", .ora_type = "slice[u256]", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000002" },
+        .{ .name = "rt_n4b_bad_u256_array_tail", .ora_type = "slice[u256]", .payload_hex = "000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001" },
+        .{ .name = "rt_n4b_valid_mixed_bool_array", .ora_type = "(u256, slice[bool])", .payload_hex = "00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000" },
+        .{ .name = "rt_n4b_bad_mixed_bool_array", .ora_type = "(u256, slice[bool])", .payload_hex = "00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000001" },
+        .{ .name = "rt_n4b_valid_enum", .ora_type = "Status", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000001" },
+        .{ .name = "rt_n4b_bad_enum", .ora_type = "Status", .payload_hex = "0000000000000000000000000000000000000000000000000000000000000002" },
+    };
+    for (structured) |case| {
+        try cases.append(testing.allocator, .{
+            .name = try testing.allocator.dupe(u8, case.name),
+            .ora_type = case.ora_type,
+            .payload_hex = try testing.allocator.dupe(u8, case.payload_hex),
+        });
+    }
+
+    var fuzz = RuntimeAbiDecodeFuzzBytes{ .state = 0x4e34625f72756e31 };
+    var buffer: [160]u8 = undefined;
+    for (0..40) |index| {
+        const shape = shapes[index % shapes.len];
+        const name = try std.fmt.allocPrint(testing.allocator, "rt_n4b_fuzz_{d}", .{index});
+        errdefer testing.allocator.free(name);
+        const len = @as(usize, fuzz.next()) % buffer.len;
+        fuzz.fill(buffer[0..len]);
+        const payload_hex = try allocHexBytes(testing.allocator, buffer[0..len]);
+        errdefer testing.allocator.free(payload_hex);
+        try cases.append(testing.allocator, .{
+            .name = name,
+            .ora_type = shape.ora_type,
+            .payload_hex = payload_hex,
+        });
+    }
+
+    var comptime_source = std.ArrayList(u8){};
+    defer comptime_source.deinit(testing.allocator);
+    var runtime_source = std.ArrayList(u8){};
+    defer runtime_source.deinit(testing.allocator);
+    try appendRuntimeAbiDecodeFuzzPrelude(&comptime_source, false);
+    try appendRuntimeAbiDecodeFuzzPrelude(&runtime_source, true);
+
+    var names = std.ArrayList([]const u8){};
+    defer names.deinit(testing.allocator);
+    for (cases.items) |case| {
+        try names.append(testing.allocator, case.name);
+        try appendRuntimeAbiDecodeFuzzFunction(&comptime_source, case, true);
+        try appendRuntimeAbiDecodeFuzzFunction(&runtime_source, case, false);
+    }
+    try runtime_source.appendSlice(testing.allocator, "}\n");
+
+    const expected = try collectComptimeU256Returns(testing.allocator, comptime_source.items, names.items);
+    defer testing.allocator.free(expected);
+    try expectRuntimeU256Returns(runtime_source.items, expected);
+}
+
 test "compiler abiDecode round-trips encoder M2 static corpus" {
     const scalar_tuple_source =
         \\type Scalars = (u256, bool);
@@ -6354,6 +6806,17 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             .source =
             \\pub fn run() -> u256 {
             \\    return comptime {
+            \\        let decoded = @abiDecodePermissive();
+            \\        0;
+            \\    };
+            \\}
+            ,
+            .needle = "@abiDecodePermissive expects 2 arguments, found 0",
+        },
+        .{
+            .source =
+            \\pub fn run() -> u256 {
+            \\    return comptime {
             \\        let decoded = @abiDecode(Exact<u256, 5>, hex"0000000000000000000000000000000000000000000000000000000000000005");
             \\        0;
             \\    };
@@ -6427,6 +6890,15 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             ,
             .needle = "runtime @abiDecode does not yet support target type",
         },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecodePermissive(slice[bool], payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "runtime @abiDecodePermissive does not yet support target type",
+        },
     };
 
     for (cases) |case| {
@@ -6435,6 +6907,38 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
         const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
         try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, case.needle));
     }
+
+    const bad_marker_source =
+        \\contract Bad {
+        \\    @decodePermissive
+        \\    fn run(flag: bool) -> u256 {
+        \\        if (flag) {
+        \\            return 1;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+    var bad_marker_compilation = try compileText(bad_marker_source);
+    defer bad_marker_compilation.deinit();
+    const module = bad_marker_compilation.db.sources.module(bad_marker_compilation.root_module_id);
+    const ast_diags = try bad_marker_compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "@decodePermissive is only supported on public functions"));
+
+    const root_marker_source =
+        \\@decodePermissive
+        \\pub fn run(flag: bool) -> u256 {
+        \\    if (flag) {
+        \\        return 1;
+        \\    }
+        \\    return 0;
+        \\}
+    ;
+    var root_marker_compilation = try compileText(root_marker_source);
+    defer root_marker_compilation.deinit();
+    const root_module = root_marker_compilation.db.sources.module(root_marker_compilation.root_module_id);
+    const root_ast_diags = try root_marker_compilation.db.astDiagnostics(root_module.file_id);
+    try testing.expect(diagnosticMessagesContain(root_ast_diags, "@decodePermissive is only supported on public contract functions"));
 }
 
 test "compiler corpus covers static abiEncode builtin" {

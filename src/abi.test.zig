@@ -9,6 +9,7 @@ const abi = ora_root.abi;
 const abi_layout = ora_root.abi_layout;
 const abi_layout_context = ora_root.abi_layout_context;
 const abi_comptime_decoder = ora_root.abi_comptime_decoder;
+const abi_comptime_encoder = ora_root.abi_comptime_encoder;
 const compiler = ora_root.compiler;
 const hir_module_lowering = compiler.hir.abi_layout_test_support;
 const mlir = @import("mlir_c_api").c;
@@ -91,6 +92,131 @@ fn noopAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
     };
 }
 
+var n4a_resolver_context: u8 = 0;
+
+fn n4aTypeIdForType(_: *anyopaque, ty: compiler.sema.Type) ?u32 {
+    return switch (ty) {
+        .enum_ => |named| if (std.mem.eql(u8, named.name, "Status")) 1 else null,
+        else => null,
+    };
+}
+
+fn n4aStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+    return null;
+}
+
+fn n4aEnumVariantCount(_: *anyopaque, name: []const u8) ?usize {
+    return if (std.mem.eql(u8, name, "Status")) 2 else null;
+}
+
+fn n4aAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
+    return .{
+        .context = &n4a_resolver_context,
+        .typeIdForType = n4aTypeIdForType,
+        .structFields = n4aStructFields,
+        .enumVariantCount = n4aEnumVariantCount,
+    };
+}
+
+fn decodeHexBytes(allocator: std.mem.Allocator, hex_with_optional_prefix: []const u8) ![]u8 {
+    const hex = if (std.mem.startsWith(u8, hex_with_optional_prefix, "0x")) hex_with_optional_prefix[2..] else hex_with_optional_prefix;
+    try testing.expectEqual(@as(usize, 0), hex.len % 2);
+    const bytes = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| {
+        const hi = try std.fmt.charToDigit(hex[index * 2], 16);
+        const lo = try std.fmt.charToDigit(hex[index * 2 + 1], 16);
+        byte.* = @intCast((hi << 4) | lo);
+    }
+    return bytes;
+}
+
+fn expectComptimeDecodeError(
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    bytes: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+    expected: abi_comptime_decoder.DecodeError,
+) !void {
+    try expectComptimeDecodeErrorWithMode(layout, target_type, bytes, resolver, expected, .strict);
+}
+
+fn expectComptimeDecodeErrorWithMode(
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    bytes: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+    expected: abi_comptime_decoder.DecodeError,
+    mode: abi_comptime_decoder.DecodeMode,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    const decoded = try abi_comptime_decoder.decodeComptimeValueWithMode(
+        allocator,
+        &heap,
+        resolver,
+        layout,
+        target_type,
+        bytes,
+        mode,
+    );
+    try testing.expectEqual(expected, decoded.err);
+}
+
+fn expectComptimeDecodeErrorHex(
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    payload_hex: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+    expected: abi_comptime_decoder.DecodeError,
+) !void {
+    const bytes = try decodeHexBytes(testing.allocator, payload_hex);
+    defer testing.allocator.free(bytes);
+    try expectComptimeDecodeError(layout, target_type, bytes, resolver, expected);
+}
+
+fn expectComptimeDecodeErrorHexWithMode(
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    payload_hex: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+    expected: abi_comptime_decoder.DecodeError,
+    mode: abi_comptime_decoder.DecodeMode,
+) !void {
+    const bytes = try decodeHexBytes(testing.allocator, payload_hex);
+    defer testing.allocator.free(bytes);
+    try expectComptimeDecodeErrorWithMode(layout, target_type, bytes, resolver, expected, mode);
+}
+
+const NestedDecodeFixture = struct {
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+};
+
+fn nestedTupleDecodeFixture(
+    allocator: std.mem.Allocator,
+    depth: usize,
+    leaf_layout: abi_layout.LayoutNode,
+    leaf_type: compiler.sema.Type,
+) !NestedDecodeFixture {
+    if (depth == 0) return .{ .layout = leaf_layout, .target_type = leaf_type };
+
+    const inner = try nestedTupleDecodeFixture(allocator, depth - 1, leaf_layout, leaf_type);
+    const layout_elements = try allocator.alloc(abi_layout.LayoutNode, 1);
+    layout_elements[0] = inner.layout;
+    const type_elements = try allocator.alloc(compiler.sema.Type, 1);
+    type_elements[0] = inner.target_type;
+    return .{
+        .layout = .{ .tuple = .{ .path = .{}, .elements = layout_elements } },
+        .target_type = .{ .tuple = type_elements },
+    };
+}
+
 test "abi decode error ordinals are stable for runtime C++ mapping" {
     const DecodeError = abi_comptime_decoder.DecodeError;
 
@@ -109,6 +235,443 @@ test "abi decode error ordinals are stable for runtime C++ mapping" {
     try testing.expectEqual(@as(u32, 12), @intFromEnum(DecodeError.invalid_offset));
     try testing.expectEqual(@as(u32, 13), @intFromEnum(DecodeError.length_overflow));
     try testing.expectEqual(@as(u32, 14), @intFromEnum(DecodeError.string_length_exceeded));
+}
+
+test "abi comptime decoder has malformed corpus fixture for every DecodeError variant" {
+    const sema = compiler.sema;
+    const resolver = n4aAbiDecodeResolver();
+
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u8_ty: sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const string_ty: sema.Type = .string;
+    const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
+    const refinement_args = [_]compiler.ast.TypeArg{
+        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
+        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    };
+    const non_zero_ty: sema.Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = &u256_ty,
+        .args = &refinement_args,
+    } };
+
+    const u256_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 256 } } };
+    const u8_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 8 } } };
+    const bool_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .bool } };
+    const address_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .address } };
+    const bytes4_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .fixed_bytes = 4 } } };
+    const string_layout: abi_layout.LayoutNode = .{ .dynamic_bytes = .{ .path = .{}, .kind = .string } };
+    const u256_array_element = try testing.allocator.create(abi_layout.LayoutNode);
+    defer testing.allocator.destroy(u256_array_element);
+    u256_array_element.* = u256_layout;
+    const u256_slice_layout: abi_layout.LayoutNode = .{ .dynamic_array = .{ .path = .{}, .element = u256_array_element } };
+    const status_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 8 } } };
+
+    const word_zero = "0000000000000000000000000000000000000000000000000000000000000000";
+    const word_one = "0000000000000000000000000000000000000000000000000000000000000001";
+    const word_two = "0000000000000000000000000000000000000000000000000000000000000002";
+    const word_32 = "0000000000000000000000000000000000000000000000000000000000000020";
+    const word_2_64 = "0000000000000000000000000000000000000000000000010000000000000000";
+    const word_32769 = "0000000000000000000000000000000000000000000000000000000000008001";
+    const word_1048577 = "0000000000000000000000000000000000000000000000000000000000100001";
+
+    // N4a corpus map:
+    // - truncated_buffer: missing a required static word.
+    // - oversize_buffer: valid static word followed by extra bytes.
+    // - buffer_size_exceeded: input exceeds the decoder's global byte budget.
+    // - non_canonical_padding: narrow integer with non-zero high bits.
+    // - invalid_bool_value: bool word is neither 0 nor 1.
+    // - invalid_address: address word has non-zero high 96 bits.
+    // - invalid_fixed_bytes: bytesN word has non-zero trailing padding.
+    // - enum_out_of_range: positional enum id is >= variant count.
+    // - depth_limit_exceeded: nested tuple walk crosses MAX_DECODE_DEPTH.
+    // - array_length_exceeded: dynamic array length is over MAX_ARRAY_LENGTH.
+    // - refinement_violation: decoded value violates MinValue.
+    // - non_canonical_encoding: top-level dynamic offset is not the canonical 32.
+    // - invalid_offset: top-level offset word does not fit usize.
+    // - length_overflow: dynamic length word does not fit usize.
+    // - string_length_exceeded: string/bytes length is above MAX_STRING_LENGTH.
+    try expectComptimeDecodeErrorHex(u256_layout, u256_ty, "", resolver, .truncated_buffer);
+    try expectComptimeDecodeErrorHex(u256_layout, u256_ty, word_one ++ word_zero, resolver, .oversize_buffer);
+
+    const too_large = try testing.allocator.alloc(u8, abi_comptime_decoder.MAX_BUFFER_SIZE + 1);
+    defer testing.allocator.free(too_large);
+    @memset(too_large, 0);
+    try expectComptimeDecodeError(u256_layout, u256_ty, too_large, resolver, .buffer_size_exceeded);
+
+    try expectComptimeDecodeErrorHex(u8_layout, u8_ty, "0000000000000000000000000000000000000000000000000000000000000100", resolver, .non_canonical_padding);
+    try expectComptimeDecodeErrorHex(bool_layout, .bool, word_two, resolver, .invalid_bool_value);
+    try expectComptimeDecodeErrorHex(address_layout, .address, "0100000000000000000000001234567890abcdef1234567890abcdef12345678", resolver, .invalid_address);
+    try expectComptimeDecodeErrorHex(bytes4_layout, bytes4_ty, "aabbccdd00000000000000000000000000000000000000000000000000000001", resolver, .invalid_fixed_bytes);
+    try expectComptimeDecodeErrorHex(status_layout, status_ty, word_two, resolver, .enum_out_of_range);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const nested = try nestedTupleDecodeFixture(arena.allocator(), abi_comptime_decoder.MAX_DECODE_DEPTH, u256_layout, u256_ty);
+    try expectComptimeDecodeErrorHex(nested.layout, nested.target_type, word_one, resolver, .depth_limit_exceeded);
+
+    try expectComptimeDecodeErrorHex(u256_slice_layout, u256_slice_ty, word_32 ++ word_32769, resolver, .array_length_exceeded);
+    try expectComptimeDecodeErrorHex(u256_layout, non_zero_ty, word_zero, resolver, .refinement_violation);
+    try expectComptimeDecodeErrorHex(string_layout, string_ty, word_zero, resolver, .non_canonical_encoding);
+    try expectComptimeDecodeErrorHex(string_layout, string_ty, word_2_64, resolver, .invalid_offset);
+    try expectComptimeDecodeErrorHex(string_layout, string_ty, word_32 ++ word_2_64, resolver, .length_overflow);
+    try expectComptimeDecodeErrorHex(string_layout, string_ty, word_32 ++ word_1048577, resolver, .string_length_exceeded);
+}
+
+test "abi N5 permissive comptime decoder masks canonicality but preserves hard errors" {
+    const sema = compiler.sema;
+    const resolver = n4aAbiDecodeResolver();
+
+    const u8_ty: sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const bool_ty: sema.Type = .bool;
+    const address_ty: sema.Type = .address;
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const string_ty: sema.Type = .string;
+    const u8_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 8 } } };
+    const bool_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .bool } };
+    const address_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .address } };
+    const bytes4_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .fixed_bytes = 4 } } };
+    const string_layout: abi_layout.LayoutNode = .{ .dynamic_bytes = .{ .path = .{}, .kind = .string } };
+
+    const noncanonical_u8 = try decodeHexBytes(testing.allocator, "0000000000000000000000000000000000000000000000000000000000000100");
+    defer testing.allocator.free(noncanonical_u8);
+    const invalid_bool = try decodeHexBytes(testing.allocator, "0000000000000000000000000000000000000000000000000000000000000002");
+    defer testing.allocator.free(invalid_bool);
+    const invalid_address = try decodeHexBytes(testing.allocator, "0100000000000000000000001234567890abcdef1234567890abcdef12345678");
+    defer testing.allocator.free(invalid_address);
+    const invalid_fixed = try decodeHexBytes(testing.allocator, "aabbccdd00000000000000000000000000000000000000000000000000000001");
+    defer testing.allocator.free(invalid_fixed);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    const decoded_u8 = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, u8_layout, u8_ty, noncanonical_u8);
+    try testing.expectEqual(@as(u256, 0), decoded_u8.ok.integer);
+
+    const decoded_bool = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, bool_layout, bool_ty, invalid_bool);
+    try testing.expect(decoded_bool.ok.boolean);
+
+    const decoded_address = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, address_layout, address_ty, invalid_address);
+    try testing.expectEqual(@as(u160, 0x1234567890abcdef1234567890abcdef12345678), decoded_address.ok.address);
+
+    const decoded_fixed = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, bytes4_layout, bytes4_ty, invalid_fixed);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0xaa, 0xbb, 0xcc, 0xdd }, heap.getBytes(decoded_fixed.ok.bytes_ref));
+
+    const word_zero = "0000000000000000000000000000000000000000000000000000000000000000";
+    const word_32 = "0000000000000000000000000000000000000000000000000000000000000020";
+    const word_64 = "0000000000000000000000000000000000000000000000000000000000000040";
+    const word_one = "0000000000000000000000000000000000000000000000000000000000000001";
+    const word_2_64 = "0000000000000000000000000000000000000000000000010000000000000000";
+    const refinement_args = [_]compiler.ast.TypeArg{
+        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
+        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    };
+    const positive_u8_ty: sema.Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = &u8_ty,
+        .args = &refinement_args,
+    } };
+
+    try expectComptimeDecodeErrorHexWithMode(u8_layout, positive_u8_ty, "0000000000000000000000000000000000000000000000000000000000000100", resolver, .refinement_violation, .permissive);
+    try expectComptimeDecodeErrorHexWithMode(string_layout, string_ty, word_32, resolver, .truncated_buffer, .permissive);
+    try expectComptimeDecodeErrorHexWithMode(string_layout, string_ty, word_32 ++ word_2_64, resolver, .length_overflow, .permissive);
+
+    const trailing = try decodeHexBytes(testing.allocator, word_zero ++ word_zero);
+    defer testing.allocator.free(trailing);
+    const decoded_trailing = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, u8_layout, u8_ty, trailing);
+    try testing.expectEqual(@as(u256, 0), decoded_trailing.ok.integer);
+
+    const shifted_string = try decodeHexBytes(testing.allocator, word_64 ++ word_zero ++ word_one ++ "61ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    defer testing.allocator.free(shifted_string);
+    const decoded_shifted = try abi_comptime_decoder.decodeComptimeValuePermissive(allocator, &heap, resolver, string_layout, string_ty, shifted_string);
+    const reencoded_shifted = try abi_comptime_encoder.encodeComptimeValue(
+        testing.allocator,
+        &heap,
+        string_layout,
+        .{ .ct = decoded_shifted.ok },
+    );
+    defer testing.allocator.free(reencoded_shifted);
+    try testing.expect(!std.mem.eql(u8, shifted_string, reencoded_shifted));
+    try testing.expectEqual(@as(u8, 0x40), shifted_string[31]);
+    try testing.expectEqual(@as(u8, 0x20), reencoded_shifted[31]);
+}
+
+fn expectDecodeReencodesCanonicalBytes(
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    bytes: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    const decoded = try abi_comptime_decoder.decodeComptimeValue(
+        allocator,
+        &heap,
+        resolver,
+        layout,
+        target_type,
+        bytes,
+    );
+
+    switch (decoded) {
+        .err => {},
+        .ok => |value| {
+            const encoded = try abi_comptime_encoder.encodeComptimeValue(
+                testing.allocator,
+                &heap,
+                layout,
+                .{ .ct = value },
+            );
+            defer testing.allocator.free(encoded);
+            try testing.expectEqualSlices(u8, bytes, encoded);
+        },
+    }
+}
+
+fn expectCanonicalValueRoundTrip(
+    source_heap: *const ora_root.comptime_eval.CtHeap,
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    value: ora_root.comptime_eval.CtValue,
+    resolver: abi_comptime_decoder.TypeResolver,
+) !void {
+    const encoded = try abi_comptime_encoder.encodeComptimeValue(
+        testing.allocator,
+        source_heap,
+        layout,
+        .{ .ct = value },
+    );
+    defer testing.allocator.free(encoded);
+    try expectDecodeReencodesCanonicalBytes(layout, target_type, encoded, resolver);
+}
+
+fn expectCanonicalValueRoundTripForType(
+    source_heap: *const ora_root.comptime_eval.CtHeap,
+    target_type: compiler.sema.Type,
+    value: ora_root.comptime_eval.CtValue,
+    resolver: abi_comptime_decoder.TypeResolver,
+) !void {
+    const layout = try abi_layout.fromType(testing.allocator, target_type);
+    defer layout.deinit(testing.allocator);
+    try expectCanonicalValueRoundTrip(source_heap, layout, target_type, value, resolver);
+}
+
+const N4bFuzzTarget = struct {
+    layout: abi_layout.LayoutNode,
+    target_type: compiler.sema.Type,
+    resolver: abi_comptime_decoder.TypeResolver,
+};
+
+const N4bDeterministicBytes = struct {
+    state: u64,
+
+    fn next(self: *N4bDeterministicBytes) u8 {
+        self.state = self.state *% 6364136223846793005 +% 1442695040888963407;
+        return @truncate(self.state >> 56);
+    }
+
+    fn fill(self: *N4bDeterministicBytes, bytes: []u8) void {
+        for (bytes) |*byte| byte.* = self.next();
+    }
+};
+
+test "abi N4b comptime decode encode round-trip covers committed corpus shapes" {
+    const sema = compiler.sema;
+    const resolver = n4aAbiDecodeResolver();
+
+    var heap = ora_root.comptime_eval.CtHeap.init(testing.allocator);
+    defer heap.deinit();
+
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u8_ty: sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const i16_ty: sema.Type = .{ .integer = .{ .bits = 16, .signed = true, .spelling = "i16" } };
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const tuple_elems = [_]sema.Type{ u256_ty, .bool };
+    const static_tuple_ty: sema.Type = .{ .tuple = &tuple_elems };
+    const mixed_elems = [_]sema.Type{ u256_ty, .string };
+    const mixed_tuple_ty: sema.Type = .{ .tuple = &mixed_elems };
+    const bitfield_ty: sema.Type = .{ .bitfield = .{ .name = "Flags" } };
+    const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
+
+    try expectCanonicalValueRoundTripForType(&heap, .void, .void_val, resolver);
+    try expectCanonicalValueRoundTripForType(&heap, u256_ty, .{ .integer = 0x1234 }, resolver);
+    try expectCanonicalValueRoundTripForType(&heap, u8_ty, .{ .integer = 0xa5 }, resolver);
+    try expectCanonicalValueRoundTripForType(&heap, i16_ty, .{ .integer = std.math.maxInt(u256) }, resolver);
+    try expectCanonicalValueRoundTripForType(&heap, .bool, .{ .boolean = true }, resolver);
+    try expectCanonicalValueRoundTripForType(&heap, .address, .{ .address = 0x1234567890abcdef1234567890abcdef12345678 }, resolver);
+
+    const bytes4_value: ora_root.comptime_eval.CtValue = .{ .bytes_ref = try heap.allocBytes(&.{ 0xaa, 0xbb, 0xcc, 0xdd }) };
+    try expectCanonicalValueRoundTripForType(&heap, bytes4_ty, bytes4_value, resolver);
+
+    const string_value: ora_root.comptime_eval.CtValue = .{ .string_ref = try heap.allocString("hello") };
+    try expectCanonicalValueRoundTripForType(&heap, .string, string_value, resolver);
+
+    const bytes_value: ora_root.comptime_eval.CtValue = .{ .bytes_ref = try heap.allocBytes(&.{ 0xde, 0xad, 0xbe, 0xef, 0x01 }) };
+    try expectCanonicalValueRoundTripForType(&heap, .bytes, bytes_value, resolver);
+
+    const slice_elems = [_]ora_root.comptime_eval.CtValue{
+        .{ .integer = 1 },
+        .{ .integer = 2 },
+        .{ .integer = 3 },
+    };
+    const u256_slice_value: ora_root.comptime_eval.CtValue = .{ .slice_ref = try heap.allocSlice(&slice_elems) };
+    try expectCanonicalValueRoundTripForType(&heap, u256_slice_ty, u256_slice_value, resolver);
+
+    const tuple_values = [_]ora_root.comptime_eval.CtValue{
+        .{ .integer = 42 },
+        .{ .boolean = false },
+    };
+    const static_tuple_value: ora_root.comptime_eval.CtValue = .{ .tuple_ref = try heap.allocTuple(&tuple_values) };
+    try expectCanonicalValueRoundTripForType(&heap, static_tuple_ty, static_tuple_value, resolver);
+
+    const mixed_values = [_]ora_root.comptime_eval.CtValue{
+        .{ .integer = 7 },
+        string_value,
+    };
+    const mixed_tuple_value: ora_root.comptime_eval.CtValue = .{ .tuple_ref = try heap.allocTuple(&mixed_values) };
+    try expectCanonicalValueRoundTripForType(&heap, mixed_tuple_ty, mixed_tuple_value, resolver);
+
+    try expectCanonicalValueRoundTripForType(&heap, bitfield_ty, .{ .integer = 0xf0f0 }, resolver);
+
+    const status_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 8 } } };
+    try expectCanonicalValueRoundTrip(
+        &heap,
+        status_layout,
+        status_ty,
+        .{ .adt_val = .{ .type_id = 1, .variant_id = 1, .payload = null } },
+        resolver,
+    );
+}
+
+test "abi N4b bounded mutation fuzz either rejects or re-encodes exactly" {
+    const sema = compiler.sema;
+    const resolver = n4aAbiDecodeResolver();
+
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u8_ty: sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const tuple_elems = [_]sema.Type{ u256_ty, .bool };
+    const static_tuple_ty: sema.Type = .{ .tuple = &tuple_elems };
+
+    const u256_layout = try abi_layout.fromType(testing.allocator, u256_ty);
+    defer u256_layout.deinit(testing.allocator);
+    const u8_layout = try abi_layout.fromType(testing.allocator, u8_ty);
+    defer u8_layout.deinit(testing.allocator);
+    const bool_layout = try abi_layout.fromType(testing.allocator, .bool);
+    defer bool_layout.deinit(testing.allocator);
+    const address_layout = try abi_layout.fromType(testing.allocator, .address);
+    defer address_layout.deinit(testing.allocator);
+    const bytes4_layout = try abi_layout.fromType(testing.allocator, bytes4_ty);
+    defer bytes4_layout.deinit(testing.allocator);
+    const string_layout = try abi_layout.fromType(testing.allocator, .string);
+    defer string_layout.deinit(testing.allocator);
+    const bytes_layout = try abi_layout.fromType(testing.allocator, .bytes);
+    defer bytes_layout.deinit(testing.allocator);
+    const u256_slice_layout = try abi_layout.fromType(testing.allocator, u256_slice_ty);
+    defer u256_slice_layout.deinit(testing.allocator);
+    const static_tuple_layout = try abi_layout.fromType(testing.allocator, static_tuple_ty);
+    defer static_tuple_layout.deinit(testing.allocator);
+    const status_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 8 } } };
+    const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
+
+    const targets = [_]N4bFuzzTarget{
+        .{ .layout = u256_layout, .target_type = u256_ty, .resolver = resolver },
+        .{ .layout = u8_layout, .target_type = u8_ty, .resolver = resolver },
+        .{ .layout = bool_layout, .target_type = .bool, .resolver = resolver },
+        .{ .layout = address_layout, .target_type = .address, .resolver = resolver },
+        .{ .layout = bytes4_layout, .target_type = bytes4_ty, .resolver = resolver },
+        .{ .layout = string_layout, .target_type = .string, .resolver = resolver },
+        .{ .layout = bytes_layout, .target_type = .bytes, .resolver = resolver },
+        .{ .layout = u256_slice_layout, .target_type = u256_slice_ty, .resolver = resolver },
+        .{ .layout = static_tuple_layout, .target_type = static_tuple_ty, .resolver = resolver },
+        .{ .layout = status_layout, .target_type = status_ty, .resolver = resolver },
+    };
+
+    var fuzz = N4bDeterministicBytes{ .state = 0x4e34625f61626931 };
+    var buffer: [192]u8 = undefined;
+    for (0..96) |index| {
+        const target = targets[index % targets.len];
+        const len = @as(usize, fuzz.next()) % buffer.len;
+        fuzz.fill(buffer[0..len]);
+        try expectDecodeReencodesCanonicalBytes(target.layout, target.target_type, buffer[0..len], target.resolver);
+    }
+
+    const mutated = [_]struct {
+        layout: abi_layout.LayoutNode,
+        target_type: sema.Type,
+        hex: []const u8,
+        expected: abi_comptime_decoder.DecodeError,
+    }{
+        .{
+            .layout = bool_layout,
+            .target_type = .bool,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000002",
+            .expected = .invalid_bool_value,
+        },
+        .{
+            .layout = u8_layout,
+            .target_type = u8_ty,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000100",
+            .expected = .non_canonical_padding,
+        },
+        .{
+            .layout = address_layout,
+            .target_type = .address,
+            .hex = "0100000000000000000000001234567890abcdef1234567890abcdef12345678",
+            .expected = .invalid_address,
+        },
+        .{
+            .layout = bytes4_layout,
+            .target_type = bytes4_ty,
+            .hex = "aabbccdd00000000000000000000000000000000000000000000000000000001",
+            .expected = .invalid_fixed_bytes,
+        },
+        .{
+            .layout = string_layout,
+            .target_type = .string,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000040",
+            .expected = .non_canonical_encoding,
+        },
+        .{
+            .layout = string_layout,
+            .target_type = .string,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000020" ++
+                "0000000000000000000000000000000000000000000000000000000000000001" ++
+                "6100000000000000000000000000000000000000000000000000000000000001",
+            .expected = .non_canonical_encoding,
+        },
+        .{
+            .layout = u256_slice_layout,
+            .target_type = u256_slice_ty,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000020" ++
+                "0000000000000000000000000000000000000000000000000000000000008001",
+            .expected = .array_length_exceeded,
+        },
+        .{
+            .layout = status_layout,
+            .target_type = status_ty,
+            .hex = "0000000000000000000000000000000000000000000000000000000000000002",
+            .expected = .enum_out_of_range,
+        },
+    };
+
+    for (mutated) |case| {
+        const bytes = try decodeHexBytes(testing.allocator, case.hex);
+        defer testing.allocator.free(bytes);
+        try expectComptimeDecodeError(case.layout, case.target_type, bytes, resolver, case.expected);
+    }
 }
 
 test "abi comptime decoder prioritizes decode errors over oversize" {

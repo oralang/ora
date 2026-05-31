@@ -50,6 +50,7 @@ pub fn createExternalReturnAbiDecodeOp(
         result_type,
         "returndata",
         "error_union",
+        "strict",
         failure_error,
     );
 }
@@ -76,6 +77,29 @@ pub fn createMemoryResultAbiDecodeOp(
     );
 }
 
+pub fn createMemoryResultAbiDecodeOpPermissive(
+    allocator: std.mem.Allocator,
+    mlir_context: mlir.MlirContext,
+    loc: mlir.MlirLocation,
+    layout_context: abi_layout_context.LayoutContext,
+    target_type: sema.Type,
+    bytes: mlir.MlirValue,
+    result_type: mlir.MlirType,
+) !mlir.MlirOperation {
+    return createAbiDecodeOpWithModeAndDecodeMode(
+        allocator,
+        mlir_context,
+        loc,
+        layout_context,
+        target_type,
+        bytes,
+        result_type,
+        "memory",
+        "result",
+        "permissive",
+    );
+}
+
 fn createAbiDecodeOpWithMode(
     allocator: std.mem.Allocator,
     mlir_context: mlir.MlirContext,
@@ -97,6 +121,34 @@ fn createAbiDecodeOpWithMode(
         result_type,
         source,
         failure_mode,
+        "strict",
+        null,
+    );
+}
+
+fn createAbiDecodeOpWithModeAndDecodeMode(
+    allocator: std.mem.Allocator,
+    mlir_context: mlir.MlirContext,
+    loc: mlir.MlirLocation,
+    layout_context: abi_layout_context.LayoutContext,
+    return_type: sema.Type,
+    bytes: mlir.MlirValue,
+    result_type: mlir.MlirType,
+    source: []const u8,
+    failure_mode: []const u8,
+    decode_mode: []const u8,
+) !mlir.MlirOperation {
+    return createAbiDecodeOpWithModeAndFailureError(
+        allocator,
+        mlir_context,
+        loc,
+        layout_context,
+        return_type,
+        bytes,
+        result_type,
+        source,
+        failure_mode,
+        decode_mode,
         null,
     );
 }
@@ -111,6 +163,7 @@ fn createAbiDecodeOpWithModeAndFailureError(
     result_type: mlir.MlirType,
     source: []const u8,
     failure_mode: []const u8,
+    decode_mode: []const u8,
     failure_error: ?[]const u8,
 ) !mlir.MlirOperation {
     const attrs = try attrsForReturnType(allocator, mlir_context, layout_context, return_type);
@@ -128,6 +181,11 @@ fn createAbiDecodeOpWithModeAndFailureError(
         mlir_context,
         "failure_mode",
         mlir.oraStringAttrCreate(mlir_context, strRef(failure_mode)),
+    ));
+    try op_attrs.append(allocator, mlir_helpers.namedAttr(
+        mlir_context,
+        "decode_mode",
+        mlir.oraStringAttrCreate(mlir_context, strRef(decode_mode)),
     ));
     if (enum_variant_count) |count| {
         try op_attrs.append(allocator, mlir_helpers.namedAttr(

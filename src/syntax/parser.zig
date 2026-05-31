@@ -132,6 +132,9 @@ const Parser = struct {
     }
 
     fn parseTopLevelItem(self: *Parser) anyerror!green.GreenNodeId {
+        if (self.startsDecodePermissiveFunction()) {
+            return self.parseFunctionItem();
+        }
         if (self.at(.Comptime) and self.peekKind(1) == .Const) {
             return self.parseConstOrImportItem();
         }
@@ -224,6 +227,10 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        while (self.looksLikeDecodePermissiveMarker()) {
+            try children.append(self.allocator, .{ .node = try self.parseDecodePermissiveMarkerNode() });
+        }
+
         if (self.at(.Pub)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
@@ -248,6 +255,15 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.FunctionItem, children.items);
+    }
+
+    fn parseDecodePermissiveMarkerNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.allocator, .{ .token = self.bump() });
+        return self.finishNode(SyntaxKind.BuiltinExpr, children.items);
     }
 
     fn parseTraitMethodSignature(self: *Parser) anyerror!green.GreenNodeId {
@@ -2511,7 +2527,8 @@ const Parser = struct {
                     std.mem.eql(u8, builtin_name.?, "truncate") or
                     std.mem.eql(u8, builtin_name.?, "sizeOf") or
                     std.mem.eql(u8, builtin_name.?, "typeName") or
-                    std.mem.eql(u8, builtin_name.?, "abiDecode")) and
+                    std.mem.eql(u8, builtin_name.?, "abiDecode") or
+                    std.mem.eql(u8, builtin_name.?, "abiDecodePermissive")) and
                 !self.at(.RightParen))
             {
                 try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
@@ -2826,6 +2843,7 @@ const Parser = struct {
     }
 
     fn startsTopLevelItem(self: *const Parser) bool {
+        if (self.startsDecodePermissiveFunction()) return true;
         const kind = self.current().kind;
         return switch (kind) {
             .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
@@ -2833,6 +2851,20 @@ const Parser = struct {
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
+    }
+
+    fn startsDecodePermissiveFunction(self: *const Parser) bool {
+        if (!self.looksLikeDecodePermissiveMarker()) return false;
+        var cursor = self.index + 2;
+        if (self.peekTokenKindAt(cursor) == .Pub) cursor += 1;
+        if (self.peekTokenKindAt(cursor) == .Comptime) cursor += 1;
+        return self.peekTokenKindAt(cursor) == .Fn;
+    }
+
+    fn looksLikeDecodePermissiveMarker(self: *const Parser) bool {
+        if (!self.at(.At) or self.peekKind(1) != .Identifier) return false;
+        const token = self.tokens.items[self.index + 1];
+        return std.mem.eql(u8, self.source_text[token.range.start..token.range.end], "decodePermissive");
     }
 
     fn startsTypeAliasItem(self: *const Parser) bool {

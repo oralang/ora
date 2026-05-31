@@ -18,6 +18,7 @@
 namespace mlir::ora::abi_lowering
 {
     using mlir::ora::lowering::boolAbiWordIsCanonical;
+    using mlir::ora::lowering::boolAbiWordPermissivePayload;
     using mlir::ora::lowering::abiDecodeBoundAPInt;
     using mlir::ora::lowering::abiDecodeWordGte;
     using mlir::ora::lowering::abiDecodeWordLte;

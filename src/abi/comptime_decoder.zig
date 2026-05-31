@@ -36,6 +36,11 @@ pub const DecodeResult = union(enum) {
     err: DecodeError,
 };
 
+pub const DecodeMode = enum {
+    strict,
+    permissive,
+};
+
 pub const TypeResolver = struct {
     context: *anyopaque,
     typeIdForType: *const fn (*anyopaque, sema.Type) ?u32,
@@ -51,16 +56,39 @@ pub fn decodeComptimeValue(
     target_type: sema.Type,
     bytes: []const u8,
 ) !DecodeResult {
+    return decodeComptimeValueWithMode(allocator, heap, resolver, layout, target_type, bytes, .strict);
+}
+
+pub fn decodeComptimeValuePermissive(
+    allocator: std.mem.Allocator,
+    heap: *CtHeap,
+    resolver: TypeResolver,
+    layout: abi_layout.LayoutNode,
+    target_type: sema.Type,
+    bytes: []const u8,
+) !DecodeResult {
+    return decodeComptimeValueWithMode(allocator, heap, resolver, layout, target_type, bytes, .permissive);
+}
+
+pub fn decodeComptimeValueWithMode(
+    allocator: std.mem.Allocator,
+    heap: *CtHeap,
+    resolver: TypeResolver,
+    layout: abi_layout.LayoutNode,
+    target_type: sema.Type,
+    bytes: []const u8,
+    mode: DecodeMode,
+) !DecodeResult {
     if (bytes.len > MAX_BUFFER_SIZE) return .{ .err = .buffer_size_exceeded };
 
     const decoded = if (layout.isDynamic() and topLevelWrapsSingleArgument(target_type))
-        try decodeSingleTopLevelArgument(allocator, heap, resolver, layout, target_type, bytes)
+        try decodeSingleTopLevelArgument(allocator, heap, resolver, layout, target_type, bytes, mode)
     else
-        try decodeNodeAt(allocator, heap, resolver, layout, target_type, bytes, 0, 0);
+        try decodeNodeAt(allocator, heap, resolver, layout, target_type, bytes, 0, 0, mode);
 
     const value = switch (decoded) {
         .value => |value| blk: {
-            if (value.size < bytes.len) return .{ .err = .oversize_buffer };
+            if (mode == .strict and value.size < bytes.len) return .{ .err = .oversize_buffer };
             if (value.size > bytes.len) return .{ .err = .truncated_buffer };
             break :blk value.value;
         },
@@ -97,20 +125,24 @@ fn decodeSingleTopLevelArgument(
     layout: abi_layout.LayoutNode,
     target_type: sema.Type,
     bytes: []const u8,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     const head_size: usize = 32;
     const offset = switch (readUsizeWord(bytes, 0, .invalid_offset)) {
         .value => |value| value,
         .err => |err| return .{ .err = err },
     };
-    if (offset != head_size) return .{ .err = .non_canonical_encoding };
+    if (mode == .strict and offset != head_size) return .{ .err = .non_canonical_encoding };
 
-    const decoded = try decodeNodeAt(allocator, heap, resolver, layout, target_type, bytes, offset, 1);
+    const decoded = try decodeNodeAt(allocator, heap, resolver, layout, target_type, bytes, offset, 1, mode);
     return switch (decoded) {
-        .value => |value| .{ .value = .{
-            .value = value.value,
-            .size = head_size + value.size,
-        } },
+        .value => |value| blk: {
+            const tail_end = checkedAdd(offset, value.size) orelse return .{ .err = .length_overflow };
+            break :blk .{ .value = .{
+                .value = value.value,
+                .size = if (mode == .strict) head_size + value.size else @max(head_size, tail_end),
+            } };
+        },
         .err => |err| .{ .err = err },
     };
 }
@@ -124,12 +156,13 @@ fn decodeNodeAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     if (depth > MAX_DECODE_DEPTH) return .{ .err = .depth_limit_exceeded };
     const unwrapped_type = unwrapRefinement(target_type);
     const decoded: DecodeStep(DecodeValue) = switch (layout) {
         .static_word => |word| blk: {
-            const value = try decodeStaticWordAt(heap, resolver, word.encoding, unwrapped_type, bytes, offset);
+            const value = try decodeStaticWordAt(heap, resolver, word.encoding, unwrapped_type, bytes, offset, mode);
             break :blk switch (value) {
                 .value => |decoded_word| .{ .value = .{
                     .value = decoded_word,
@@ -138,10 +171,10 @@ fn decodeNodeAt(
                 .err => |err| .{ .err = err },
             };
         },
-        .dynamic_bytes => |dynamic_bytes| try decodeDynamicBytesAt(heap, dynamic_bytes.kind, unwrapped_type, bytes, offset),
-        .dynamic_array => |array| try decodeDynamicArrayAt(allocator, heap, resolver, array, unwrapped_type, bytes, offset, depth),
-        .fixed_array => |array| try decodeFixedArrayAt(allocator, heap, resolver, array, unwrapped_type, bytes, offset, depth),
-        .tuple => |tuple| try decodeTupleAt(allocator, heap, resolver, tuple, unwrapped_type, bytes, offset, depth),
+        .dynamic_bytes => |dynamic_bytes| try decodeDynamicBytesAt(heap, dynamic_bytes.kind, unwrapped_type, bytes, offset, mode),
+        .dynamic_array => |array| try decodeDynamicArrayAt(allocator, heap, resolver, array, unwrapped_type, bytes, offset, depth, mode),
+        .fixed_array => |array| try decodeFixedArrayAt(allocator, heap, resolver, array, unwrapped_type, bytes, offset, depth, mode),
+        .tuple => |tuple| try decodeTupleAt(allocator, heap, resolver, tuple, unwrapped_type, bytes, offset, depth, mode),
     };
     return switch (try validateDecodedValue(target_type, decoded)) {
         .value => |value| .{ .value = value },
@@ -156,14 +189,15 @@ fn decodeStaticWordAt(
     target_type: sema.Type,
     bytes: []const u8,
     offset: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(CtValue) {
     const word = readWordAt(bytes, offset) orelse return .{ .err = .truncated_buffer };
     return switch (encoding) {
-        .uint => |bits| try decodeUnsignedWord(resolver, target_type, word, bits),
-        .int => |bits| decodeSignedWord(target_type, word, bits),
-        .bool => decodeBoolWord(word),
-        .address => decodeAddressWord(word),
-        .fixed_bytes => |len| decodeFixedBytesWord(heap, word, len),
+        .uint => |bits| try decodeUnsignedWord(resolver, target_type, word, bits, mode),
+        .int => |bits| decodeSignedWord(target_type, word, bits, mode),
+        .bool => decodeBoolWord(word, mode),
+        .address => decodeAddressWord(word, mode),
+        .fixed_bytes => |len| decodeFixedBytesWord(heap, word, len, mode),
     };
 }
 
@@ -173,6 +207,7 @@ fn decodeDynamicBytesAt(
     target_type: sema.Type,
     bytes: []const u8,
     offset: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     const len = switch (readUsizeWord(bytes, offset, .length_overflow)) {
         .value => |value| value,
@@ -185,8 +220,10 @@ fn decodeDynamicBytesAt(
     const content_end = checkedAdd(content_start, len) orelse return .{ .err = .length_overflow };
     const padded_end = checkedAdd(content_start, padded_len) orelse return .{ .err = .length_overflow };
     if (padded_end > bytes.len) return .{ .err = .length_overflow };
-    for (bytes[content_end..padded_end]) |byte| {
-        if (byte != 0) return .{ .err = .non_canonical_encoding };
+    if (mode == .strict) {
+        for (bytes[content_end..padded_end]) |byte| {
+            if (byte != 0) return .{ .err = .non_canonical_encoding };
+        }
     }
 
     const value: CtValue = switch (kind) {
@@ -205,11 +242,12 @@ fn decodeDynamicBytesAt(
     } };
 }
 
-fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *const [32]u8, bits: u16) anyerror!DecodeStep(CtValue) {
-    const value = std.mem.readInt(u256, word, .big);
+fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *const [32]u8, bits: u16, mode: DecodeMode) anyerror!DecodeStep(CtValue) {
+    var value = std.mem.readInt(u256, word, .big);
     if (bits < 256) {
         const mask = (@as(u256, 1) << @intCast(bits)) - 1;
-        if ((value & ~mask) != 0) return .{ .err = .non_canonical_padding };
+        if (mode == .strict and (value & ~mask) != 0) return .{ .err = .non_canonical_padding };
+        value &= mask;
     }
     if (target_type == .enum_) {
         // TODO(decoder): explicit enum values are not represented here yet.
@@ -226,19 +264,21 @@ fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *con
     return .{ .value = .{ .integer = value } };
 }
 
-fn decodeSignedWord(target_type: sema.Type, word: *const [32]u8, bits: u16) DecodeStep(CtValue) {
+fn decodeSignedWord(target_type: sema.Type, word: *const [32]u8, bits: u16, mode: DecodeMode) DecodeStep(CtValue) {
     _ = target_type;
-    const value = std.mem.readInt(u256, word, .big);
+    var value = std.mem.readInt(u256, word, .big);
     if (bits < 256) {
         const sign_bit = @as(u256, 1) << @intCast(bits - 1);
         const mask = (@as(u256, 1) << @intCast(bits)) - 1;
         const expected = if ((value & sign_bit) == 0) value & mask else (value & mask) | ~mask;
-        if (value != expected) return .{ .err = .non_canonical_padding };
+        if (mode == .strict and value != expected) return .{ .err = .non_canonical_padding };
+        value = expected;
     }
     return .{ .value = .{ .integer = value } };
 }
 
-fn decodeBoolWord(word: *const [32]u8) DecodeStep(CtValue) {
+fn decodeBoolWord(word: *const [32]u8, mode: DecodeMode) DecodeStep(CtValue) {
+    if (mode == .permissive) return .{ .value = .{ .boolean = std.mem.readInt(u256, word, .big) != 0 } };
     var prefix: [31]u8 = [_]u8{0} ** 31;
     if (!std.mem.eql(u8, word[0..31], &prefix)) return .{ .err = .invalid_bool_value };
     return switch (word[31]) {
@@ -248,16 +288,18 @@ fn decodeBoolWord(word: *const [32]u8) DecodeStep(CtValue) {
     };
 }
 
-fn decodeAddressWord(word: *const [32]u8) DecodeStep(CtValue) {
+fn decodeAddressWord(word: *const [32]u8, mode: DecodeMode) DecodeStep(CtValue) {
     var prefix: [12]u8 = [_]u8{0} ** 12;
-    if (!std.mem.eql(u8, word[0..12], &prefix)) return .{ .err = .invalid_address };
+    if (mode == .strict and !std.mem.eql(u8, word[0..12], &prefix)) return .{ .err = .invalid_address };
     return .{ .value = .{ .address = std.mem.readInt(u160, word[12..32], .big) } };
 }
 
-fn decodeFixedBytesWord(heap: *CtHeap, word: *const [32]u8, len: u8) anyerror!DecodeStep(CtValue) {
+fn decodeFixedBytesWord(heap: *CtHeap, word: *const [32]u8, len: u8, mode: DecodeMode) anyerror!DecodeStep(CtValue) {
     if (len > 32) return error.AbiDecoderInternalShapeMismatch;
-    for (word[len..32]) |byte| {
-        if (byte != 0) return .{ .err = .invalid_fixed_bytes };
+    if (mode == .strict) {
+        for (word[len..32]) |byte| {
+            if (byte != 0) return .{ .err = .invalid_fixed_bytes };
+        }
     }
     return .{ .value = .{ .bytes_ref = try heap.allocBytes(word[0..len]) } };
 }
@@ -271,6 +313,7 @@ fn decodeDynamicArrayAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     const element_type = switch (target_type) {
         .array => |array_ty| array_ty.element_type.*,
@@ -282,7 +325,7 @@ fn decodeDynamicArrayAt(
         .err => |err| return .{ .err = err },
     };
     const elements_base = checkedAdd(offset, 32) orelse return .{ .err = .length_overflow };
-    const decoded = try decodeArrayElementsAt(allocator, heap, resolver, array.element.*, element_type, len, bytes, elements_base, depth + 1);
+    const decoded = try decodeArrayElementsAt(allocator, heap, resolver, array.element.*, element_type, len, bytes, elements_base, depth + 1, mode);
     return switch (decoded) {
         .value => |elements| .{ .value = .{
             .value = .{ .slice_ref = try heap.allocSlice(elements.values) },
@@ -301,13 +344,14 @@ fn decodeFixedArrayAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     const element_type = switch (target_type) {
         .array => |array_ty| array_ty.element_type.*,
         else => return error.AbiDecoderInternalShapeMismatch,
     };
     if (array.len > MAX_ARRAY_LENGTH) return .{ .err = .array_length_exceeded };
-    const decoded = try decodeArrayElementsAt(allocator, heap, resolver, array.element.*, element_type, array.len, bytes, offset, depth + 1);
+    const decoded = try decodeArrayElementsAt(allocator, heap, resolver, array.element.*, element_type, array.len, bytes, offset, depth + 1, mode);
     return switch (decoded) {
         .value => |elements| .{ .value = .{
             .value = .{ .array_ref = try heap.allocArray(elements.values) },
@@ -332,6 +376,7 @@ fn decodeArrayElementsAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodedElements) {
     switch (validateArrayHeadBudget(element_layout, len, bytes, offset)) {
         .value => {},
@@ -341,7 +386,7 @@ fn decodeArrayElementsAt(
     if (!element_layout.isDynamic()) {
         var cursor = offset;
         for (0..len) |index| {
-            const decoded = try decodeNodeAt(allocator, heap, resolver, element_layout, element_type, bytes, cursor, depth + 1);
+            const decoded = try decodeNodeAt(allocator, heap, resolver, element_layout, element_type, bytes, cursor, depth + 1, mode);
             switch (decoded) {
                 .value => |value| {
                     elems[index] = value.value;
@@ -362,15 +407,20 @@ fn decodeArrayElementsAt(
             .value => |value| value,
             .err => |err| return .{ .err = err },
         };
-        if (element_offset != tail_cursor) return .{ .err = .non_canonical_encoding };
+        if (mode == .strict and element_offset != tail_cursor) return .{ .err = .non_canonical_encoding };
         head_cursor = checkedAdd(head_cursor, 32) orelse return .{ .err = .length_overflow };
 
         const absolute = checkedAdd(offset, element_offset) orelse return .{ .err = .length_overflow };
-        const decoded = try decodeNodeAt(allocator, heap, resolver, element_layout, element_type, bytes, absolute, depth + 1);
+        const decoded = try decodeNodeAt(allocator, heap, resolver, element_layout, element_type, bytes, absolute, depth + 1, mode);
         switch (decoded) {
             .value => |value| {
                 elems[index] = value.value;
-                tail_cursor = checkedAdd(tail_cursor, value.size) orelse return .{ .err = .length_overflow };
+                tail_cursor = if (mode == .strict)
+                    checkedAdd(tail_cursor, value.size) orelse return .{ .err = .length_overflow }
+                else blk: {
+                    const element_end = checkedAdd(element_offset, value.size) orelse return .{ .err = .length_overflow };
+                    break :blk @max(tail_cursor, element_end);
+                };
             },
             .err => |err| return .{ .err = err },
         }
@@ -406,12 +456,13 @@ fn decodeTupleAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
     if (tuple.elements.len == 0) return .{ .value = .{ .value = .void_val, .size = 0 } };
     switch (target_type) {
         .tuple => |elements| {
             if (elements.len != tuple.elements.len) return error.AbiDecoderInternalShapeMismatch;
-            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, elements, bytes, offset, depth + 1)) {
+            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, elements, bytes, offset, depth + 1, mode)) {
                 .value => |decoded| decoded,
                 .err => |err| return .{ .err = err },
             };
@@ -426,7 +477,7 @@ fn decodeTupleAt(
             for (struct_type.fields, 0..) |field, index| {
                 types[index] = field.ty;
             }
-            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, types, bytes, offset, depth + 1)) {
+            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, types, bytes, offset, depth + 1, mode)) {
                 .value => |decoded| decoded,
                 .err => |err| return .{ .err = err },
             };
@@ -443,7 +494,7 @@ fn decodeTupleAt(
             for (fields, 0..) |field, index| {
                 types[index] = field.ty;
             }
-            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, types, bytes, offset, depth + 1)) {
+            const decoded = switch (try decodeTupleElementsAt(allocator, heap, resolver, tuple.elements, types, bytes, offset, depth + 1, mode)) {
                 .value => |decoded| decoded,
                 .err => |err| return .{ .err = err },
             };
@@ -469,6 +520,7 @@ fn decodeTupleElementsAt(
     bytes: []const u8,
     offset: usize,
     depth: usize,
+    mode: DecodeMode,
 ) anyerror!DecodeStep(DecodedElements) {
     if (layouts.len != types.len) return error.AbiDecoderInternalShapeMismatch;
     const values = try allocator.alloc(CtValue, layouts.len);
@@ -486,20 +538,25 @@ fn decodeTupleElementsAt(
                 .value => |value| value,
                 .err => |err| return .{ .err = err },
             };
-            if (element_offset != tail_cursor) return .{ .err = .non_canonical_encoding };
+            if (mode == .strict and element_offset != tail_cursor) return .{ .err = .non_canonical_encoding };
             head_cursor = checkedAdd(head_cursor, 32) orelse return .{ .err = .length_overflow };
 
             const absolute = checkedAdd(offset, element_offset) orelse return .{ .err = .length_overflow };
-            const decoded = try decodeNodeAt(allocator, heap, resolver, layout, ty, bytes, absolute, depth + 1);
+            const decoded = try decodeNodeAt(allocator, heap, resolver, layout, ty, bytes, absolute, depth + 1, mode);
             switch (decoded) {
                 .value => |value| {
                     values[index] = value.value;
-                    tail_cursor = checkedAdd(tail_cursor, value.size) orelse return .{ .err = .length_overflow };
+                    tail_cursor = if (mode == .strict)
+                        checkedAdd(tail_cursor, value.size) orelse return .{ .err = .length_overflow }
+                    else blk: {
+                        const element_end = checkedAdd(element_offset, value.size) orelse return .{ .err = .length_overflow };
+                        break :blk @max(tail_cursor, element_end);
+                    };
                 },
                 .err => |err| return .{ .err = err },
             }
         } else {
-            const decoded = try decodeNodeAt(allocator, heap, resolver, layout, ty, bytes, head_cursor, depth + 1);
+            const decoded = try decodeNodeAt(allocator, heap, resolver, layout, ty, bytes, head_cursor, depth + 1, mode);
             switch (decoded) {
                 .value => |value| {
                     values[index] = value.value;

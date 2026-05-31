@@ -263,6 +263,93 @@ test "compiler converts runtime abiDecode bool memory result with canonical vali
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
 }
 
+test "compiler converts runtime abiDecodePermissive memory result shapes through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode_scalar(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecodePermissive(u8, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_text(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecodePermissive(string, payload);
+        \\        return match (decoded) {
+        \\            Ok(_) => 1,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_values(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecodePermissive(slice[u256], payload);
+        \\        return match (decoded) {
+        \\            Ok(values) => values[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn decode_pair_text(payload: bytes) -> u256 {
+        \\        let decoded = @abiDecodePermissive((u256, string), payload);
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    try expectNoResidualOraRuntimeOps(rendered);
+
+    const scalar_fn = try functionSlice(rendered, "decode_scalar");
+    const text_fn = try functionSlice(rendered, "decode_text");
+    const values_fn = try functionSlice(rendered, "decode_values");
+    const pair_text_fn = try functionSlice(rendered, "decode_pair_text");
+
+    try expectStaticAbiDecodeGuardBeforePayloadLoad(scalar_fn);
+    try expectDynamicAbiDecodeWordGuardChain(text_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, text_fn, 1, "mload8"));
+    try expectDynamicAbiDecodeWordGuardChain(values_fn);
+    try expectDynamicAbiDecodeWordGuardChain(pair_text_fn);
+    try testing.expect(!std.mem.containsAtLeast(u8, pair_text_fn, 1, "mload8"));
+    try expectMixedDynamicTupleCarrierShape(pair_text_fn);
+}
+
+test "compiler converts runtime abiDecodePermissive mixed dynamic hex literal through OraToSIR" {
+    const source_text =
+        \\contract Decode {
+        \\    pub fn decode() -> u256 {
+        \\        let decoded = @abiDecodePermissive((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        \\        return match (decoded) {
+        \\            Ok(value) => value.0 + value.1[0],
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
 test "compiler abiDecode N3b4 validates public calldata bool and address params before call" {
     const source_text =
         \\contract Entry {
@@ -308,6 +395,42 @@ test "compiler abiDecode N3b4 validates public calldata bool and address params 
     try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept"));
     try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept n_accept"));
     try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept n_accept arg_accept"));
+}
+
+test "compiler decodePermissive marker relaxes public calldata canonicality checks" {
+    const source_text =
+        \\contract Entry {
+        \\    @decodePermissive
+        \\    pub fn accept(flag: bool, owner: address, note: string) -> u256 {
+        \\        if (flag) {
+        \\            return note[0];
+        \\        }
+        \\        return @abiEncode(owner)[31];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const main_fn = try functionSlice(rendered, "main");
+
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "abi_decode_revert_4"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "abi_decode_revert_5"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "abi_decode_revert_11"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "mload8"));
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_14", "const 0xE", "mstore256", "revert" });
 }
 
 test "compiler abiDecode N3b4 validates public calldata enum range before call" {

@@ -68,6 +68,15 @@ namespace mlir::ora::lowering
         return rewriter.create<sir::OrOp>(loc, u256Type, isZero, isOne);
     }
 
+    inline Value boolAbiWordPermissivePayload(OpBuilder &rewriter, Location loc, Value word)
+    {
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        Value zero = constU256(rewriter, loc, 0);
+        Value one = constU256(rewriter, loc, 1);
+        Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, word);
+        return rewriter.create<sir::SelectOp>(loc, u256Type, isZero, zero, one);
+    }
+
     struct FixedBytesWordDecode
     {
         Value payload;

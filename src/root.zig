@@ -17,6 +17,8 @@ pub const abi = @import("abi.zig");
 pub const abi_layout = @import("abi/layout.zig");
 pub const abi_layout_context = @import("abi/layout_context.zig");
 pub const abi_comptime_decoder = @import("abi/comptime_decoder.zig");
+pub const abi_comptime_encoder = @import("abi/comptime_encoder.zig");
+pub const abi_comptime_decoder_test_support = @import("abi/comptime_decoder_test_support.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler.zig");
 

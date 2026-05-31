@@ -1322,6 +1322,12 @@ namespace mlir
                 return failure();
             if (failed(verifyStringEnumAttr("failure_mode", {"result", "revert", "error_union"})))
                 return failure();
+            if (auto modeAttr = (*this)->getAttrOfType<::mlir::StringAttr>("decode_mode"))
+            {
+                if (!llvm::is_contained({"strict", "permissive"}, modeAttr.getValue()))
+                    return emitOpError() << "has unsupported 'decode_mode' value '"
+                                         << modeAttr.getValue() << "'";
+            }
 
             return success();
         }

@@ -720,7 +720,7 @@ const ConstEvaluator = struct {
                     const trait_item = (try self.resolveReflectionTraitReference(builtin.args[0])) orelse break :blk null;
                     break :blk try self.buildTraitMethodsCtValue(trait_item);
                 }
-                if (std.mem.eql(u8, builtin.name, "abiDecode")) {
+                if (std.mem.eql(u8, builtin.name, "abiDecode") or std.mem.eql(u8, builtin.name, "abiDecodePermissive")) {
                     break :blk try self.evalAbiDecodeBuiltinCtValue(builtin, use_cache);
                 }
                 if (std.mem.eql(u8, builtin.name, "cast") and builtin.type_arg != null and builtin.args.len > 0) {
@@ -2556,14 +2556,24 @@ const ConstEvaluator = struct {
         var layout = layout_context.layoutForType(target_type) catch return error.AbiDecoderInternalShapeMismatch;
         defer layout.deinit(self.allocator);
 
-        const decoded = try abi_comptime_decoder.decodeComptimeValue(
-            self.allocator,
-            &self.env.heap,
-            self.abiDecodeTypeResolver(),
-            layout,
-            target_type,
-            bytes,
-        );
+        const decoded = if (std.mem.eql(u8, builtin.name, "abiDecodePermissive"))
+            try abi_comptime_decoder.decodeComptimeValuePermissive(
+                self.allocator,
+                &self.env.heap,
+                self.abiDecodeTypeResolver(),
+                layout,
+                target_type,
+                bytes,
+            )
+        else
+            try abi_comptime_decoder.decodeComptimeValue(
+                self.allocator,
+                &self.env.heap,
+                self.abiDecodeTypeResolver(),
+                layout,
+                target_type,
+                bytes,
+            );
         return switch (decoded) {
             .ok => |value| try self.abiDecodeOk(value),
             .err => |err| try self.abiDecodeErr(err),

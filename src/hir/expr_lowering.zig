@@ -2578,7 +2578,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
                 return appendValueOp(self.block, op);
             }
-            if (std.mem.eql(u8, builtin.name, "abiDecode") and builtin.args.len > 0) {
+            if ((std.mem.eql(u8, builtin.name, "abiDecode") or std.mem.eql(u8, builtin.name, "abiDecodePermissive")) and builtin.args.len > 0) {
                 return try @This().lowerAbiDecodeBuiltin(self, expr_id, builtin, locals);
             }
             if (builtin.args.len == 2 and std.mem.eql(u8, builtin.name, "concat")) {
@@ -2630,15 +2630,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
             const bytes_arg = if (builtin.type_arg != null) builtin.args[0] else if (builtin.args.len > 1) builtin.args[1] else return error.MlirOperationCreationFailed;
             const bytes_value = try self.lowerExpr(bytes_arg, locals);
-            const decode_op = try abi_runtime_decoder.createMemoryResultAbiDecodeOp(
-                self.parent.allocator,
-                self.parent.context,
-                self.parent.location(builtin.range),
-                @This().layoutContext(self),
-                target_type,
-                bytes_value,
-                self.parent.lowerExprType(expr_id),
-            );
+            const decode_op = if (std.mem.eql(u8, builtin.name, "abiDecodePermissive"))
+                try abi_runtime_decoder.createMemoryResultAbiDecodeOpPermissive(
+                    self.parent.allocator,
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    @This().layoutContext(self),
+                    target_type,
+                    bytes_value,
+                    self.parent.lowerExprType(expr_id),
+                )
+            else
+                try abi_runtime_decoder.createMemoryResultAbiDecodeOp(
+                    self.parent.allocator,
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    @This().layoutContext(self),
+                    target_type,
+                    bytes_value,
+                    self.parent.lowerExprType(expr_id),
+                );
             if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, decode_op);
         }

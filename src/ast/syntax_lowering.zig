@@ -49,6 +49,19 @@ pub fn mixin(Builder: type) type {
                     .node => |node| {
                         const item_id = try Lowering.lowerTopLevelItemNode(self, node, null);
                         try self.root_items.append(self.allocator, item_id);
+                        if (self.items.items[item_id.index()] == .Function) {
+                            const function = self.items.items[item_id.index()].Function;
+                            if (function.abi_decode_permissive) {
+                                try self.diagnostics.appendErrorWithDebug(
+                                    "@decodePermissive is only supported on public contract functions",
+                                    "decodePermissive marker was attached to a root-scope function",
+                                    .{
+                                        .file_id = self.file.file_id,
+                                        .range = function.range,
+                                    },
+                                );
+                            }
+                        }
                     },
                 }
             }
@@ -162,6 +175,10 @@ pub fn mixin(Builder: type) type {
             const params_node = firstDirectChildOfKind(node, .ParameterList) orelse return Lowering.malformedItem(self, node, "missing function parameter list");
             const parameters = try Lowering.lowerParameterListNode(self, params_node, allow_bare_self);
             const return_type = firstDirectTypeChild(node) orelse null;
+            const abi_decode_permissive = try Lowering.functionAbiDecodePermissive(self, node);
+            if (abi_decode_permissive and visibility != .public) {
+                _ = try Lowering.malformedItem(self, node, "@decodePermissive is only supported on public functions");
+            }
 
             var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
@@ -197,6 +214,7 @@ pub fn mixin(Builder: type) type {
                 .name = name,
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
                 .is_generic = is_generic,
+                .abi_decode_permissive = abi_decode_permissive,
                 .visibility = visibility,
                 .parameters = parameters,
                 .return_type = if (return_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
@@ -205,6 +223,23 @@ pub fn mixin(Builder: type) type {
                 .body = body_id,
                 .parent_contract = parent_contract,
             } });
+        }
+
+        fn functionAbiDecodePermissive(self: *Builder, node: SyntaxNode) !bool {
+            _ = self;
+            var permissive = false;
+            var it = node.children();
+            while (it.next()) |child| {
+                const child_node = switch (child) {
+                    .token => continue,
+                    .node => |n| n,
+                };
+                if (child_node.kind() != .BuiltinExpr) continue;
+                const name_token = nthDirectIdentifierLikeToken(child_node, 0) orelse continue;
+                if (!std.mem.eql(u8, tokenText(name_token), "decodePermissive")) continue;
+                permissive = true;
+            }
+            return permissive;
         }
 
         fn lowerStructItemNode(self: *Builder, node: SyntaxNode) !ItemId {

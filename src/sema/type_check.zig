@@ -44,6 +44,10 @@ const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
 const refinements = @import("refinements.zig");
 
+fn isAbiDecodeBuiltinName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "abiDecode") or std.mem.eql(u8, name, "abiDecodePermissive");
+}
+
 pub const ImportQuery = struct {
     context: *anyopaque,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
@@ -3416,7 +3420,7 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "abiEncode")) {
             try self.checkAbiEncodeBuiltinArguments(builtin);
         }
-        if (std.mem.eql(u8, builtin.name, "abiDecode")) {
+        if (isAbiDecodeBuiltinName(builtin.name)) {
             try self.checkAbiDecodeBuiltinArguments(builtin);
         }
         if (std.mem.eql(u8, builtin.name, "chainId")) {
@@ -3481,7 +3485,7 @@ const TypeChecker = struct {
         const logical_arg_count = builtin.args.len + @as(usize, if (builtin.type_arg != null) 1 else 0);
         const expected_value_args: usize = if (builtin.type_arg != null) 1 else 2;
         if (builtin.args.len != expected_value_args) {
-            try self.emitRangeError(builtin.range, "@abiDecode expects 2 arguments, found {d}", .{logical_arg_count});
+            try self.emitRangeError(builtin.range, "@{s} expects 2 arguments, found {d}", .{ builtin.name, logical_arg_count });
             return;
         }
 
@@ -3492,8 +3496,8 @@ const TypeChecker = struct {
         else blk: {
             if (!self.exprIsTypeValue(builtin.args[0])) {
                 const arg_type = self.expr_types[builtin.args[0].index()];
-                try self.emitRangeError(builtin.range, "@abiDecode expects a type as its first argument, found '{s}'", .{
-                    diagnosticTypeDisplayName(self, arg_type),
+                try self.emitRangeError(builtin.range, "@{s} expects a type as its first argument, found '{s}'", .{
+                    builtin.name, diagnosticTypeDisplayName(self, arg_type),
                 });
                 return;
             }
@@ -3501,7 +3505,11 @@ const TypeChecker = struct {
         };
 
         if (self.abiDecodeIsUnsupported(target_type)) {
-            try self.emitRangeError(builtin.range, "@abiDecode: type '{s}' has no ABI representation", .{
+            try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
+                builtin.name, diagnosticTypeDisplayName(self, target_type),
+            });
+        } else if (std.mem.eql(u8, builtin.name, "abiDecodePermissive") and self.comptime_depth == 0 and !self.runtimeAbiDecodePermissiveSupportsType(target_type)) {
+            try self.emitRangeError(builtin.range, "runtime @abiDecodePermissive does not yet support target type '{s}'", .{
                 diagnosticTypeDisplayName(self, target_type),
             });
         } else if (self.comptime_depth == 0 and !self.runtimeAbiDecodeSupportsType(target_type)) {
@@ -3514,8 +3522,8 @@ const TypeChecker = struct {
         const bytes_type = self.expr_types[bytes_arg.index()];
         switch (bytes_type.kind()) {
             .bytes, .fixed_bytes => {},
-            else => try self.emitRangeError(builtin.range, "@abiDecode expects bytes as its second argument, found '{s}'", .{
-                diagnosticTypeDisplayName(self, bytes_type),
+            else => try self.emitRangeError(builtin.range, "@{s} expects bytes as its second argument, found '{s}'", .{
+                builtin.name, diagnosticTypeDisplayName(self, bytes_type),
             }),
         }
     }
@@ -3575,6 +3583,54 @@ const TypeChecker = struct {
 
     fn runtimeAbiDecodeSupportsType(self: *TypeChecker, ty: Type) bool {
         return self.runtimeAbiDecodeSupportsTypeInContext(ty, true);
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsType(self: *TypeChecker, ty: Type) bool {
+        return self.runtimeAbiDecodePermissiveSupportsTypeInContext(ty, true);
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
+        return switch (ty) {
+            .bool, .address, .fixed_bytes, .enum_, .bitfield, .void => true,
+            .integer => |integer| (integer.bits orelse 256) > 0,
+            .string, .bytes => allow_top_level_dynamic,
+            .slice => |slice| allow_top_level_dynamic and self.isRuntimeAbiDecodeU256(slice.element_type.*),
+            .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
+                refinements.hasNativeMlirTypeName(refinement.name) and
+                self.runtimeAbiDecodePermissiveSupportsTypeInContext(refinement.base_type.*, allow_top_level_dynamic),
+            .tuple => |elements| blk: {
+                if (elements.len <= 1) break :blk false;
+                if (allow_top_level_dynamic and elements.len == 2 and
+                    self.isRuntimeAbiDecodeU256(elements[0]) and
+                    (self.isRuntimeAbiDecodeDynamicBytesLike(elements[1]) or self.isRuntimeAbiDecodeU256Slice(elements[1])))
+                {
+                    break :blk true;
+                }
+                for (elements) |element| {
+                    if (element == .void or !self.runtimeAbiDecodePermissiveSupportsTypeInContext(element, false)) break :blk false;
+                }
+                break :blk true;
+            },
+            .named => |named| self.runtimeAbiDecodePermissiveSupportsNamed(named.name, allow_top_level_dynamic),
+            else => false,
+        };
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsNamed(self: *TypeChecker, name: []const u8, allow_top_level_dynamic: bool) bool {
+        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
+        if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
+        if (parseIntegerSpelling(name) != null) return true;
+        if (parseFixedBytesSpelling(name) != null) return true;
+        if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
+        if (self.instantiatedBitfieldByName(name) != null) return true;
+
+        const item_id = self.item_index.lookup(name) orelse return false;
+        return switch (self.file.item(item_id).*) {
+            .Enum => !self.enumHasPayload(name),
+            .Bitfield => true,
+            .TypeAlias => |type_alias| self.runtimeAbiDecodePermissiveSupportsTypeInContext(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false, allow_top_level_dynamic),
+            else => false,
+        };
     }
 
     fn runtimeAbiDecodeSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
@@ -5616,7 +5672,7 @@ const TypeChecker = struct {
             return .{ .bytes = {} };
         }
 
-        if (std.mem.eql(u8, builtin.name, "abiDecode")) {
+        if (isAbiDecodeBuiltinName(builtin.name)) {
             const target_type = if (builtin.type_arg) |type_arg|
                 self.resolveTypeExprInCurrentContext(type_arg) catch Type{ .unknown = {} }
             else blk: {

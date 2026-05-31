@@ -50,4 +50,13 @@ contract AbiDecodeCalldataRevert {
         touched = 8;
         return 8;
     }
+
+    @decodePermissive
+    pub fn accept_permissive(flag: bool, to: address, text: string) -> u256 {
+        touched = 9;
+        if (flag) {
+            return text[0];
+        }
+        return @abiEncode(to)[31];
+    }
 }
