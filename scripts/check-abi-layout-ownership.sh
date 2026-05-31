@@ -10,7 +10,7 @@ fail() {
 
 matches="$(
   grep -R -n -E "StaticEncoding|LayoutNode \{|abi/layout\.zig|abi_layout\." src --include="*.zig" \
-    | grep -v -E "src/abi/layout\.zig:|src/abi/layout_context\.zig:|src/abi/comptime_encoder\.zig:|src/abi/runtime_encoder\.zig:|src/abi\.test\.zig:" \
+    | grep -v -E "src/abi/layout\.zig:|src/abi/layout_context\.zig:|src/abi/comptime_encoder\.zig:|src/abi/comptime_decoder\.zig:|src/abi/runtime_encoder\.zig:|src/abi/runtime_decoder\.zig:|src/abi\.test\.zig:" \
     | grep -v -E "src/hir/abi\.zig:|src/root\.zig:" \
     || true
 )"

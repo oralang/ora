@@ -1130,9 +1130,10 @@ namespace mlir
 
                 if (isa<sir::SelectOp>(op))
                 {
-                    std::string zeroKey = formatConstKey(APInt(256, 0));
-                    bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                    uint32_t expandCount = needsZero ? 6 : 5;
+                    // emitOperationText always emits a local sel_zero for select expansion
+                    // so the source-map expansion count must remain six even if another
+                    // zero const already exists in the block.
+                    uint32_t expandCount = 6;
                     for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                     {
                         callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
@@ -1224,7 +1225,7 @@ namespace mlir
             // CRITICAL: The op indexing must exactly match the serialized backend
             // execution order used by Sensei source-map emission. Skipped ops
             // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too,
-            // and expanded ops (SelectOp -> 5-6 SIR ops) must produce matching
+            // and expanded ops (SelectOp -> 6 SIR ops) must produce matching
             // synthetic indices. The separate line map ties these backend indices
             // back to textual .sir lines.
 
@@ -1510,9 +1511,9 @@ namespace mlir
 
                         if (isa<sir::SelectOp>(op))
                         {
-                            std::string zeroKey = formatConstKey(APInt(256, 0));
-                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                            uint32_t expandCount = needsZero ? 6 : 5;
+                            // emitOperationText always emits a local sel_zero for select expansion
+                            // so textual line accounting must match that six-line shape.
+                            uint32_t expandCount = 6;
                             for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                             {
                                 textLineByOp[{&op, expandIdx}] = currentLine;
