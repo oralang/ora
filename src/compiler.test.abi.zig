@@ -132,6 +132,20 @@ fn expectComptimeDecoderErrorForType(
     );
 }
 
+fn expectComptimeDecoderErrorBytesForType(
+    target_type: compiler.sema.Type,
+    bytes: []const u8,
+    expected: abi_comptime_decoder.DecodeError,
+) !void {
+    try abi_comptime_decoder_test_support.expectDecodeErrorBytesForType(
+        testing.allocator,
+        target_type,
+        bytes,
+        noopAbiDecodeResolver(),
+        expected,
+    );
+}
+
 fn expectedHexByteLen(expected_hex: []const u8) !usize {
     const hex = if (std.mem.startsWith(u8, expected_hex, "0x")) expected_hex[2..] else expected_hex;
     try testing.expectEqual(@as(usize, 0), hex.len % 2);
@@ -943,6 +957,31 @@ test "compiler abiDecode length overflow fixtures expose exact error variant" {
         \\}
     ;
     try expectRuntimeAbiDecodeErrors(runtime_source, &cases);
+}
+
+test "compiler abiDecode resource guards expose exact decoder variants" {
+    const sema = compiler.sema;
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    const too_large = try testing.allocator.alloc(u8, abi_comptime_decoder.MAX_BUFFER_SIZE + 1);
+    defer testing.allocator.free(too_large);
+    @memset(too_large, 0);
+    try expectComptimeDecoderErrorBytesForType(u256_ty, too_large, .buffer_size_exceeded);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var nested_ty = u256_ty;
+    for (0..abi_comptime_decoder.MAX_DECODE_DEPTH) |_| {
+        const elems = try allocator.alloc(sema.Type, 1);
+        elems[0] = nested_ty;
+        nested_ty = .{ .tuple = elems };
+    }
+    try expectComptimeDecoderErrorForType(
+        nested_ty,
+        "0000000000000000000000000000000000000000000000000000000000000001",
+        .depth_limit_exceeded,
+    );
 }
 
 test "compiler abiDecode dynamic error fixtures expose exact error variants" {
@@ -1774,6 +1813,55 @@ test "compiler abiEncode sign-extends signed integers" {
     ;
     // cast abi-encode "f(int16)" 258
     try expectAbiEncodeReturnBytes(positive_i16_source, "run", "0000000000000000000000000000000000000000000000000000000000000102");
+}
+
+test "compiler abiEncode covers narrow integer and fixed-bytes width edges" {
+    const u8_source =
+        \\pub fn run() -> bytes {
+        \\    return comptime {
+        \\        @abiEncode(@cast(u8, 255));
+        \\    };
+        \\}
+    ;
+    try expectAbiEncodeReturnBytes(u8_source, "run", "00000000000000000000000000000000000000000000000000000000000000ff");
+
+    const u16_source =
+        \\pub fn run() -> bytes {
+        \\    return comptime {
+        \\        @abiEncode(@cast(u16, 258));
+        \\    };
+        \\}
+    ;
+    try expectAbiEncodeReturnBytes(u16_source, "run", "0000000000000000000000000000000000000000000000000000000000000102");
+
+    const i8_source =
+        \\pub fn run() -> bytes {
+        \\    return comptime {
+        \\        @abiEncode(@cast(i8, -1));
+        \\    };
+        \\}
+    ;
+    try expectAbiEncodeReturnBytes(i8_source, "run", "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+
+    const bytes1_source =
+        \\pub fn run() -> bytes {
+        \\    return comptime {
+        \\        const value: bytes1 = hex"aa";
+        \\        @abiEncode(value);
+        \\    };
+        \\}
+    ;
+    try expectAbiEncodeReturnBytes(bytes1_source, "run", "aa00000000000000000000000000000000000000000000000000000000000000");
+
+    const bytes32_source =
+        \\pub fn run() -> bytes {
+        \\    return comptime {
+        \\        const value: bytes32 = hex"0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        \\        @abiEncode(value);
+        \\    };
+        \\}
+    ;
+    try expectAbiEncodeReturnBytes(bytes32_source, "run", "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20");
 }
 
 test "compiler abiEncode encodes static arrays structs enum bitfield and empty values" {
@@ -5012,6 +5100,62 @@ test "compiler abiDecode round-trips encoder M2 static corpus" {
     try expectComptimeIntegerReturn(refinement_source, "run", 5);
 }
 
+test "compiler abiDecode round-trips encoder dynamic corpus" {
+    const source =
+        \\pub fn string_value() -> u256 {
+        \\    return comptime {
+        \\        const value = "hello";
+        \\        let decoded = @abiDecode(string, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0] + roundtrip.len,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\
+        \\pub fn bytes_value() -> u256 {
+        \\    return comptime {
+        \\        const value: bytes = hex"deadbeef";
+        \\        let decoded = @abiDecode(bytes, @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0] + roundtrip[3],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\
+        \\pub fn u256_array() -> u256 {
+        \\    return comptime {
+        \\        const value = @cast(slice[u256], [1, 2, 3]);
+        \\        let decoded = @abiDecode(slice[u256], @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip[0] + roundtrip[1] + roundtrip[2],
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+        \\
+        \\pub fn mixed_tuple() -> u256 {
+        \\    return comptime {
+        \\        const value: (u256, string) = (7, "hello");
+        \\        let decoded = @abiDecode((u256, string), @abiEncode(value));
+        \\        let out = match (decoded) {
+        \\            Ok(roundtrip) => roundtrip.0 + roundtrip.1[0] + roundtrip.1.len,
+        \\            Err(_) => 0,
+        \\        };
+        \\        out;
+        \\    };
+        \\}
+    ;
+    try expectComptimeIntegerReturn(source, "string_value", 109);
+    try expectComptimeIntegerReturn(source, "bytes_value", 461);
+    try expectComptimeIntegerReturn(source, "u256_array", 6);
+    try expectComptimeIntegerReturn(source, "mixed_tuple", 116);
+}
+
 test "compiler abiDecode decodes dynamic ABI values at comptime" {
     const string_source =
         \\pub fn run() -> u256 {
@@ -6894,6 +7038,18 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             \\}
             ,
             .needle = "@abiEncode: type 'map<address, u256>' has no ABI representation",
+        },
+        .{
+            .source =
+            \\error Failure(code: u256);
+            \\pub fn run() -> bytes {
+            \\    return comptime {
+            \\        const value: Result<u256, Failure> = Ok(7);
+            \\        @abiEncode(value);
+            \\    };
+            \\}
+            ,
+            .needle = "@abiEncode: type '!u256 | Failure' has no ABI representation",
         },
         .{
             .source =

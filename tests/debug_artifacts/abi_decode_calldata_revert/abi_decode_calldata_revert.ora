@@ -51,6 +51,22 @@ contract AbiDecodeCalldataRevert {
         return 8;
     }
 
+    pub fn decode_memory(payload: bytes) -> u256 {
+        let decoded = @abiDecode((u256, bool), payload);
+        match (decoded) {
+            Ok(value) => {
+                touched = 10;
+                if (value.1) {
+                    return value.0 + 1;
+                }
+                return value.0;
+            }
+            Err(_) => {
+                return 0;
+            }
+        }
+    }
+
     @decodePermissive
     pub fn accept_permissive(flag: bool, to: address, text: string) -> u256 {
         touched = 9;

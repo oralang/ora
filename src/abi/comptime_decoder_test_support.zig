@@ -47,3 +47,31 @@ pub fn expectDecodeErrorForType(
     );
     if (decoded != .err or decoded.err != expected) return error.UnexpectedDecodeError;
 }
+
+pub fn expectDecodeErrorBytesForType(
+    allocator: std.mem.Allocator,
+    target_type: sema.Type,
+    bytes: []const u8,
+    resolver: abi_comptime_decoder.TypeResolver,
+    expected: abi_comptime_decoder.DecodeError,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var layout = try abi_layout.fromType(arena_allocator, target_type);
+    defer layout.deinit(arena_allocator);
+
+    var heap = comptime_mod.CtHeap.init(arena_allocator);
+    defer heap.deinit();
+
+    const decoded = try abi_comptime_decoder.decodeComptimeValue(
+        arena_allocator,
+        &heap,
+        resolver,
+        layout,
+        target_type,
+        bytes,
+    );
+    if (decoded != .err or decoded.err != expected) return error.UnexpectedDecodeError;
+}

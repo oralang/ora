@@ -481,6 +481,38 @@ test "debug-probe malformed public calldata reverts before body effects" {
         try expectProbeContains(case.name, valid_stdout, expected_success_output);
     }
 
+    const memory_decode_valid_payload =
+        // Public calldata carries a bytes value whose contents are ABI bytes
+        // for (u256,bool): value 6 and canonical true.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000006" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const memory_decode_valid_calldata = try calldataHexForPayloadHex(allocator, "decode_memory(bytes)", memory_decode_valid_payload);
+    defer allocator.free(memory_decode_valid_calldata);
+    const memory_decode_valid_stdout = try runDebugProbe(allocator, fixture, out_dir, memory_decode_valid_calldata, "48");
+    defer allocator.free(memory_decode_valid_stdout);
+    try expectProbeContains("runtime memory abiDecode valid", memory_decode_valid_stdout, "reverted: false");
+    try expectProbeContains("runtime memory abiDecode valid", memory_decode_valid_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000007");
+    try expectProbeContains("runtime memory abiDecode valid", memory_decode_valid_stdout, "binding touched [storage_field] value=10");
+
+    const memory_decode_invalid_payload =
+        // The bytes wrapper is canonical, but the nested ABI bool word is not.
+        // This exercises @abiDecode(T, runtime_bytes) on the VM, not a folded
+        // SIR text extraction.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000006" ++
+        "0000000000000000000000000000000000000000000000000000000000000002";
+    const memory_decode_invalid_calldata = try calldataHexForPayloadHex(allocator, "decode_memory(bytes)", memory_decode_invalid_payload);
+    defer allocator.free(memory_decode_invalid_calldata);
+    const memory_decode_invalid_stdout = try runDebugProbe(allocator, fixture, out_dir, memory_decode_invalid_calldata, "48");
+    defer allocator.free(memory_decode_invalid_stdout);
+    try expectProbeContains("runtime memory abiDecode invalid", memory_decode_invalid_stdout, "reverted: false");
+    try expectProbeContains("runtime memory abiDecode invalid", memory_decode_invalid_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000000");
+    try expectProbeOmits("runtime memory abiDecode invalid", memory_decode_invalid_stdout, "binding touched [storage_field] value=10");
+    try expectProbeOmits("runtime memory abiDecode invalid", memory_decode_invalid_stdout, "opcode=SSTORE");
+
     const permissive_payload =
         // bool=2 (non-canonical true), address has non-zero high padding, and
         // string offset/padding are non-canonical. @decodePermissive accepts
@@ -1026,4 +1058,128 @@ test "debug-probe malformed external returndata returns decode error before body
     try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "reverted: false");
     try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000009");
     try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "touched = 9;");
+
+    const ReturndataStaticCase = struct {
+        name: []const u8,
+        signature: []const u8,
+        invalid_returndata: []const u8,
+        valid_returndata: []const u8,
+        expected_error: u32,
+        expected_success: u32,
+    };
+    const returndata_static_cases = [_]ReturndataStaticCase{
+        .{
+            .name = "returndata enum out of range",
+            .signature = "read_status(address)",
+            .invalid_returndata = "0000000000000000000000000000000000000000000000000000000000000002",
+            .valid_returndata = "0000000000000000000000000000000000000000000000000000000000000001",
+            .expected_error = 7,
+            .expected_success = 9,
+        },
+        .{
+            .name = "returndata signed int noncanonical",
+            .signature = "read_delta(address)",
+            .invalid_returndata = "00000000000000000000000000000000000000000000000000000000000000fb",
+            .valid_returndata = "fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffb",
+            .expected_error = 3,
+            .expected_success = 9,
+        },
+        .{
+            .name = "returndata refinement violation",
+            .signature = "read_positive(address)",
+            .invalid_returndata = "0000000000000000000000000000000000000000000000000000000000000000",
+            .valid_returndata = "0000000000000000000000000000000000000000000000000000000000000001",
+            .expected_error = 10,
+            .expected_success = 1,
+        },
+    };
+
+    for (returndata_static_cases) |case| {
+        const case_calldata = try calldataHexForSingleWordHex(allocator, case.signature, mock_target_word);
+        defer allocator.free(case_calldata);
+
+        const invalid_stdout_case = try runDebugProbeWithExtraArgs(
+            allocator,
+            fixture,
+            out_dir,
+            case_calldata,
+            &.{ "--mock-returndata-hex", case.invalid_returndata },
+            "96",
+        );
+        defer allocator.free(invalid_stdout_case);
+        const expected_error = try std.fmt.allocPrint(allocator, "output: 0x{x:0>64}", .{case.expected_error});
+        defer allocator.free(expected_error);
+        try expectProbeContains(case.name, invalid_stdout_case, "reverted: false");
+        try expectProbeContains(case.name, invalid_stdout_case, expected_error);
+        try expectProbeOmits(case.name, invalid_stdout_case, "touched = 9;");
+        try expectProbeOmits(case.name, invalid_stdout_case, "opcode=SSTORE");
+
+        const valid_stdout_case = try runDebugProbeWithExtraArgs(
+            allocator,
+            fixture,
+            out_dir,
+            case_calldata,
+            &.{ "--mock-returndata-hex", case.valid_returndata },
+            "96",
+        );
+        defer allocator.free(valid_stdout_case);
+        const expected_success = try std.fmt.allocPrint(allocator, "output: 0x{x:0>64}", .{case.expected_success});
+        defer allocator.free(expected_success);
+        try expectProbeContains(case.name, valid_stdout_case, "reverted: false");
+        try expectProbeContains(case.name, valid_stdout_case, expected_success);
+        try expectProbeContains(case.name, valid_stdout_case, "touched = 9;");
+    }
+
+    const flags_calldata = try calldataHexForSingleWordHex(allocator, "read_flags(address)", mock_target_word);
+    defer allocator.free(flags_calldata);
+    const flags_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        flags_calldata,
+        &.{ "--mock-returndata-hex", "0000000000000000000000000000000000000000000000000000000000000003" },
+        "96",
+    );
+    defer allocator.free(flags_stdout);
+    try expectProbeContains("returndata bitfield valid", flags_stdout, "reverted: false");
+    try expectProbeContains("returndata bitfield valid", flags_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000009");
+    try expectProbeContains("returndata bitfield valid", flags_stdout, "touched = 9;");
+
+    const bools_calldata = try calldataHexForSingleWordHex(allocator, "read_bools(address)", mock_target_word);
+    defer allocator.free(bools_calldata);
+    const invalid_bools_returndata =
+        // offset=0x20, length=1, bool element is neither 0 nor 1.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000002";
+    const invalid_bools_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        bools_calldata,
+        &.{ "--mock-returndata-hex", invalid_bools_returndata },
+        "96",
+    );
+    defer allocator.free(invalid_bools_stdout);
+    try expectProbeContains("returndata bool array invalid element", invalid_bools_stdout, "reverted: false");
+    try expectProbeContains("returndata bool array invalid element", invalid_bools_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000004");
+    try expectProbeOmits("returndata bool array invalid element", invalid_bools_stdout, "touched = 9;");
+    try expectProbeOmits("returndata bool array invalid element", invalid_bools_stdout, "opcode=SSTORE");
+
+    const valid_bools_returndata =
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const valid_bools_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        bools_calldata,
+        &.{ "--mock-returndata-hex", valid_bools_returndata },
+        "96",
+    );
+    defer allocator.free(valid_bools_stdout);
+    try expectProbeContains("returndata bool array valid", valid_bools_stdout, "reverted: false");
+    try expectProbeContains("returndata bool array valid", valid_bools_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000009");
+    try expectProbeContains("returndata bool array valid", valid_bools_stdout, "touched = 9;");
 }

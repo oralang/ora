@@ -365,6 +365,34 @@ static Value adaptErrorPayloadToResultType(
         return rewriter.create<sir::BitcastOp>(loc, resultType, replacement);
     }
 
+    if (auto anonType = llvm::dyn_cast<ora::AnonymousStructType>(resultType))
+    {
+        auto fieldTypes = anonType.getFieldTypes();
+        const bool singleI256Field =
+            fieldTypes.size() == 1 &&
+            llvm::isa<mlir::IntegerType>(fieldTypes.front()) &&
+            llvm::cast<mlir::IntegerType>(fieldTypes.front()).getWidth() == 256;
+        if (singleI256Field && llvm::isa<sir::U256Type>(replacement.getType()))
+        {
+            Type fieldType = fieldTypes.front();
+            Value fieldValue = replacement;
+            if (fieldValue.getType() != fieldType)
+            {
+                if (llvm::isa<mlir::IntegerType>(fieldType) &&
+                    llvm::cast<mlir::IntegerType>(fieldType).getWidth() == 256)
+                {
+                    fieldValue = rewriter.create<sir::BitcastOp>(loc, fieldType, fieldValue);
+                }
+                else
+                {
+                    fieldValue = ora::createMaterializationCast(
+                        rewriter, loc, fieldType, fieldValue, mat_kind::kPayloadForward);
+                }
+            }
+            return rewriter.create<ora::StructInitOp>(loc, resultType, ValueRange{fieldValue});
+        }
+    }
+
     if (llvm::isa<sir::PtrType>(replacement.getType()) &&
         llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
                   mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
@@ -534,6 +562,7 @@ static void buildWideErrorUnionReturnFromParts(
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type);
+static bool valueHasForceWideErrorUnion(Value value);
 // Error unions have two SIR encodings. Narrow unions fit in one u256 word
 // as (payload << 1) | tag. Wide unions lower to two values: a u256 tag and a
 // carrier for the success payload. Scalar payloads use u256; aggregate or
@@ -696,6 +725,23 @@ static LogicalResult appendConvertedCompositeValues(
         out.push_back(converted);
     }
 
+    return success();
+}
+
+static LogicalResult appendSplitPackedErrorUnionValue(
+    PatternRewriter &rewriter,
+    Location loc,
+    Value packed,
+    SmallVectorImpl<Value> &out)
+{
+    if (!llvm::isa<sir::U256Type>(packed.getType()))
+        return failure();
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    Value one = mlir::ora::lowering::constU256(rewriter, loc, 1);
+    Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
+    Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+    out.push_back(tag);
+    out.push_back(payload);
     return success();
 }
 
@@ -993,7 +1039,7 @@ static LogicalResult materializeWideErrorUnion(
 
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
     {
-        if (isNarrowErrorUnion(errType))
+        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(operand))
         {
             Value packed = toU256(operand);
             Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
@@ -5394,7 +5440,16 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
     for (Type t : op.getResultTypes())
     {
         SmallVector<Type> convertedTypes;
-        if (failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty())
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(t))
+        {
+            if (hasForceWideErrorUnionAttr(op.getOperation()) && isNarrowErrorUnion(errType))
+            {
+                auto *ctx = rewriter.getContext();
+                convertedTypes.push_back(sir::U256Type::get(ctx));
+                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+            }
+        }
+        if (convertedTypes.empty() && (failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty()))
         {
             if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(t))
             {
@@ -5473,7 +5528,15 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
                 Value operand = it.value();
                 auto &group = resultTypeGroups[idx];
                 if (failed(appendConvertedCompositeValues(rewriter, loc, tc, operand, group, convertedOperands)))
-                    return rewriter.notifyMatchFailure(y, "failed to materialize scf.if yield operand");
+                {
+                    Type originalResultType = op.getResultTypes()[idx];
+                    if (!llvm::isa<ora::ErrorUnionType>(originalResultType) ||
+                        group.size() != 2 ||
+                        failed(appendSplitPackedErrorUnionValue(rewriter, loc, operand, convertedOperands)))
+                    {
+                        return rewriter.notifyMatchFailure(y, "failed to materialize scf.if yield operand");
+                    }
+                }
             }
             rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
         }
@@ -5508,7 +5571,15 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         {
             auto &group = resultTypeGroups[idx];
             if (failed(appendConvertedCompositeValues(rewriter, loc, tc, result, group, convertedOperands)))
-                return rewriter.notifyMatchFailure(op, "failed to materialize implicit scf.if branch operand");
+            {
+                Type originalResultType = op.getResultTypes()[idx];
+                if (!llvm::isa<ora::ErrorUnionType>(originalResultType) ||
+                    group.size() != 2 ||
+                    failed(appendSplitPackedErrorUnionValue(rewriter, loc, result, convertedOperands)))
+                {
+                    return rewriter.notifyMatchFailure(op, "failed to materialize implicit scf.if branch operand");
+                }
+            }
         }
         rewriter.create<sir::BrOp>(loc, convertedOperands, mergeBlock);
         return success();

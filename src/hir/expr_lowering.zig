@@ -1713,6 +1713,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const if_result_count: usize = if (has_extern_summary_ensures) 2 else 1;
             const if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, success, &if_result_types, if_result_count, true);
             if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            const external_result_requires_wide = self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id));
+            if (external_result_requires_wide) {
+                mlir.oraOperationSetAttributeByName(if_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
             appendOp(self.block, if_op);
 
             const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
@@ -1740,7 +1744,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
                 const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
                 if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
-                if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                if (external_result_requires_wide) {
                     mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
                 }
                 appendOp(then_block, ok_op);
@@ -1762,7 +1766,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     "ExternalCallFailed",
                 );
                 if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
-                if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                if (external_result_requires_wide) {
                     mlir.oraOperationSetAttributeByName(decode_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
                 }
                 appendOp(then_block, decode_op);
@@ -1776,6 +1780,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const summary_if_result_types = [_]mlir.MlirType{ result_type, boolType(self.parent.context) };
                     const summary_if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, is_error, &summary_if_result_types, summary_if_result_types.len, true);
                     if (mlir.oraOperationIsNull(summary_if_op)) return error.MlirOperationCreationFailed;
+                    if (external_result_requires_wide) {
+                        mlir.oraOperationSetAttributeByName(summary_if_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                    }
                     appendOp(then_block, summary_if_op);
 
                     const summary_err_block = mlir.oraScfIfOpGetThenBlock(summary_if_op);

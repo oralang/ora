@@ -32,7 +32,7 @@ namespace
         return operand;
     }
 
-    static Value ptrForDynamicBytesOperand(
+    static Value ptrForAbiNodeOperand(
         PatternRewriter &rewriter,
         Location loc,
         const AbiLayoutNode &node,
@@ -51,21 +51,6 @@ namespace
     {
         return node.loadFromAggregate &&
                (node.kind == AbiLayoutKind::Tuple || node.kind == AbiLayoutKind::FixedArray);
-    }
-
-    static Value ptrForAggregateNodeOperand(
-        PatternRewriter &rewriter,
-        Location loc,
-        const AbiLayoutNode &node,
-        ValueRange operands)
-    {
-        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);
-        Value operand = operandForAbiNode(rewriter, loc, node, operands);
-        if (!operand)
-            return {};
-        if (llvm::isa<sir::PtrType>(operand.getType()))
-            return operand;
-        return rewriter.create<sir::BitcastOp>(loc, ptrType, ensureU256(rewriter, loc, operand));
     }
 
     static std::optional<uint64_t> staticMemRefElementCount(Operation *ownerOp, const AbiLayoutNode &node)
@@ -110,7 +95,7 @@ namespace
         ValueRange operands)
     {
         auto u256Type = sir::U256Type::get(rewriter.getContext());
-        Value source = ptrForDynamicBytesOperand(rewriter, loc, node, operands);
+        Value source = ptrForAbiNodeOperand(rewriter, loc, node, operands);
         if (!source)
             return std::nullopt;
 
@@ -334,7 +319,7 @@ namespace
         const AbiLayoutNode &node,
         ValueRange operands)
     {
-        Value source = ptrForDynamicBytesOperand(rewriter, loc, node, operands);
+        Value source = ptrForAbiNodeOperand(rewriter, loc, node, operands);
         if (!source)
             return {};
         return dynamicBytesTailSizeFromPtr(rewriter, loc, source);
@@ -378,7 +363,7 @@ namespace
         case AbiLayoutKind::FixedArray:
             if (node.isDynamic())
             {
-                Value source = ptrForDynamicBytesOperand(rewriter, loc, node, operands);
+                Value source = ptrForAbiNodeOperand(rewriter, loc, node, operands);
                 if (!source)
                     return {};
                 result = fixedArrayDynamicSizeFromPointer(rewriter, loc, node, source);
@@ -404,7 +389,7 @@ namespace
                 Value childSize;
                 if (isPointerBackedAggregateNode(*child))
                 {
-                    Value childPtr = ptrForAggregateNodeOperand(rewriter, loc, *child, operands);
+                    Value childPtr = ptrForAbiNodeOperand(rewriter, loc, *child, operands);
                     if (!childPtr)
                         return {};
                     childSize = abiEncodedSizeFromPointer(rewriter, loc, *child, childPtr);
@@ -512,7 +497,7 @@ namespace
         Value basePtr,
         Value baseOffset)
     {
-        Value source = ptrForDynamicBytesOperand(rewriter, loc, node, operands);
+        Value source = ptrForAbiNodeOperand(rewriter, loc, node, operands);
         if (!source)
             return failure();
         return emitDynamicBytesTailFromPtr(rewriter, loc, source, basePtr, baseOffset);
@@ -650,86 +635,98 @@ namespace
         return success();
     }
 
-    static LogicalResult emitDynamicArrayTailFromSource(
+    static LogicalResult emitDynamicElementArrayTailWithRuntimeLength(
         PatternRewriter &rewriter,
         Location loc,
         Operation *anchorOp,
-        const AbiLayoutNode &node,
+        const AbiLayoutNode &element,
         const DynamicArraySource &source,
         Value basePtr,
         Value baseOffset)
     {
-        if (node.children.empty())
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        Value zero = constU256(rewriter, loc, 0);
+        Value one = constU256(rewriter, loc, 1);
+        Value word = constU256(rewriter, loc, 32);
+        Value initialTailOffset = mulU256(rewriter, loc, source.length, constU256(rewriter, loc, element.headSlotBytes()));
+
+        Block *parentBlock = rewriter.getInsertionBlock();
+        Region *parentRegion = parentBlock->getParent();
+        auto afterBlock = rewriter.splitBlock(parentBlock, rewriter.getInsertionPoint());
+        auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type, u256Type}, {loc, loc});
+        auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type, u256Type}, {loc, loc});
+
+        rewriter.setInsertionPointToEnd(parentBlock);
+        rewriter.create<sir::BrOp>(loc, ValueRange{zero, initialTailOffset}, condBlock);
+
+        rewriter.setInsertionPointToStart(condBlock);
+        Value iv = condBlock->getArgument(0);
+        Value tailOffsetArg = condBlock->getArgument(1);
+        Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, source.length);
+        rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv, tailOffsetArg}, ValueRange{}, bodyBlock, afterBlock);
+
+        rewriter.setInsertionPointToStart(bodyBlock);
+        Value bodyIv = bodyBlock->getArgument(0);
+        Value bodyTailOffset = bodyBlock->getArgument(1);
+        Value headSlotOffset = addU256(
+            rewriter,
+            loc,
+            baseOffset,
+            addU256(rewriter, loc, word, mulU256(rewriter, loc, bodyIv, constU256(rewriter, loc, element.headSlotBytes()))));
+        storeAbiWordAt(rewriter, loc, basePtr, headSlotOffset, bodyTailOffset);
+
+        Value elementPtr = dynamicArrayElementPointer(rewriter, loc, source, bodyIv);
+        Value elementBaseOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, word, bodyTailOffset));
+        if (failed(emitAbiEncodingFromPointer(rewriter, loc, anchorOp, element, elementPtr, basePtr, elementBaseOffset)))
             return failure();
-        storeAbiWordAt(rewriter, loc, basePtr, baseOffset, source.length);
-        const AbiLayoutNode &element = *node.children.front();
+        Value elementSize = abiEncodedSizeFromPointer(rewriter, loc, element, elementPtr);
+        if (!elementSize)
+            return failure();
+        Value nextTailOffset = addU256(rewriter, loc, bodyTailOffset, elementSize);
+        Value next = addU256(rewriter, loc, bodyIv, one);
+        rewriter.create<sir::BrOp>(loc, ValueRange{next, nextTailOffset}, condBlock);
 
-        if (element.isDynamic())
+        rewriter.setInsertionPointToStart(afterBlock);
+        return success();
+    }
+
+    static LogicalResult emitDynamicElementArrayTailWithStaticCount(
+        PatternRewriter &rewriter,
+        Location loc,
+        Operation *anchorOp,
+        const AbiLayoutNode &element,
+        const DynamicArraySource &source,
+        Value basePtr,
+        Value baseOffset)
+    {
+        if (!source.staticElementCount)
+            return failure();
+        Value tailOffset = constU256(rewriter, loc, (*source.staticElementCount) * element.headSlotBytes());
+        for (uint64_t index = 0; index < *source.staticElementCount; ++index)
         {
-            if (!source.staticElementCount)
-            {
-                auto u256Type = sir::U256Type::get(rewriter.getContext());
-                Value zero = constU256(rewriter, loc, 0);
-                Value one = constU256(rewriter, loc, 1);
-                Value word = constU256(rewriter, loc, 32);
-                Value initialTailOffset = mulU256(rewriter, loc, source.length, constU256(rewriter, loc, element.headSlotBytes()));
-
-                Block *parentBlock = rewriter.getInsertionBlock();
-                Region *parentRegion = parentBlock->getParent();
-                auto afterBlock = rewriter.splitBlock(parentBlock, rewriter.getInsertionPoint());
-                auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type, u256Type}, {loc, loc});
-                auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type, u256Type}, {loc, loc});
-
-                rewriter.setInsertionPointToEnd(parentBlock);
-                rewriter.create<sir::BrOp>(loc, ValueRange{zero, initialTailOffset}, condBlock);
-
-                rewriter.setInsertionPointToStart(condBlock);
-                Value iv = condBlock->getArgument(0);
-                Value tailOffsetArg = condBlock->getArgument(1);
-                Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, source.length);
-                rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv, tailOffsetArg}, ValueRange{}, bodyBlock, afterBlock);
-
-                rewriter.setInsertionPointToStart(bodyBlock);
-                Value bodyIv = bodyBlock->getArgument(0);
-                Value bodyTailOffset = bodyBlock->getArgument(1);
-                Value headSlotOffset = addU256(
-                    rewriter,
-                    loc,
-                    baseOffset,
-                    addU256(rewriter, loc, word, mulU256(rewriter, loc, bodyIv, constU256(rewriter, loc, element.headSlotBytes()))));
-                storeAbiWordAt(rewriter, loc, basePtr, headSlotOffset, bodyTailOffset);
-
-                Value elementPtr = dynamicArrayElementPointer(rewriter, loc, source, bodyIv);
-                Value elementBaseOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, word, bodyTailOffset));
-                if (failed(emitAbiEncodingFromPointer(rewriter, loc, anchorOp, element, elementPtr, basePtr, elementBaseOffset)))
-                    return failure();
-                Value elementSize = abiEncodedSizeFromPointer(rewriter, loc, element, elementPtr);
-                if (!elementSize)
-                    return failure();
-                Value nextTailOffset = addU256(rewriter, loc, bodyTailOffset, elementSize);
-                Value next = addU256(rewriter, loc, bodyIv, one);
-                rewriter.create<sir::BrOp>(loc, ValueRange{next, nextTailOffset}, condBlock);
-
-                rewriter.setInsertionPointToStart(afterBlock);
-                return success();
-            }
-            Value tailOffset = constU256(rewriter, loc, (*source.staticElementCount) * element.headSlotBytes());
-            for (uint64_t index = 0; index < *source.staticElementCount; ++index)
-            {
-                Value headSlotOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, constU256(rewriter, loc, 32), constU256(rewriter, loc, index * element.headSlotBytes())));
-                storeAbiWordAt(rewriter, loc, basePtr, headSlotOffset, tailOffset);
-                Value elementPtr = dynamicArrayElementPointer(rewriter, loc, source, constU256(rewriter, loc, index));
-                Value elementBaseOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, constU256(rewriter, loc, 32), tailOffset));
-                if (failed(emitAbiEncodingFromPointer(rewriter, loc, anchorOp, element, elementPtr, basePtr, elementBaseOffset)))
-                    return failure();
-                Value elementSize = abiEncodedSizeFromPointer(rewriter, loc, element, elementPtr);
-                if (!elementSize)
-                    return failure();
-                tailOffset = addU256(rewriter, loc, tailOffset, elementSize);
-            }
-            return success();
+            Value headSlotOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, constU256(rewriter, loc, 32), constU256(rewriter, loc, index * element.headSlotBytes())));
+            storeAbiWordAt(rewriter, loc, basePtr, headSlotOffset, tailOffset);
+            Value elementPtr = dynamicArrayElementPointer(rewriter, loc, source, constU256(rewriter, loc, index));
+            Value elementBaseOffset = addU256(rewriter, loc, baseOffset, addU256(rewriter, loc, constU256(rewriter, loc, 32), tailOffset));
+            if (failed(emitAbiEncodingFromPointer(rewriter, loc, anchorOp, element, elementPtr, basePtr, elementBaseOffset)))
+                return failure();
+            Value elementSize = abiEncodedSizeFromPointer(rewriter, loc, element, elementPtr);
+            if (!elementSize)
+                return failure();
+            tailOffset = addU256(rewriter, loc, tailOffset, elementSize);
         }
+        return success();
+    }
 
+    static LogicalResult emitStaticElementArrayTailFromSource(
+        PatternRewriter &rewriter,
+        Location loc,
+        Operation *anchorOp,
+        const AbiLayoutNode &element,
+        const DynamicArraySource &source,
+        Value basePtr,
+        Value baseOffset)
+    {
         SmallVector<AbiStaticLeaf, 8> leaves;
         element.collectStaticLeaves(leaves);
         if (leaves.empty())
@@ -807,6 +804,29 @@ namespace
         return success();
     }
 
+    static LogicalResult emitDynamicArrayTailFromSource(
+        PatternRewriter &rewriter,
+        Location loc,
+        Operation *anchorOp,
+        const AbiLayoutNode &node,
+        const DynamicArraySource &source,
+        Value basePtr,
+        Value baseOffset)
+    {
+        if (node.children.empty())
+            return failure();
+        storeAbiWordAt(rewriter, loc, basePtr, baseOffset, source.length);
+        const AbiLayoutNode &element = *node.children.front();
+
+        if (!element.isDynamic())
+            return emitStaticElementArrayTailFromSource(rewriter, loc, anchorOp, element, source, basePtr, baseOffset);
+
+        if (source.staticElementCount)
+            return emitDynamicElementArrayTailWithStaticCount(rewriter, loc, anchorOp, element, source, basePtr, baseOffset);
+
+        return emitDynamicElementArrayTailWithRuntimeLength(rewriter, loc, anchorOp, element, source, basePtr, baseOffset);
+    }
+
     static LogicalResult emitAbiEncodingFromPointer(
         PatternRewriter &rewriter,
         Location loc,
@@ -876,7 +896,7 @@ namespace
                 Value childSize;
                 if (isPointerBackedAggregateNode(*child))
                 {
-                    Value childPtr = ptrForAggregateNodeOperand(rewriter, loc, *child, operands);
+                    Value childPtr = ptrForAbiNodeOperand(rewriter, loc, *child, operands);
                     if (!childPtr)
                         return failure();
                     if (failed(emitAbiEncodingFromPointer(rewriter, loc, anchorOp, *child, childPtr, basePtr, childBaseOffset)))
@@ -898,7 +918,7 @@ namespace
             {
                 if (isPointerBackedAggregateNode(*child))
                 {
-                    Value childPtr = ptrForAggregateNodeOperand(rewriter, loc, *child, operands);
+                    Value childPtr = ptrForAbiNodeOperand(rewriter, loc, *child, operands);
                     if (!childPtr)
                         return failure();
                     if (failed(emitAbiStaticNodeFromPointer(rewriter, loc, *child, childPtr, basePtr, headSlotOffset)))
@@ -938,7 +958,7 @@ namespace
         case AbiLayoutKind::FixedArray:
             if (node.isDynamic())
             {
-                Value source = ptrForDynamicBytesOperand(rewriter, loc, node, operands);
+                Value source = ptrForAbiNodeOperand(rewriter, loc, node, operands);
                 if (!source)
                     return failure();
                 return emitFixedArrayEncodingFromPointer(rewriter, loc, anchorOp, node, source, basePtr, baseOffset);
@@ -1143,4 +1163,3 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     rewriter.replaceOp(op, ValueRange{callSuccess, fullReturnPtrU256});
     return success();
 }
-

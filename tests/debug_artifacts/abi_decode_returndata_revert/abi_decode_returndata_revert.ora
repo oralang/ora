@@ -1,7 +1,24 @@
+enum Status: u8 {
+    Active,
+    Paused,
+}
+
+bitfield Flags: u8 {
+    enabled: u1,
+    mode: u7,
+}
+
+type Positive = MinValue<u256, 1>;
+
 extern trait Metadata {
     staticcall fn name(self) -> string;
     staticcall fn owners(self) -> slice[address];
     staticcall fn quote(self) -> (u256, bytes);
+    staticcall fn status(self) -> Status;
+    staticcall fn flags(self) -> Flags;
+    staticcall fn delta(self) -> i8;
+    staticcall fn positive(self) -> Positive;
+    staticcall fn bools(self) -> slice[bool];
 }
 
 error ExternalCallFailed(code: u256);
@@ -37,6 +54,71 @@ contract AbiDecodeReturndataRevert {
 
     pub fn read_quote(target: address) -> u256 {
         let decoded = external<Metadata>(target, gas: 50000).quote();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_status(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).status();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_flags(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).flags();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_delta(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).delta();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_positive(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).positive();
+        match (decoded) {
+            Ok(value) => {
+                touched = 9;
+                return value;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_bools(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).bools();
         match (decoded) {
             Ok(_) => {
                 touched = 9;

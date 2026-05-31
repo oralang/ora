@@ -103,6 +103,7 @@ static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *
 
 static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConverter,
                                                 Type resultType,
+                                                Operation *op,
                                                 SmallVector<Type> &convertedTypes)
 {
     if (!typeConverter)
@@ -117,7 +118,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
             return failure();
         auto u256 = sir::U256Type::get(ctx);
         const bool narrow = isNarrowErrorUnion(errType);
-        if (narrow)
+        if (narrow && !hasForceWideErrorUnionAttr(op))
         {
             if (convertedTypes.size() != 1 || !isa<sir::U256Type>(convertedTypes.front()))
             {
@@ -381,6 +382,18 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         Value tag;
         Value payload;
     };
+
+    static WideAbiDecodeResult splitPackedAbiDecodeResult(
+        PatternRewriter &rewriter,
+        Location loc,
+        Value packed)
+    {
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        Value one = constU256(rewriter, loc, 1);
+        Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
+        Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+        return WideAbiDecodeResult{tag, payload};
+    }
 
     static Value staticDecodeRequiredLengthConst(
         PatternRewriter &rewriter,
@@ -913,7 +926,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         Value length = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, bytesPtr);
 
         SmallVector<Type> convertedResultTypes;
-        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), convertedResultTypes)) ||
+        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
             convertedResultTypes.empty())
         {
             return rewriter.notifyMatchFailure(op, "failed to convert memory/result ABI decode result type");
@@ -971,17 +984,35 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         };
 
         auto branchNarrow = [&](Value value) -> LogicalResult {
-            if (convertedResultTypes.size() != 1)
-                return rewriter.notifyMatchFailure(op, "narrow ABI decode produced a non-narrow carrier");
-            Value checked = permissive
-                                ? value
-                                : applyStaticOversizeCheckToNarrowResult(
-                                      rewriter,
-                                      op.getLoc(),
-                                      value,
-                                      length,
-                                      required);
-            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{checked}, mergeBlock);
+            if (convertedResultTypes.size() == 1)
+            {
+                Value checked = permissive
+                                    ? value
+                                    : applyStaticOversizeCheckToNarrowResult(
+                                          rewriter,
+                                          op.getLoc(),
+                                          value,
+                                          length,
+                                          required);
+                rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{checked}, mergeBlock);
+                return finish();
+            }
+            if (convertedResultTypes.size() != 2)
+                return rewriter.notifyMatchFailure(op, "narrow ABI decode produced an unsupported carrier");
+
+            WideAbiDecodeResult split = splitPackedAbiDecodeResult(rewriter, op.getLoc(), value);
+            WideAbiDecodeResult checked = permissive
+                                              ? split
+                                              : applyStaticOversizeCheckToWideResult(
+                                                    rewriter,
+                                                    op.getLoc(),
+                                                    split,
+                                                    length,
+                                                    required,
+                                                    convertedResultTypes[1]);
+            if (checked.payload.getType() != convertedResultTypes[1])
+                checked.payload = rewriter.create<sir::BitcastOp>(op.getLoc(), convertedResultTypes[1], checked.payload);
+            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{checked.tag, checked.payload}, mergeBlock);
             return finish();
         };
 
@@ -1638,7 +1669,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             return rewriter.notifyMatchFailure(op, "strict returndata ABI decode currently requires a non-empty tuple layout");
 
         SmallVector<Type> convertedResultTypes;
-        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), convertedResultTypes)) ||
+        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
             convertedResultTypes.empty())
         {
             return rewriter.notifyMatchFailure(op, "failed to convert strict returndata ABI decode result type");
