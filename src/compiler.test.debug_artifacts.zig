@@ -16,6 +16,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const ORA_BINARY_REL = "zig-out/bin/ora";
+const DEBUG_PROBE_BINARY_REL = "lib/evm/zig-out/bin/ora-evm-debug-probe";
 const FIXTURES_REL = "tests/debug_artifacts";
 
 const Fixture = struct {
@@ -31,6 +32,13 @@ const FIXTURES = [_]Fixture{
 fn binaryAvailable() bool {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch return false;
     return true;
+}
+
+fn expectBinaryAvailable(path: []const u8, build_hint: []const u8) !void {
+    std.fs.cwd().access(path, .{}) catch |err| {
+        std.debug.print("missing required execution-test binary: {s}\n{s}\n", .{ path, build_hint });
+        return err;
+    };
 }
 
 /// Run `ora debug --no-tui <fixture> -o <output_dir>`.
@@ -63,6 +71,134 @@ fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []con
             return error.OraDebugFailed;
         },
     }
+}
+
+fn runDebugProbe(
+    allocator: std.mem.Allocator,
+    fixture: Fixture,
+    output_dir: []const u8,
+    calldata_hex: []const u8,
+    max_statements: []const u8,
+) ![]u8 {
+    return runDebugProbeWithExtraArgs(allocator, fixture, output_dir, calldata_hex, &.{}, max_statements);
+}
+
+fn runDebugProbeWithExtraArgs(
+    allocator: std.mem.Allocator,
+    fixture: Fixture,
+    output_dir: []const u8,
+    calldata_hex: ?[]const u8,
+    extra_args: []const []const u8,
+    max_statements: []const u8,
+) ![]u8 {
+    const stem = std.fs.path.stem(fixture.source_relpath);
+    const bytecode_path = try std.fmt.allocPrint(allocator, "{s}/{s}.hex", .{ output_dir, stem });
+    defer allocator.free(bytecode_path);
+    const sourcemap_path = try std.fmt.allocPrint(allocator, "{s}/{s}.sourcemap.json", .{ output_dir, stem });
+    defer allocator.free(sourcemap_path);
+    const debug_info_path = try std.fmt.allocPrint(allocator, "{s}/{s}.debug.json", .{ output_dir, stem });
+    defer allocator.free(debug_info_path);
+
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &[_][]const u8{
+        DEBUG_PROBE_BINARY_REL,
+        bytecode_path,
+        sourcemap_path,
+        fixture.source_relpath,
+        "--debug-info",
+        debug_info_path,
+    });
+    if (calldata_hex) |hex| {
+        try argv.appendSlice(allocator, &[_][]const u8{ "--calldata-hex", hex });
+    }
+    try argv.appendSlice(allocator, extra_args);
+    try argv.appendSlice(allocator, &[_][]const u8{ "--max-statements", max_statements });
+
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv.items,
+        .max_output_bytes = 4 * 1024 * 1024,
+    });
+    errdefer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| if (code != 0) {
+            std.debug.print(
+                "ora-evm-debug-probe exited with {d}\nstdout:\n{s}\nstderr:\n{s}\n",
+                .{ code, result.stdout, result.stderr },
+            );
+            allocator.free(result.stdout);
+            return error.DebugProbeFailed;
+        },
+        else => {
+            std.debug.print("ora-evm-debug-probe terminated abnormally: {}\n", .{result.term});
+            allocator.free(result.stdout);
+            return error.DebugProbeFailed;
+        },
+    }
+
+    return result.stdout;
+}
+
+fn calldataHexForSingleWordHex(allocator: std.mem.Allocator, signature: []const u8, word_hex: []const u8) ![]u8 {
+    try testing.expectEqual(@as(usize, 64), word_hex.len);
+    return calldataHexForPayloadHex(allocator, signature, word_hex);
+}
+
+fn calldataHexForPayloadHex(allocator: std.mem.Allocator, signature: []const u8, payload_hex: []const u8) ![]u8 {
+    try testing.expectEqual(@as(usize, 0), payload_hex.len % 2);
+    var selector_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(signature, &selector_hash, .{});
+
+    var out = std.ArrayList(u8){};
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, 8 + payload_hex.len);
+    for (selector_hash[0..4]) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+    try out.appendSlice(allocator, payload_hex);
+    return try out.toOwnedSlice(allocator);
+}
+
+fn singleDynamicConstructorPayloadHex(allocator: std.mem.Allocator, tail_hex: []const u8) ![]u8 {
+    try testing.expectEqual(@as(usize, 0), tail_hex.len % 64);
+    return try std.fmt.allocPrint(
+        allocator,
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+            "{s}",
+        .{tail_hex},
+    );
+}
+
+fn twoOneWordDynamicConstructorPayloadHex(allocator: std.mem.Allocator, first_tail_hex: []const u8, second_tail_hex: []const u8) ![]u8 {
+    try testing.expectEqual(@as(usize, 128), first_tail_hex.len);
+    try testing.expectEqual(@as(usize, 128), second_tail_hex.len);
+    return try std.fmt.allocPrint(
+        allocator,
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+            "0000000000000000000000000000000000000000000000000000000000000080" ++
+            "{s}" ++
+            "{s}",
+        .{ first_tail_hex, second_tail_hex },
+    );
+}
+
+fn expectProbeContains(case_name: []const u8, stdout: []const u8, needle: []const u8) !void {
+    if (std.mem.containsAtLeast(u8, stdout, 1, needle)) return;
+    std.debug.print(
+        "debug-probe output for {s} did not contain expected text:\n{s}\nstdout:\n{s}\n",
+        .{ case_name, needle, stdout },
+    );
+    return error.TestUnexpectedResult;
+}
+
+fn expectProbeOmits(case_name: []const u8, stdout: []const u8, needle: []const u8) !void {
+    if (!std.mem.containsAtLeast(u8, stdout, 1, needle)) return;
+    std.debug.print(
+        "debug-probe output for {s} unexpectedly contained text:\n{s}\nstdout:\n{s}\n",
+        .{ case_name, needle, stdout },
+    );
+    return error.TestUnexpectedResult;
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -165,4 +301,697 @@ test "debug-artifacts regression corpus matches goldens" {
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "sourcemap.json", actual_sourcemap, golden_sourcemap);
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "debug.json", actual_debug, golden_debug);
     }
+}
+
+test "debug-probe malformed public calldata reverts before body effects" {
+    try expectBinaryAvailable(ORA_BINARY_REL, "test-compiler depends on the top-level install step; run `zig build install` if this test is invoked directly.");
+    try expectBinaryAvailable(DEBUG_PROBE_BINARY_REL, "test-compiler depends on `zig build install` in lib/evm; run `zig build -C lib/evm install` if this test is invoked directly.");
+
+    const allocator = testing.allocator;
+    const fixture: Fixture = .{
+        .name = "abi_decode_calldata_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_calldata_revert/abi_decode_calldata_revert.ora",
+    };
+    const out_dir = "/tmp/ora_dbg_artifacts_abi_decode_calldata_revert_exec";
+
+    std.fs.cwd().deleteTree(out_dir) catch {};
+    try runOraDebug(allocator, fixture, out_dir);
+
+    const Case = struct {
+        name: []const u8,
+        signature: []const u8,
+        invalid_word: []const u8,
+        valid_word: []const u8,
+        expected_error: u32,
+        expected_success: u32,
+    };
+    const cases = [_]Case{
+        .{
+            .name = "invalid bool",
+            .signature = "accept_bool(bool)",
+            .invalid_word = "0000000000000000000000000000000000000000000000000000000000000002",
+            .valid_word = "0000000000000000000000000000000000000000000000000000000000000001",
+            .expected_error = 4,
+            .expected_success = 1,
+        },
+        .{
+            .name = "invalid address",
+            .signature = "accept_address(address)",
+            .invalid_word = "0100000000000000000000001234567890abcdef1234567890abcdef12345678",
+            .valid_word = "0000000000000000000000001234567890abcdef1234567890abcdef12345678",
+            .expected_error = 5,
+            .expected_success = 2,
+        },
+        .{
+            .name = "invalid bytes4",
+            .signature = "accept_bytes4(bytes4)",
+            .invalid_word = "aabbccdd00000000000000000000000000000000000000000000000000000001",
+            .valid_word = "aabbccdd00000000000000000000000000000000000000000000000000000000",
+            .expected_error = 6,
+            .expected_success = 3,
+        },
+        .{
+            .name = "invalid u8",
+            .signature = "accept_u8(uint8)",
+            .invalid_word = "0000000000000000000000000000000000000000000000000000000000000100",
+            .valid_word = "0000000000000000000000000000000000000000000000000000000000000007",
+            .expected_error = 3,
+            .expected_success = 4,
+        },
+        .{
+            .name = "enum out of range",
+            .signature = "accept_status(uint8)",
+            .invalid_word = "0000000000000000000000000000000000000000000000000000000000000002",
+            .valid_word = "0000000000000000000000000000000000000000000000000000000000000001",
+            .expected_error = 7,
+            .expected_success = 5,
+        },
+        .{
+            .name = "refinement violation",
+            .signature = "accept_positive(uint256)",
+            .invalid_word = "0000000000000000000000000000000000000000000000000000000000000000",
+            .valid_word = "0000000000000000000000000000000000000000000000000000000000000001",
+            .expected_error = 10,
+            .expected_success = 6,
+        },
+    };
+
+    for (cases) |case| {
+        const invalid_calldata = try calldataHexForSingleWordHex(allocator, case.signature, case.invalid_word);
+        defer allocator.free(invalid_calldata);
+        const invalid_stdout = try runDebugProbe(allocator, fixture, out_dir, invalid_calldata, "32");
+        defer allocator.free(invalid_stdout);
+
+        const expected_output = try std.fmt.allocPrint(
+            allocator,
+            "output: 0x{x:0>64}",
+            .{case.expected_error},
+        );
+        defer allocator.free(expected_output);
+
+        try expectProbeContains(case.name, invalid_stdout, "reverted: true");
+        try expectProbeContains(case.name, invalid_stdout, expected_output);
+        try expectProbeOmits(case.name, invalid_stdout, "opcode=SSTORE");
+
+        const valid_calldata = try calldataHexForSingleWordHex(allocator, case.signature, case.valid_word);
+        defer allocator.free(valid_calldata);
+        const valid_stdout = try runDebugProbe(allocator, fixture, out_dir, valid_calldata, "32");
+        defer allocator.free(valid_stdout);
+
+        const expected_success_output = try std.fmt.allocPrint(
+            allocator,
+            "output: 0x{x:0>64}",
+            .{case.expected_success},
+        );
+        defer allocator.free(expected_success_output);
+
+        try expectProbeContains(case.name, valid_stdout, "reverted: false");
+        try expectProbeContains(case.name, valid_stdout, expected_success_output);
+    }
+
+    const DynamicCase = struct {
+        name: []const u8,
+        signature: []const u8,
+        invalid_payload: []const u8,
+        valid_payload: []const u8,
+        expected_error: u32,
+        expected_success: u32,
+    };
+    const dynamic_cases = [_]DynamicCase{
+        .{
+            .name = "dynamic string bad offset",
+            .signature = "accept_text(string)",
+            .invalid_payload =
+            // Head offset must be 0x20 for a single dynamic parameter.
+            "0000000000000000000000000000000000000000000000000000000000000040",
+            .valid_payload =
+            // offset=0x20, length=2, data="hi" padded to one ABI word.
+            "0000000000000000000000000000000000000000000000000000000000000020" ++
+                "0000000000000000000000000000000000000000000000000000000000000002" ++
+                "6869000000000000000000000000000000000000000000000000000000000000",
+            .expected_error = 11,
+            .expected_success = 7,
+        },
+        .{
+            .name = "address array invalid element",
+            .signature = "accept_addresses(address[])",
+            .invalid_payload =
+            // offset=0x20, length=1, element has non-zero high address padding.
+            "0000000000000000000000000000000000000000000000000000000000000020" ++
+                "0000000000000000000000000000000000000000000000000000000000000001" ++
+                "0100000000000000000000001234567890abcdef1234567890abcdef12345678",
+            .valid_payload = "0000000000000000000000000000000000000000000000000000000000000020" ++
+                "0000000000000000000000000000000000000000000000000000000000000001" ++
+                "0000000000000000000000001234567890abcdef1234567890abcdef12345678",
+            .expected_error = 5,
+            .expected_success = 8,
+        },
+    };
+
+    for (dynamic_cases) |case| {
+        const invalid_calldata = try calldataHexForPayloadHex(allocator, case.signature, case.invalid_payload);
+        defer allocator.free(invalid_calldata);
+        const invalid_stdout = try runDebugProbe(allocator, fixture, out_dir, invalid_calldata, "32");
+        defer allocator.free(invalid_stdout);
+
+        const expected_output = try std.fmt.allocPrint(
+            allocator,
+            "output: 0x{x:0>64}",
+            .{case.expected_error},
+        );
+        defer allocator.free(expected_output);
+
+        try expectProbeContains(case.name, invalid_stdout, "reverted: true");
+        try expectProbeContains(case.name, invalid_stdout, expected_output);
+        try expectProbeOmits(case.name, invalid_stdout, "opcode=SSTORE");
+
+        const valid_calldata = try calldataHexForPayloadHex(allocator, case.signature, case.valid_payload);
+        defer allocator.free(valid_calldata);
+        const valid_stdout = try runDebugProbe(allocator, fixture, out_dir, valid_calldata, "32");
+        defer allocator.free(valid_stdout);
+
+        const expected_success_output = try std.fmt.allocPrint(
+            allocator,
+            "output: 0x{x:0>64}",
+            .{case.expected_success},
+        );
+        defer allocator.free(expected_success_output);
+
+        try expectProbeContains(case.name, valid_stdout, "reverted: false");
+        try expectProbeContains(case.name, valid_stdout, expected_success_output);
+    }
+
+    const constructor_fixture: Fixture = .{
+        .name = "abi_decode_constructor_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_revert/abi_decode_constructor_revert.ora",
+    };
+    const constructor_string_fixture: Fixture = .{
+        .name = "abi_decode_constructor_string_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_string_revert/abi_decode_constructor_string_revert.ora",
+    };
+    const constructor_slice_fixture: Fixture = .{
+        .name = "abi_decode_constructor_slice_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_slice_revert/abi_decode_constructor_slice_revert.ora",
+    };
+    const constructor_multi_slice_fixture: Fixture = .{
+        .name = "abi_decode_constructor_multi_slice_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_multi_slice_revert/abi_decode_constructor_multi_slice_revert.ora",
+    };
+    const constructor_u256_slice_fixture: Fixture = .{
+        .name = "abi_decode_constructor_u256_slice_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_u256_slice_revert/abi_decode_constructor_u256_slice_revert.ora",
+    };
+    const constructor_bool_slice_fixture: Fixture = .{
+        .name = "abi_decode_constructor_bool_slice_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_bool_slice_revert/abi_decode_constructor_bool_slice_revert.ora",
+    };
+    const constructor_fixed_bytes_slice_fixture: Fixture = .{
+        .name = "abi_decode_constructor_fixed_bytes_slice_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_constructor_fixed_bytes_slice_revert/abi_decode_constructor_fixed_bytes_slice_revert.ora",
+    };
+    const result_carrier_fixture: Fixture = .{
+        .name = "abi_decode_result_carrier_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_result_carrier_revert/abi_decode_result_carrier_revert.ora",
+    };
+    const result_error_payload_fixture: Fixture = .{
+        .name = "abi_decode_result_error_payload_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_result_error_payload_revert/abi_decode_result_error_payload_revert.ora",
+    };
+    const result_multi_error_payload_fixture: Fixture = .{
+        .name = "abi_decode_result_multi_error_payload_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_result_multi_error_payload_revert/abi_decode_result_multi_error_payload_revert.ora",
+    };
+    const constructor_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_revert_exec";
+    const constructor_string_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_string_revert_exec";
+    const constructor_slice_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_slice_revert_exec";
+    const constructor_multi_slice_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_multi_slice_revert_exec";
+    const constructor_u256_slice_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_u256_slice_revert_exec";
+    const constructor_bool_slice_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_bool_slice_revert_exec";
+    const constructor_fixed_bytes_slice_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_constructor_fixed_bytes_slice_revert_exec";
+    const result_carrier_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_carrier_revert_exec";
+    const result_error_payload_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_error_payload_revert_exec";
+    const result_multi_error_payload_out_dir = "/tmp/ora_dbg_artifacts_abi_decode_result_multi_error_payload_revert_exec";
+    std.fs.cwd().deleteTree(constructor_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_string_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_slice_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_multi_slice_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_u256_slice_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_bool_slice_out_dir) catch {};
+    std.fs.cwd().deleteTree(constructor_fixed_bytes_slice_out_dir) catch {};
+    std.fs.cwd().deleteTree(result_carrier_out_dir) catch {};
+    std.fs.cwd().deleteTree(result_error_payload_out_dir) catch {};
+    std.fs.cwd().deleteTree(result_multi_error_payload_out_dir) catch {};
+    try runOraDebug(allocator, constructor_fixture, constructor_out_dir);
+    try runOraDebug(allocator, constructor_string_fixture, constructor_string_out_dir);
+    try runOraDebug(allocator, constructor_slice_fixture, constructor_slice_out_dir);
+    try runOraDebug(allocator, constructor_multi_slice_fixture, constructor_multi_slice_out_dir);
+    try runOraDebug(allocator, constructor_u256_slice_fixture, constructor_u256_slice_out_dir);
+    try runOraDebug(allocator, constructor_bool_slice_fixture, constructor_bool_slice_out_dir);
+    try runOraDebug(allocator, constructor_fixed_bytes_slice_fixture, constructor_fixed_bytes_slice_out_dir);
+    try runOraDebug(allocator, result_carrier_fixture, result_carrier_out_dir);
+    try runOraDebug(allocator, result_error_payload_fixture, result_error_payload_out_dir);
+    try runOraDebug(allocator, result_multi_error_payload_fixture, result_multi_error_payload_out_dir);
+
+    const constructor_name_tail =
+        // length=2, data="hi" padded to one ABI word.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "6869000000000000000000000000000000000000000000000000000000000000";
+    const invalid_constructor_name_tail =
+        // length=2, data="hi", but trailing padding is non-zero.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "6869000000000000000000000000000000000000000000000000000000000001";
+    const constructor_payload_tail =
+        // length=2, data=0xaabb padded to one ABI word.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "aabb000000000000000000000000000000000000000000000000000000000000";
+    const invalid_constructor_payload_tail =
+        // length=2, data=0xaabb, but trailing padding is non-zero.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "aabb000000000000000000000000000000000000000000000000000000000001";
+    const invalid_single_constructor_offset =
+        // Single dynamic constructor arg head must be 0x20.
+        "0000000000000000000000000000000000000000000000000000000000000040";
+    const invalid_multi_constructor_second_offset =
+        // Multi-dynamic constructor heads are 0x40 and 0x80 for two one-word tails.
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "00000000000000000000000000000000000000000000000000000000000000a0" ++
+        constructor_name_tail ++
+        constructor_payload_tail;
+    const constructor_address_slice_tail =
+        // length=1, one canonical address element.
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+    const invalid_constructor_address_slice_tail =
+        // length=1, address element has non-zero high padding.
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0100000000000000000000001234567890abcdef1234567890abcdef12345678";
+    const constructor_u256_slice_tail =
+        // length=2, two full-word u256 elements.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000004" ++
+        "0000000000000000000000000000000000000000000000000000000000000005";
+    const invalid_constructor_u256_slice_tail =
+        // length=2, but only one element is present.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000004";
+    const constructor_bool_slice_tail =
+        // length=2, canonical true and false words.
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    const invalid_constructor_bool_slice_tail =
+        // length=1, bool element is neither 0 nor 1.
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000002";
+    const constructor_fixed_bytes_slice_tail =
+        // length=1, bytes4 element has canonical trailing zero padding.
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "aabbccdd00000000000000000000000000000000000000000000000000000000";
+    const invalid_constructor_fixed_bytes_slice_tail =
+        // length=1, bytes4 element has non-zero trailing padding.
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "aabbccdd00000000000000000000000000000000000000000000000000000001";
+
+    const ConstructorCase = struct {
+        name: []const u8,
+        fixture: Fixture,
+        out_dir: []const u8,
+        payload: []const u8,
+        expected_error: u32,
+    };
+    const invalid_constructor_string_padding = try singleDynamicConstructorPayloadHex(allocator, invalid_constructor_name_tail);
+    defer allocator.free(invalid_constructor_string_padding);
+    const invalid_constructor_bytes_padding = try twoOneWordDynamicConstructorPayloadHex(allocator, constructor_name_tail, invalid_constructor_payload_tail);
+    defer allocator.free(invalid_constructor_bytes_padding);
+    const invalid_constructor_address_slice = try singleDynamicConstructorPayloadHex(allocator, invalid_constructor_address_slice_tail);
+    defer allocator.free(invalid_constructor_address_slice);
+    const invalid_constructor_u256_slice = try singleDynamicConstructorPayloadHex(allocator, invalid_constructor_u256_slice_tail);
+    defer allocator.free(invalid_constructor_u256_slice);
+    const invalid_constructor_bool_slice = try singleDynamicConstructorPayloadHex(allocator, invalid_constructor_bool_slice_tail);
+    defer allocator.free(invalid_constructor_bool_slice);
+    const invalid_constructor_fixed_bytes_slice = try singleDynamicConstructorPayloadHex(allocator, invalid_constructor_fixed_bytes_slice_tail);
+    defer allocator.free(invalid_constructor_fixed_bytes_slice);
+    const invalid_constructor_multi_address_slice = try twoOneWordDynamicConstructorPayloadHex(allocator, constructor_name_tail, invalid_constructor_address_slice_tail);
+    defer allocator.free(invalid_constructor_multi_address_slice);
+    const constructor_error_cases = [_]ConstructorCase{
+        .{ .name = "constructor string bad offset", .fixture = constructor_string_fixture, .out_dir = constructor_string_out_dir, .payload = invalid_single_constructor_offset, .expected_error = 11 },
+        .{ .name = "constructor string padding", .fixture = constructor_string_fixture, .out_dir = constructor_string_out_dir, .payload = invalid_constructor_string_padding, .expected_error = 11 },
+        .{ .name = "constructor multi second dynamic bad offset", .fixture = constructor_fixture, .out_dir = constructor_out_dir, .payload = invalid_multi_constructor_second_offset, .expected_error = 11 },
+        .{ .name = "constructor multi second bytes padding", .fixture = constructor_fixture, .out_dir = constructor_out_dir, .payload = invalid_constructor_bytes_padding, .expected_error = 11 },
+        .{ .name = "constructor address slice invalid element", .fixture = constructor_slice_fixture, .out_dir = constructor_slice_out_dir, .payload = invalid_constructor_address_slice, .expected_error = 5 },
+        .{ .name = "constructor multi second address slice invalid element", .fixture = constructor_multi_slice_fixture, .out_dir = constructor_multi_slice_out_dir, .payload = invalid_constructor_multi_address_slice, .expected_error = 5 },
+        .{ .name = "constructor u256 slice tail too short", .fixture = constructor_u256_slice_fixture, .out_dir = constructor_u256_slice_out_dir, .payload = invalid_constructor_u256_slice, .expected_error = 0 },
+        .{ .name = "constructor bool slice invalid element", .fixture = constructor_bool_slice_fixture, .out_dir = constructor_bool_slice_out_dir, .payload = invalid_constructor_bool_slice, .expected_error = 4 },
+        .{ .name = "constructor bytes4 slice invalid element", .fixture = constructor_fixed_bytes_slice_fixture, .out_dir = constructor_fixed_bytes_slice_out_dir, .payload = invalid_constructor_fixed_bytes_slice, .expected_error = 6 },
+    };
+    for (constructor_error_cases) |case| {
+        const stdout = try runDebugProbeWithExtraArgs(
+            allocator,
+            case.fixture,
+            case.out_dir,
+            null,
+            &.{ "--probe-deploy", "--init-calldata-hex", case.payload },
+            "96",
+        );
+        defer allocator.free(stdout);
+
+        const expected_output = try std.fmt.allocPrint(
+            allocator,
+            "output: 0x{x:0>64}",
+            .{case.expected_error},
+        );
+        defer allocator.free(expected_output);
+
+        try expectProbeContains(case.name, stdout, "deploy-calldata: 0x");
+        try expectProbeContains(case.name, stdout, "reverted: true");
+        try expectProbeContains(case.name, stdout, expected_output);
+        try expectProbeOmits(case.name, stdout, "touched = 9;");
+        try expectProbeOmits(case.name, stdout, "opcode=SSTORE");
+    }
+
+    const valid_constructor_string_payload = try singleDynamicConstructorPayloadHex(allocator, constructor_name_tail);
+    defer allocator.free(valid_constructor_string_payload);
+    const valid_constructor_bytes_payload = try twoOneWordDynamicConstructorPayloadHex(allocator, constructor_name_tail, constructor_payload_tail);
+    defer allocator.free(valid_constructor_bytes_payload);
+    const valid_constructor_address_slice = try singleDynamicConstructorPayloadHex(allocator, constructor_address_slice_tail);
+    defer allocator.free(valid_constructor_address_slice);
+    const valid_constructor_u256_slice = try singleDynamicConstructorPayloadHex(allocator, constructor_u256_slice_tail);
+    defer allocator.free(valid_constructor_u256_slice);
+    const valid_constructor_bool_slice = try singleDynamicConstructorPayloadHex(allocator, constructor_bool_slice_tail);
+    defer allocator.free(valid_constructor_bool_slice);
+    const valid_constructor_fixed_bytes_slice = try singleDynamicConstructorPayloadHex(allocator, constructor_fixed_bytes_slice_tail);
+    defer allocator.free(valid_constructor_fixed_bytes_slice);
+    const valid_constructor_multi_address_slice = try twoOneWordDynamicConstructorPayloadHex(allocator, constructor_name_tail, constructor_address_slice_tail);
+    defer allocator.free(valid_constructor_multi_address_slice);
+
+    const valid_constructor_string_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_string_fixture,
+        constructor_string_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_string_payload },
+        "96",
+    );
+    defer allocator.free(valid_constructor_string_stdout);
+    try expectProbeContains("constructor string valid", valid_constructor_string_stdout, "reverted: false");
+    try expectProbeContains("constructor string valid", valid_constructor_string_stdout, "touched = 9;");
+
+    const valid_constructor_bytes_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_fixture,
+        constructor_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_bytes_payload },
+        "96",
+    );
+    defer allocator.free(valid_constructor_bytes_stdout);
+    try expectProbeContains("constructor multi valid partial bytes", valid_constructor_bytes_stdout, "reverted: false");
+    try expectProbeContains("constructor multi valid partial bytes", valid_constructor_bytes_stdout, "touched = 9;");
+
+    const valid_constructor_slice_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_slice_fixture,
+        constructor_slice_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_address_slice },
+        "96",
+    );
+    defer allocator.free(valid_constructor_slice_stdout);
+    try expectProbeContains("constructor address slice valid", valid_constructor_slice_stdout, "reverted: false");
+    try expectProbeContains("constructor address slice valid", valid_constructor_slice_stdout, "touched = 9;");
+
+    const valid_constructor_multi_slice_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_multi_slice_fixture,
+        constructor_multi_slice_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_multi_address_slice },
+        "96",
+    );
+    defer allocator.free(valid_constructor_multi_slice_stdout);
+    try expectProbeContains("constructor multi address slice valid", valid_constructor_multi_slice_stdout, "reverted: false");
+    try expectProbeContains("constructor multi address slice valid", valid_constructor_multi_slice_stdout, "touched = 9;");
+
+    const valid_constructor_u256_slice_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_u256_slice_fixture,
+        constructor_u256_slice_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_u256_slice },
+        "96",
+    );
+    defer allocator.free(valid_constructor_u256_slice_stdout);
+    try expectProbeContains("constructor u256 slice valid", valid_constructor_u256_slice_stdout, "reverted: false");
+    try expectProbeContains("constructor u256 slice valid", valid_constructor_u256_slice_stdout, "touched = 9;");
+
+    const valid_constructor_bool_slice_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_bool_slice_fixture,
+        constructor_bool_slice_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_bool_slice },
+        "96",
+    );
+    defer allocator.free(valid_constructor_bool_slice_stdout);
+    try expectProbeContains("constructor bool slice valid", valid_constructor_bool_slice_stdout, "reverted: false");
+    try expectProbeContains("constructor bool slice valid", valid_constructor_bool_slice_stdout, "touched = 9;");
+
+    const valid_constructor_fixed_bytes_slice_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        constructor_fixed_bytes_slice_fixture,
+        constructor_fixed_bytes_slice_out_dir,
+        null,
+        &.{ "--probe-deploy", "--init-calldata-hex", valid_constructor_fixed_bytes_slice },
+        "96",
+    );
+    defer allocator.free(valid_constructor_fixed_bytes_slice_stdout);
+    try expectProbeContains("constructor bytes4 slice valid", valid_constructor_fixed_bytes_slice_stdout, "reverted: false");
+    try expectProbeContains("constructor bytes4 slice valid", valid_constructor_fixed_bytes_slice_stdout, "touched = 9;");
+
+    const result_ok_bytes_valid_payload =
+        // arg offset=0x20; Result tuple tag=Ok, bytes offset=0x40; bytes="hi".
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        constructor_name_tail;
+    const result_ok_bytes_invalid_payload =
+        // Same shape, but the nested bytes padding is non-canonical.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        invalid_constructor_name_tail;
+    const result_error_bytes_valid_payload =
+        // arg offset=0x20; Result tuple tag=Err, ok payload=0, error bytes offset=0x60.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000060" ++
+        constructor_name_tail;
+    const result_error_bytes_invalid_payload =
+        // Same shape, but the nested error bytes padding is non-canonical.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000060" ++
+        invalid_constructor_name_tail;
+    const result_multi_error_bytes_valid_payload =
+        // arg offset=0x20; Result tuple tag=Err, ok payload=0, error tuple offset=0x60;
+        // error tuple code=5, data offset=0x40, data="hi".
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000060" ++
+        "0000000000000000000000000000000000000000000000000000000000000005" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        constructor_name_tail;
+    const result_multi_error_bytes_invalid_payload =
+        // Same shape, but the nested error bytes padding is non-canonical.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000000000000000000000000000000000000000000000" ++
+        "0000000000000000000000000000000000000000000000000000000000000060" ++
+        "0000000000000000000000000000000000000000000000000000000000000005" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        invalid_constructor_name_tail;
+
+    const invalid_result_ok_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,bytes))", result_ok_bytes_invalid_payload);
+    defer allocator.free(invalid_result_ok_calldata);
+    const invalid_result_ok_stdout = try runDebugProbe(allocator, result_carrier_fixture, result_carrier_out_dir, invalid_result_ok_calldata, "96");
+    defer allocator.free(invalid_result_ok_stdout);
+    try expectProbeContains("result dynamic ok payload invalid padding", invalid_result_ok_stdout, "reverted: true");
+    try expectProbeContains("result dynamic ok payload invalid padding", invalid_result_ok_stdout, "output: 0x000000000000000000000000000000000000000000000000000000000000000b");
+    try expectProbeOmits("result dynamic ok payload invalid padding", invalid_result_ok_stdout, "opcode=SSTORE");
+
+    const valid_result_ok_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,bytes))", result_ok_bytes_valid_payload);
+    defer allocator.free(valid_result_ok_calldata);
+    const valid_result_ok_stdout = try runDebugProbe(allocator, result_carrier_fixture, result_carrier_out_dir, valid_result_ok_calldata, "96");
+    defer allocator.free(valid_result_ok_stdout);
+    try expectProbeContains("result dynamic ok payload valid", valid_result_ok_stdout, "reverted: false");
+    try expectProbeContains("result dynamic ok payload valid", valid_result_ok_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000002");
+
+    const invalid_result_error_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,uint256,bytes))", result_error_bytes_invalid_payload);
+    defer allocator.free(invalid_result_error_calldata);
+    const invalid_result_error_stdout = try runDebugProbe(allocator, result_error_payload_fixture, result_error_payload_out_dir, invalid_result_error_calldata, "96");
+    defer allocator.free(invalid_result_error_stdout);
+    try expectProbeContains("result dynamic error payload invalid padding", invalid_result_error_stdout, "reverted: true");
+    try expectProbeContains("result dynamic error payload invalid padding", invalid_result_error_stdout, "output: 0x000000000000000000000000000000000000000000000000000000000000000b");
+    try expectProbeOmits("result dynamic error payload invalid padding", invalid_result_error_stdout, "opcode=SSTORE");
+
+    const valid_result_error_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,uint256,bytes))", result_error_bytes_valid_payload);
+    defer allocator.free(valid_result_error_calldata);
+    const valid_result_error_stdout = try runDebugProbe(allocator, result_error_payload_fixture, result_error_payload_out_dir, valid_result_error_calldata, "96");
+    defer allocator.free(valid_result_error_stdout);
+    try expectProbeContains("result dynamic error payload valid", valid_result_error_stdout, "reverted: false");
+    try expectProbeContains("result dynamic error payload valid", valid_result_error_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000002");
+
+    const invalid_result_multi_error_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,uint256,(uint256,bytes)))", result_multi_error_bytes_invalid_payload);
+    defer allocator.free(invalid_result_multi_error_calldata);
+    const invalid_result_multi_error_stdout = try runDebugProbe(allocator, result_multi_error_payload_fixture, result_multi_error_payload_out_dir, invalid_result_multi_error_calldata, "128");
+    defer allocator.free(invalid_result_multi_error_stdout);
+    try expectProbeContains("result multi-field dynamic error payload invalid padding", invalid_result_multi_error_stdout, "reverted: true");
+    try expectProbeContains("result multi-field dynamic error payload invalid padding", invalid_result_multi_error_stdout, "output: 0x000000000000000000000000000000000000000000000000000000000000000b");
+    try expectProbeOmits("result multi-field dynamic error payload invalid padding", invalid_result_multi_error_stdout, "opcode=SSTORE");
+
+    const valid_result_multi_error_calldata = try calldataHexForPayloadHex(allocator, "consume((bool,uint256,(uint256,bytes)))", result_multi_error_bytes_valid_payload);
+    defer allocator.free(valid_result_multi_error_calldata);
+    const valid_result_multi_error_stdout = try runDebugProbe(allocator, result_multi_error_payload_fixture, result_multi_error_payload_out_dir, valid_result_multi_error_calldata, "128");
+    defer allocator.free(valid_result_multi_error_stdout);
+    try expectProbeContains("result multi-field dynamic error payload valid", valid_result_multi_error_stdout, "reverted: false");
+    try expectProbeContains("result multi-field dynamic error payload valid", valid_result_multi_error_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000007");
+}
+
+test "debug-probe malformed external returndata returns decode error before body effects" {
+    try expectBinaryAvailable(ORA_BINARY_REL, "test-compiler depends on the top-level install step; run `zig build install` if this test is invoked directly.");
+    try expectBinaryAvailable(DEBUG_PROBE_BINARY_REL, "test-compiler depends on `zig build install` in lib/evm; run `zig build -C lib/evm install` if this test is invoked directly.");
+
+    const allocator = testing.allocator;
+    const fixture: Fixture = .{
+        .name = "abi_decode_returndata_revert",
+        .source_relpath = "tests/debug_artifacts/abi_decode_returndata_revert/abi_decode_returndata_revert.ora",
+    };
+    const out_dir = "/tmp/ora_dbg_artifacts_abi_decode_returndata_revert_exec";
+
+    std.fs.cwd().deleteTree(out_dir) catch {};
+    try runOraDebug(allocator, fixture, out_dir);
+
+    const mock_target_word = "0000000000000000000000000000000000000000000000000000000000000300";
+    const calldata = try calldataHexForSingleWordHex(allocator, "read_name(address)", mock_target_word);
+    defer allocator.free(calldata);
+
+    const invalid_returndata =
+        // Top-level string returndata must have offset 0x20.
+        "0000000000000000000000000000000000000000000000000000000000000040";
+    const invalid_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        calldata,
+        &.{ "--mock-returndata-hex", invalid_returndata },
+        "64",
+    );
+    defer allocator.free(invalid_stdout);
+    try expectProbeContains("returndata string bad offset", invalid_stdout, "reverted: false");
+    try expectProbeContains("returndata string bad offset", invalid_stdout, "output: 0x000000000000000000000000000000000000000000000000000000000000000b");
+    try expectProbeOmits("returndata string bad offset", invalid_stdout, "touched = 9;");
+    try expectProbeOmits("returndata string bad offset", invalid_stdout, "opcode=SSTORE");
+
+    const valid_returndata =
+        // offset=0x20, length=2, data="hi" padded to one ABI word.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "6869000000000000000000000000000000000000000000000000000000000000";
+    const valid_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        calldata,
+        &.{ "--mock-returndata-hex", valid_returndata },
+        "64",
+    );
+    defer allocator.free(valid_stdout);
+    try expectProbeContains("returndata string valid", valid_stdout, "reverted: false");
+    try expectProbeContains("returndata string valid", valid_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000002");
+    try expectProbeContains("returndata string valid", valid_stdout, "touched = 9;");
+
+    const owners_calldata = try calldataHexForSingleWordHex(allocator, "read_owners(address)", mock_target_word);
+    defer allocator.free(owners_calldata);
+
+    const invalid_owner_array_returndata =
+        // offset=0x20, length=1, address word has non-canonical high bits.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0100000000000000000000001234567890abcdef1234567890abcdef12345678";
+    const invalid_owners_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        owners_calldata,
+        &.{ "--mock-returndata-hex", invalid_owner_array_returndata },
+        "96",
+    );
+    defer allocator.free(invalid_owners_stdout);
+    try expectProbeContains("returndata address array invalid element", invalid_owners_stdout, "reverted: false");
+    try expectProbeContains("returndata address array invalid element", invalid_owners_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000005");
+    try expectProbeOmits("returndata address array invalid element", invalid_owners_stdout, "touched = 9;");
+    try expectProbeOmits("returndata address array invalid element", invalid_owners_stdout, "opcode=SSTORE");
+
+    const valid_owner_array_returndata =
+        // offset=0x20, length=1, one canonical address.
+        "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+    const valid_owners_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        owners_calldata,
+        &.{ "--mock-returndata-hex", valid_owner_array_returndata },
+        "96",
+    );
+    defer allocator.free(valid_owners_stdout);
+    try expectProbeContains("returndata address array valid", valid_owners_stdout, "reverted: false");
+    try expectProbeContains("returndata address array valid", valid_owners_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000009");
+    try expectProbeContains("returndata address array valid", valid_owners_stdout, "touched = 9;");
+
+    const quote_calldata = try calldataHexForSingleWordHex(allocator, "read_quote(address)", mock_target_word);
+    defer allocator.free(quote_calldata);
+
+    const invalid_mixed_returndata =
+        // first=7, offset=0x40, bytes length=2, non-canonical padding.
+        "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "6869000000000000000000000000000000000000000000000000000000000001";
+    const invalid_quote_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        quote_calldata,
+        &.{ "--mock-returndata-hex", invalid_mixed_returndata },
+        "96",
+    );
+    defer allocator.free(invalid_quote_stdout);
+    try expectProbeContains("returndata mixed bytes invalid padding", invalid_quote_stdout, "reverted: false");
+    try expectProbeContains("returndata mixed bytes invalid padding", invalid_quote_stdout, "output: 0x000000000000000000000000000000000000000000000000000000000000000b");
+    try expectProbeOmits("returndata mixed bytes invalid padding", invalid_quote_stdout, "touched = 9;");
+    try expectProbeOmits("returndata mixed bytes invalid padding", invalid_quote_stdout, "opcode=SSTORE");
+
+    const valid_mixed_returndata =
+        // first=7, offset=0x40, bytes length=2, data="hi".
+        "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "6869000000000000000000000000000000000000000000000000000000000000";
+    const valid_quote_stdout = try runDebugProbeWithExtraArgs(
+        allocator,
+        fixture,
+        out_dir,
+        quote_calldata,
+        &.{ "--mock-returndata-hex", valid_mixed_returndata },
+        "96",
+    );
+    defer allocator.free(valid_quote_stdout);
+    try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "reverted: false");
+    try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "output: 0x0000000000000000000000000000000000000000000000000000000000000009");
+    try expectProbeContains("returndata mixed bytes valid", valid_quote_stdout, "touched = 9;");
 }

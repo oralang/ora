@@ -955,6 +955,47 @@ test "compiler rejects public Result parameters when one-word success would requ
     try testing.expect(found);
 }
 
+test "compiler rejects public Result dynamic arrays outside committed calldata element set" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn consume_small(value: Result<slice[u8], Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn consume_enum(value: Result<slice[Status], Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expect(diags.items.items.len != 0);
+    var found = false;
+    for (diags.items.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "unsupported Result ABI type") != null and
+            std.mem.indexOf(u8, diag.message, "carrier-compatible payload and a single error") != null)
+        {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
 test "compiler keeps plain match expressions on booleans on the switch path" {
     const source_text =
         \\pub fn run(flag: bool) -> u256 {
@@ -2142,7 +2183,7 @@ test "compiler lowers dynamic bytes public Result inputs through OraToSIR dispat
         \\contract Probe {
         \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
         \\        return match (value) {
-        \\            Ok(inner) => 1,
+        \\            Ok(inner) => inner.len,
         \\            Err(err) => 0,
         \\        };
         \\    }
@@ -2162,6 +2203,7 @@ test "compiler lowers dynamic bytes public Result inputs through OraToSIR dispat
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
 }
 
 test "compiler lowers dynamic bytes public Result inputs with payload errors through OraToSIR dispatcher path" {
@@ -2171,7 +2213,7 @@ test "compiler lowers dynamic bytes public Result inputs with payload errors thr
         \\contract Probe {
         \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
         \\        return match (value) {
-        \\            Ok(inner) => 1,
+        \\            Ok(inner) => inner.len,
         \\            Err(err) => err.code,
         \\        };
         \\    }
@@ -2191,6 +2233,7 @@ test "compiler lowers dynamic bytes public Result inputs with payload errors thr
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
 }
 
 test "compiler emits dispatcher metadata for dynamic slice public Result inputs with payload errors" {
@@ -2257,6 +2300,96 @@ test "compiler lowers dynamic slice public Result inputs with payload errors thr
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+}
+
+test "compiler lowers dynamic error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
+}
+
+test "compiler lowers multi-field dynamic error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(code: u256, data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => err.code + err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
+}
+
+test "compiler lowers dynamic ok and error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "shr"));
 }
 
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {

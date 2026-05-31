@@ -938,7 +938,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
 
             // Check if frame finished after step
             if (self.evm.getCurrentFrame()) |f| {
-                if (f.stopped) {
+                if (f.stopped or f.reverted) {
                     self.state = .halted;
                     self.stop_reason = if (f.reverted) .execution_reverted else .execution_finished;
                     self.last_error_name = null;

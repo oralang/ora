@@ -805,6 +805,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             defer result_input_mode_attrs.deinit(self.allocator);
             var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
             defer result_input_error_id_attrs.deinit(self.allocator);
+            var abi_param_enum_count_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer abi_param_enum_count_attrs.deinit(self.allocator);
+            var abi_param_refinement_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            defer abi_param_refinement_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
                 const param_type = self.typecheck.pattern_types[parameter.pattern.index()].type;
@@ -828,6 +832,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     self.allocator,
                     mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().publicResultInputErrorId(self, param_type) orelse 0)),
                 ) catch return error.OutOfMemory;
+                abi_param_enum_count_attrs.append(
+                    self.allocator,
+                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().enumVariantCountForType(self, param_type) orelse 0)),
+                ) catch return error.OutOfMemory;
+                const refinement_spec = try @This().abiParamRefinementSpec(self, param_type);
+                defer self.allocator.free(refinement_spec);
+                abi_param_refinement_attrs.append(
+                    self.allocator,
+                    mlir.oraStringAttrCreate(self.context, strRef(refinement_spec)),
+                ) catch return error.OutOfMemory;
             }
 
             if (abi_param_attrs.items.len != 0) {
@@ -843,6 +857,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try attrs.append(self.allocator, .{
                     .name = identifier(self.context, "ora.result_input_error_ids"),
                     .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(result_input_error_id_attrs.items.len), result_input_error_id_attrs.items.ptr),
+                });
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.abi_param_enum_counts"),
+                    .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(abi_param_enum_count_attrs.items.len), abi_param_enum_count_attrs.items.ptr),
+                });
+                try attrs.append(self.allocator, .{
+                    .name = identifier(self.context, "ora.abi_param_refinements"),
+                    .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(abi_param_refinement_attrs.items.len), abi_param_refinement_attrs.items.ptr),
                 });
             }
 
@@ -1519,6 +1541,82 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var signature_buf: [256]u8 = undefined;
             const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{error_name}) catch return null;
             return @intCast(abi_support.keccakSelectorValue(signature));
+        }
+
+        fn enumVariantCountForType(self: *Lowerer, ty: sema.Type) ?usize {
+            const enum_name = ty.name() orelse return null;
+            for (self.typecheck.instantiated_enums) |instantiated| {
+                if (std.mem.eql(u8, instantiated.mangled_name, enum_name)) return instantiated.variants.len;
+            }
+            const item_id = self.item_index.lookup(enum_name) orelse return null;
+            const enum_item = switch (self.file.item(item_id).*) {
+                .Enum => |enum_item| enum_item,
+                else => return null,
+            };
+            return enum_item.variants.len;
+        }
+
+        fn abiParamRefinementSpec(self: *Lowerer, ty: sema.Type) ![]const u8 {
+            var parts: std.ArrayList([]const u8) = .{};
+            defer {
+                for (parts.items) |part| self.allocator.free(part);
+                parts.deinit(self.allocator);
+            }
+            try @This().appendAbiParamRefinementSpec(self, &parts, ty);
+            if (parts.items.len == 0) return self.allocator.dupe(u8, "");
+            return std.mem.join(self.allocator, ";", parts.items);
+        }
+
+        fn appendAbiParamRefinementSpec(self: *Lowerer, parts: *std.ArrayList([]const u8), ty: sema.Type) !void {
+            switch (ty) {
+                .refinement => |refinement| {
+                    try @This().appendAbiParamRefinementSpec(self, parts, refinement.base_type.*);
+                    if (sema.refinements.kindForName(refinement.name) == .non_zero_address) {
+                        try parts.append(self.allocator, try self.allocator.dupe(u8, "nonzero_address"));
+                        return;
+                    }
+                    if (sema.refinements.bounds(refinement)) |bounds| {
+                        const signed = @This().refinementBaseIsSignedInteger(bounds.base_type);
+                        if (bounds.min_text) |min_text| {
+                            const min_value = try @This().parseAbiRefinementBound(min_text, signed);
+                            try @This().appendAbiRefinementBound(self, parts, "min", signed, min_value);
+                        }
+                        if (bounds.max_text) |max_text| {
+                            const max_value = try @This().parseAbiRefinementBound(max_text, signed);
+                            try @This().appendAbiRefinementBound(self, parts, "max", signed, max_value);
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+
+        fn appendAbiRefinementBound(self: *Lowerer, parts: *std.ArrayList([]const u8), tag: []const u8, signed: bool, value: u256) !void {
+            const high_high: u64 = @truncate(value >> 192);
+            const high_low: u64 = @truncate(value >> 128);
+            const low_high: u64 = @truncate(value >> 64);
+            const low_low: u64 = @truncate(value);
+            try parts.append(self.allocator, try std.fmt.allocPrint(
+                self.allocator,
+                "{s}:{s}:{d}:{d}:{d}:{d}",
+                .{ tag, if (signed) "s" else "u", high_high, high_low, low_high, low_low },
+            ));
+        }
+
+        fn parseAbiRefinementBound(text: []const u8, signed: bool) !u256 {
+            if (signed) {
+                const parsed = std.fmt.parseInt(i256, text, 10) catch return error.MlirOperationCreationFailed;
+                return @bitCast(parsed);
+            }
+            return std.fmt.parseInt(u256, text, 10) catch error.MlirOperationCreationFailed;
+        }
+
+        fn refinementBaseIsSignedInteger(ty: sema.Type) bool {
+            return switch (ty) {
+                .integer => |integer| integer.signed orelse false,
+                .refinement => |refinement| @This().refinementBaseIsSignedInteger(refinement.base_type.*),
+                else => false,
+            };
         }
 
         pub fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {

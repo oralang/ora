@@ -1553,6 +1553,64 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return method.clauses.len > 0;
         }
 
+        fn externReturndataStrictSupports(ty: sema.Type) bool {
+            return externReturndataStrictSupportsInner(ty, true);
+        }
+
+        fn externReturndataStrictSupportsInner(ty: sema.Type, top_level: bool) bool {
+            return switch (ty) {
+                .bool, .address, .integer, .fixed_bytes, .bitfield => true,
+                .string, .bytes => top_level,
+                .slice => |slice| top_level and externReturndataStrictSupportsSliceElement(slice.element_type.*),
+                // The current ABI decode op carries one enum_variant_count attr,
+                // so only a top-level enum has enough metadata for strict
+                // returndata range validation in this slice.
+                .enum_ => top_level,
+                .refinement => |refinement| externReturndataStrictSupportsInner(refinement.base_type.*, top_level),
+                .tuple => |tuple| blk: {
+                    if (tuple.len == 0) break :blk false;
+                    if (top_level and externReturndataStrictSupportsMixedDynamicTuple(tuple)) break :blk true;
+                    for (tuple) |element| {
+                        if (!externReturndataStrictSupportsInner(element, false)) break :blk false;
+                    }
+                    break :blk true;
+                },
+                else => false,
+            };
+        }
+
+        fn externReturndataStrictSupportsMixedDynamicTuple(elements: []const sema.Type) bool {
+            return elements.len == 2 and
+                externReturndataStrictSupportsU256(elements[0]) and
+                externReturndataStrictSupportsTopLevelDynamic(elements[1]);
+        }
+
+        fn externReturndataStrictSupportsTopLevelDynamic(ty: sema.Type) bool {
+            return switch (ty) {
+                .string, .bytes => true,
+                .slice => |slice| externReturndataStrictSupportsSliceElement(slice.element_type.*),
+                .refinement => |refinement| externReturndataStrictSupportsTopLevelDynamic(refinement.base_type.*),
+                else => false,
+            };
+        }
+
+        fn externReturndataStrictSupportsSliceElement(ty: sema.Type) bool {
+            return switch (ty) {
+                .bool, .address, .fixed_bytes => true,
+                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .refinement => |refinement| externReturndataStrictSupportsSliceElement(refinement.base_type.*),
+                else => false,
+            };
+        }
+
+        fn externReturndataStrictSupportsU256(ty: sema.Type) bool {
+            return switch (ty) {
+                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .refinement => |refinement| externReturndataStrictSupportsU256(refinement.base_type.*),
+                else => false,
+            };
+        }
+
         fn lowerExternSummaryEnsuresCondition(
             self: *FunctionLowerer,
             ast_method: ?ast.nodes.TraitMethod,
@@ -1588,7 +1646,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerExternProxyMethodCall(self: *FunctionLowerer, expr_id: ast.ExprId, call: ast.CallExpr, locals: *LocalEnv) anyerror!?mlir.MlirValue {
             const resolved = @This().resolveExternProxyMethodCall(self, call.callee) orelse return null;
             switch (resolved.method.return_type.kind()) {
-                .bool, .address, .integer, .fixed_bytes, .string, .bytes, .tuple, .struct_, .contract, .slice => {},
+                .bool, .address, .integer, .fixed_bytes, .enum_, .bitfield, .refinement, .string, .bytes, .tuple, .struct_, .contract, .slice => {},
                 else => return error.UnsupportedExternTraitLowering,
             }
 
@@ -1661,30 +1719,92 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
             if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) return error.MlirOperationCreationFailed;
 
-            const decode_op = try abi_runtime_decoder.createAbiDecodeOp(
-                self.parent.allocator,
-                self.parent.context,
-                loc,
-                layout_context,
-                resolved.method.return_type,
-                returndata,
-                payload_type,
-            );
-            if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
-            appendOp(then_block, decode_op);
-            const decoded = mlir.oraOperationGetResult(decode_op, 0);
-            const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
-            const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
-            if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
-            if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
-                mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
-            }
-            appendOp(then_block, ok_op);
-            if (has_extern_summary_ensures) {
-                const condition = summary_condition orelse appendValueOp(then_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
-                try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{ mlir.oraOperationGetResult(ok_op, 0), condition });
+            const can_strict_decode_returndata = externReturndataStrictSupports(resolved.method.return_type);
+            if (!can_strict_decode_returndata) {
+                // N3c: summary clauses still need the decoded payload value to
+                // evaluate the summary expression. Unsupported summary return
+                // shapes stay on the legacy payload projection until their
+                // strict decode surface exists.
+                const decode_op = try abi_runtime_decoder.createAbiDecodeOp(
+                    self.parent.allocator,
+                    self.parent.context,
+                    loc,
+                    layout_context,
+                    resolved.method.return_type,
+                    returndata,
+                    payload_type,
+                );
+                if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
+                appendOp(then_block, decode_op);
+                const decoded = mlir.oraOperationGetResult(decode_op, 0);
+                const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
+                const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
+                if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                    mlir.oraOperationSetAttributeByName(ok_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                appendOp(then_block, ok_op);
+                if (has_extern_summary_ensures) {
+                    const condition = summary_condition orelse appendValueOp(then_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                    try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{ mlir.oraOperationGetResult(ok_op, 0), condition });
+                } else {
+                    try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+                }
             } else {
-                try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{mlir.oraOperationGetResult(ok_op, 0)});
+                const decode_op = try abi_runtime_decoder.createExternalReturnAbiDecodeOp(
+                    self.parent.allocator,
+                    self.parent.context,
+                    loc,
+                    layout_context,
+                    resolved.method.return_type,
+                    returndata,
+                    result_type,
+                    "ExternalCallFailed",
+                );
+                if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
+                if (self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.exprType(expr_id))) {
+                    mlir.oraOperationSetAttributeByName(decode_op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                }
+                appendOp(then_block, decode_op);
+                const decoded_result = mlir.oraOperationGetResult(decode_op, 0);
+                if (has_extern_summary_ensures) {
+                    const is_error_op = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, decoded_result);
+                    if (mlir.oraOperationIsNull(is_error_op)) return error.MlirOperationCreationFailed;
+                    appendOp(then_block, is_error_op);
+                    const is_error = mlir.oraOperationGetResult(is_error_op, 0);
+
+                    const summary_if_result_types = [_]mlir.MlirType{ result_type, boolType(self.parent.context) };
+                    const summary_if_op = mlir.oraScfIfOpCreate(self.parent.context, loc, is_error, &summary_if_result_types, summary_if_result_types.len, true);
+                    if (mlir.oraOperationIsNull(summary_if_op)) return error.MlirOperationCreationFailed;
+                    appendOp(then_block, summary_if_op);
+
+                    const summary_err_block = mlir.oraScfIfOpGetThenBlock(summary_if_op);
+                    const summary_ok_block = mlir.oraScfIfOpGetElseBlock(summary_if_op);
+                    if (mlir.oraBlockIsNull(summary_err_block) or mlir.oraBlockIsNull(summary_ok_block)) return error.MlirOperationCreationFailed;
+
+                    const true_value = appendValueOp(summary_err_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                    try support.appendScfYieldValues(self.parent.context, summary_err_block, loc, &[_]mlir.MlirValue{ decoded_result, true_value });
+
+                    const unwrap_op = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, decoded_result, payload_type);
+                    if (mlir.oraOperationIsNull(unwrap_op)) return error.MlirOperationCreationFailed;
+                    appendOp(summary_ok_block, unwrap_op);
+                    const decoded_payload = mlir.oraOperationGetResult(unwrap_op, 0);
+                    const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded_payload, summary_ok_block);
+                    const condition = summary_condition orelse appendValueOp(summary_ok_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
+                    try support.appendScfYieldValues(self.parent.context, summary_ok_block, loc, &[_]mlir.MlirValue{ decoded_result, condition });
+
+                    try support.appendScfYieldValues(
+                        self.parent.context,
+                        then_block,
+                        loc,
+                        &[_]mlir.MlirValue{
+                            mlir.oraOperationGetResult(summary_if_op, 0),
+                            mlir.oraOperationGetResult(summary_if_op, 1),
+                        },
+                    );
+                } else {
+                    try support.appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{decoded_result});
+                }
             }
 
             const error_result = try @This().lowerExternErrorResult(self, expr_id, resolved.method, else_block, loc, returndata);

@@ -1409,7 +1409,7 @@ const TypeChecker = struct {
         if (!self.publicAbiErrorTypeHasPayload(error_union.error_types[0])) return true;
         if (!self.publicAbiSupportsResultCarrierType(error_union.error_types[0])) return false;
         const error_words = self.publicAbiStaticWordCount(error_union.error_types[0]);
-        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return false;
+        if (payload_words == 1 and error_words != null and error_words.? > 1) return false;
         return true;
     }
 
@@ -1419,20 +1419,52 @@ const TypeChecker = struct {
             .bytes, .string => true,
             .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(slice.element_type.*),
             .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(array.element_type.*),
+            .anonymous_struct => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (!self.publicAbiSupportsResultCarrierType(field.ty)) return false;
+                }
+                return true;
+            },
+            .tuple => |elements| {
+                for (elements) |element| {
+                    if (!self.publicAbiSupportsResultCarrierType(element)) return false;
+                }
+                return true;
+            },
             .refinement => |refinement| self.publicAbiSupportsResultCarrierType(refinement.base_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .ErrorDecl => |error_decl| error_blk: {
+                        for (error_decl.parameters) |parameter| {
+                            const payload = self.pattern_types[parameter.pattern.index()].type;
+                            if (!self.publicAbiSupportsResultCarrierType(payload)) break :error_blk false;
+                        }
+                        break :error_blk true;
+                    },
+                    else => false,
+                };
+            },
             else => false,
         };
     }
 
     fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
         return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
+            .bool, .address, .fixed_bytes => true,
+            .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
             .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
             .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "u256") or
+                    std.mem.eql(u8, named.name, "bool") or
+                    std.mem.eql(u8, named.name, "address") or
+                    runtimeFixedBytesSpellingLen(named.name) != null)
+                {
+                    break :blk true;
+                }
                 const item_id = self.item_index.lookup(named.name) orelse break :blk false;
                 break :blk switch (self.file.item(item_id).*) {
-                    .Enum => !self.enumHasPayload(named.name),
-                    .Bitfield => true,
+                    .TypeAlias => |type_alias| self.publicAbiSupportsResultDynamicArrayElement(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk false),
                     else => false,
                 };
             },

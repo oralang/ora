@@ -2,12 +2,36 @@ const std = @import("std");
 const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
 
-const Evm = ora_evm.Evm(.{});
-const Frame = ora_evm.Frame(.{});
-const Debugger = ora_evm.Debugger(.{});
+const MOCK_RETURNDATA_PRECOMPILE_ADDRESS = primitives.Address.fromU256(0x300);
+
+var mock_returndata: []const u8 = &.{};
+
+fn mockReturndataPrecompile(ctx: ?*anyopaque, allocator: std.mem.Allocator, input: []const u8, gas_limit: u64) anyerror!ora_evm.PrecompileOutput {
+    _ = ctx;
+    _ = input;
+    _ = gas_limit;
+    return .{
+        .output = try allocator.dupe(u8, mock_returndata),
+        .gas_used = 15,
+        .success = true,
+    };
+}
+
+const EvmConfig = ora_evm.EvmConfig{
+    .precompile_overrides = &.{
+        .{
+            .address = MOCK_RETURNDATA_PRECOMPILE_ADDRESS,
+            .execute = mockReturndataPrecompile,
+        },
+    },
+};
+
+const Evm = ora_evm.Evm(EvmConfig);
+const Frame = ora_evm.Frame(EvmConfig);
+const Debugger = ora_evm.Debugger(EvmConfig);
 const SourceMap = ora_evm.SourceMap;
 const DebugInfo = ora_evm.DebugInfo;
-const Session = ora_evm.DebugSession(.{});
+const Session = ora_evm.DebugSession(EvmConfig);
 
 const ProbeConfig = struct {
     bytecode_path: []const u8,
@@ -16,6 +40,9 @@ const ProbeConfig = struct {
     debug_info_path: ?[]const u8 = null,
     abi_path: ?[]const u8 = null,
     calldata: []u8 = &.{},
+    init_calldata: []u8 = &.{},
+    mock_returndata: []u8 = &.{},
+    probe_deploy: bool = false,
     max_statements: usize = 64,
     limits: ora_evm.DebugLimits = .{},
 
@@ -26,6 +53,8 @@ const ProbeConfig = struct {
         if (self.debug_info_path) |path| allocator.free(path);
         if (self.abi_path) |path| allocator.free(path);
         allocator.free(self.calldata);
+        allocator.free(self.init_calldata);
+        allocator.free(self.mock_returndata);
     }
 };
 
@@ -36,6 +65,7 @@ pub fn main() !void {
 
     var config = try parseArgs(allocator);
     defer config.deinit(allocator);
+    mock_returndata = config.mock_returndata;
 
     const limits = config.limits;
 
@@ -43,6 +73,13 @@ pub fn main() !void {
     defer allocator.free(bytecode_hex);
     const bytecode = try decodeHexAlloc(allocator, bytecode_hex);
     defer allocator.free(bytecode);
+    const deployment_bytecode = if (config.init_calldata.len == 0) bytecode else blk: {
+        const combined = try allocator.alloc(u8, bytecode.len + config.init_calldata.len);
+        @memcpy(combined[0..bytecode.len], bytecode);
+        @memcpy(combined[bytecode.len..], config.init_calldata);
+        break :blk combined;
+    };
+    defer if (config.init_calldata.len != 0) allocator.free(deployment_bytecode);
 
     const source_map_json = try ora_evm.loadDebuggerArtifactWithCap(allocator, config.source_map_path, limits.artifact_max_bytes);
     defer allocator.free(source_map_json);
@@ -72,10 +109,75 @@ pub fn main() !void {
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(contract);
 
+    if (config.probe_deploy) {
+        try evm.frames.append(evm.arena.allocator(), try Frame.init(
+            evm.arena.allocator(),
+            deployment_bytecode,
+            limits.gas_limit,
+            caller,
+            contract,
+            0,
+            &.{},
+            @as(*anyopaque, @ptrCast(&evm)),
+            evm.hardfork,
+            false,
+        ));
+
+        var debugger = blk: {
+            if (debug_info) |info| {
+                debug_info = null;
+                break :blk try Debugger.initWithDebugInfo(allocator, &evm, source_map, info, source_text);
+            }
+            break :blk try Debugger.init(allocator, &evm, source_map, source_text);
+        };
+        source_map_transferred = true;
+        defer debugger.deinit();
+        debugger.max_steps = limits.max_steps;
+
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_file = std.fs.File.stdout().writer(&stdout_buffer);
+        const stdout = &stdout_file.interface;
+        try stdout.print("debug probe\n", .{});
+        try stdout.print("  bytecode: {s}\n", .{config.bytecode_path});
+        try stdout.print("  source:   {s}\n", .{config.source_path});
+        try stdout.print("  deploy-calldata: 0x", .{});
+        try printHex(stdout, config.init_calldata);
+        try stdout.print("\n", .{});
+
+        var stops: usize = 0;
+        while (!debugger.isHalted() and stops < config.max_statements) {
+            try debugger.stepIn();
+            if (debugger.stop_reason == .step_complete or debugger.stop_reason == .breakpoint_hit) {
+                if (debugger.currentEntry()) |entry| {
+                    stops += 1;
+                    try printStop(stdout, &debugger, entry, stops);
+                }
+            } else if (debugger.isHalted()) {
+                break;
+            } else if (debugger.currentEntry()) |entry| {
+                stops += 1;
+                try printStop(stdout, &debugger, entry, stops);
+            }
+        }
+
+        try stdout.print("halted: {s}\n", .{@tagName(debugger.stop_reason)});
+        if (evm.getCurrentFrame()) |frame| {
+            try stdout.print("pc: {d}\n", .{frame.pc});
+            try stdout.print("reverted: {}\n", .{frame.reverted});
+            if (frame.output.len > 0) {
+                try stdout.print("output: 0x", .{});
+                try printHex(stdout, frame.output);
+                try stdout.print("\n", .{});
+            }
+        }
+        try stdout.flush();
+        return;
+    }
+
     const runtime_bytecode = try Session.deployRuntimeBytecode(allocator, &evm, .{
         .caller = caller,
         .contract = contract,
-        .deployment_bytecode = bytecode,
+        .deployment_bytecode = deployment_bytecode,
         .gas_limit = limits.gas_limit,
         .step_cap = limits.deploy_step_cap,
     });
@@ -201,6 +303,8 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
         .source_map_path = try allocator.dupe(u8, args[2]),
         .source_path = try allocator.dupe(u8, args[3]),
         .calldata = try allocator.dupe(u8, &.{}),
+        .init_calldata = try allocator.dupe(u8, &.{}),
+        .mock_returndata = try allocator.dupe(u8, &.{}),
     };
     errdefer config.deinit(allocator);
 
@@ -240,6 +344,18 @@ fn parseArgs(allocator: std.mem.Allocator) !ProbeConfig {
             if (i >= args.len) return error.InvalidArguments;
             allocator.free(config.calldata);
             config.calldata = try decodeHexAlloc(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--init-calldata-hex")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            allocator.free(config.init_calldata);
+            config.init_calldata = try decodeHexAlloc(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--mock-returndata-hex")) {
+            i += 1;
+            if (i >= args.len) return error.InvalidArguments;
+            allocator.free(config.mock_returndata);
+            config.mock_returndata = try decodeHexAlloc(allocator, args[i]);
+        } else if (std.mem.eql(u8, arg, "--probe-deploy")) {
+            config.probe_deploy = true;
         } else if (std.mem.eql(u8, arg, "--max-statements")) {
             i += 1;
             if (i >= args.len) return error.InvalidArguments;
@@ -294,6 +410,9 @@ fn printUsage() !void {
         \\  --signature <sig>            Function signature, e.g. add(u256,u256)
         \\  --arg <value>                Argument value (repeatable, in order)
         \\  --calldata-hex <hex>         Raw calldata as hex
+        \\  --init-calldata-hex <hex>    Raw constructor/init ABI payload appended to deploy bytecode
+        \\  --mock-returndata-hex <hex>  Return data emitted by debug precompile address 0x300
+        \\  --probe-deploy               Trace deployment instead of runtime call
         \\  --max-statements <n>         Cap source-stop count (default 64)
         \\  --gas-limit <i64>            Frame gas budget (default 5000000)
         \\  --max-steps <u64>            Per-command opcode safety cap (default 10000000)

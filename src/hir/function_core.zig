@@ -465,6 +465,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn parseU256Literal(text: []const u8) ?u256 {
+            if (std.mem.startsWith(u8, text, "-")) {
+                const magnitude = parseU256Literal(text[1..]) orelse return null;
+                return @as(u256, 0) -% magnitude;
+            }
+            if (std.mem.startsWith(u8, text, "+")) {
+                return parseU256Literal(text[1..]);
+            }
             const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
             const digits = if (base == 10) text else text[2..];
             return std.fmt.parseInt(u256, digits, base) catch null;

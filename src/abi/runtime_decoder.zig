@@ -30,6 +30,30 @@ pub fn createAbiDecodeOp(
     );
 }
 
+pub fn createExternalReturnAbiDecodeOp(
+    allocator: std.mem.Allocator,
+    mlir_context: mlir.MlirContext,
+    loc: mlir.MlirLocation,
+    layout_context: abi_layout_context.LayoutContext,
+    return_type: sema.Type,
+    returndata: mlir.MlirValue,
+    result_type: mlir.MlirType,
+    failure_error: []const u8,
+) !mlir.MlirOperation {
+    return createAbiDecodeOpWithModeAndFailureError(
+        allocator,
+        mlir_context,
+        loc,
+        layout_context,
+        return_type,
+        returndata,
+        result_type,
+        "returndata",
+        "error_union",
+        failure_error,
+    );
+}
+
 pub fn createMemoryResultAbiDecodeOp(
     allocator: std.mem.Allocator,
     mlir_context: mlir.MlirContext,
@@ -63,6 +87,32 @@ fn createAbiDecodeOpWithMode(
     source: []const u8,
     failure_mode: []const u8,
 ) !mlir.MlirOperation {
+    return createAbiDecodeOpWithModeAndFailureError(
+        allocator,
+        mlir_context,
+        loc,
+        layout_context,
+        return_type,
+        bytes,
+        result_type,
+        source,
+        failure_mode,
+        null,
+    );
+}
+
+fn createAbiDecodeOpWithModeAndFailureError(
+    allocator: std.mem.Allocator,
+    mlir_context: mlir.MlirContext,
+    loc: mlir.MlirLocation,
+    layout_context: abi_layout_context.LayoutContext,
+    return_type: sema.Type,
+    bytes: mlir.MlirValue,
+    result_type: mlir.MlirType,
+    source: []const u8,
+    failure_mode: []const u8,
+    failure_error: ?[]const u8,
+) !mlir.MlirOperation {
     const attrs = try attrsForReturnType(allocator, mlir_context, layout_context, return_type);
     const enum_variant_count = enumVariantCount(layout_context, return_type);
     var op_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
@@ -84,6 +134,13 @@ fn createAbiDecodeOpWithMode(
             mlir_context,
             "enum_variant_count",
             mlir.oraIntegerAttrCreateI64(mlir_context, mlir.oraIntegerTypeCreate(mlir_context, 64), @intCast(count)),
+        ));
+    }
+    if (failure_error) |name| {
+        try op_attrs.append(allocator, mlir_helpers.namedAttr(
+            mlir_context,
+            "returndata_failure_error",
+            mlir.oraStringAttrCreate(mlir_context, strRef(name)),
         ));
     }
     const operands = [_]mlir.MlirValue{bytes};

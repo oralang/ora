@@ -4,6 +4,8 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const abi_layout = ora_root.abi_layout;
+const abi_comptime_decoder = ora_root.abi_comptime_decoder;
 
 const h = @import("compiler.test.helpers.zig");
 const compileText = h.compileText;
@@ -57,6 +59,34 @@ fn expectComptimeIntegerReturn(source_text: []const u8, function_name: []const u
     try testing.expectEqual(expected, try consteval.values[value_index].?.integer.toInt(i128));
 }
 
+const ExpectedDecodeError = struct {
+    name: []const u8,
+    expected_variant: u32,
+};
+
+var noop_decode_resolver_context: u8 = 0;
+
+fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
+    return null;
+}
+
+fn noopDecodeStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+    return null;
+}
+
+fn noopDecodeEnumVariantCount(_: *anyopaque, _: []const u8) ?usize {
+    return null;
+}
+
+fn noopAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
+    return .{
+        .context = &noop_decode_resolver_context,
+        .typeIdForType = noopDecodeTypeIdForType,
+        .structFields = noopDecodeStructFields,
+        .enumVariantCount = noopDecodeEnumVariantCount,
+    };
+}
+
 fn expectHexBytes(expected_hex: []const u8, actual: []const u8) !void {
     const hex = if (std.mem.startsWith(u8, expected_hex, "0x")) expected_hex[2..] else expected_hex;
     try testing.expectEqual(@as(usize, 0), hex.len % 2);
@@ -68,6 +98,48 @@ fn expectHexBytes(expected_hex: []const u8, actual: []const u8) !void {
         byte.* = @intCast((hi << 4) | lo);
     }
     try testing.expectEqualSlices(u8, expected, actual);
+}
+
+fn decodeHexBytes(hex_with_optional_prefix: []const u8) ![]u8 {
+    const hex = if (std.mem.startsWith(u8, hex_with_optional_prefix, "0x")) hex_with_optional_prefix[2..] else hex_with_optional_prefix;
+    try testing.expectEqual(@as(usize, 0), hex.len % 2);
+    const bytes = try testing.allocator.alloc(u8, hex.len / 2);
+    errdefer testing.allocator.free(bytes);
+    for (bytes, 0..) |*byte, index| {
+        const hi = try std.fmt.charToDigit(hex[index * 2], 16);
+        const lo = try std.fmt.charToDigit(hex[index * 2 + 1], 16);
+        byte.* = @intCast((hi << 4) | lo);
+    }
+    return bytes;
+}
+
+fn expectComptimeDecoderErrorForType(
+    target_type: compiler.sema.Type,
+    payload_hex: []const u8,
+    expected: abi_comptime_decoder.DecodeError,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var layout = try abi_layout.fromType(allocator, target_type);
+    defer layout.deinit(allocator);
+
+    const bytes = try decodeHexBytes(payload_hex);
+    defer testing.allocator.free(bytes);
+
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    const decoded = try abi_comptime_decoder.decodeComptimeValue(
+        allocator,
+        &heap,
+        noopAbiDecodeResolver(),
+        layout,
+        target_type,
+        bytes,
+    );
+    try testing.expectEqual(expected, decoded.err);
 }
 
 fn expectedHexByteLen(expected_hex: []const u8) !usize {
@@ -701,6 +773,309 @@ fn expectRuntimeU256Return(source_text: []const u8, function_name: []const u8, e
     defer testing.allocator.free(payload);
     const actual = try u256FromAbiWord(payload);
     try testing.expectEqual(expected, actual);
+}
+
+fn expectRuntimeAbiDecodeErrors(source_text: []const u8, cases: []const ExpectedDecodeError) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    for (cases) |case| {
+        const payload = try extractRuntimeReturnBytesFromSir(rendered, case.name, 64);
+        defer testing.allocator.free(payload);
+
+        const tag = try u256FromAbiWord(payload[0..32]);
+        const err = try u256FromAbiWord(payload[32..64]);
+        try testing.expectEqual(@as(u256, 1), tag);
+        try testing.expectEqual(@as(u256, case.expected_variant), err);
+    }
+}
+
+test "compiler abiDecode length overflow fixtures expose exact error variant" {
+    const length_overflow: u32 = 13;
+    const cases = [_]ExpectedDecodeError{
+        .{ .name = "err_dynamic_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_dynamic_array_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_dynamic_bool_array_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_dynamic_fixed_bytes_array_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_dynamic_address_array_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_tuple_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_length_overflow", .expected_variant = length_overflow },
+        .{ .name = "err_mixed_dynamic_array_tuple_length_overflow", .expected_variant = length_overflow },
+    };
+
+    const sema = compiler.sema;
+    const single_overflow_payload = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000010000000000000000";
+    const mixed_overflow_payload = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000010000000000000000";
+
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const bool_ty: sema.Type = .bool;
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const address_ty: sema.Type = .address;
+    const string_ty: sema.Type = .string;
+    const bytes_ty: sema.Type = .bytes;
+    const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const bool_slice_ty: sema.Type = .{ .slice = .{ .element_type = &bool_ty } };
+    const bytes4_slice_ty: sema.Type = .{ .slice = .{ .element_type = &bytes4_ty } };
+    const address_slice_ty: sema.Type = .{ .slice = .{ .element_type = &address_ty } };
+    const bool_tuple_elems = [_]sema.Type{ u256_ty, bool_slice_ty };
+    const fixed_bytes_tuple_elems = [_]sema.Type{ u256_ty, bytes4_slice_ty };
+    const address_tuple_elems = [_]sema.Type{ u256_ty, address_slice_ty };
+    const string_tuple_elems = [_]sema.Type{ u256_ty, string_ty };
+    const bytes_tuple_elems = [_]sema.Type{ u256_ty, bytes_ty };
+    const u256_array_tuple_elems = [_]sema.Type{ u256_ty, u256_slice_ty };
+    const bool_tuple_ty: sema.Type = .{ .tuple = &bool_tuple_elems };
+    const fixed_bytes_tuple_ty: sema.Type = .{ .tuple = &fixed_bytes_tuple_elems };
+    const address_tuple_ty: sema.Type = .{ .tuple = &address_tuple_elems };
+    const string_tuple_ty: sema.Type = .{ .tuple = &string_tuple_elems };
+    const bytes_tuple_ty: sema.Type = .{ .tuple = &bytes_tuple_elems };
+    const u256_array_tuple_ty: sema.Type = .{ .tuple = &u256_array_tuple_elems };
+
+    try expectComptimeDecoderErrorForType(string_ty, single_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(u256_slice_ty, single_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(bool_slice_ty, single_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(bytes4_slice_ty, single_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(address_slice_ty, single_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(bool_tuple_ty, mixed_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(fixed_bytes_tuple_ty, mixed_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(address_tuple_ty, mixed_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(string_tuple_ty, mixed_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(bytes_tuple_ty, mixed_overflow_payload, .length_overflow);
+    try expectComptimeDecoderErrorForType(u256_array_tuple_ty, mixed_overflow_payload, .length_overflow);
+
+    const runtime_source =
+        \\contract Decode {
+        \\    pub fn err_dynamic_length_overflow() -> Result<string, AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode(string, payload);
+        \\    }
+        \\    pub fn err_dynamic_array_length_overflow() -> Result<slice[u256], AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode(slice[u256], payload);
+        \\    }
+        \\    pub fn err_dynamic_bool_array_length_overflow() -> Result<slice[bool], AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode(slice[bool], payload);
+        \\    }
+        \\    pub fn err_dynamic_fixed_bytes_array_length_overflow() -> Result<slice[bytes4], AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode(slice[bytes4], payload);
+        \\    }
+        \\    pub fn err_dynamic_address_array_length_overflow() -> Result<slice[address], AbiDecodeError> {
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode(slice[address], payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_bool_array_tuple_length_overflow() -> Result<(u256, slice[bool]), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, slice[bool]), payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_length_overflow() -> Result<(u256, slice[bytes4]), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, slice[bytes4]), payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_address_array_tuple_length_overflow() -> Result<(u256, slice[address]), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, slice[address]), payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_tuple_length_overflow() -> Result<(u256, string), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, string), payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_bytes_tuple_length_overflow() -> Result<(u256, bytes), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, bytes), payload);
+        \\    }
+        \\    pub fn err_mixed_dynamic_array_tuple_length_overflow() -> Result<(u256, slice[u256]), AbiDecodeError> {
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000010000000000000000";
+        \\        return @abiDecode((u256, slice[u256]), payload);
+        \\    }
+        \\}
+    ;
+    try expectRuntimeAbiDecodeErrors(runtime_source, &cases);
+}
+
+test "compiler abiDecode dynamic error fixtures expose exact error variants" {
+    const sema = compiler.sema;
+    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const bool_ty: sema.Type = .bool;
+    const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const address_ty: sema.Type = .address;
+    const string_ty: sema.Type = .string;
+    const bytes_ty: sema.Type = .bytes;
+    const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
+    const bool_slice_ty: sema.Type = .{ .slice = .{ .element_type = &bool_ty } };
+    const bytes4_slice_ty: sema.Type = .{ .slice = .{ .element_type = &bytes4_ty } };
+    const address_slice_ty: sema.Type = .{ .slice = .{ .element_type = &address_ty } };
+    const string_tuple_elems = [_]sema.Type{ u256_ty, string_ty };
+    const bytes_tuple_elems = [_]sema.Type{ u256_ty, bytes_ty };
+    const u256_array_tuple_elems = [_]sema.Type{ u256_ty, u256_slice_ty };
+    const bool_tuple_elems = [_]sema.Type{ u256_ty, bool_slice_ty };
+    const fixed_bytes_tuple_elems = [_]sema.Type{ u256_ty, bytes4_slice_ty };
+    const address_tuple_elems = [_]sema.Type{ u256_ty, address_slice_ty };
+    const string_tuple_ty: sema.Type = .{ .tuple = &string_tuple_elems };
+    const bytes_tuple_ty: sema.Type = .{ .tuple = &bytes_tuple_elems };
+    const u256_array_tuple_ty: sema.Type = .{ .tuple = &u256_array_tuple_elems };
+    const bool_tuple_ty: sema.Type = .{ .tuple = &bool_tuple_elems };
+    const fixed_bytes_tuple_ty: sema.Type = .{ .tuple = &fixed_bytes_tuple_elems };
+    const address_tuple_ty: sema.Type = .{ .tuple = &address_tuple_elems };
+
+    const single_offset = "0000000000000000000000000000000000000000000000000000000000000000";
+    const single_truncated_length = "0000000000000000000000000000000000000000000000000000000000000020";
+    const single_string_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000100001";
+    const single_array_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000008001";
+    const single_array_tail_too_short = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const single_invalid_bool = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const single_invalid_fixed_bytes = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "aabbccdd00000000000000000000000000000000000000000000000000000001" ++
+        "0203040000000000000000000000000000000000000000000000000000000001";
+    const single_invalid_address = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0100000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+
+    const mixed_offset = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    const mixed_truncated_length = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040";
+    const mixed_string_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000100001";
+    const mixed_array_length_exceeded = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000008001";
+    const mixed_array_tail_too_short = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const mixed_invalid_bool = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0000000000000000000000000000000000000000000000000000000000000001";
+    const mixed_invalid_fixed_bytes = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "aabbccdd00000000000000000000000000000000000000000000000000000001" ++
+        "0203040000000000000000000000000000000000000000000000000000000001";
+    const mixed_invalid_address = "0000000000000000000000000000000000000000000000000000000000000007" ++
+        "0000000000000000000000000000000000000000000000000000000000000040" ++
+        "0000000000000000000000000000000000000000000000000000000000000002" ++
+        "0100000000000000000000000000000000000000000000000000000000000001" ++
+        "0000000000000000000000001234567890abcdef1234567890abcdef12345678";
+
+    const ExactVariantCase = struct {
+        name: []const u8,
+        ora_type: []const u8,
+        target_type: sema.Type,
+        payload: []const u8,
+        expected: abi_comptime_decoder.DecodeError,
+    };
+    const cases = [_]ExactVariantCase{
+        .{ .name = "err_dynamic_offset", .ora_type = "string", .target_type = string_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_bytes_offset", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_array_offset", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_bool_array_offset", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_fixed_bytes_array_offset", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_dynamic_address_array_offset", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_tuple_offset", .ora_type = "(u256, string)", .target_type = string_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_offset", .ora_type = "(u256, bytes)", .target_type = bytes_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_array_tuple_offset", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_offset", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_offset", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_offset", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_offset, .expected = .non_canonical_encoding },
+
+        .{ .name = "err_dynamic_truncated_length", .ora_type = "string", .target_type = string_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_bytes_truncated_length", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_array_truncated_length", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_bool_array_truncated_length", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_fixed_bytes_array_truncated_length", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_address_array_truncated_length", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_tuple_truncated_length", .ora_type = "(u256, string)", .target_type = string_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_truncated_length", .ora_type = "(u256, bytes)", .target_type = bytes_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_array_tuple_truncated_length", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_truncated_length", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_truncated_length", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_truncated_length", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_truncated_length, .expected = .truncated_buffer },
+
+        .{ .name = "err_dynamic_string_length_exceeded", .ora_type = "string", .target_type = string_ty, .payload = single_string_length_exceeded, .expected = .string_length_exceeded },
+        .{ .name = "err_dynamic_bytes_length_exceeded", .ora_type = "bytes", .target_type = bytes_ty, .payload = single_string_length_exceeded, .expected = .string_length_exceeded },
+        .{ .name = "err_dynamic_array_length_exceeded", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_dynamic_bool_array_length_exceeded", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_dynamic_fixed_bytes_array_length_exceeded", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_dynamic_address_array_length_exceeded", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_mixed_dynamic_tuple_string_length_exceeded", .ora_type = "(u256, string)", .target_type = string_tuple_ty, .payload = mixed_string_length_exceeded, .expected = .string_length_exceeded },
+        .{ .name = "err_mixed_dynamic_bytes_tuple_length_exceeded", .ora_type = "(u256, bytes)", .target_type = bytes_tuple_ty, .payload = mixed_string_length_exceeded, .expected = .string_length_exceeded },
+        .{ .name = "err_mixed_dynamic_array_tuple_length_exceeded", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_length_exceeded", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_length_exceeded", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_array_length_exceeded, .expected = .array_length_exceeded },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_length_exceeded", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_array_length_exceeded, .expected = .array_length_exceeded },
+
+        .{ .name = "err_dynamic_array_tail_too_short", .ora_type = "slice[u256]", .target_type = u256_slice_ty, .payload = single_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_bool_array_tail_too_short", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_fixed_bytes_array_tail_too_short", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_dynamic_address_array_tail_too_short", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_array_tuple_tail_too_short", .ora_type = "(u256, slice[u256])", .target_type = u256_array_tuple_ty, .payload = mixed_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_tail_too_short", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_tail_too_short", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_array_tail_too_short, .expected = .truncated_buffer },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_tail_too_short", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_array_tail_too_short, .expected = .truncated_buffer },
+
+        .{ .name = "err_dynamic_bool_array_invalid_bool", .ora_type = "slice[bool]", .target_type = bool_slice_ty, .payload = single_invalid_bool, .expected = .invalid_bool_value },
+        .{ .name = "err_dynamic_fixed_bytes_array_invalid_fixed_bytes", .ora_type = "slice[bytes4]", .target_type = bytes4_slice_ty, .payload = single_invalid_fixed_bytes, .expected = .invalid_fixed_bytes },
+        .{ .name = "err_dynamic_address_array_invalid_address", .ora_type = "slice[address]", .target_type = address_slice_ty, .payload = single_invalid_address, .expected = .invalid_address },
+        .{ .name = "err_mixed_dynamic_bool_array_tuple_invalid_bool", .ora_type = "(u256, slice[bool])", .target_type = bool_tuple_ty, .payload = mixed_invalid_bool, .expected = .invalid_bool_value },
+        .{ .name = "err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes", .ora_type = "(u256, slice[bytes4])", .target_type = fixed_bytes_tuple_ty, .payload = mixed_invalid_fixed_bytes, .expected = .invalid_fixed_bytes },
+        .{ .name = "err_mixed_dynamic_address_array_tuple_invalid_address", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_invalid_address, .expected = .invalid_address },
+    };
+
+    var runtime_source = std.ArrayList(u8){};
+    defer runtime_source.deinit(testing.allocator);
+    try runtime_source.appendSlice(testing.allocator, "contract Decode {\n");
+    for (cases) |case| {
+        const function_source = try std.fmt.allocPrint(testing.allocator,
+            \\    pub fn {s}() -> Result<{s}, AbiDecodeError> {{
+            \\        let payload = hex"{s}";
+            \\        return @abiDecode({s}, payload);
+            \\    }}
+            \\
+        , .{ case.name, case.ora_type, case.payload, case.ora_type });
+        defer testing.allocator.free(function_source);
+        try runtime_source.appendSlice(testing.allocator, function_source);
+
+        try expectComptimeDecoderErrorForType(case.target_type, case.payload, case.expected);
+    }
+    try runtime_source.appendSlice(testing.allocator, "}\n");
+
+    var expected_runtime = std.ArrayList(ExpectedDecodeError){};
+    defer expected_runtime.deinit(testing.allocator);
+    for (cases) |case| {
+        try expected_runtime.append(testing.allocator, .{
+            .name = case.name,
+            .expected_variant = @intFromEnum(case.expected),
+        });
+    }
+    try expectRuntimeAbiDecodeErrors(runtime_source.items, expected_runtime.items);
 }
 
 fn rootFunctionReturnValueIndex(compilation: anytype, function_name: []const u8) !usize {
@@ -2147,7 +2522,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_dynamic_length_overflow() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005");
+        \\        let decoded = @abiDecode(string, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -2277,7 +2652,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_dynamic_bool_array_length_overflow() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -2307,7 +2682,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_dynamic_fixed_bytes_array_invalid_fixed_bytes() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001");
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000010203040000000000000000000000000000000000000000000000000000000001");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -2337,7 +2712,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_dynamic_fixed_bytes_array_length_overflow() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let decoded = @abiDecode(slice[bytes4], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -2417,7 +2792,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001");
+        \\        let decoded = @abiDecode((u256, slice[bytes4]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000010203040000000000000000000000000000000000000000000000000000000001");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -2507,7 +2882,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\}
         \\pub fn err_dynamic_address_array_length_overflow() -> u256 {
         \\    return comptime {
-        \\        let decoded = @abiDecode(slice[address], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000");
+        \\        let decoded = @abiDecode(slice[address], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000");
         \\        let out = match (decoded) {
         \\            Ok(_) => 0,
         \\            Err(_) => 1,
@@ -3295,7 +3670,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_dynamic_length_overflow() -> u256 {
-        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000005";
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
         \\        let decoded = @abiDecode(string, payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,
@@ -3399,7 +3774,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_dynamic_bool_array_length_overflow() -> u256 {
-        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
         \\        let decoded = @abiDecode(slice[bool], payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,
@@ -3423,7 +3798,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_dynamic_fixed_bytes_array_invalid_fixed_bytes() -> u256 {
-        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001";
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000010203040000000000000000000000000000000000000000000000000000000001";
         \\        let decoded = @abiDecode(slice[bytes4], payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,
@@ -3447,7 +3822,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_dynamic_fixed_bytes_array_length_overflow() -> u256 {
-        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
         \\        let decoded = @abiDecode(slice[bytes4], payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,
@@ -3511,7 +3886,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_mixed_dynamic_fixed_bytes_array_tuple_invalid_fixed_bytes() -> u256 {
-        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000000102030400000000000000000000000000000000000000000000000000000001";
+        \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000002aabbccdd000000000000000000000000000000000000000000000000000000010203040000000000000000000000000000000000000000000000000000000001";
         \\        let decoded = @abiDecode((u256, slice[bytes4]), payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,
@@ -3583,7 +3958,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        };
         \\    }
         \\    pub fn err_dynamic_address_array_length_overflow() -> u256 {
-        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000001000000000000000";
+        \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000010000000000000000";
         \\        let decoded = @abiDecode(slice[address], payload);
         \\        return match (decoded) {
         \\            Ok(_) => 0,

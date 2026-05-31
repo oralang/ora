@@ -1,0 +1,50 @@
+extern trait Metadata {
+    staticcall fn name(self) -> string;
+    staticcall fn owners(self) -> slice[address];
+    staticcall fn quote(self) -> (u256, bytes);
+}
+
+error ExternalCallFailed(code: u256);
+
+contract AbiDecodeReturndataRevert {
+    storage var touched: u256 = 0;
+
+    pub fn read_name(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).name();
+        match (decoded) {
+            Ok(name) => {
+                touched = 9;
+                return name.len;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_owners(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).owners();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+
+    pub fn read_quote(target: address) -> u256 {
+        let decoded = external<Metadata>(target, gas: 50000).quote();
+        match (decoded) {
+            Ok(_) => {
+                touched = 9;
+                return 9;
+            }
+            Err(err) => {
+                return err.code;
+            }
+        }
+    }
+}

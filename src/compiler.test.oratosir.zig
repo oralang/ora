@@ -263,6 +263,746 @@ test "compiler converts runtime abiDecode bool memory result with canonical vali
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
 }
 
+test "compiler abiDecode N3b4 validates public calldata bool and address params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn accept(flag: bool, owner: address, amount: u8, delta: i8, tag: bytes4) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "or"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "and"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 5, "eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "shr"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "shl"));
+    try expectOrderedNeedles(main_fn, &.{ "a_accept = calldataload", "eq a_accept", "eq a_accept", "or" });
+    try expectOrderedNeedles(main_fn, &.{ "b_accept = calldataload", "and b_accept", "eq b_accept" });
+    try expectOrderedNeedles(main_fn, &.{ "n_accept = calldataload", "and n_accept", "eq n_accept" });
+    try expectOrderedNeedles(main_fn, &.{ "arg_accept = calldataload", "signextend", "eq arg_accept" });
+    try expectOrderedNeedles(main_fn, &.{ "arg_accept_0 = calldataload", "shr", "shl", "eq arg_accept_0" });
+    try expectOrderedNeedles(main_fn, &.{ "a_accept = calldataload", "or", ": @abi_decode_revert_4", "b_accept = calldataload" });
+    try expectOrderedNeedles(main_fn, &.{ "b_accept = calldataload", "eq b_accept", ": @abi_decode_revert_5", "n_accept = calldataload" });
+    try expectOrderedNeedles(main_fn, &.{ "n_accept = calldataload", "eq n_accept", ": @abi_decode_revert_3" });
+    try expectOrderedNeedles(main_fn, &.{ "arg_accept = calldataload", "eq arg_accept", ": @abi_decode_revert_3" });
+    try expectOrderedNeedles(main_fn, &.{ "arg_accept_0 = calldataload", "eq arg_accept_0", "? @accept_exec : @abi_decode_revert_6" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_3", "const 0x3", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_4", "const 0x4", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_5", "const 0x5", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_6", "const 0x6", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "accept_exec"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept n_accept"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @accept a_accept b_accept n_accept arg_accept"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata enum range before call" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\contract Entry {
+        \\    pub fn set(status: Status, flag: bool) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{ "a_set = calldataload", "and a_set", "eq a_set", "lt" });
+    try expectOrderedNeedles(main_fn, &.{ "eq a_set", ": @abi_decode_revert_3" });
+    try expectOrderedNeedles(main_fn, &.{ "lt", ": @abi_decode_revert_7" });
+    try expectOrderedNeedles(main_fn, &.{ "b_set = calldataload", "eq b_set", "eq b_set", "or" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_3", "const 0x3", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_4", "const 0x4", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_7", "const 0x7", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "set_exec"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @set"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @set a_set b_set"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata refinements before call" {
+    const source_text =
+        \\type PositiveByte = MinValue<u8, 1>;
+        \\type SignedFloor = MinValue<i8, -5>;
+        \\contract Entry {
+        \\    pub fn check(amount: PositiveByte, delta: SignedFloor, owner: NonZeroAddress) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{ "a_check = calldataload", "and a_check", "eq a_check", "lt", "iszero", ": @abi_decode_revert_3", ": @abi_decode_revert_10" });
+    try expectOrderedNeedles(main_fn, &.{ "b_check = calldataload", "signextend", "eq b_check", "slt", "iszero", ": @abi_decode_revert_3", ": @abi_decode_revert_10" });
+    try expectOrderedNeedles(main_fn, &.{ "n_check = calldataload", "and n_check", "eq n_check", "eq", "iszero", ": @abi_decode_revert_5", ": @abi_decode_revert_10" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_3", "const 0x3", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_5", "const 0x5", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_10", "const 0xA", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "check_exec"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @check"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @check a_check b_check n_check"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata string and bytes params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_text(text: string) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_data(data: bytes) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_both(text: string, data: bytes) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    for ([_][]const u8{ "take_text", "take_data" }) |name| {
+        var load_buf: [64]u8 = undefined;
+        var exec_buf: [64]u8 = undefined;
+        const load = try std.fmt.bufPrint(&load_buf, "a_{s} = calldataload", .{name});
+        const exec = try std.fmt.bufPrint(&exec_buf, "? @{s}_exec : @abi_decode_revert_11", .{name});
+        try expectOrderedNeedles(main_fn, &.{
+            load,
+            "eq a_",
+            ": @abi_decode_revert_11",
+            "calldatasize",
+            ": @abi_decode_revert_0",
+            "calldataload",
+            "large_const 0xFFFFFFFFFFFFFFFF",
+            "gt",
+            ": @abi_decode_revert_13",
+            "const 0x100000",
+            "gt",
+            ": @abi_decode_revert_14",
+            "div",
+            "mul",
+            ": @abi_decode_revert_0",
+            "calldatacopy",
+            "mload8",
+            "eq",
+            exec,
+        });
+    }
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_both = calldataload",
+        "eq a_take_both",
+        ": @abi_decode_revert_11",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "b_take_both = calldataload",
+        "eq b_take_both",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x100000",
+        "gt",
+        ": @abi_decode_revert_14",
+        "div",
+        "mul",
+        ": @abi_decode_revert_0",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "? @take_both_exec : @abi_decode_revert_11",
+    });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_14", "const 0xE", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_text"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_data"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_both"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_text a_take_text"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_data a_take_data"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_both_exec : @revert_error"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata u256 slice params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_values(values: slice[u256]) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_text_values(text: string, values: slice[u256]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_values = calldataload",
+        "eq a_take_values",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @take_values_exec : @abi_decode_revert_0",
+    });
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_text_values = calldataload",
+        "eq a_take_text_values",
+        ": @abi_decode_revert_11",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "b_take_text_values = calldataload",
+        "eq b_take_text_values",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @take_text_values_exec : @abi_decode_revert_0",
+    });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_9", "const 0x9", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "calldatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_values_exec : @revert_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_text_values_exec : @revert_error"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata address slice params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_addresses(values: slice[address]) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_text_addresses(text: string, values: slice[address]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_addresses = calldataload",
+        "eq a_take_addresses",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "and",
+        "eq",
+        "? @take_addresses_exec : @abi_decode_revert_5",
+    });
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_text_addresses = calldataload",
+        "eq a_take_text_addresses",
+        ": @abi_decode_revert_11",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "b_take_text_addresses = calldataload",
+        "eq b_take_text_addresses",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "and",
+        "eq",
+        "? @take_text_addresses_exec : @abi_decode_revert_5",
+    });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_5", "const 0x5", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_9", "const 0x9", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "calldatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_addresses_exec : @revert_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_text_addresses_exec : @revert_error"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata bool slice params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_bools(values: slice[bool]) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_text_bools(text: string, values: slice[bool]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_bools = calldataload",
+        "eq a_take_bools",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "eq",
+        "eq",
+        "or",
+        "? @take_bools_exec : @abi_decode_revert_4",
+    });
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_text_bools = calldataload",
+        "eq a_take_text_bools",
+        ": @abi_decode_revert_11",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "b_take_text_bools = calldataload",
+        "eq b_take_text_bools",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "eq",
+        "eq",
+        "or",
+        "? @take_text_bools_exec : @abi_decode_revert_4",
+    });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_4", "const 0x4", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_9", "const 0x9", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "calldatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_bools_exec : @revert_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_text_bools_exec : @revert_error"));
+}
+
+test "compiler abiDecode N3b4 validates public calldata fixed bytes slice params before call" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_tags(values: slice[bytes4]) -> bool {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn take_text_tags(text: string, values: slice[bytes4]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_tags = calldataload",
+        "eq a_take_tags",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "shr",
+        "shl",
+        "eq",
+        ": @abi_decode_revert_6",
+    });
+    try expectOrderedNeedles(main_fn, &.{
+        "a_take_text_tags = calldataload",
+        "eq a_take_text_tags",
+        ": @abi_decode_revert_11",
+        "calldatacopy",
+        "mload8",
+        "eq",
+        "b_take_text_tags = calldataload",
+        "eq b_take_text_tags",
+        ": @abi_decode_revert_11",
+        "calldatasize",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "large_const 0xFFFFFFFFFFFFFFFF",
+        "gt",
+        ": @abi_decode_revert_13",
+        "const 0x8000",
+        "gt",
+        ": @abi_decode_revert_9",
+        "mul",
+        "? @",
+        ": @abi_decode_revert_0",
+        "calldataload",
+        "shr",
+        "shl",
+        "eq",
+        ": @abi_decode_revert_6",
+    });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_6", "const 0x6", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_9", "const 0x9", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+    try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_tags"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @take_text_tags"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_tags_exec : @revert_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @take_text_tags_exec : @revert_error"));
+}
+
+test "compiler abiDecode N3b4 rejects unsupported nested dynamic calldata arrays before legacy fallback" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_nested(values: slice[slice[u256]]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+}
+
+test "compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before legacy fallback" {
+    const source_text =
+        \\contract Entry {
+        \\    pub fn take_pair(value: (u256, string)) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+}
+
+test "compiler abiDecode N3b5 validates dynamic constructor string and bytes calldata" {
+    const cases = [_][]const u8{
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(name: string) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(payload: bytes) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(name: string, payload: bytes) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+    };
+
+    for (cases) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+        try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+        const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+        defer testing.allocator.free(rendered);
+
+        const init_fn = try functionSlice(rendered, "init");
+        try expectOrderedNeedles(init_fn, &.{ "codesize", "init_end", "codecopy", "mload256", "eq", ": @init_abi_decode_revert_11" });
+        try expectOrderedNeedles(init_fn, &.{ "mload256", "gt", ": @init_abi_decode_revert_13" });
+        try expectOrderedNeedles(init_fn, &.{ "large_const 0xFFFFFFFFFFFFFFFF", "gt", ": @init_abi_decode_revert_13", "const 0x100000", "gt", ": @init_abi_decode_revert_14", "div", "mul", ": @init_abi_decode_revert_0", "mload8" });
+        try expectOrderedNeedles(init_fn, &.{ "mload8", "eq", "? @", ": @init_abi_decode_revert_11" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_14", "const 0xE", "mstore256", "revert" });
+        try testing.expect(std.mem.containsAtLeast(u8, init_fn, 1, "icall @__ora_user_init"));
+    }
+}
+
+test "compiler abiDecode N3b5 validates dynamic constructor slice calldata" {
+    const cases = [_][]const u8{
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(values: slice[u256]) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(owners: slice[address]) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(flags: slice[bool]) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(tags: slice[bytes4]) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+        \\contract Entry {
+        \\    storage var touched: u256 = 0;
+        \\    pub fn init(name: string, owners: slice[address]) {
+        \\        touched = 9;
+        \\    }
+        \\}
+        ,
+    };
+
+    for (cases) |source_text| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+        try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+        const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+        defer testing.allocator.free(rendered);
+
+        const init_fn = try functionSlice(rendered, "init");
+        try expectOrderedNeedles(init_fn, &.{ "codesize", "init_end", "codecopy", "mload256", "eq", ": @init_abi_decode_revert_11" });
+        try expectOrderedNeedles(init_fn, &.{ "mload256", "gt", ": @init_abi_decode_revert_13" });
+        try expectOrderedNeedles(init_fn, &.{ "large_const 0xFFFFFFFFFFFFFFFF", "gt", ": @init_abi_decode_revert_13", "const 0x8000", "gt", ": @init_abi_decode_revert_9", "mul", ": @init_abi_decode_revert_0" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_9", "const 0x9", "mstore256", "revert" });
+        try expectOrderedNeedles(init_fn, &.{ "init_abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+        try testing.expect(std.mem.containsAtLeast(u8, init_fn, 1, "icall @__ora_user_init"));
+    }
+}
+
+test "compiler abiDecode N3b5 validates dynamic Result carrier bounds before payload loads" {
+    const cases = [_]struct {
+        source: []const u8,
+        cap: []const u8,
+        cap_error: []const u8,
+        payload_needles: []const []const u8,
+    }{
+        .{
+            .source =
+            \\error Failure(code: u256);
+            \\
+            \\contract Entry {
+            \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
+            \\        return match (value) {
+            \\            Ok(inner) => inner.len,
+            \\            Err(err) => err.code,
+            \\        };
+            \\    }
+            \\}
+            ,
+            .cap = "const 0x100000",
+            .cap_error = ": @abi_decode_revert_14",
+            .payload_needles = &.{ ": @abi_decode_revert_0", "calldataload", "shr", "? @consume_exec : @abi_decode_revert_11" },
+        },
+        .{
+            .source =
+            \\error Failure(code: u256);
+            \\
+            \\contract Entry {
+            \\    pub fn consume(value: Result<slice[address], Failure>) -> u256 {
+            \\        return match (value) {
+            \\            Ok(inner) => 1,
+            \\            Err(err) => err.code,
+            \\        };
+            \\    }
+            \\}
+            ,
+            .cap = "const 0x8000",
+            .cap_error = ": @abi_decode_revert_9",
+            .payload_needles = &.{ ": @abi_decode_revert_0", "calldataload", "and", "eq", "? @consume_exec : @abi_decode_revert_5" },
+        },
+    };
+
+    for (cases) |case| {
+        var compilation = try compileText(case.source);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+        try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+        const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+        defer testing.allocator.free(rendered);
+
+        const main_fn = try functionSlice(rendered, "main");
+        try expectOrderedNeedles(main_fn, &.{ "calldatasize", ": @abi_decode_revert_0", "calldataload", "large_const 0xFFFFFFFFFFFFFFFF", "gt", ": @abi_decode_revert_13" });
+        try expectOrderedNeedles(main_fn, &.{ "large_const 0xFFFFFFFFFFFFFFFF", "gt", ": @abi_decode_revert_13", case.cap, "gt", case.cap_error, "mul", ": @abi_decode_revert_0" });
+        try expectOrderedNeedles(main_fn, case.payload_needles);
+        try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_0", "const 0x0", "mstore256", "revert" });
+        try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_11", "const 0xB", "mstore256", "revert" });
+        try expectOrderedNeedles(main_fn, &.{ "abi_decode_revert_13", "const 0xD", "mstore256", "revert" });
+        try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @consume"));
+        try testing.expect(!std.mem.containsAtLeast(u8, main_fn, 1, "? @consume_exec : @revert_error"));
+    }
+}
+
 test "compiler converts runtime abiDecode bool oversize priority through OraToSIR" {
     const source_text =
         \\contract Decode {

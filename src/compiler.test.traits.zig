@@ -90,6 +90,16 @@ fn mlirFunctionText(module_text: []const u8, fn_name: []const u8) ![]const u8 {
     return module_text[fn_start..fn_end];
 }
 
+fn expectReturndataGuardBeforePayloadLoad(function_text: []const u8) !void {
+    const size_index = std.mem.indexOf(u8, function_text, "sir.returndatasize") orelse return error.TestExpectedEqual;
+    const decode_region = function_text[size_index..];
+    try testing.expect(std.mem.containsAtLeast(u8, decode_region, 1, "sir.lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, decode_region, 1, "sir.gt"));
+    const branch_index = std.mem.indexOf(u8, decode_region, "sir.cond_br") orelse return error.TestExpectedEqual;
+    const load_index = std.mem.indexOf(u8, decode_region, "sir.load") orelse return error.TestExpectedEqual;
+    try testing.expect(branch_index < load_index);
+}
+
 fn expectSirBlockOperandsAreLocal(sir_text: []const u8, block_name: []const u8, op_name: []const u8) !void {
     var locals = std.ArrayList([]const u8){};
     defer locals.deinit(testing.allocator);
@@ -451,7 +461,7 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"staticcall\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"ERC20\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balanceOf\""));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "returndata_failure_error = \"ExternalCallFailed\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
 }
 
@@ -485,6 +495,9 @@ test "compiler converts trusted extern trait summaries through SIR" {
     defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
     const hir_text = hir_text_ref.data[0..hir_text_ref.length];
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "tuple(static(uint256))"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "returndata_failure_error = \"ExternalCallFailed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.is_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
 
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
@@ -493,8 +506,143 @@ test "compiler converts trusted extern trait summaries through SIR" {
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    const pull_fn = try mlirFunctionText(rendered, "pull");
+    try expectReturndataGuardBeforePayloadLoad(pull_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, pull_fn, 1, "sir.const 42"));
+    try testing.expect(!std.mem.containsAtLeast(u8, pull_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.assume"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+}
+
+test "compiler converts trusted extern trait summaries for strict static return shapes through SIR" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\
+        \\bitfield Flags: u8 {
+        \\    enabled: bool @0;
+        \\    mode: u7 @1;
+        \\}
+        \\
+        \\type PositiveAmount = MinValue<u256, 1>;
+        \\
+        \\extern trait Inspector {
+        \\    staticcall fn flag(self) -> bool
+        \\        ensures(result == result);
+        \\    staticcall fn owner(self) -> address
+        \\        ensures(result == result);
+        \\    staticcall fn small(self) -> u8
+        \\        ensures(result == result);
+        \\    staticcall fn delta(self) -> i8
+        \\        ensures(result == result);
+        \\    staticcall fn tag(self) -> bytes4
+        \\        ensures(result == result);
+        \\    staticcall fn status(self) -> Status
+        \\        ensures(result == result);
+        \\    staticcall fn flags(self) -> Flags
+        \\        ensures(result.enabled == result.enabled);
+        \\    staticcall fn positive(self) -> PositiveAmount
+        \\        ensures(result == result);
+        \\    staticcall fn pair(self) -> (u256, bool)
+        \\        ensures(result.0 == result.0)
+        \\        ensures(result.1 == result.1);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Caller {
+        \\    storage var target: address;
+        \\
+        \\    pub fn pullFlag() -> !bool | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).flag();
+        \\    }
+        \\
+        \\    pub fn pullOwner() -> !address | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).owner();
+        \\    }
+        \\
+        \\    pub fn pullSmall() -> !u8 | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).small();
+        \\    }
+        \\
+        \\    pub fn pullDelta() -> !i8 | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).delta();
+        \\    }
+        \\
+        \\    pub fn pullTag() -> !bytes4 | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).tag();
+        \\    }
+        \\
+        \\    pub fn pullStatus() -> !Status | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).status();
+        \\    }
+        \\
+        \\    pub fn pullFlags() -> !Flags | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).flags();
+        \\    }
+        \\
+        \\    pub fn pullPositive() -> !PositiveAmount | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).positive();
+        \\    }
+        \\
+        \\    pub fn pullPair() -> !(u256, bool) | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).pair();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 9, "returndata_failure_error = \"ExternalCallFailed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 9, "ora.error.is_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 9, "ora.error.unwrap"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    const flag_fn = try mlirFunctionText(rendered, "pullFlag");
+    const owner_fn = try mlirFunctionText(rendered, "pullOwner");
+    const small_fn = try mlirFunctionText(rendered, "pullSmall");
+    const delta_fn = try mlirFunctionText(rendered, "pullDelta");
+    const tag_fn = try mlirFunctionText(rendered, "pullTag");
+    const status_fn = try mlirFunctionText(rendered, "pullStatus");
+    const flags_fn = try mlirFunctionText(rendered, "pullFlags");
+    const positive_fn = try mlirFunctionText(rendered, "pullPositive");
+    const pair_fn = try mlirFunctionText(rendered, "pullPair");
+
+    for ([_][]const u8{
+        flag_fn,
+        owner_fn,
+        small_fn,
+        delta_fn,
+        tag_fn,
+        status_fn,
+        flags_fn,
+        positive_fn,
+        pair_fn,
+    }) |decode_fn| {
+        try expectReturndataGuardBeforePayloadLoad(decode_fn);
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.staticcall"));
+        try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "ora.abi_decode"));
+    }
+
+    try testing.expect(std.mem.containsAtLeast(u8, flag_fn, 1, "sir.const 4"));
+    try testing.expect(std.mem.containsAtLeast(u8, owner_fn, 1, "sir.const 5"));
+    try testing.expect(std.mem.containsAtLeast(u8, small_fn, 1, "sir.const 3"));
+    try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.const 3"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_fn, 1, "sir.const 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, status_fn, 1, "sir.const 7"));
+    try testing.expect(std.mem.containsAtLeast(u8, flags_fn, 1, "sir.const 3"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_fn, 1, "sir.const 10"));
+    try testing.expect(std.mem.containsAtLeast(u8, pair_fn, 1, "sir.const 4"));
 }
 
 test "compiler lowers extern trait calls with aggregate and enum parameters to ABI layouts" {
@@ -829,8 +977,12 @@ test "compiler converts call-kind extern traits with bool and address returns th
 
     const send_fn = try mlirFunctionText(rendered, "send");
     const owner_fn = try mlirFunctionText(rendered, "currentOwner");
+    try expectReturndataGuardBeforePayloadLoad(send_fn);
+    try expectReturndataGuardBeforePayloadLoad(owner_fn);
     try testing.expect(std.mem.containsAtLeast(u8, send_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, send_fn, 1, "sir.const 4"));
     try testing.expect(std.mem.containsAtLeast(u8, owner_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, owner_fn, 1, "sir.const 5"));
     try testing.expect(!std.mem.containsAtLeast(u8, send_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, owner_fn, 1, "ora.abi_decode"));
 }
@@ -886,12 +1038,18 @@ test "compiler converts extern trait calls with narrow integer returns through S
     const decimals_fn = try mlirFunctionText(rendered, "tokenDecimals");
     const fee_fn = try mlirFunctionText(rendered, "feeBps");
     const delta_fn = try mlirFunctionText(rendered, "delta");
+    try expectReturndataGuardBeforePayloadLoad(decimals_fn);
+    try expectReturndataGuardBeforePayloadLoad(fee_fn);
+    try expectReturndataGuardBeforePayloadLoad(delta_fn);
     try testing.expect(std.mem.containsAtLeast(u8, decimals_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, decimals_fn, 1, "sir.const 3"));
     try testing.expect(std.mem.containsAtLeast(u8, fee_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, fee_fn, 1, "sir.const 3"));
     try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.and"));
-    // Returndata projection is success-only today: signed narrow values are
-    // masked, not canonicalized through the memory/result sign-extension path.
-    try testing.expect(!std.mem.containsAtLeast(u8, delta_fn, 1, "sir.signextend"));
+    // N3c strict returndata decode validates signed narrow returns through the
+    // same sign-extension canonicality check as memory/result decode.
+    try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.signextend"));
+    try testing.expect(std.mem.containsAtLeast(u8, delta_fn, 1, "sir.const 3"));
     try testing.expect(!std.mem.containsAtLeast(u8, decimals_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, fee_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, delta_fn, 1, "ora.abi_decode"));
@@ -933,6 +1091,138 @@ test "compiler converts extern trait calls with dynamic bytes and string returns
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatasize"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+
+    const name_fn = try mlirFunctionText(rendered, "tokenName");
+    const symbol_fn = try mlirFunctionText(rendered, "tokenSymbolBytes");
+    for ([_][]const u8{ name_fn, symbol_fn }) |decode_fn| {
+        try expectReturndataGuardBeforePayloadLoad(decode_fn);
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.load8"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.const 0"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.const 1"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.const 11"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.const 13"));
+        try testing.expect(std.mem.containsAtLeast(u8, decode_fn, 1, "sir.const 14"));
+        try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "ora.abi_decode"));
+    }
+}
+
+test "compiler converts extern trait dynamic array and mixed dynamic returns through strict returndata decode" {
+    const source_text =
+        \\extern trait Portfolio {
+        \\    staticcall fn values(self) -> slice[u256];
+        \\    staticcall fn owners(self) -> slice[address];
+        \\    staticcall fn flags(self) -> slice[bool];
+        \\    staticcall fn tags(self) -> slice[bytes4];
+        \\    staticcall fn quoteText(self) -> (u256, string);
+        \\    staticcall fn quoteBlob(self) -> (u256, bytes);
+        \\    staticcall fn quoteValues(self) -> (u256, slice[u256]);
+        \\    staticcall fn quoteOwners(self) -> (u256, slice[address]);
+        \\    staticcall fn quoteFlags(self) -> (u256, slice[bool]);
+        \\    staticcall fn quoteTags(self) -> (u256, slice[bytes4]);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var target: address;
+        \\
+        \\    pub fn valuesView() -> !slice[u256] | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).values();
+        \\    }
+        \\
+        \\    pub fn ownersView() -> !slice[address] | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).owners();
+        \\    }
+        \\
+        \\    pub fn flagsView() -> !slice[bool] | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).flags();
+        \\    }
+        \\
+        \\    pub fn tagsView() -> !slice[bytes4] | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).tags();
+        \\    }
+        \\
+        \\    pub fn quoteTextView() -> !(u256, string) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteText();
+        \\    }
+        \\
+        \\    pub fn quoteBlobView() -> !(u256, bytes) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteBlob();
+        \\    }
+        \\
+        \\    pub fn quoteValuesView() -> !(u256, slice[u256]) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteValues();
+        \\    }
+        \\
+        \\    pub fn quoteOwnersView() -> !(u256, slice[address]) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteOwners();
+        \\    }
+        \\
+        \\    pub fn quoteFlagsView() -> !(u256, slice[bool]) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteFlags();
+        \\    }
+        \\
+        \\    pub fn quoteTagsView() -> !(u256, slice[bytes4]) | ExternalCallFailed {
+        \\        return external<Portfolio>(target, gas: 50000).quoteTags();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 10, "returndata_failure_error = \"ExternalCallFailed\""));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatasize"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
+
+    const values_fn = try mlirFunctionText(rendered, "valuesView");
+    const owners_fn = try mlirFunctionText(rendered, "ownersView");
+    const flags_fn = try mlirFunctionText(rendered, "flagsView");
+    const tags_fn = try mlirFunctionText(rendered, "tagsView");
+    const quote_text_fn = try mlirFunctionText(rendered, "quoteTextView");
+    const quote_blob_fn = try mlirFunctionText(rendered, "quoteBlobView");
+    const quote_values_fn = try mlirFunctionText(rendered, "quoteValuesView");
+    const quote_owners_fn = try mlirFunctionText(rendered, "quoteOwnersView");
+    const quote_flags_fn = try mlirFunctionText(rendered, "quoteFlagsView");
+    const quote_tags_fn = try mlirFunctionText(rendered, "quoteTagsView");
+
+    for ([_][]const u8{
+        values_fn,
+        owners_fn,
+        flags_fn,
+        tags_fn,
+        quote_text_fn,
+        quote_blob_fn,
+        quote_values_fn,
+        quote_owners_fn,
+        quote_flags_fn,
+        quote_tags_fn,
+    }) |decode_fn| {
+        try expectReturndataGuardBeforePayloadLoad(decode_fn);
+        try testing.expect(!std.mem.containsAtLeast(u8, decode_fn, 1, "ora.abi_decode"));
+    }
+
+    try testing.expect(std.mem.containsAtLeast(u8, owners_fn, 1, "sir.const 5"));
+    try testing.expect(std.mem.containsAtLeast(u8, flags_fn, 1, "sir.const 4"));
+    try testing.expect(std.mem.containsAtLeast(u8, tags_fn, 1, "sir.const 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_text_fn, 1, "sir.load8"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_blob_fn, 1, "sir.load8"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_owners_fn, 1, "sir.const 5"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_flags_fn, 1, "sir.const 4"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_tags_fn, 1, "sir.const 6"));
 }
 
 test "compiler converts extern trait fixed bytes returns using ABI layout" {
@@ -986,17 +1276,95 @@ test "compiler converts extern trait fixed bytes returns using ABI layout" {
     const tag_one_fn = try mlirFunctionText(rendered, "tagOne");
     const tag_view_fn = try mlirFunctionText(rendered, "tagView");
     const tag_full_fn = try mlirFunctionText(rendered, "tagFull");
+    try expectReturndataGuardBeforePayloadLoad(tag_one_fn);
+    try expectReturndataGuardBeforePayloadLoad(tag_view_fn);
+    try expectReturndataGuardBeforePayloadLoad(tag_full_fn);
     try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.shr"));
     try testing.expect(std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.shr"));
-    // Returndata bytesN projection extracts the high N bytes only. The
-    // memory/result validation path would shift back up before comparing.
-    try testing.expect(!std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.shl"));
-    try testing.expect(!std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.shl"));
+    // N3c strict returndata decode shifts back up and compares the ABI word so
+    // malformed bytesN padding cannot be silently projected.
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.shl"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_one_fn, 1, "sir.const 6"));
+    try testing.expect(std.mem.containsAtLeast(u8, tag_view_fn, 1, "sir.const 6"));
     try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "sir.shr"));
     try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "sir.shl"));
     try testing.expect(!std.mem.containsAtLeast(u8, tag_one_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, tag_view_fn, 1, "ora.abi_decode"));
     try testing.expect(!std.mem.containsAtLeast(u8, tag_full_fn, 1, "ora.abi_decode"));
+}
+
+test "compiler converts extern trait enum bitfield and refinement returns through strict returndata decode" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\
+        \\bitfield Flags: u8 {
+        \\    enabled: bool @0;
+        \\    mode: u7 @1;
+        \\}
+        \\
+        \\type PositiveAmount = MinValue<u256, 1>;
+        \\
+        \\extern trait Inspector {
+        \\    staticcall fn status(self) -> Status;
+        \\    staticcall fn flags(self) -> Flags;
+        \\    staticcall fn positive(self) -> PositiveAmount;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var target: address;
+        \\
+        \\    pub fn currentStatus() -> !Status | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).status();
+        \\    }
+        \\
+        \\    pub fn currentFlags() -> !Flags | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).flags();
+        \\    }
+        \\
+        \\    pub fn positiveAmount() -> !PositiveAmount | ExternalCallFailed {
+        \\        return external<Inspector>(target, gas: 50000).positive();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_text = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "returndata_failure_error = \"ExternalCallFailed\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "enum_variant_count"));
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    const status_fn = try mlirFunctionText(rendered, "currentStatus");
+    const flags_fn = try mlirFunctionText(rendered, "currentFlags");
+    const positive_fn = try mlirFunctionText(rendered, "positiveAmount");
+    try expectReturndataGuardBeforePayloadLoad(status_fn);
+    try expectReturndataGuardBeforePayloadLoad(flags_fn);
+    try expectReturndataGuardBeforePayloadLoad(positive_fn);
+
+    try testing.expect(std.mem.containsAtLeast(u8, status_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, status_fn, 2, "sir.lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, status_fn, 1, "sir.const 7"));
+    try testing.expect(std.mem.containsAtLeast(u8, flags_fn, 1, "sir.and"));
+    try testing.expect(std.mem.containsAtLeast(u8, flags_fn, 1, "sir.eq"));
+    try testing.expect(std.mem.containsAtLeast(u8, flags_fn, 1, "sir.const 3"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_fn, 2, "sir.lt"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_fn, 1, "sir.iszero"));
+    try testing.expect(std.mem.containsAtLeast(u8, positive_fn, 1, "sir.const 10"));
+    try testing.expect(!std.mem.containsAtLeast(u8, status_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, flags_fn, 1, "ora.abi_decode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, positive_fn, 1, "ora.abi_decode"));
 }
 
 test "compiler converts extern trait calls with static struct returns through SIR" {
@@ -1307,6 +1675,10 @@ test "compiler converts extern trait calls with tuple returns through SIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.staticcall"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.returndatacopy"));
+    const quote_fn = try mlirFunctionText(rendered, "quoteView");
+    try expectReturndataGuardBeforePayloadLoad(quote_fn);
+    try testing.expect(std.mem.containsAtLeast(u8, quote_fn, 1, "sir.or"));
+    try testing.expect(std.mem.containsAtLeast(u8, quote_fn, 1, "sir.const 4"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
 }
 

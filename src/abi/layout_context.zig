@@ -76,8 +76,9 @@ pub const LayoutContext = struct {
 
         if (!self.resultInputCarrierShapeSupported(err_ty)) return null;
         if (payload_words != null and payload_words.? == 1) {
-            const error_words = self.staticWordCountForType(err_ty) orelse return null;
-            if (error_words > 1) return null;
+            if (self.staticWordCountForType(err_ty)) |error_words| {
+                if (error_words > 1) return null;
+            }
         }
         return .{ .mode = .wide_single_error, .payload = payload, .err = err_ty };
     }
@@ -277,7 +278,32 @@ pub const LayoutContext = struct {
             .bytes, .string => true,
             .slice => |slice| self.resultInputDynamicArrayElementSupported(slice.element_type.*),
             .array => |array| array.len == null and self.resultInputDynamicArrayElementSupported(array.element_type.*),
+            .anonymous_struct => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (!self.resultInputCarrierShapeSupported(field.ty)) return false;
+                }
+                return true;
+            },
+            .tuple => |elements| {
+                for (elements) |element| {
+                    if (!self.resultInputCarrierShapeSupported(element)) return false;
+                }
+                return true;
+            },
             .refinement => |refinement| self.resultInputCarrierShapeSupported(refinement.base_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .ErrorDecl => |error_decl| error_blk: {
+                        for (error_decl.parameters) |parameter| {
+                            const payload = self.typecheck.pattern_types[parameter.pattern.index()].type;
+                            if (!self.resultInputCarrierShapeSupported(payload)) break :error_blk false;
+                        }
+                        break :error_blk true;
+                    },
+                    else => false,
+                };
+            },
             else => false,
         };
     }

@@ -1,0 +1,13 @@
+error Failure();
+
+contract AbiDecodeResultCarrierRevert {
+    storage var touched: u256 = 0;
+
+    pub fn consume(value: Result<bytes, Failure>) -> u256 {
+        touched = 10;
+        return match(value) {
+            Ok(inner) -> inner.len,
+            Err(_) -> 0,
+        };
+    }
+}

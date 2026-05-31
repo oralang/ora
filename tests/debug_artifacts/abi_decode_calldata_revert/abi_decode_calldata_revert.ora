@@ -1,0 +1,53 @@
+enum Status: u8 {
+    Active,
+    Paused,
+}
+
+type Positive = MinValue<u256, 1>;
+
+contract AbiDecodeCalldataRevert {
+    storage var touched: u256 = 0;
+
+    pub fn accept_bool(flag: bool) -> u256 {
+        touched = 1;
+        if (flag) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn accept_address(to: address) -> u256 {
+        touched = 2;
+        return 2;
+    }
+
+    pub fn accept_bytes4(tag: bytes4) -> u256 {
+        touched = 3;
+        return 3;
+    }
+
+    pub fn accept_u8(value: u8) -> u256 {
+        touched = 4;
+        return 4;
+    }
+
+    pub fn accept_status(status: Status) -> u256 {
+        touched = 5;
+        return 5;
+    }
+
+    pub fn accept_positive(value: Positive) -> u256 {
+        touched = 6;
+        return 6;
+    }
+
+    pub fn accept_text(text: string) -> u256 {
+        touched = 7;
+        return 7;
+    }
+
+    pub fn accept_addresses(values: slice[address]) -> u256 {
+        touched = 8;
+        return 8;
+    }
+}
