@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("ora_types").builtin;
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 
@@ -249,7 +250,9 @@ pub fn staticWordCountFromType(allocator: std.mem.Allocator, ty: sema.Type) !?us
 
 pub fn staticWordCountForType(ty: sema.Type) ?usize {
     return switch (ty) {
-        .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
+        .bool, .address, .enum_, .bitfield => 1,
+        .fixed_bytes => |fixed_bytes| if (fixedBytesLen(fixed_bytes)) |_| 1 else |_| null,
+        .integer => |integer| if (integerEncoding(integer)) |_| 1 else |_| null,
         .named => |named| if (parseFixedBytesSpelling(named.name) != null) 1 else null,
         .refinement => |refinement| staticWordCountForType(refinement.base_type.*),
         // Keep the legacy API boundary: `hir.abi.staticAbiWordCount` did not
@@ -314,17 +317,13 @@ pub fn serializeForMlirAttr(allocator: std.mem.Allocator, node: LayoutNode) ![]c
 }
 
 pub fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-    if (!std.mem.startsWith(u8, name, "bytes")) return null;
-    if (name.len <= "bytes".len) return null;
-    const digits = name["bytes".len..];
-    if (digits.len > 1 and digits[0] == '0') return null;
-    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-    if (len < 1 or len > 32) return null;
-    return len;
+    return builtin.parseFixedBytesName(name);
 }
 
 fn fixedBytesLen(fixed_bytes: sema.FixedBytesType) !u8 {
-    if (fixed_bytes.len < 1 or fixed_bytes.len > 32) return error.InvalidFixedBytesWidth;
+    if (fixed_bytes.len < builtin.fixed_bytes_min_len or fixed_bytes.len > builtin.fixed_bytes_max_len) {
+        return error.InvalidFixedBytesWidth;
+    }
     return fixed_bytes.len;
 }
 
@@ -344,22 +343,12 @@ fn childPath(allocator: std.mem.Allocator, parent: []const ValuePathSegment, seg
 }
 
 fn integerEncoding(integer: sema_model.IntegerType) !StaticEncoding {
-    const signed = integer.signed orelse signedFromSpelling(integer.spelling) orelse false;
-    const bits = integer.bits orelse bitsFromSpelling(integer.spelling) orelse 256;
-    if (bits == 0 or bits > 256 or bits % 8 != 0) return error.InvalidIntegerWidth;
-    return if (signed) .{ .int = bits } else .{ .uint = bits };
-}
-
-fn signedFromSpelling(spelling: ?[]const u8) ?bool {
-    const text = spelling orelse return null;
-    if (std.mem.startsWith(u8, text, "u")) return false;
-    if (std.mem.startsWith(u8, text, "i")) return true;
-    return null;
-}
-
-fn bitsFromSpelling(spelling: ?[]const u8) ?u16 {
-    const text = spelling orelse return null;
-    if (text.len < 2) return null;
-    if (text[0] != 'u' and text[0] != 'i') return null;
-    return std.fmt.parseUnsigned(u16, text[1..], 10) catch null;
+    const signed = integer.signed orelse return error.InvalidIntegerWidth;
+    const bits = integer.bits orelse return error.InvalidIntegerWidth;
+    const spec = builtin.lookupIntegerBuiltin(signed, bits) orelse return error.InvalidIntegerWidth;
+    const width = spec.bit_width orelse return error.InvalidIntegerWidth;
+    return if (spec.signed orelse return error.InvalidIntegerWidth)
+        .{ .int = width }
+    else
+        .{ .uint = width };
 }

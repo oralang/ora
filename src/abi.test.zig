@@ -1139,6 +1139,42 @@ test "abi layout canonical strings match existing ABI helper for static types" {
     try testing.expectEqualStrings("(uint256,address,bool,bytes4)", tuple_text);
 }
 
+test "abi layout derives primitive family checks from builtin types" {
+    const allocator = testing.allocator;
+    const sema = compiler.sema;
+
+    const u160_ty: sema.Type = .{ .integer = .{ .bits = 160, .signed = false, .spelling = "u160" } };
+    const u160_text = try abi_layout.canonicalAbiTypeFromType(allocator, u160_ty);
+    defer allocator.free(u160_text);
+    try testing.expectEqualStrings("uint160", u160_text);
+    try testing.expectEqual(@as(?usize, 1), abi_layout.staticWordCountForType(u160_ty));
+
+    const u24_ty: sema.Type = .{ .integer = .{ .bits = 24, .signed = false, .spelling = "u24" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, u24_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(u24_ty));
+
+    const i96_ty: sema.Type = .{ .integer = .{ .bits = 96, .signed = true, .spelling = "i96" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, i96_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(i96_ty));
+
+    const missing_bits_ty: sema.Type = .{ .integer = .{ .signed = false, .spelling = "u256" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, missing_bits_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(missing_bits_ty));
+
+    const missing_signedness_ty: sema.Type = .{ .integer = .{ .bits = 256, .spelling = "u256" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, missing_signedness_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(missing_signedness_ty));
+
+    const bytes33_ty: sema.Type = .{ .fixed_bytes = .{ .len = 33, .spelling = "bytes33" } };
+    try testing.expectError(error.InvalidFixedBytesWidth, abi_layout.canonicalAbiTypeFromType(allocator, bytes33_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(bytes33_ty));
+
+    try testing.expectEqual(@as(?u8, 20), abi_layout.parseFixedBytesSpelling("bytes20"));
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes01") == null);
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes+5") == null);
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes1_6") == null);
+}
+
 test "abi layout classifies static and dynamic aggregate shapes" {
     const allocator = testing.allocator;
     const sema = compiler.sema;
