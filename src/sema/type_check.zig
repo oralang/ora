@@ -449,8 +449,11 @@ pub fn typeCheck(
         .expr_effects = expr_effects,
         .effect_states = effect_states,
         .instantiated_structs = .{},
+        .instantiated_struct_lookup = std.StringHashMap(usize).init(arena),
         .instantiated_enums = .{},
+        .instantiated_enum_lookup = std.StringHashMap(usize).init(arena),
         .instantiated_bitfields = .{},
+        .instantiated_bitfield_lookup = std.StringHashMap(usize).init(arena),
         .trait_interfaces = .{},
         .impl_interfaces = .{},
         .catch_error_tag_patterns = catch_error_tag_patterns,
@@ -574,8 +577,11 @@ const TypeChecker = struct {
     expr_effects: []Effect,
     effect_states: []EffectSummaryState,
     instantiated_structs: std.ArrayList(InstantiatedStruct),
+    instantiated_struct_lookup: std.StringHashMap(usize),
     instantiated_enums: std.ArrayList(InstantiatedEnum),
+    instantiated_enum_lookup: std.StringHashMap(usize),
     instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
+    instantiated_bitfield_lookup: std.StringHashMap(usize),
     trait_interfaces: std.ArrayList(TraitInterface),
     impl_interfaces: std.ArrayList(ImplInterface),
     catch_error_tag_patterns: []bool = &.{},
@@ -5317,7 +5323,7 @@ const TypeChecker = struct {
                     .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
                 };
             }
-            try self.instantiated_structs.append(self.arena, .{
+            try self.appendInstantiatedStruct(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .fields = fields,
@@ -5361,10 +5367,15 @@ const TypeChecker = struct {
     }
 
     fn instantiatedStructByName(self: *const TypeChecker, name: []const u8) ?InstantiatedStruct {
-        for (self.instantiated_structs.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_struct_lookup.get(name) orelse return null;
+        return self.instantiated_structs.items[index];
+    }
+
+    fn appendInstantiatedStruct(self: *TypeChecker, instantiated: InstantiatedStruct) !void {
+        std.debug.assert(self.instantiated_struct_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_structs.items.len;
+        try self.instantiated_structs.append(self.arena, instantiated);
+        try self.instantiated_struct_lookup.put(instantiated.mangled_name, index);
     }
 
     fn instantiateGenericEnum(
@@ -5379,7 +5390,7 @@ const TypeChecker = struct {
 
         if (self.instantiatedEnumByName(mangled_name) == null) {
             const variants = try self.resolveEnumVariantPayloads(enum_item, bindings);
-            try self.instantiated_enums.append(self.arena, .{
+            try self.appendInstantiatedEnum(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .repr_type = if (enum_item.base_type) |type_expr|
@@ -5472,10 +5483,15 @@ const TypeChecker = struct {
     }
 
     fn instantiatedEnumByName(self: *const TypeChecker, name: []const u8) ?InstantiatedEnum {
-        for (self.instantiated_enums.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_enum_lookup.get(name) orelse return null;
+        return self.instantiated_enums.items[index];
+    }
+
+    fn appendInstantiatedEnum(self: *TypeChecker, instantiated: InstantiatedEnum) !void {
+        std.debug.assert(self.instantiated_enum_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_enums.items.len;
+        try self.instantiated_enums.append(self.arena, instantiated);
+        try self.instantiated_enum_lookup.put(instantiated.mangled_name, index);
     }
 
     fn enumHasPayload(self: *const TypeChecker, name: []const u8) bool {
@@ -5516,7 +5532,7 @@ const TypeChecker = struct {
                     .width = field.width,
                 };
             }
-            try self.instantiated_bitfields.append(self.arena, .{
+            try self.appendInstantiatedBitfield(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .base_type = if (bitfield_item.base_type) |type_expr|
@@ -5620,10 +5636,15 @@ const TypeChecker = struct {
     }
 
     fn instantiatedBitfieldByName(self: *const TypeChecker, name: []const u8) ?InstantiatedBitfield {
-        for (self.instantiated_bitfields.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_bitfield_lookup.get(name) orelse return null;
+        return self.instantiated_bitfields.items[index];
+    }
+
+    fn appendInstantiatedBitfield(self: *TypeChecker, instantiated: InstantiatedBitfield) !void {
+        std.debug.assert(self.instantiated_bitfield_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_bitfields.items.len;
+        try self.instantiated_bitfields.append(self.arena, instantiated);
+        try self.instantiated_bitfield_lookup.put(instantiated.mangled_name, index);
     }
 
     fn builtinReturnType(self: *TypeChecker, builtin: ast.BuiltinExpr) Type {

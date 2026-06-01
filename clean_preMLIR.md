@@ -1235,6 +1235,14 @@ Examples of duplicated lookup shape include:
 - Impl method lookup by trait and target type.
 - Instantiated struct/enum/bitfield/interface lookup by name.
 
+Current status:
+
+- Struct-literal field lookup is indexed.
+- Enum-variant lookup is indexed for sema/HIR/comptime consumers.
+- Instantiated struct/enum/bitfield lookup is indexed both in the stable
+  `TypeCheckResult` and in the live `TypeChecker` while generic instantiations
+  are being created.
+
 Plan:
 
 - Add sema-owned lookup indexes built from durable query results and allocated
