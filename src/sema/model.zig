@@ -1,6 +1,7 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const lookup_index = @import("lookup.zig");
 const source = @import("../source/mod.zig");
 const BigInt = std.math.big.int.Managed;
 
@@ -681,6 +682,7 @@ pub const ItemIndexResult = struct {
     arena: std.heap.ArenaAllocator,
     entries: []NamedItem,
     impl_entries: []ImplEntry,
+    impl_lookup: []lookup_index.PairEntry,
 
     pub fn deinit(self: *ItemIndexResult) void {
         self.arena.deinit();
@@ -701,12 +703,8 @@ pub const ItemIndexResult = struct {
     }
 
     pub fn lookupImpl(self: *const ItemIndexResult, trait_name: []const u8, target_name: []const u8) ?ast.ItemId {
-        for (self.impl_entries) |entry| {
-            if (std.mem.eql(u8, entry.trait_name, trait_name) and std.mem.eql(u8, entry.target_name, target_name)) {
-                return entry.item_id;
-            }
-        }
-        return null;
+        const index = lookup_index.findPair(self.impl_lookup, trait_name, target_name) orelse return null;
+        return self.impl_entries[index].item_id;
     }
 };
 
@@ -734,10 +732,15 @@ pub const TypeCheckResult = struct {
     expr_effects: []Effect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
+    instantiated_struct_lookup: []lookup_index.NamedEntry,
     instantiated_enums: []const InstantiatedEnum,
+    instantiated_enum_lookup: []lookup_index.NamedEntry,
     instantiated_bitfields: []const InstantiatedBitfield,
+    instantiated_bitfield_lookup: []lookup_index.NamedEntry,
     trait_interfaces: []const TraitInterface,
+    trait_interface_lookup: []lookup_index.NamedEntry,
     impl_interfaces: []const ImplInterface,
+    impl_interface_lookup: []lookup_index.PairEntry,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *TypeCheckResult) void {
@@ -773,42 +776,28 @@ pub const TypeCheckResult = struct {
     }
 
     pub fn instantiatedStructByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedStruct {
-        for (self.instantiated_structs) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_struct_lookup, name) orelse return null;
+        return self.instantiated_structs[index];
     }
 
     pub fn instantiatedEnumByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedEnum {
-        for (self.instantiated_enums) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_enum_lookup, name) orelse return null;
+        return self.instantiated_enums[index];
     }
 
     pub fn instantiatedBitfieldByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedBitfield {
-        for (self.instantiated_bitfields) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_bitfield_lookup, name) orelse return null;
+        return self.instantiated_bitfields[index];
     }
 
     pub fn traitInterfaceByName(self: *const TypeCheckResult, name: []const u8) ?TraitInterface {
-        for (self.trait_interfaces) |trait_interface| {
-            if (std.mem.eql(u8, trait_interface.name, name)) return trait_interface;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.trait_interface_lookup, name) orelse return null;
+        return self.trait_interfaces[index];
     }
 
     pub fn implInterfaceByNames(self: *const TypeCheckResult, trait_name: []const u8, target_name: []const u8) ?ImplInterface {
-        for (self.impl_interfaces) |impl_interface| {
-            if (std.mem.eql(u8, impl_interface.trait_name, trait_name) and
-                std.mem.eql(u8, impl_interface.target_name, target_name))
-            {
-                return impl_interface;
-            }
-        }
-        return null;
+        const index = lookup_index.findPair(self.impl_interface_lookup, trait_name, target_name) orelse return null;
+        return self.impl_interfaces[index];
     }
 };
 

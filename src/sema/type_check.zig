@@ -6,6 +6,7 @@ const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 const descriptors = @import("type_descriptors.zig");
 const region_rules = @import("region.zig");
+const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
@@ -359,10 +360,15 @@ pub fn typeCheck(
         .expr_effects = &.{},
         .body_types = &.{},
         .instantiated_structs = &.{},
+        .instantiated_struct_lookup = &.{},
         .instantiated_enums = &.{},
+        .instantiated_enum_lookup = &.{},
         .instantiated_bitfields = &.{},
+        .instantiated_bitfield_lookup = &.{},
         .trait_interfaces = &.{},
+        .trait_interface_lookup = &.{},
         .impl_interfaces = &.{},
+        .impl_interface_lookup = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -536,10 +542,15 @@ pub fn typeCheck(
     result.expr_effects = expr_effects;
     result.body_types = body_types;
     result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
+    result.instantiated_struct_lookup = try lookup_index.buildNamed(InstantiatedStruct, arena, result.instantiated_structs, "mangled_name");
     result.instantiated_enums = try typechecker.instantiated_enums.toOwnedSlice(arena);
+    result.instantiated_enum_lookup = try lookup_index.buildNamed(InstantiatedEnum, arena, result.instantiated_enums, "mangled_name");
     result.instantiated_bitfields = try typechecker.instantiated_bitfields.toOwnedSlice(arena);
+    result.instantiated_bitfield_lookup = try lookup_index.buildNamed(InstantiatedBitfield, arena, result.instantiated_bitfields, "mangled_name");
     result.trait_interfaces = try typechecker.trait_interfaces.toOwnedSlice(arena);
+    result.trait_interface_lookup = try lookup_index.buildNamed(TraitInterface, arena, result.trait_interfaces, "name");
     result.impl_interfaces = try typechecker.impl_interfaces.toOwnedSlice(arena);
+    result.impl_interface_lookup = try lookup_index.buildPair(ImplInterface, arena, result.impl_interfaces, "trait_name", "target_name");
     return result;
 }
 

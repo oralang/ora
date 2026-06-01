@@ -600,10 +600,15 @@ pub const CompilerDb = struct {
             .expr_effects = expr_effects,
             .body_types = body_types,
             .instantiated_structs = &.{},
+            .instantiated_struct_lookup = &.{},
             .instantiated_enums = &.{},
+            .instantiated_enum_lookup = &.{},
             .instantiated_bitfields = &.{},
+            .instantiated_bitfield_lookup = &.{},
             .trait_interfaces = &.{},
+            .trait_interface_lookup = &.{},
             .impl_interfaces = &.{},
+            .impl_interface_lookup = &.{},
             .diagnostics = diagnostics.DiagnosticList.init(self.allocator),
         };
 

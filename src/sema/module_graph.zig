@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const lookup = @import("lookup.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 
@@ -114,6 +115,7 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .arena = std.heap.ArenaAllocator.init(allocator),
         .entries = &[_]NamedItem{},
         .impl_entries = &[_]ImplEntry{},
+        .impl_lookup = &[_]lookup.PairEntry{},
     };
     errdefer result.deinit();
 
@@ -130,6 +132,7 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     }.lessThan);
     result.entries = try entries.toOwnedSlice(arena);
     result.impl_entries = try impl_entries.toOwnedSlice(arena);
+    result.impl_lookup = try lookup.buildPair(ImplEntry, arena, result.impl_entries, "trait_name", "target_name");
     return result;
 }
 
