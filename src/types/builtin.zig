@@ -46,9 +46,9 @@ pub const fixed_bytes_type_id_max: u32 = fixed_bytes_type_id_base + fixed_bytes_
 pub const abi_decode_error_type_id: u32 = 900_000;
 pub const named_type_id_base: u32 = 1_000_000;
 
-// TODO(typeid-audit): classify this observed comptime test fixture value as
-// test-only or move it into a documented reserved band.
-const known_test_sentinel_type_id: u32 = 100;
+// Audited test-only sentinels from comptime heap/value/pool unit tests. Keep
+// them out of reserved bands so tests cannot accidentally alias production IDs.
+const known_test_sentinel_type_ids = [_]u32{ 42, 100 };
 
 pub const builtin_types = [_]BuiltinTypeSpec{
     .{ .id = .u8, .source_name = "u8", .category = .Integer, .bit_width = 8, .byte_width = 1, .signed = false, .comptime_type_id = 1 },
@@ -249,12 +249,14 @@ fn assertBuiltinTable() void {
     if (abi_decode_error_type_id >= named_type_id_base) {
         @compileError("ABI decode error TypeId must remain below named TypeId band");
     }
-    if (lookupBuiltinByComptimeTypeId(known_test_sentinel_type_id) != null or
-        fixedBytesLenForTypeId(known_test_sentinel_type_id) != null or
-        known_test_sentinel_type_id == abi_decode_error_type_id or
-        known_test_sentinel_type_id >= named_type_id_base)
-    {
-        @compileError("known test/sentinel TypeId collides with a reserved band");
+    for (known_test_sentinel_type_ids) |sentinel_type_id| {
+        if (lookupBuiltinByComptimeTypeId(sentinel_type_id) != null or
+            fixedBytesLenForTypeId(sentinel_type_id) != null or
+            sentinel_type_id == abi_decode_error_type_id or
+            sentinel_type_id >= named_type_id_base)
+        {
+            @compileError("known test-only TypeId collides with a reserved band");
+        }
     }
 }
 

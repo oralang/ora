@@ -340,11 +340,12 @@ bytes, ABI-decode error encoding, and named types. Current known bands are:
 
 - primitive static builtins: `1..18` (`u160` is assigned `18`; existing IDs
   remain frozen)
-- local test/sentinel IDs such as `100` in comptime value/pool tests, to be
-  classified as either reserved or test-only
+- local test-only sentinels: `42` in the comptime heap tests and `100` in the
+  comptime value/pool tests
 - fixed bytes: `500_000 + len`, currently `500_001..500_032`
 - ABI decode error ADT: `900_000`
-- named types: `1_000_000 + module_offset + item_offset`
+- named types:
+  `1_000_000 + module_component * 100_000 + item_component`
 
 Roughly two hundred sites consume these IDs. If any ID value is baked into
 emitted artifacts, reordering or regenerating the enum silently changes output.
@@ -369,6 +370,41 @@ Outcome:
   assignments with lighter compile-time invariants.
 - Add comptime assertions that static builtin IDs are unique, all known bands
   are disjoint, and formulas cannot collide with primitive or special bands.
+
+Audit result, 2026-06-01:
+
+- Numeric comptime `TypeId` values are currently an in-memory compiler contract,
+  not an external artifact contract.
+- `src/comptime/value.zig` and `src/comptime/compiler_ast_eval.zig` are the
+  production numeric authorities today. `src/abi/comptime_decoder.zig` receives
+  IDs through a resolver and stores them only inside evaluator `CtValue`
+  enum/struct values.
+- `src/sema/model.zig` `ConstValue` does not carry comptime `TypeId`, and HIR
+  lowering emits MLIR attributes from that sema value model, not from comptime
+  numeric IDs. Non-folded type values lower as the `"ora.type_value"`
+  placeholder, not as a numeric ID.
+- Debug artifacts format sema `ConstValue` through `formatConstDebugValue`;
+  those formatted values do not include comptime `TypeId`.
+- ABI manifest `typeId` fields in `src/abi.zig` are hashed string IDs from the
+  ABI canonical payload (`t:...`), separate from comptime `u32` TypeIds.
+- `src/comptime/value.zig` `ConstValue` and `src/comptime/pool.zig` preserve
+  TypeIds, but the pool is not currently wired to a serializer or emitted cache.
+- The only observed raw sentinel IDs are test-only: `42` in
+  `src/comptime/heap.zig` tests and `100` in `src/comptime/value.zig` /
+  `src/comptime/pool.zig` tests.
+
+Guard decision:
+
+- No external golden/snapshot guard is required for the current code because no
+  emitted MLIR, ABI manifest, debug artifact, or serialized cache was found to
+  contain numeric comptime `TypeId` values.
+- The numeric assignments still remain frozen as an internal compiler ABI.
+  Phase 4 may replace duplicated lookup code with table-derived code, but must
+  preserve the explicit primitive IDs and the existing formulas for fixed bytes,
+  ABI-decode error, and named types.
+- If a future compiler cache or debug/ABI/MLIR sink starts serializing numeric
+  comptime `TypeId`, that change must add a golden/snapshot guard and document
+  the IDs as an external contract before it lands.
 
 ### Phase 1: Add Central Builtin Metadata
 
