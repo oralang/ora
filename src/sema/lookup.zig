@@ -62,6 +62,11 @@ pub fn findNamed(entries: []const NamedEntry, name: []const u8) ?usize {
     return entries[left].index;
 }
 
+pub fn findNamedItem(comptime T: type, items: []const T, entries: []const NamedEntry, name: []const u8) ?T {
+    const index = findNamed(entries, name) orelse return null;
+    return items[index];
+}
+
 pub fn findPair(entries: []const PairEntry, first: []const u8, second: []const u8) ?usize {
     var left: usize = 0;
     var right: usize = entries.len;
@@ -121,6 +126,7 @@ test "named lookup returns original first duplicate" {
     try std.testing.expectEqual(@as(?usize, 1), findNamed(entries, "Alpha"));
     try std.testing.expectEqual(@as(?usize, 0), findNamed(entries, "Beta"));
     try std.testing.expectEqual(@as(?usize, null), findNamed(entries, "Missing"));
+    try std.testing.expectEqualStrings("Beta", findNamedItem(Item, &items, entries, "Beta").?.name);
 }
 
 test "pair lookup returns original first duplicate" {

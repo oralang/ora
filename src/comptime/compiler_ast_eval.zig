@@ -7,6 +7,7 @@ const type_builtin = @import("ora_types").builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
+const lookup_index = @import("../sema/lookup.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const refinements = @import("../sema/refinements.zig");
 const source = @import("../source/mod.zig");
@@ -1030,9 +1031,11 @@ const ConstEvaluator = struct {
         }
 
         const fields = payload_fields.?;
+        const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.allocator, struct_literal.fields, "name");
+        defer self.allocator.free(init_lookup);
         const elems = try self.allocator.alloc(CtValue, fields.len);
         for (fields, 0..) |payload_field, index| {
-            const init = findStructFieldInit(struct_literal.fields, payload_field.name) orelse return null;
+            const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, payload_field.name) orelse return null;
             _ = try self.evalExprImpl(init.value, use_cache);
             const value = (try self.evalExprCtValueImpl(init.value, use_cache, true)) orelse return null;
             if (!try self.validateCtValueForType(value, payload_field.ty, init.range)) return null;
@@ -1322,13 +1325,6 @@ const ConstEvaluator = struct {
         const field_id: comptime_mod.FieldId = @intCast(field_index);
         for (struct_data.fields) |field| {
             if (field.field_id == field_id) return field.value;
-        }
-        return null;
-    }
-
-    fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
         }
         return null;
     }

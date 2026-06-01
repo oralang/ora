@@ -8,6 +8,7 @@ const abi_layout_context = @import("../abi/layout_context.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
+const lookup_index = @import("../sema/lookup.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
 
@@ -3410,8 +3411,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (struct_item.fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
                 const field_sema_type = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, decl_field.type_expr);
@@ -3462,10 +3465,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), variant_name);
             var fields: std.ArrayList(mlir.MlirValue) = .{};
             defer fields.deinit(self.parent.allocator);
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (0..field_count) |index| {
                 const field_name_ref = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
                 const field_name = field_name_ref.data[0..field_name_ref.length];
-                const init = findStructFieldInit(struct_literal.fields, field_name) orelse return error.MlirOperationCreationFailed;
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field_name) orelse return error.MlirOperationCreationFailed;
                 const raw = try self.lowerExpr(init.value, locals);
                 const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .anonymous_struct and index < payload_sema_type.?.anonymous_struct.fields.len)
                     try self.convertValueForSemaFlow(raw, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range)
@@ -3513,8 +3518,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
                 const raw_value = try self.lowerExpr(init.value, locals);
@@ -3542,8 +3549,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
                 const raw_value = try self.lowerExpr(init.value, locals);
@@ -4150,13 +4159,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 appendOp(self.block, store);
             }
             return memref;
-        }
-
-        fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-            for (fields) |field| {
-                if (std.mem.eql(u8, field.name, name)) return field;
-            }
-            return null;
         }
 
         fn constTupleIndex(self: *FunctionLowerer, expr_id: ast.ExprId) ?usize {
