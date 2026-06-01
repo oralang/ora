@@ -1476,14 +1476,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn externTraitMethodAst(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?ast.nodes.TraitMethod {
             const trait_item_id = self.parent.item_index.lookup(trait_name) orelse return null;
-            const trait_item = switch (self.parent.file.item(trait_item_id).*) {
-                .Trait => |trait_item| trait_item,
-                else => return null,
-            };
-            for (trait_item.methods) |method| {
-                if (std.mem.eql(u8, method.name, method_name)) return method;
-            }
-            return null;
+            return self.parent.item_index.lookupTraitMethod(self.parent.file, trait_item_id, method_name);
         }
 
         fn externSummaryLocals(

@@ -116,7 +116,9 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .entries = &[_]NamedItem{},
         .impl_entries = &[_]ImplEntry{},
         .impl_lookup = &[_]lookup.PairEntry{},
+        .trait_method_lookup = &[_]lookup.MemberEntry{},
         .impl_method_lookup = &[_]lookup.MemberEntry{},
+        .impl_method_owner_lookup = &[_]lookup.IndexEntry{},
         .enum_variant_lookup = &[_]lookup.MemberEntry{},
         .contract_member_lookup = &[_]lookup.MemberEntry{},
     };
@@ -125,24 +127,30 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     const arena = result.arena.allocator();
     var entries: std.ArrayList(NamedItem) = .{};
     var impl_entries: std.ArrayList(ImplEntry) = .{};
+    var trait_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var impl_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
+    var impl_method_owner_lookup: std.ArrayList(lookup.IndexEntry) = .{};
     var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &impl_method_lookup, &enum_variant_lookup, &contract_member_lookup);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &trait_method_lookup, &impl_method_lookup, &impl_method_owner_lookup, &enum_variant_lookup, &contract_member_lookup);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
             return std.mem.order(u8, lhs.name, rhs.name) == .lt;
         }
     }.lessThan);
+    lookup.sortMembers(trait_method_lookup.items);
     lookup.sortMembers(impl_method_lookup.items);
+    lookup.sortIndexes(impl_method_owner_lookup.items);
     lookup.sortMembers(enum_variant_lookup.items);
     lookup.sortMembers(contract_member_lookup.items);
     result.entries = try entries.toOwnedSlice(arena);
     result.impl_entries = try impl_entries.toOwnedSlice(arena);
     result.impl_lookup = try lookup.buildPair(ImplEntry, arena, result.impl_entries, "trait_name", "target_name");
+    result.trait_method_lookup = try trait_method_lookup.toOwnedSlice(arena);
     result.impl_method_lookup = try impl_method_lookup.toOwnedSlice(arena);
+    result.impl_method_owner_lookup = try impl_method_owner_lookup.toOwnedSlice(arena);
     result.enum_variant_lookup = try enum_variant_lookup.toOwnedSlice(arena);
     result.contract_member_lookup = try contract_member_lookup.toOwnedSlice(arena);
     return result;
@@ -155,7 +163,9 @@ fn collectItemEntry(
     prefix: ?[]const u8,
     entries: *std.ArrayList(NamedItem),
     impl_entries: *std.ArrayList(ImplEntry),
+    trait_method_lookup: *std.ArrayList(lookup.MemberEntry),
     impl_method_lookup: *std.ArrayList(lookup.MemberEntry),
+    impl_method_owner_lookup: *std.ArrayList(lookup.IndexEntry),
     enum_variant_lookup: *std.ArrayList(lookup.MemberEntry),
     contract_member_lookup: *std.ArrayList(lookup.MemberEntry),
 ) !void {
@@ -175,7 +185,16 @@ fn collectItemEntry(
             }
             break :blk item.Enum.name;
         },
-        .Trait => item.Trait.name,
+        .Trait => blk: {
+            for (item.Trait.methods, 0..) |method, method_index| {
+                try trait_method_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = method.name,
+                    .index = method_index,
+                });
+            }
+            break :blk item.Trait.name;
+        },
         .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
         .ErrorDecl => item.ErrorDecl.name,
@@ -196,6 +215,10 @@ fn collectItemEntry(
                     .owner_index = item_id.index(),
                     .name = method.name,
                     .index = method_index,
+                });
+                try impl_method_owner_lookup.append(allocator, .{
+                    .key_index = method_id.index(),
+                    .index = item_id.index(),
                 });
             }
             return;
@@ -219,7 +242,7 @@ fn collectItemEntry(
                     .index = member_index,
                 });
             }
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, impl_method_lookup, enum_variant_lookup, contract_member_lookup);
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, trait_method_lookup, impl_method_lookup, impl_method_owner_lookup, enum_variant_lookup, contract_member_lookup);
         }
     }
 }

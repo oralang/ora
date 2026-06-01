@@ -1246,9 +1246,14 @@ Current status:
   consumers; remaining `contract.members` loops are traversal or index
   construction, not local lookup policy.
 - Trait/interface and impl method lookup is indexed through semantic interface
-  records, with raw impl method item lookup indexed in `ItemIndexResult`; the
-  remaining semantic method loop materializes all trait methods for comptime
-  reflection rather than looking up one method by name.
+  records. AST trait-method lookups by `(trait item, method name)`, raw impl
+  method lookups by `(impl item, method name)`, and reverse `method -> impl`
+  lookup are indexed in `ItemIndexResult`.
+- Remaining `trait_item.methods`/`impl_item.methods` loops are classified as
+  traversal/materialization/index construction: declaration validation,
+  resolver binding, visiting/lowering every impl method, building semantic
+  method signatures, ghost `self` discovery, and comptime `@traitMethods`
+  reflection.
 
 Plan:
 

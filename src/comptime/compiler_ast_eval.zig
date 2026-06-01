@@ -1936,8 +1936,8 @@ const ConstEvaluator = struct {
                     if (self.lookupNamedItem(base_name)) |base_item_id| {
                         switch (self.file.item(base_item_id).*) {
                             .Trait => |trait_item| {
-                                for (trait_item.methods) |method| {
-                                    if (std.mem.eql(u8, method.name, field.name)) {
+                                if (self.currentItemIndex() catch null) |item_index| {
+                                    if (item_index.lookupTraitMethod(self.file, base_item_id, field.name)) |method| {
                                         const signature = (try self.signatureForTraitMethod(method)) orelse break :blk null;
                                         break :blk AbiFunctionReference{
                                             .name = method.name,

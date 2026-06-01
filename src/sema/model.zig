@@ -819,7 +819,9 @@ pub const ItemIndexResult = struct {
     entries: []NamedItem,
     impl_entries: []ImplEntry,
     impl_lookup: []lookup_index.PairEntry,
+    trait_method_lookup: []lookup_index.MemberEntry,
     impl_method_lookup: []lookup_index.MemberEntry,
+    impl_method_owner_lookup: []lookup_index.IndexEntry,
     enum_variant_lookup: []lookup_index.MemberEntry,
     contract_member_lookup: []lookup_index.MemberEntry,
 
@@ -846,9 +848,24 @@ pub const ItemIndexResult = struct {
         return self.impl_entries[index].item_id;
     }
 
+    pub fn lookupTraitMethod(self: *const ItemIndexResult, file: *const ast.AstFile, trait_item_id: ast.ItemId, name: []const u8) ?ast.nodes.TraitMethod {
+        const method_index = lookup_index.findMember(self.trait_method_lookup, trait_item_id.index(), name) orelse return null;
+        const trait_item = switch (file.item(trait_item_id).*) {
+            .Trait => |trait_item| trait_item,
+            else => return null,
+        };
+        if (method_index >= trait_item.methods.len) return null;
+        return trait_item.methods[method_index];
+    }
+
     pub fn lookupImplMethod(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) ?ast.ItemId {
         const method_index = lookup_index.findMember(self.impl_method_lookup, impl_item_id.index(), name) orelse return null;
         return implMethodAt(file, impl_item_id, method_index);
+    }
+
+    pub fn lookupImplContainingMethod(self: *const ItemIndexResult, method_item_id: ast.ItemId) ?ast.ItemId {
+        const impl_index = lookup_index.findIndex(self.impl_method_owner_lookup, method_item_id.index()) orelse return null;
+        return ast.ItemId.fromIndex(impl_index);
     }
 
     pub fn countImplMethods(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) usize {

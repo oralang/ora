@@ -419,13 +419,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn enclosingImplForMethod(self: *Lowerer, method_item_id: ast.ItemId) ?ast.ImplItem {
-            for (self.file.items) |item| {
-                if (item != .Impl) continue;
-                for (item.Impl.methods) |candidate_id| {
-                    if (candidate_id.index() == method_item_id.index()) return item.Impl;
-                }
-            }
-            return null;
+            const impl_item_id = self.item_index.lookupImplContainingMethod(method_item_id) orelse return null;
+            return self.file.item(impl_item_id).Impl;
         }
 
         pub fn ensureLoweredImplMethod(
@@ -730,7 +725,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             };
 
             var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
-            if (@This().matchingTraitMethodForImplMethod(self, trait_item, method_item_id)) |trait_method| {
+            if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |trait_method| {
                 const aliases = try @This().traitMethodPatternAliases(self, trait_method, self.file.item(method_item_id).Function);
                 for (trait_method.clauses) |clause| {
                     try clauses.append(self.allocator, .{
@@ -770,12 +765,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return clauses.toOwnedSlice(self.allocator);
         }
 
-        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item: ast.TraitItem, method_item_id: ast.ItemId) ?ast.nodes.TraitMethod {
+        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item_id: ast.ItemId, method_item_id: ast.ItemId) ?ast.nodes.TraitMethod {
             const method = self.file.item(method_item_id).Function;
-            for (trait_item.methods) |trait_method| {
-                if (std.mem.eql(u8, trait_method.name, method.name)) return trait_method;
-            }
-            return null;
+            return self.item_index.lookupTraitMethod(self.file, trait_item_id, method.name);
         }
 
         fn traitMethodPatternAliases(self: *Lowerer, trait_method: ast.nodes.TraitMethod, impl_method: ast.FunctionItem) anyerror![]const FunctionLowerer.PatternAlias {

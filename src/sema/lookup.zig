@@ -17,6 +17,11 @@ pub const MemberEntry = struct {
     index: usize,
 };
 
+pub const IndexEntry = struct {
+    key_index: usize,
+    index: usize,
+};
+
 pub const EntryRange = struct {
     start: usize,
     end: usize,
@@ -108,6 +113,25 @@ pub fn sortMembers(entries: []MemberEntry) void {
     std.sort.heap(MemberEntry, entries, {}, memberLessThan);
 }
 
+pub fn sortIndexes(entries: []IndexEntry) void {
+    std.sort.heap(IndexEntry, entries, {}, indexLessThan);
+}
+
+pub fn findIndex(entries: []const IndexEntry, key_index: usize) ?usize {
+    var left: usize = 0;
+    var right: usize = entries.len;
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        switch (compareIndexToKey(entries[mid], key_index)) {
+            .lt => left = mid + 1,
+            .eq, .gt => right = mid,
+        }
+    }
+    if (left >= entries.len) return null;
+    if (entries[left].key_index != key_index) return null;
+    return entries[left].index;
+}
+
 pub fn findMember(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?usize {
     const range = findMemberRange(entries, owner_index, name) orelse return null;
     return entries[range.start].index;
@@ -167,6 +191,12 @@ fn memberLessThan(_: void, lhs: MemberEntry, rhs: MemberEntry) bool {
     };
 }
 
+fn indexLessThan(_: void, lhs: IndexEntry, rhs: IndexEntry) bool {
+    if (lhs.key_index < rhs.key_index) return true;
+    if (lhs.key_index > rhs.key_index) return false;
+    return lhs.index < rhs.index;
+}
+
 fn comparePairToKey(entry: PairEntry, first: []const u8, second: []const u8) std.math.Order {
     return switch (std.mem.order(u8, entry.first, first)) {
         .lt => .lt,
@@ -179,6 +209,12 @@ fn compareMemberToKey(entry: MemberEntry, owner_index: usize, name: []const u8) 
     if (entry.owner_index < owner_index) return .lt;
     if (entry.owner_index > owner_index) return .gt;
     return std.mem.order(u8, entry.name, name);
+}
+
+fn compareIndexToKey(entry: IndexEntry, key_index: usize) std.math.Order {
+    if (entry.key_index < key_index) return .lt;
+    if (entry.key_index > key_index) return .gt;
+    return .eq;
 }
 
 test "named lookup returns original first duplicate" {
@@ -220,6 +256,19 @@ test "member lookup returns original first duplicate within owner" {
     try std.testing.expectEqual(@as(usize, 2), range.end - range.start);
     try std.testing.expectEqual(@as(usize, 0), entries[range.start].index);
     try std.testing.expectEqual(@as(usize, 3), entries[range.start + 1].index);
+}
+
+test "index lookup returns original first duplicate" {
+    var entries = [_]IndexEntry{
+        .{ .key_index = 8, .index = 3 },
+        .{ .key_index = 2, .index = 1 },
+        .{ .key_index = 8, .index = 0 },
+    };
+    sortIndexes(&entries);
+
+    try std.testing.expectEqual(@as(?usize, 1), findIndex(&entries, 2));
+    try std.testing.expectEqual(@as(?usize, 0), findIndex(&entries, 8));
+    try std.testing.expectEqual(@as(?usize, null), findIndex(&entries, 4));
 }
 
 test "pair lookup returns original first duplicate" {

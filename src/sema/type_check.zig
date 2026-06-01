@@ -1693,21 +1693,13 @@ const TypeChecker = struct {
 
         for (impl_item.methods) |method_id| {
             const method = self.file.item(method_id).Function;
-            if (!self.traitHasMethodNamed(trait_item, method.name)) {
+            if (self.item_index.lookupTraitMethod(self.file, trait_item_id, method.name) == null) {
                 try self.emitRangeError(method.range, "impl contains method '{s}' which is not part of trait '{s}'", .{
                     method.name,
                     trait_item.name,
                 });
             }
         }
-    }
-
-    fn traitHasMethodNamed(self: *TypeChecker, trait_item: anytype, name: []const u8) bool {
-        _ = self;
-        for (trait_item.methods) |method| {
-            if (std.mem.eql(u8, method.name, name)) return true;
-        }
-        return false;
     }
 
     fn checkImplMethodSignature(self: *TypeChecker, trait_name: []const u8, trait_method: anytype, impl_method: ast.FunctionItem) anyerror!void {
@@ -1850,13 +1842,7 @@ const TypeChecker = struct {
     }
 
     fn enclosingImplItemIdForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ItemId {
-        for (self.file.items, 0..) |item, index| {
-            if (item != .Impl) continue;
-            for (item.Impl.methods) |candidate_id| {
-                if (candidate_id.index() == method_item_id.index()) return ast.ItemId.fromIndex(index);
-            }
-        }
-        return null;
+        return self.item_index.lookupImplContainingMethod(method_item_id);
     }
 
     fn nominalItemSelfType(self: *const TypeChecker, item_id: ast.ItemId) ?Type {
