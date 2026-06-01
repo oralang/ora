@@ -6,6 +6,7 @@ const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 const descriptors = @import("type_descriptors.zig");
 const region_rules = @import("region.zig");
+const unique_list = @import("unique_list.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -195,12 +196,20 @@ fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
         keyPathsEql(lhs.key_path, rhs.key_path);
 }
 
+fn effectSlotIsStorage(slot: EffectSlot) bool {
+    return slot.region == .storage;
+}
+
 fn effectSlotsEql(lhs: []const EffectSlot, rhs: []const EffectSlot) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |lhs_slot, rhs_slot| {
         if (!effectSlotEql(lhs_slot, rhs_slot)) return false;
     }
     return true;
+}
+
+fn itemIdEql(lhs: ast.ItemId, rhs: ast.ItemId) bool {
+    return lhs.index() == rhs.index();
 }
 
 fn effectEql(lhs: Effect, rhs: Effect) bool {
@@ -6355,46 +6364,19 @@ const TypeChecker = struct {
     };
 
     fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var clone: std.ArrayList(EffectSlot) = .{};
-        for (items) |item| try clone.append(self.arena, item);
-        return clone;
-    }
-
-    fn mergeLockedSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
-        for (src) |slot| try self.appendUniqueSlot(dst, slot);
+        return unique_list.clone(EffectSlot, self.arena, items);
     }
 
     fn mergeStorageSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
-        for (src) |slot| {
-            if (slot.region != .storage) continue;
-            try self.appendUniqueSlot(dst, slot);
-        }
+        try unique_list.mergeUnique(EffectSlot, self.arena, dst, src, effectSlotEql, effectSlotIsStorage);
     }
 
     fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var result: std.ArrayList(EffectSlot) = .{};
-        for (lhs) |lhs_slot| {
-            for (rhs) |rhs_slot| {
-                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
-                try result.append(self.arena, lhs_slot);
-                break;
-            }
-        }
-        return result;
+        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, null);
     }
 
     fn intersectStorageSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var result: std.ArrayList(EffectSlot) = .{};
-        for (lhs) |lhs_slot| {
-            if (lhs_slot.region != .storage) continue;
-            for (rhs) |rhs_slot| {
-                if (rhs_slot.region != .storage) continue;
-                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
-                try result.append(self.arena, lhs_slot);
-                break;
-            }
-        }
-        return result;
+        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, effectSlotIsStorage);
     }
 
     fn removeLockedSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) void {
@@ -6680,10 +6662,7 @@ const TypeChecker = struct {
     }
 
     fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) !void {
-        for (slots.items) |existing| {
-            if (effectSlotEql(existing, slot)) return;
-        }
-        try slots.append(self.arena, slot);
+        try unique_list.appendUnique(EffectSlot, self.arena, slots, slot, effectSlotEql);
     }
 
     fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
@@ -6978,10 +6957,7 @@ const TypeChecker = struct {
     }
 
     fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
-        for (items.items) |existing| {
-            if (existing.index() == item_id.index()) return;
-        }
-        try items.append(self.arena, item_id);
+        try unique_list.appendUnique(ast.ItemId, self.arena, items, item_id, itemIdEql);
     }
 
     fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
@@ -7835,10 +7811,7 @@ const TypeChecker = struct {
     }
 
     fn appendUniqueErrorType(self: *TypeChecker, error_types: *std.ArrayList(Type), error_type: Type) anyerror!void {
-        for (error_types.items) |existing| {
-            if (typeEql(existing, error_type)) return;
-        }
-        try error_types.append(self.arena, error_type);
+        try unique_list.appendUnique(Type, self.arena, error_types, error_type, typeEql);
     }
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {
