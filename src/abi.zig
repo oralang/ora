@@ -1085,25 +1085,20 @@ const CompilerAbiGenerator = struct {
 
     fn buildEffects(self: *CompilerAbiGenerator, effect: compiler.sema.Effect, effects: *std.ArrayList(AbiEffect)) anyerror!void {
         switch (effect) {
-            .pure => {},
-            .external => try effects.append(self.allocator, .{ .kind = .calls }),
-            .side_effects => |side_effects| {
-                try self.appendEffectFlags(side_effects.has_external, side_effects.has_log, effects);
-            },
+            .pure, .external, .side_effects => {},
             .reads => |reads| {
                 try self.appendEffectSlots(.reads, reads.slots, effects);
-                try self.appendEffectFlags(reads.has_external, reads.has_log, effects);
             },
             .writes => |writes| {
                 try self.appendEffectSlots(.writes, writes.slots, effects);
-                try self.appendEffectFlags(writes.has_external, writes.has_log, effects);
             },
             .reads_writes => |rw| {
                 try self.appendEffectSlots(.reads, rw.reads, effects);
                 try self.appendEffectSlots(.writes, rw.writes, effects);
-                try self.appendEffectFlags(rw.has_external, rw.has_log, effects);
             },
         }
+        const flags = effect.flags();
+        try self.appendEffectFlags(flags.has_external, flags.has_log, effects);
     }
 
     fn resolvePublicResultInputType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) !ResolvedType {

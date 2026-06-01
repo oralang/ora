@@ -565,41 +565,94 @@ pub fn effectSlotPathRoot(path: []const u8) []const u8 {
     return path;
 }
 
+pub const EffectFlags = struct {
+    has_external: bool = false,
+    has_log: bool = false,
+    has_havoc: bool = false,
+    has_lock: bool = false,
+    has_unlock: bool = false,
+
+    pub fn any(self: EffectFlags) bool {
+        return self.has_external or self.has_log or self.has_havoc or self.has_lock or self.has_unlock;
+    }
+
+    pub fn externalOnly(self: EffectFlags) bool {
+        return self.has_external and !self.has_log and !self.has_havoc and !self.has_lock and !self.has_unlock;
+    }
+
+    pub fn merge(self: *EffectFlags, other: EffectFlags) void {
+        self.has_external = self.has_external or other.has_external;
+        self.has_log = self.has_log or other.has_log;
+        self.has_havoc = self.has_havoc or other.has_havoc;
+        self.has_lock = self.has_lock or other.has_lock;
+        self.has_unlock = self.has_unlock or other.has_unlock;
+    }
+};
+
 pub const Effect = union(enum) {
     pure,
     external,
-    side_effects: struct {
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
-    },
+    side_effects: EffectFlags,
     writes: struct {
         slots: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
     reads: struct {
         slots: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
     reads_writes: struct {
         reads: []const EffectSlot,
         writes: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
+
+    pub fn readSlots(self: Effect) []const EffectSlot {
+        return switch (self) {
+            .pure, .external, .side_effects, .writes => &.{},
+            .reads => |read_effect| read_effect.slots,
+            .reads_writes => |read_write| read_write.reads,
+        };
+    }
+
+    pub fn writeSlots(self: Effect) []const EffectSlot {
+        return switch (self) {
+            .pure, .external, .side_effects, .reads => &.{},
+            .writes => |write_effect| write_effect.slots,
+            .reads_writes => |read_write| read_write.writes,
+        };
+    }
+
+    pub fn flags(self: Effect) EffectFlags {
+        return switch (self) {
+            .pure => .{},
+            .external => .{ .has_external = true },
+            .side_effects => |effect_flags| effect_flags,
+            .reads => |read_effect| read_effect.flags,
+            .writes => |write_effect| write_effect.flags,
+            .reads_writes => |read_write| read_write.flags,
+        };
+    }
+
+    pub fn hasExternal(self: Effect) bool {
+        return self.flags().has_external;
+    }
+
+    pub fn hasLog(self: Effect) bool {
+        return self.flags().has_log;
+    }
+
+    pub fn hasHavoc(self: Effect) bool {
+        return self.flags().has_havoc;
+    }
+
+    pub fn hasLock(self: Effect) bool {
+        return self.flags().has_lock;
+    }
+
+    pub fn hasUnlock(self: Effect) bool {
+        return self.flags().has_unlock;
+    }
 };
 
 pub const TypeCheckKey = union(enum) {
@@ -869,22 +922,23 @@ test "Effect supports external call marker" {
     const external_only: Effect = .external;
     const reads_external: Effect = .{ .reads = .{
         .slots = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
     const writes_external: Effect = .{ .writes = .{
         .slots = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
     const mixed_external: Effect = .{ .reads_writes = .{
         .reads = &slots,
         .writes = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
 
     try std.testing.expect(external_only == .external);
-    try std.testing.expect(reads_external.reads.has_external);
-    try std.testing.expect(writes_external.writes.has_external);
-    try std.testing.expect(mixed_external.reads_writes.has_external);
+    try std.testing.expect(external_only.hasExternal());
+    try std.testing.expect(reads_external.hasExternal());
+    try std.testing.expect(writes_external.hasExternal());
+    try std.testing.expect(mixed_external.hasExternal());
 }
 
 test "Effect supports log and havoc markers" {
@@ -893,23 +947,25 @@ test "Effect supports log and havoc markers" {
     };
     const reads_log: Effect = .{ .reads = .{
         .slots = &slots,
-        .has_log = true,
+        .flags = .{ .has_log = true },
     } };
     const writes_havoc: Effect = .{ .writes = .{
         .slots = &slots,
-        .has_havoc = true,
+        .flags = .{ .has_havoc = true },
     } };
     const mixed: Effect = .{ .reads_writes = .{
         .reads = &slots,
         .writes = &slots,
-        .has_log = true,
-        .has_havoc = true,
+        .flags = .{
+            .has_log = true,
+            .has_havoc = true,
+        },
     } };
 
-    try std.testing.expect(reads_log.reads.has_log);
-    try std.testing.expect(writes_havoc.writes.has_havoc);
-    try std.testing.expect(mixed.reads_writes.has_log);
-    try std.testing.expect(mixed.reads_writes.has_havoc);
+    try std.testing.expect(reads_log.hasLog());
+    try std.testing.expect(writes_havoc.hasHavoc());
+    try std.testing.expect(mixed.hasLog());
+    try std.testing.expect(mixed.hasHavoc());
 }
 
 test "Effect supports side-effect-only marker" {
@@ -920,8 +976,8 @@ test "Effect supports side-effect-only marker" {
         .has_unlock = true,
     } };
 
-    try std.testing.expect(effect.side_effects.has_log);
-    try std.testing.expect(effect.side_effects.has_havoc);
-    try std.testing.expect(effect.side_effects.has_lock);
-    try std.testing.expect(effect.side_effects.has_unlock);
+    try std.testing.expect(effect.hasLog());
+    try std.testing.expect(effect.hasHavoc());
+    try std.testing.expect(effect.hasLock());
+    try std.testing.expect(effect.hasUnlock());
 }

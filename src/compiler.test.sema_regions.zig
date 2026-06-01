@@ -361,8 +361,8 @@ test "compiler does not report root locks as persistent storage reads" {
     switch (typecheck.itemEffect(guarded)) {
         .writes => |effect| {
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
-            try testing.expect(effect.has_lock);
-            try testing.expect(effect.has_unlock);
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -966,13 +966,13 @@ test "compiler tracks log and havoc effect kinds" {
             try testing.expect(effect.has_havoc);
         },
         .writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -984,13 +984,13 @@ test "compiler tracks log and havoc effect kinds" {
             try testing.expect(effect.has_havoc);
         },
         .writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -1024,13 +1024,13 @@ test "compiler tracks lock and unlock effect kinds" {
             try testing.expect(effect.has_unlock);
         },
         .reads => |effect| {
-            try testing.expect(effect.has_lock);
-            try testing.expect(effect.has_unlock);
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_lock);
-            try testing.expect(effect.has_unlock);
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
             try testing.expect(containsEffectSlot(effect.reads, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -1072,11 +1072,11 @@ test "compiler composes effects to a fixpoint across mutual recursion" {
 
     switch (typecheck.itemEffect(ping)) {
         .writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -1084,11 +1084,11 @@ test "compiler composes effects to a fixpoint across mutual recursion" {
 
     switch (typecheck.itemEffect(pong)) {
         .writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
