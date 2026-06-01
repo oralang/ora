@@ -2167,7 +2167,14 @@ const TypeChecker = struct {
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
         switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral => |literal| self.expr_types[expr_id.index()] = integerLiteralType(literal.text),
+            .IntegerLiteral => |literal| {
+                if (invalidIntegerLiteralSuffix(literal.text)) |suffix| {
+                    try self.emitExprError(expr_id, "invalid integer type suffix '{s}'; supported integer types are {s}", .{ suffix, descriptors.supported_integer_type_names_text });
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                } else {
+                    self.expr_types[expr_id.index()] = integerLiteralType(literal.text);
+                }
+            },
             .StringLiteral => self.expr_types[expr_id.index()] = .{ .string = {} },
             .BoolLiteral => self.expr_types[expr_id.index()] = .{ .bool = {} },
             .AddressLiteral => self.expr_types[expr_id.index()] = .{ .address = {} },
@@ -4845,6 +4852,10 @@ const TypeChecker = struct {
                     if (!std.mem.eql(u8, trimmed, binding.name)) continue;
                     if (genericBindingType(binding)) |bound_type| break :blk bound_type;
                 }
+                if (descriptors.invalidIntegerTypeName(trimmed)) {
+                    try self.emitInvalidIntegerTypeName(path.range, trimmed);
+                    break :blk .{ .unknown = {} };
+                }
                 if (self.importedTypeForPath(trimmed)) |imported_type| {
                     break :blk imported_type;
                 }
@@ -4900,6 +4911,10 @@ const TypeChecker = struct {
     }
 
     fn resolveGenericTypeWithBindings(self: *TypeChecker, generic: ast.GenericTypeExpr, bindings: []const GenericTypeBinding) anyerror!Type {
+        if (descriptors.invalidIntegerTypeName(generic.name)) {
+            try self.emitInvalidIntegerTypeName(generic.range, generic.name);
+            return .{ .unknown = {} };
+        }
         if (self.importedTypeForPath(generic.name)) |imported_type| {
             return imported_type;
         }
@@ -8696,6 +8711,10 @@ const TypeChecker = struct {
         });
     }
 
+    fn emitInvalidIntegerTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        try self.emitRangeError(range, "invalid integer type '{s}'; supported integer types are {s}", .{ name, descriptors.supported_integer_type_names_text });
+    }
+
     fn emitExprError(self: *TypeChecker, expr_id: ast.ExprId, comptime fmt: []const u8, args: anytype) !void {
         var buffer: [256]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, fmt, args);
@@ -8893,6 +8912,11 @@ fn integerLiteralType(text: []const u8) Type {
     return .{ .integer = .{} };
 }
 
+fn invalidIntegerLiteralSuffix(text: []const u8) ?[]const u8 {
+    const suffix = integerLiteralTypeSuffix(text) orelse return null;
+    return if (descriptors.invalidIntegerTypeName(suffix)) suffix else null;
+}
+
 fn parseEnumVariantIntegerLiteral(text: []const u8) ?i64 {
     const trimmed = std.mem.trim(u8, text, " \t\n\r");
     const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x")) 16 else if (std.mem.startsWith(u8, trimmed, "0b")) 2 else 10;
@@ -8909,6 +8933,11 @@ fn enumBytesLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const 
 }
 
 fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
+    const suffix = integerLiteralTypeSuffix(text) orelse return null;
+    return descriptors.integerTypeFromName(suffix);
+}
+
+fn integerLiteralTypeSuffix(text: []const u8) ?[]const u8 {
     const unsigned_index = std.mem.lastIndexOfScalar(u8, text, 'u');
     const signed_index = std.mem.lastIndexOfScalar(u8, text, 'i');
     const suffix_index = switch (unsigned_index != null and signed_index != null) {
@@ -8917,18 +8946,7 @@ fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
     };
     const start = suffix_index orelse return null;
     if (start == 0 or start + 1 >= text.len) return null;
-    const suffix = text[start..];
-    const signed = switch (suffix[0]) {
-        'u' => false,
-        'i' => true,
-        else => return null,
-    };
-    const bits = std.fmt.parseInt(u16, suffix[1..], 10) catch return null;
-    return .{
-        .bits = bits,
-        .signed = signed,
-        .spelling = suffix,
-    };
+    return text[start..];
 }
 
 fn typesComparable(lhs_type: Type, rhs_type: Type) bool {
@@ -9357,4 +9375,25 @@ test "typesFlowCompatible rejects non-guardable refinement mismatches" {
     try testing.expect(!typesFlowCompatible(scaled18, scaled6));
     try testing.expect(!typesFlowCompatible(scaled18, plain_u256));
     try testing.expect(typesFlowCompatible(plain_u256, scaled18));
+}
+
+test "integer literal suffixes use closed builtin width set" {
+    const u256_integer = integerTypeSuffix("1 u256") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 256), u256_integer.bits);
+    try std.testing.expectEqual(@as(?bool, false), u256_integer.signed);
+    try std.testing.expectEqualStrings("u256", u256_integer.spelling.?);
+
+    const i8_integer = integerTypeSuffix("1 i8") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 8), i8_integer.bits);
+    try std.testing.expectEqual(@as(?bool, true), i8_integer.signed);
+
+    const u160_integer = integerTypeSuffix("1 u160") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 160), u160_integer.bits);
+    try std.testing.expectEqual(@as(?bool, false), u160_integer.signed);
+
+    try std.testing.expect(integerTypeSuffix("1 u24") == null);
+    try std.testing.expectEqualStrings("u24", invalidIntegerLiteralSuffix("1 u24") orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("u1_6", invalidIntegerLiteralSuffix("1 u1_6") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(invalidIntegerLiteralSuffix("1 wei") == null);
+    try std.testing.expect(invalidIntegerLiteralSuffix("1 microether") == null);
 }

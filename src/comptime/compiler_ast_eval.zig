@@ -1658,6 +1658,7 @@ const ConstEvaluator = struct {
             type_ids.u32_id => "u32",
             type_ids.u64_id => "u64",
             type_ids.u128_id => "u128",
+            type_ids.u160_id => "u160",
             type_ids.u256_id => "u256",
             type_ids.i8_id => "i8",
             type_ids.i16_id => "i16",
@@ -1682,6 +1683,7 @@ const ConstEvaluator = struct {
             type_ids.u32_id => "uint32",
             type_ids.u64_id => "uint64",
             type_ids.u128_id => "uint128",
+            type_ids.u160_id => "uint160",
             type_ids.u256_id => "uint256",
             type_ids.i8_id => "int8",
             type_ids.i16_id => "int16",
@@ -1706,6 +1708,7 @@ const ConstEvaluator = struct {
             type_ids.u32_id, type_ids.i32_id => 4,
             type_ids.u64_id, type_ids.i64_id => 8,
             type_ids.u128_id, type_ids.i128_id => 16,
+            type_ids.u160_id => 20,
             type_ids.u256_id, type_ids.i256_id => 32,
             type_ids.bool_id => 1,
             type_ids.address_id => 20,
@@ -2265,6 +2268,7 @@ const ConstEvaluator = struct {
                     32 => type_ids.u32_id,
                     64 => type_ids.u64_id,
                     128 => type_ids.u128_id,
+                    160 => type_ids.u160_id,
                     256 => type_ids.u256_id,
                     else => null,
                 };
@@ -3220,6 +3224,7 @@ const ConstEvaluator = struct {
         if (std.mem.eql(u8, trimmed, "u32")) return type_ids.u32_id;
         if (std.mem.eql(u8, trimmed, "u64")) return type_ids.u64_id;
         if (std.mem.eql(u8, trimmed, "u128")) return type_ids.u128_id;
+        if (std.mem.eql(u8, trimmed, "u160")) return type_ids.u160_id;
         if (std.mem.eql(u8, trimmed, "u256")) return type_ids.u256_id;
         if (std.mem.eql(u8, trimmed, "i8")) return type_ids.i8_id;
         if (std.mem.eql(u8, trimmed, "i16")) return type_ids.i16_id;

@@ -3008,15 +3008,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const value_is_int = mlir.oraTypeIsAInteger(value_type);
             const target_is_int = mlir.oraTypeIsAInteger(target_type);
 
-            if (mlir.oraTypeIsAddressType(value_type) and target_is_int and mlir.oraIntegerTypeGetWidth(target_type) == 160) {
+            if (mlir.oraTypeIsAddressType(value_type) and target_is_int) {
                 const op = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
                 if (mlir.oraOperationIsNull(op)) return value;
-                return appendValueOp(self.block, op);
+                const i160_value = appendValueOp(self.block, op);
+                if (mlir.oraIntegerTypeGetWidth(target_type) == 160) return i160_value;
+                return try @This().convertBuiltinCastValue(self, i160_value, target_type, range, checked);
             }
 
-            if (value_is_int and mlir.oraTypeIsAddressType(target_type) and mlir.oraIntegerTypeGetWidth(value_type) == 160) {
-                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, value);
-                if (mlir.oraOperationIsNull(op)) return value;
+            if (value_is_int and mlir.oraTypeIsAddressType(target_type)) {
+                const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+                if (mlir.oraTypeIsNull(i160_type)) return value;
+                const i160_value = if (mlir.oraIntegerTypeGetWidth(value_type) == 160)
+                    value
+                else
+                    try @This().convertBuiltinCastValue(self, value, i160_type, range, checked);
+                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, i160_value);
+                if (mlir.oraOperationIsNull(op)) return i160_value;
                 return appendValueOp(self.block, op);
             }
 

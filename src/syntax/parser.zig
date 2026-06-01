@@ -2035,7 +2035,7 @@ const Parser = struct {
                 self.parseAnonymousStructLiteralExprNode(terminators)
             else
                 self.parseExpressionErrorNode("expected expression"),
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
+            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
                 self.parseExternalProxyExprNode()
             else if (self.looksLikeGenericTypeValueExpr(terminators))
                 self.parsePathOrGenericTypeNode(terminators)
@@ -2202,6 +2202,7 @@ const Parser = struct {
             .U32,
             .U64,
             .U128,
+            .U160,
             .U256,
             .I8,
             .I16,
@@ -2936,7 +2937,7 @@ const Parser = struct {
 
     fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
             else => false,
         };
     }
@@ -3326,7 +3327,7 @@ fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
 
 fn isIdentifierLike(kind: green.TokenKind) bool {
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

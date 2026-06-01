@@ -5,12 +5,15 @@
 
 pub const source_span = @import("source_span.zig");
 pub const region = @import("region.zig");
+pub const builtin = @import("builtin.zig");
 pub const type_info = @import("type_info.zig");
 pub const ast_arena = @import("ast_arena.zig");
 pub const refinements = @import("ora_refinements");
 
 pub const SourceSpan = source_span.SourceSpan;
 pub const MemoryRegion = region.MemoryRegion;
+pub const BuiltinTypeId = builtin.BuiltinTypeId;
+pub const BuiltinTypeSpec = builtin.BuiltinTypeSpec;
 pub const TypeInfo = type_info.TypeInfo;
 pub const TypeCategory = type_info.TypeCategory;
 pub const OraType = type_info.OraType;

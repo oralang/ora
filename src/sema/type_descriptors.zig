@@ -1,10 +1,13 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const builtin = @import("ora_types").builtin;
 const model = @import("model.zig");
 const refinements = @import("refinements.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const Type = model.Type;
+
+pub const supported_integer_type_names_text = builtin.supported_integer_type_names_text;
 
 pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.AstFile, item_index: *const ItemIndexResult, type_expr_id: ast.TypeExprId) anyerror!Type {
     return switch (file.typeExpr(type_expr_id).*) {
@@ -57,13 +60,9 @@ pub fn descriptorFromTypeExpr(allocator: std.mem.Allocator, file: *const ast.Ast
 
 pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemIndexResult, name: []const u8) Type {
     const trimmed = std.mem.trim(u8, name, " \t\n\r");
-    if (std.mem.eql(u8, trimmed, "void")) return .{ .void = {} };
-    if (std.mem.eql(u8, trimmed, "bool")) return .{ .bool = {} };
-    if (std.mem.eql(u8, trimmed, "string")) return .{ .string = {} };
-    if (std.mem.eql(u8, trimmed, "address")) return .{ .address = {} };
-    if (std.mem.eql(u8, trimmed, "bytes")) return .{ .bytes = {} };
+    if (descriptorFromBuiltinName(trimmed)) |ty| return ty;
     if (parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
-    if (parseIntegerType(trimmed)) |integer| return .{ .integer = integer };
+    if (invalidIntegerTypeName(trimmed)) return .{ .unknown = {} };
     if (item_index.lookup(trimmed)) |item_id| {
         return switch (file.item(item_id).*) {
             .Contract => .{ .contract = .{ .name = trimmed } },
@@ -74,6 +73,30 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
         };
     }
     return .{ .named = .{ .name = trimmed } };
+}
+
+fn descriptorFromBuiltinName(name: []const u8) ?Type {
+    const spec = builtin.lookupBuiltinByName(name) orelse return null;
+    return switch (spec.category) {
+        .Void => .{ .void = {} },
+        .Bool => .{ .bool = {} },
+        .String => .{ .string = {} },
+        .Address => .{ .address = {} },
+        .Bytes => .{ .bytes = {} },
+        .Integer => .{
+            .integer = integerTypeFromBuiltinSpec(spec, name) orelse return null,
+        },
+        else => null,
+    };
+}
+
+fn integerTypeFromBuiltinSpec(spec: builtin.BuiltinTypeSpec, spelling: []const u8) ?model.IntegerType {
+    if (spec.category != .Integer) return null;
+    return .{
+        .bits = spec.bit_width orelse return null,
+        .signed = spec.signed orelse return null,
+        .spelling = spelling,
+    };
 }
 
 pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.AstFile, item_index: *const ItemIndexResult, generic: ast.GenericTypeExpr) anyerror!Type {
@@ -205,13 +228,34 @@ pub fn typeEql(lhs: Type, rhs: Type) bool {
 }
 
 pub fn parseFixedBytesType(name: []const u8) ?model.FixedBytesType {
-    if (!std.mem.startsWith(u8, name, "bytes")) return null;
-    if (name.len <= "bytes".len) return null;
-    const digits = name["bytes".len..];
-    if (digits.len > 1 and digits[0] == '0') return null;
-    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-    if (len < 1 or len > 32) return null;
+    const len = builtin.parseFixedBytesName(name) orelse return null;
     return .{ .len = len, .spelling = name };
+}
+
+pub fn integerTypeFromName(name: []const u8) ?model.IntegerType {
+    const spec = builtin.parseIntegerBuiltin(name) orelse return null;
+    return integerTypeFromBuiltinSpec(spec, name);
+}
+
+pub fn invalidIntegerTypeName(name: []const u8) bool {
+    if (integerTypeFromName(name) != null) return false;
+    if (name.len < 2) return false;
+    switch (name[0]) {
+        'u', 'i' => {},
+        else => return false,
+    }
+
+    const suffix = name[1..];
+    var saw_digit = false;
+    for (suffix) |ch| {
+        if (ch >= '0' and ch <= '9') {
+            saw_digit = true;
+            continue;
+        }
+        if (ch == '_' or ch == '+') continue;
+        return false;
+    }
+    return saw_digit;
 }
 
 pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
@@ -487,17 +531,45 @@ fn parseArrayLen(size: ast.TypeArraySize) ?u32 {
     };
 }
 
-fn parseIntegerType(name: []const u8) ?model.IntegerType {
-    if (name.len < 2) return null;
-    const signed = switch (name[0]) {
-        'u' => false,
-        'i' => true,
-        else => return null,
-    };
-    const bits = std.fmt.parseInt(u16, name[1..], 10) catch return null;
-    return .{
-        .bits = bits,
-        .signed = signed,
-        .spelling = name,
-    };
+test "descriptor integer types use closed builtin width set" {
+    const u256_integer = integerTypeFromName("u256") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 256), u256_integer.bits);
+    try std.testing.expectEqual(@as(?bool, false), u256_integer.signed);
+    try std.testing.expectEqualStrings("u256", u256_integer.spelling.?);
+
+    const i8_integer = integerTypeFromName("i8") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 8), i8_integer.bits);
+    try std.testing.expectEqual(@as(?bool, true), i8_integer.signed);
+
+    const u160_integer = integerTypeFromName("u160") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(?u16, 160), u160_integer.bits);
+    try std.testing.expectEqual(@as(?bool, false), u160_integer.signed);
+
+    try std.testing.expect(integerTypeFromName("u24") == null);
+    try std.testing.expect(integerTypeFromName("i96") == null);
+}
+
+test "unsupported integer-looking type names are not classified as named types" {
+    try std.testing.expect(invalidIntegerTypeName("u24"));
+    try std.testing.expect(invalidIntegerTypeName("i96"));
+    try std.testing.expect(invalidIntegerTypeName("u01"));
+    try std.testing.expect(invalidIntegerTypeName("u1_6"));
+    try std.testing.expect(invalidIntegerTypeName("u+8"));
+
+    try std.testing.expect(!invalidIntegerTypeName("u256"));
+    try std.testing.expect(!invalidIntegerTypeName("u160"));
+    try std.testing.expect(!invalidIntegerTypeName("i8"));
+    try std.testing.expect(!invalidIntegerTypeName("user"));
+    try std.testing.expect(!invalidIntegerTypeName("i18n"));
+}
+
+test "fixed bytes descriptor uses canonical strict parser" {
+    const bytes32 = parseFixedBytesType("bytes32") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 32), bytes32.len);
+    try std.testing.expectEqualStrings("bytes32", bytes32.spelling.?);
+
+    try std.testing.expect(parseFixedBytesType("bytes") == null);
+    try std.testing.expect(parseFixedBytesType("bytes01") == null);
+    try std.testing.expect(parseFixedBytesType("bytes+5") == null);
+    try std.testing.expect(parseFixedBytesType("bytes1_6") == null);
 }

@@ -380,7 +380,7 @@ fn isOtherKeyword(tt: TokenType) bool {
 
 fn isTypeKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
+        .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
         else => false,
     };
 }

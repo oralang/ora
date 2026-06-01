@@ -2516,7 +2516,7 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
 
 fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
         else => false,
     };
 }
@@ -2588,7 +2588,7 @@ fn qualifiedTypeName(self: anytype, node: SyntaxNode) ?[]const u8 {
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
         else => false,
     };
 }

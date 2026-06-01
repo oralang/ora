@@ -221,6 +221,7 @@ pub const TokenType = enum {
     U32,
     U64,
     U128,
+    U160,
     U256,
     I8,
     I16,
@@ -496,6 +497,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "u32", .U32 },
     .{ "u64", .U64 },
     .{ "u128", .U128 },
+    .{ "u160", .U160 },
     .{ "u256", .U256 },
     .{ "i8", .I8 },
     .{ "i16", .I16 },
@@ -1392,7 +1394,7 @@ pub inline fn isWhitespace(c: u8) bool {
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
         else => false,
     };
 }

@@ -280,6 +280,26 @@ test "compiler rejects bytes enums without explicit values for every variant" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "bytes enums currently require explicit values for every variant"));
 }
 
+test "compiler rejects unsupported integer type widths" {
+    try expectDiagnosticProbeContains(
+        \\pub fn bad(value: u24) -> u24 {
+        \\    return value;
+        \\}
+    ,
+        .typecheck,
+        "invalid integer type 'u24'; supported integer types are u8, u16, u32, u64, u128, u160, u256, i8, i16, i32, i64, i128, and i256",
+    );
+
+    try expectDiagnosticProbeContains(
+        \\pub fn bad(value: i96) -> i96 {
+        \\    return value;
+        \\}
+    ,
+        .typecheck,
+        "invalid integer type 'i96'",
+    );
+}
+
 test "compiler parses enum explicit value expressions without syntax diagnostics" {
     const source_text =
         \\contract T {

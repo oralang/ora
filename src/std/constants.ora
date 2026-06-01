@@ -21,6 +21,10 @@ const U64_MAX: u64 = 18446744073709551615;
 const U128_MIN: u128 = 0;
 // Maximum value of u128.
 const U128_MAX: u128 = 340282366920938463463374607431768211455;
+// Minimum value of u160.
+const U160_MIN: u160 = 0;
+// Maximum value of u160.
+const U160_MAX: u160 = 1461501637330902918203684832716283019655932542975;
 // Minimum value of u256.
 const U256_MIN: u256 = 0;
 // Maximum value of u256.

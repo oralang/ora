@@ -186,6 +186,7 @@ pub const type_ids = struct {
     pub const string_id: TypeId = 15;
     pub const bytes_id: TypeId = 16;
     pub const void_id: TypeId = 17;
+    pub const u160_id: TypeId = 18;
 
     /// Convert an OraType to a well-known TypeId (primitives only).
     pub fn fromOraType(ot: OraType) ?TypeId {
@@ -195,6 +196,7 @@ pub const type_ids = struct {
             .u32 => u32_id,
             .u64 => u64_id,
             .u128 => u128_id,
+            .u160 => u160_id,
             .u256 => u256_id,
             .i8 => i8_id,
             .i16 => i16_id,
@@ -219,6 +221,7 @@ pub const type_ids = struct {
             u32_id => OraType{ .u32 = {} },
             u64_id => OraType{ .u64 = {} },
             u128_id => OraType{ .u128 = {} },
+            u160_id => OraType{ .u160 = {} },
             u256_id => OraType{ .u256 = {} },
             i8_id => OraType{ .i8 = {} },
             i16_id => OraType{ .i16 = {} },

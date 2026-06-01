@@ -98,8 +98,8 @@ pub const TypeInfo = struct {
 
         // integer types can be compatible based on size and signedness
         return switch (self.ora_type.?) {
-            .u8, .u16, .u32, .u64, .u128, .u256 => switch (other.ora_type.?) {
-                .u8, .u16, .u32, .u64, .u128, .u256 => true, // Unsigned integers
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256 => switch (other.ora_type.?) {
+                .u8, .u16, .u32, .u64, .u128, .u160, .u256 => true, // Unsigned integers
                 else => false,
             },
             .i8, .i16, .i32, .i64, .i128, .i256 => switch (other.ora_type.?) {
@@ -118,6 +118,7 @@ pub const TypeInfo = struct {
             .u32, .i32 => 32,
             .u64, .i64 => 64,
             .u128, .i128 => 128,
+            .u160 => 160,
             .u256, .i256 => 256,
             .bool => 1,
             else => null,
@@ -212,6 +213,7 @@ pub const OraType = union(enum) {
     u32: void,
     u64: void,
     u128: void,
+    u160: void,
     u256: void,
 
     // signed integer types
@@ -271,7 +273,7 @@ pub const OraType = union(enum) {
     /// Get the category for this Ora type
     pub fn getCategory(self: OraType) TypeCategory {
         return switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => .Integer,
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => .Integer,
             .bool => .Bool,
             .string => .String,
             .address => .Address,
@@ -304,7 +306,7 @@ pub const OraType = union(enum) {
     /// Check if this is an integer type
     pub fn isInteger(self: OraType) bool {
         return switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => true,
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256, .i8, .i16, .i32, .i64, .i128, .i256 => true,
             // refinement types: check the base type
             .min_value => |mv| mv.base.isInteger(),
             .max_value => |mv| mv.base.isInteger(),
@@ -318,7 +320,7 @@ pub const OraType = union(enum) {
     /// Check if this is an unsigned integer type
     pub fn isUnsignedInteger(self: OraType) bool {
         return switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256 => true,
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256 => true,
             // refinement types: check the base type
             .min_value => |mv| mv.base.isUnsignedInteger(),
             .max_value => |mv| mv.base.isUnsignedInteger(),
@@ -338,6 +340,7 @@ pub const OraType = union(enum) {
             .u32, .i32 => 32,
             .u64, .i64 => 64,
             .u128, .i128 => 128,
+            .u160 => 160,
             .u256, .i256 => 256,
             .address => 160,
             else => null,
@@ -366,6 +369,7 @@ pub const OraType = union(enum) {
             .u32 => "u32",
             .u64 => "u64",
             .u128 => "u128",
+            .u160 => "u160",
             .u256 => "u256",
             .i8 => "i8",
             .i16 => "i16",
@@ -406,7 +410,7 @@ pub const OraType = union(enum) {
     pub fn equals(a: OraType, b: OraType) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => true,
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => true,
             .struct_type => |an| switch (b) {
                 .struct_type => |bn| std.mem.eql(u8, an, bn),
                 else => unreachable,
@@ -519,7 +523,7 @@ pub const OraType = union(enum) {
         const tag_val: u64 = @intCast(@intFromEnum(std.meta.activeTag(self)));
         h.update(std.mem.asBytes(&tag_val));
         switch (self) {
-            .u8, .u16, .u32, .u64, .u128, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => {},
+            .u8, .u16, .u32, .u64, .u128, .u160, .u256, .i8, .i16, .i32, .i64, .i128, .i256, .bool, .string, .address, .bytes, .void, .type => {},
             .type_parameter => |name| h.update(name),
             .struct_type => |name| h.update(name),
             .enum_type => |name| h.update(name),
@@ -604,6 +608,7 @@ pub const OraType = union(enum) {
             .u32 => try writer.writeAll("u32"),
             .u64 => try writer.writeAll("u64"),
             .u128 => try writer.writeAll("u128"),
+            .u160 => try writer.writeAll("u160"),
             .u256 => try writer.writeAll("u256"),
             .i8 => try writer.writeAll("i8"),
             .i16 => try writer.writeAll("i16"),
