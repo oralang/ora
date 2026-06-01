@@ -116,6 +116,7 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .entries = &[_]NamedItem{},
         .impl_entries = &[_]ImplEntry{},
         .impl_lookup = &[_]lookup.PairEntry{},
+        .impl_method_lookup = &[_]lookup.MemberEntry{},
         .enum_variant_lookup = &[_]lookup.MemberEntry{},
         .contract_member_lookup = &[_]lookup.MemberEntry{},
     };
@@ -124,21 +125,24 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     const arena = result.arena.allocator();
     var entries: std.ArrayList(NamedItem) = .{};
     var impl_entries: std.ArrayList(ImplEntry) = .{};
+    var impl_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &enum_variant_lookup, &contract_member_lookup);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &impl_method_lookup, &enum_variant_lookup, &contract_member_lookup);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
             return std.mem.order(u8, lhs.name, rhs.name) == .lt;
         }
     }.lessThan);
+    lookup.sortMembers(impl_method_lookup.items);
     lookup.sortMembers(enum_variant_lookup.items);
     lookup.sortMembers(contract_member_lookup.items);
     result.entries = try entries.toOwnedSlice(arena);
     result.impl_entries = try impl_entries.toOwnedSlice(arena);
     result.impl_lookup = try lookup.buildPair(ImplEntry, arena, result.impl_entries, "trait_name", "target_name");
+    result.impl_method_lookup = try impl_method_lookup.toOwnedSlice(arena);
     result.enum_variant_lookup = try enum_variant_lookup.toOwnedSlice(arena);
     result.contract_member_lookup = try contract_member_lookup.toOwnedSlice(arena);
     return result;
@@ -151,6 +155,7 @@ fn collectItemEntry(
     prefix: ?[]const u8,
     entries: *std.ArrayList(NamedItem),
     impl_entries: *std.ArrayList(ImplEntry),
+    impl_method_lookup: *std.ArrayList(lookup.MemberEntry),
     enum_variant_lookup: *std.ArrayList(lookup.MemberEntry),
     contract_member_lookup: *std.ArrayList(lookup.MemberEntry),
 ) !void {
@@ -182,6 +187,17 @@ fn collectItemEntry(
                 .target_name = item.Impl.target_name,
                 .item_id = item_id,
             });
+            for (item.Impl.methods, 0..) |method_id, method_index| {
+                const method = switch (file.item(method_id).*) {
+                    .Function => |function| function,
+                    else => continue,
+                };
+                try impl_method_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = method.name,
+                    .index = method_index,
+                });
+            }
             return;
         },
         .GhostBlock => return,
@@ -203,7 +219,7 @@ fn collectItemEntry(
                     .index = member_index,
                 });
             }
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, enum_variant_lookup, contract_member_lookup);
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, impl_method_lookup, enum_variant_lookup, contract_member_lookup);
         }
     }
 }

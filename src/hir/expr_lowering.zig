@@ -2025,15 +2025,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(field.base);
             if (base_type.kind() != .external_proxy) return null;
             const trait_interface = self.parent.typecheck.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
-            for (trait_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name)) return .{
-                    .field = field,
-                    .trait_name = base_type.external_proxy.trait_name,
-                    .method = method,
-                    .ast_method = @This().externTraitMethodAst(self, base_type.external_proxy.trait_name, method.name),
-                };
-            }
-            return null;
+            const method = trait_interface.methodByName(field.name) orelse return null;
+            return .{
+                .field = field,
+                .trait_name = base_type.external_proxy.trait_name,
+                .method = method,
+                .ast_method = @This().externTraitMethodAst(self, base_type.external_proxy.trait_name, method.name),
+            };
         }
 
         fn lowerCurrentMethodSelfCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {
@@ -2189,30 +2187,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.trait_bounds) |bound| {
                 if (!std.mem.eql(u8, bound.parameter_name, receiver_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
-                for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .value_self) continue;
-                    if (matched_trait != null) return null;
-                    matched_trait = bound.trait_name;
-                }
+                if (trait_interface.methodByNameAndReceiver(field.name, .value_self) == null) continue;
+                if (matched_trait != null) return null;
+                matched_trait = bound.trait_name;
             }
             const trait_name = matched_trait orelse return null;
             const impl_item_id = self.parent.item_index.lookupImpl(trait_name, target_name) orelse return null;
-            const impl_item = self.parent.file.item(impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.parent.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                const has_self = @This().functionHasRuntimeSelf(self, item.Function);
-                if (!std.mem.eql(u8, item.Function.name, field.name) or !has_self) continue;
-                return .{
-                    .impl_item_id = impl_item_id,
-                    .method_item_id = method_item_id,
-                    .function = item.Function,
-                    .trait_name = trait_name,
-                    .target_name = target_name,
-                    .receiver_expr = field.base,
-                };
-            }
-            return null;
+            const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, field.name, .value_self) orelse return null;
+            const method_function = self.parent.file.item(method_item_id).Function;
+            return .{
+                .impl_item_id = impl_item_id,
+                .method_item_id = method_item_id,
+                .function = method_function,
+                .trait_name = trait_name,
+                .target_name = target_name,
+                .receiver_expr = field.base,
+            };
         }
 
         fn resolveConcreteValueMethodCall(
@@ -2229,17 +2219,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (item != .Impl) continue;
                 const impl_item = item.Impl;
                 if (!std.mem.eql(u8, impl_item.target_name, target_name)) continue;
-                for (impl_item.methods) |method_item_id| {
-                    const method_item = self.parent.file.item(method_item_id).*;
-                    if (method_item != .Function) continue;
-                    if (!std.mem.eql(u8, method_item.Function.name, field.name) or
-                        !@This().functionHasRuntimeSelf(self, method_item.Function)) continue;
-                    if (matched_impl_item_id != null) return null;
-                    matched_impl_item_id = ast.ItemId.fromIndex(item_index);
-                    matched_method_item_id = method_item_id;
-                    matched_function = method_item.Function;
-                    matched_trait_name = impl_item.trait_name;
-                }
+                const impl_item_id = ast.ItemId.fromIndex(item_index);
+                const method_count = self.parent.item_index.countImplMethodsByReceiver(self.parent.file, impl_item_id, field.name, .value_self);
+                if (method_count == 0) continue;
+                if (matched_impl_item_id != null or method_count > 1) return null;
+                const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, field.name, .value_self) orelse continue;
+                const method_item = self.parent.file.item(method_item_id).*;
+                if (method_item != .Function) continue;
+                matched_impl_item_id = impl_item_id;
+                matched_method_item_id = method_item_id;
+                matched_function = method_item.Function;
+                matched_trait_name = impl_item.trait_name;
             }
 
             return .{
@@ -2325,15 +2315,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             for (self.parent.typecheck.impl_interfaces) |impl_interface| {
                 if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
+                const method_count = impl_interface.methodCountByNameAndReceiver(field.name, .none);
+                if (method_count == 0) continue;
+                if (matched_impl_item_id != null or method_count > 1) return null;
                 const impl_item = self.parent.file.item(impl_interface.impl_item_id).Impl;
-                for (impl_interface.methods, 0..) |method, index| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
-                    if (matched_impl_item_id != null) return null;
-                    matched_impl_item_id = impl_interface.impl_item_id;
-                    matched_method_item_id = impl_item.methods[index];
-                    matched_function = self.parent.file.item(impl_item.methods[index]).Function;
-                    matched_trait_name = impl_interface.trait_name;
-                }
+                const method_index = impl_interface.methodIndexByNameAndReceiver(field.name, .none) orelse continue;
+                matched_impl_item_id = impl_interface.impl_item_id;
+                matched_method_item_id = impl_item.methods[method_index];
+                matched_function = self.parent.file.item(impl_item.methods[method_index]).Function;
+                matched_trait_name = impl_interface.trait_name;
             }
 
             return .{
@@ -2352,11 +2342,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.trait_bounds) |bound| {
                 if (!std.mem.eql(u8, bound.parameter_name, type_param_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
-                for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
-                    if (matched_trait != null) return null;
-                    matched_trait = bound.trait_name;
-                }
+                if (trait_interface.methodByNameAndReceiver(field.name, .none) == null) continue;
+                if (matched_trait != null) return null;
+                matched_trait = bound.trait_name;
             }
             const trait_name = matched_trait orelse return null;
             const concrete_type = self.parent.substitutedType(type_param_name) orelse return null;
@@ -2366,21 +2354,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn resolveAssociatedMethodFromLookup(self: *FunctionLowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) ?ResolvedAssociatedImplMethodCall {
             const impl_item_id = self.parent.item_index.lookupImpl(trait_name, target_name) orelse return null;
-            const impl_item = self.parent.file.item(impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.parent.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                const has_self = @This().functionHasRuntimeSelf(self, item.Function);
-                if (!std.mem.eql(u8, item.Function.name, method_name) or has_self) continue;
-                return .{
-                    .impl_item_id = impl_item_id,
-                    .method_item_id = method_item_id,
-                    .function = item.Function,
-                    .trait_name = trait_name,
-                    .target_name = target_name,
-                };
-            }
-            return null;
+            const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, method_name, .none) orelse return null;
+            const function = self.parent.file.item(method_item_id).Function;
+            return .{
+                .impl_item_id = impl_item_id,
+                .method_item_id = method_item_id,
+                .function = function,
+                .trait_name = trait_name,
+                .target_name = target_name,
+            };
         }
 
         fn genericTypeParameterNameForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
@@ -2423,11 +2405,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn functionHasRuntimeSelf(self: *FunctionLowerer, function: ast.FunctionItem) bool {
-            for (function.parameters) |parameter| {
-                if (parameter.is_comptime) continue;
-                return std.mem.eql(u8, self.parent.patternName(parameter.pattern) orelse "", "self");
-            }
-            return false;
+            return sema.functionHasRuntimeSelf(self.parent.file, function);
         }
 
         fn calleeName(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {

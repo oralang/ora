@@ -1245,6 +1245,10 @@ Current status:
 - Contract-member lookup by name and role is indexed for sema/HIR/comptime
   consumers; remaining `contract.members` loops are traversal or index
   construction, not local lookup policy.
+- Trait/interface and impl method lookup is indexed through semantic interface
+  records, with raw impl method item lookup indexed in `ItemIndexResult`; the
+  remaining semantic method loop materializes all trait methods for comptime
+  reflection rather than looking up one method by name.
 
 Plan:
 

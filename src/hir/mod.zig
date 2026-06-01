@@ -896,11 +896,7 @@ const Lowerer = struct {
     }
 
     pub fn functionHasRuntimeSelf(self: *const Lowerer, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
-        }
-        return false;
+        return sema_model.functionHasRuntimeSelf(self.file, function);
     }
 
     pub fn callSuppliesMethodReceiver(self: *const Lowerer, expr_id: ast.ExprId) bool {

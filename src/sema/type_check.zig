@@ -950,7 +950,7 @@ const TypeChecker = struct {
                 try self.recordTraitInterface(item_id, trait_item);
             },
             .Impl => |impl_item| {
-                try self.checkImplConformance(impl_item);
+                try self.checkImplConformance(item_id, impl_item);
 
                 const previous_contract = self.current_contract;
                 if (self.item_index.lookup(impl_item.target_name)) |target_item_id| {
@@ -1636,7 +1636,7 @@ const TypeChecker = struct {
         _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
     }
 
-    fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
+    fn checkImplConformance(self: *TypeChecker, impl_item_id: ast.ItemId, impl_item: anytype) anyerror!void {
         const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse {
             try self.emitRangeError(impl_item.range, "impl references unknown trait '{s}'", .{
                 impl_item.trait_name,
@@ -1676,7 +1676,11 @@ const TypeChecker = struct {
         }
 
         for (trait_item.methods) |trait_method| {
-            const impl_method = self.findImplMethodByName(impl_item, trait_method.name);
+            const impl_method_id = self.item_index.lookupImplMethod(self.file, impl_item_id, trait_method.name);
+            const impl_method = if (impl_method_id) |method_id| switch (self.file.item(method_id).*) {
+                .Function => |function| function,
+                else => null,
+            } else null;
             if (impl_method == null) {
                 try self.emitRangeError(impl_item.range, "impl missing method '{s}' required by trait '{s}'", .{
                     trait_method.name,
@@ -1704,15 +1708,6 @@ const TypeChecker = struct {
             if (std.mem.eql(u8, method.name, name)) return true;
         }
         return false;
-    }
-
-    fn findImplMethodByName(self: *TypeChecker, impl_item: anytype, name: []const u8) ?ast.FunctionItem {
-        for (impl_item.methods) |method_id| {
-            const item = self.file.item(method_id).*;
-            if (item != .Function) continue;
-            if (std.mem.eql(u8, item.Function.name, name)) return item.Function;
-        }
-        return null;
     }
 
     fn checkImplMethodSignature(self: *TypeChecker, trait_name: []const u8, trait_method: anytype, impl_method: ast.FunctionItem) anyerror!void {
@@ -1788,13 +1783,7 @@ const TypeChecker = struct {
     }
 
     fn functionHasBareSelf(self: *const TypeChecker, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            const pattern = self.file.pattern(parameter.pattern).*;
-            if (pattern != .Name) return false;
-            return std.mem.eql(u8, pattern.Name.name, "self");
-        }
-        return false;
+        return model.functionHasRuntimeSelf(self.file, function);
     }
 
     fn parameterTypeForFunctionItem(self: *TypeChecker, function_item_id: ast.ItemId, parameter: ast.Parameter) ?Type {
@@ -1856,10 +1845,15 @@ const TypeChecker = struct {
     }
 
     fn enclosingImplForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ImplItem {
-        for (self.file.items) |item| {
+        const impl_item_id = self.enclosingImplItemIdForMethod(method_item_id) orelse return null;
+        return self.file.item(impl_item_id).Impl;
+    }
+
+    fn enclosingImplItemIdForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ItemId {
+        for (self.file.items, 0..) |item, index| {
             if (item != .Impl) continue;
             for (item.Impl.methods) |candidate_id| {
-                if (candidate_id.index() == method_item_id.index()) return item.Impl;
+                if (candidate_id.index() == method_item_id.index()) return ast.ItemId.fromIndex(index);
             }
         }
         return null;
@@ -1979,11 +1973,13 @@ const TypeChecker = struct {
         for (trait_item.methods, 0..) |method, index| {
             methods[index] = try self.buildTraitMethodSignature(method);
         }
+        const method_lookup = try lookup_index.buildNamed(TraitMethodSignature, self.arena, methods, "name");
         try self.trait_interfaces.append(self.arena, .{
             .trait_item_id = trait_item_id,
             .name = trait_item.name,
             .is_extern = trait_item.is_extern,
             .methods = methods,
+            .method_lookup = method_lookup,
         });
     }
 
@@ -1997,6 +1993,7 @@ const TypeChecker = struct {
             const method = self.file.item(method_id).Function;
             methods[index] = try self.buildFunctionMethodSignature(method);
         }
+        const method_lookup = try lookup_index.buildNamed(TraitMethodSignature, self.arena, methods, "name");
         try self.impl_interfaces.append(self.arena, .{
             .impl_item_id = impl_item_id,
             .trait_item_id = trait_item_id,
@@ -2004,6 +2001,7 @@ const TypeChecker = struct {
             .trait_name = impl_item.trait_name,
             .target_name = impl_item.target_name,
             .methods = methods,
+            .method_lookup = method_lookup,
         });
     }
 
@@ -3331,11 +3329,7 @@ const TypeChecker = struct {
     }
 
     fn functionHasRuntimeSelf(self: *const TypeChecker, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
-        }
-        return false;
+        return model.functionHasRuntimeSelf(self.file, function);
     }
 
     fn callSuppliesMethodReceiver(self: *const TypeChecker, expr_id: ast.ExprId) bool {
@@ -7306,11 +7300,8 @@ const TypeChecker = struct {
         var matching_impls: usize = 0;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name) and method.receiver_kind == .value_self) {
-                    matching_impls += 1;
-                    break;
-                }
+            if (impl_interface.hasMethodByNameAndReceiver(field.name, .value_self)) {
+                matching_impls += 1;
             }
         }
         if (matching_impls > 1) {
@@ -7336,11 +7327,8 @@ const TypeChecker = struct {
         var matching_impls: usize = 0;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name) and method.receiver_kind == .none) {
-                    matching_impls += 1;
-                    break;
-                }
+            if (impl_interface.hasMethodByNameAndReceiver(field.name, .none)) {
+                matching_impls += 1;
             }
         }
         if (matching_impls > 1) {
@@ -7446,11 +7434,11 @@ const TypeChecker = struct {
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (!std.mem.eql(u8, method.name, field_name) or method.receiver_kind != .none) continue;
-                if (matched != null) return null;
-                matched = method;
-            }
+            const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .none);
+            if (method_count == 0) continue;
+            if (matched != null or method_count > 1) return null;
+            const method = impl_interface.methodByNameAndReceiver(field_name, .none) orelse continue;
+            matched = method;
         }
         return self.functionTypeFromTraitSignature(matched orelse return null);
     }
@@ -7538,11 +7526,11 @@ const TypeChecker = struct {
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (!std.mem.eql(u8, method.name, field_name) or method.receiver_kind != .value_self) continue;
-                if (matched != null) return null;
-                matched = method;
-            }
+            const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .value_self);
+            if (method_count == 0) continue;
+            if (matched != null or method_count > 1) return null;
+            const method = impl_interface.methodByNameAndReceiver(field_name, .value_self) orelse continue;
+            matched = method;
         }
         return self.functionTypeFromTraitSignature(matched orelse return null);
     }
@@ -7552,16 +7540,10 @@ const TypeChecker = struct {
         const impl_item = self.enclosingImplForMethod(function_item_id) orelse return null;
         if (!std.mem.eql(u8, impl_item.target_name, target_name)) return null;
 
-        var matched: ?Type = null;
-        for (impl_item.methods) |method_item_id| {
-            const item = self.file.item(method_item_id).*;
-            if (item != .Function) continue;
-            const function = item.Function;
-            if (!std.mem.eql(u8, function.name, field_name) or !self.functionHasBareSelf(function)) continue;
-            if (matched != null) return null;
-            matched = self.item_types[method_item_id.index()];
-        }
-        return matched;
+        const impl_item_id = self.enclosingImplItemIdForMethod(function_item_id) orelse return null;
+        if (self.item_index.countImplMethodsByReceiver(self.file, impl_item_id, field_name, .value_self) > 1) return null;
+        const method_item_id = self.item_index.lookupImplMethodByReceiver(self.file, impl_item_id, field_name, .value_self) orelse return null;
+        return self.item_types[method_item_id.index()];
     }
 
     fn traitInterfaceByName(self: *const TypeChecker, name: []const u8) ?TraitInterface {
@@ -7573,10 +7555,7 @@ const TypeChecker = struct {
 
     fn findTraitMethodSignature(self: *const TypeChecker, trait_interface: TraitInterface, name: []const u8) ?TraitMethodSignature {
         _ = self;
-        for (trait_interface.methods) |method| {
-            if (std.mem.eql(u8, method.name, name)) return method;
-        }
-        return null;
+        return trait_interface.methodByName(name);
     }
 
     fn indexAccessType(self: *const TypeChecker, base_type: Type, index_expr_id: ast.ExprId) Type {

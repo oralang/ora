@@ -17,7 +17,7 @@ pub const MemberEntry = struct {
     index: usize,
 };
 
-pub const MemberRange = struct {
+pub const EntryRange = struct {
     start: usize,
     end: usize,
 };
@@ -59,6 +59,11 @@ pub fn buildPair(
 }
 
 pub fn findNamed(entries: []const NamedEntry, name: []const u8) ?usize {
+    const range = findNamedRange(entries, name) orelse return null;
+    return entries[range.start].index;
+}
+
+pub fn findNamedRange(entries: []const NamedEntry, name: []const u8) ?EntryRange {
     var left: usize = 0;
     var right: usize = entries.len;
     while (left < right) {
@@ -70,7 +75,12 @@ pub fn findNamed(entries: []const NamedEntry, name: []const u8) ?usize {
     }
     if (left >= entries.len) return null;
     if (!std.mem.eql(u8, entries[left].name, name)) return null;
-    return entries[left].index;
+
+    var end = left + 1;
+    while (end < entries.len and std.mem.eql(u8, entries[end].name, name)) {
+        end += 1;
+    }
+    return .{ .start = left, .end = end };
 }
 
 pub fn findNamedItem(comptime T: type, items: []const T, entries: []const NamedEntry, name: []const u8) ?T {
@@ -103,7 +113,7 @@ pub fn findMember(entries: []const MemberEntry, owner_index: usize, name: []cons
     return entries[range.start].index;
 }
 
-pub fn findMemberRange(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?MemberRange {
+pub fn findMemberRange(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?EntryRange {
     var left: usize = 0;
     var right: usize = entries.len;
     while (left < right) {
@@ -187,6 +197,10 @@ test "named lookup returns original first duplicate" {
     try std.testing.expectEqual(@as(?usize, 0), findNamed(entries, "Beta"));
     try std.testing.expectEqual(@as(?usize, null), findNamed(entries, "Missing"));
     try std.testing.expectEqualStrings("Beta", findNamedItem(Item, &items, entries, "Beta").?.name);
+    const range = findNamedRange(entries, "Beta").?;
+    try std.testing.expectEqual(@as(usize, 2), range.end - range.start);
+    try std.testing.expectEqual(@as(usize, 0), entries[range.start].index);
+    try std.testing.expectEqual(@as(usize, 2), entries[range.start + 1].index);
 }
 
 test "member lookup returns original first duplicate within owner" {

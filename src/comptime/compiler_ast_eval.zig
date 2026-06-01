@@ -1586,20 +1586,12 @@ const ConstEvaluator = struct {
     }
 
     fn functionRuntimeSelfParameterIndex(self: *ConstEvaluator, function: ast.FunctionItem) ?usize {
-        return self.functionRuntimeSelfParameterIndexInFile(self.file, function);
+        return model.functionRuntimeSelfParameterIndex(self.file, function);
     }
 
     fn functionRuntimeSelfParameterIndexInFile(self: *ConstEvaluator, file: *const ast.AstFile, function: ast.FunctionItem) ?usize {
         _ = self;
-        for (function.parameters, 0..) |parameter, index| {
-            if (parameter.is_comptime) continue;
-            const name = switch (file.pattern(parameter.pattern).*) {
-                .Name => |pattern| pattern.name,
-                else => null,
-            };
-            return if (std.mem.eql(u8, name orelse "", "self")) index else null;
-        }
-        return null;
+        return model.functionRuntimeSelfParameterIndex(file, function);
     }
 
     fn typeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
@@ -1794,24 +1786,19 @@ const ConstEvaluator = struct {
         for (typecheck.impl_interfaces) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, concrete_name)) continue;
             const trait_interface = typecheck.traitInterfaceByName(impl_interface.trait_name) orelse continue;
-            var trait_is_comptime = false;
-            for (trait_interface.methods) |trait_method| {
-                if (!std.mem.eql(u8, trait_method.name, field.name)) continue;
-                trait_is_comptime = trait_method.is_comptime;
-                break;
-            }
-            if (!trait_is_comptime) continue;
+            const trait_method = trait_interface.methodByName(field.name) orelse continue;
+            if (!trait_method.is_comptime) continue;
 
-            const impl_item = self.file.item(impl_interface.impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                if (!std.mem.eql(u8, item.Function.name, field.name)) continue;
-                if (matched_impl_item_id != null) return null;
-                matched_impl_item_id = impl_interface.impl_item_id;
-                matched_method_item_id = method_item_id;
-                matched_function = item.Function;
-            }
+            const item_index = (self.currentItemIndex() catch null) orelse return null;
+            const method_count = item_index.countImplMethods(self.file, impl_interface.impl_item_id, field.name);
+            if (method_count == 0) continue;
+            if (matched_impl_item_id != null or method_count > 1) return null;
+            const method_item_id = item_index.lookupImplMethod(self.file, impl_interface.impl_item_id, field.name) orelse continue;
+            const item = self.file.item(method_item_id).*;
+            if (item != .Function) continue;
+            matched_impl_item_id = impl_interface.impl_item_id;
+            matched_method_item_id = method_item_id;
+            matched_function = item.Function;
         }
 
         _ = matched_impl_item_id orelse return null;
@@ -1963,14 +1950,7 @@ const ConstEvaluator = struct {
 
                                 const module_typecheck = typecheck orelse break :blk null;
                                 if (module_typecheck.traitInterfaceByName(trait_item.name)) |trait_interface| {
-                                    var found_method: ?model.TraitMethodSignature = null;
-                                    for (trait_interface.methods) |method| {
-                                        if (std.mem.eql(u8, method.name, field.name)) {
-                                            found_method = method;
-                                            break;
-                                        }
-                                    }
-                                    const method = found_method orelse break :blk null;
+                                    const method = trait_interface.methodByName(field.name) orelse break :blk null;
                                     break :blk AbiFunctionReference{
                                         .name = method.name,
                                         .param_types = method.param_types,

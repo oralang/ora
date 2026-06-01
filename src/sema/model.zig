@@ -39,6 +39,22 @@ pub const ImplEntry = struct {
     item_id: ast.ItemId,
 };
 
+pub fn functionRuntimeSelfParameterIndex(file: *const ast.AstFile, function: ast.FunctionItem) ?usize {
+    for (function.parameters, 0..) |parameter, index| {
+        if (parameter.is_comptime) continue;
+        const name = switch (file.pattern(parameter.pattern).*) {
+            .Name => |pattern| pattern.name,
+            else => null,
+        };
+        return if (std.mem.eql(u8, name orelse "", "self")) index else null;
+    }
+    return null;
+}
+
+pub fn functionHasRuntimeSelf(file: *const ast.AstFile, function: ast.FunctionItem) bool {
+    return functionRuntimeSelfParameterIndex(file, function) != null;
+}
+
 pub const ContractMemberRole = enum {
     field,
     constant,
@@ -96,6 +112,17 @@ pub const TraitInterface = struct {
     name: []const u8,
     is_extern: bool = false,
     methods: []const TraitMethodSignature,
+    method_lookup: []lookup_index.NamedEntry,
+
+    pub fn methodByName(self: TraitInterface, name: []const u8) ?TraitMethodSignature {
+        const index = findMethodIndexByName(self.methods, self.method_lookup, name) orelse return null;
+        return self.methods[index];
+    }
+
+    pub fn methodByNameAndReceiver(self: TraitInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?TraitMethodSignature {
+        const index = findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind) orelse return null;
+        return self.methods[index];
+    }
 };
 
 pub const ImplInterface = struct {
@@ -105,7 +132,64 @@ pub const ImplInterface = struct {
     trait_name: []const u8,
     target_name: []const u8,
     methods: []const TraitMethodSignature,
+    method_lookup: []lookup_index.NamedEntry,
+
+    pub fn methodByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?TraitMethodSignature {
+        const index = findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind) orelse return null;
+        return self.methods[index];
+    }
+
+    pub fn methodIndexByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?usize {
+        return findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind);
+    }
+
+    pub fn hasMethodByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) bool {
+        return self.methodIndexByNameAndReceiver(name, receiver_kind) != null;
+    }
+
+    pub fn methodCountByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) usize {
+        return countMethodsByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind);
+    }
 };
+
+fn findMethodIndexByName(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+) ?usize {
+    const index = lookup_index.findNamed(method_lookup, name) orelse return null;
+    if (index >= methods.len) return null;
+    return index;
+}
+
+fn findMethodIndexByNameAndReceiver(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+    receiver_kind: ast.ReceiverKind,
+) ?usize {
+    const range = lookup_index.findNamedRange(method_lookup, name) orelse return null;
+    for (method_lookup[range.start..range.end]) |entry| {
+        if (entry.index >= methods.len) return null;
+        if (methods[entry.index].receiver_kind == receiver_kind) return entry.index;
+    }
+    return null;
+}
+
+fn countMethodsByNameAndReceiver(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+    receiver_kind: ast.ReceiverKind,
+) usize {
+    const range = lookup_index.findNamedRange(method_lookup, name) orelse return 0;
+    var count: usize = 0;
+    for (method_lookup[range.start..range.end]) |entry| {
+        if (entry.index >= methods.len) return count;
+        if (methods[entry.index].receiver_kind == receiver_kind) count += 1;
+    }
+    return count;
+}
 
 pub const InstantiatedStructField = struct {
     name: []const u8,
@@ -735,6 +819,7 @@ pub const ItemIndexResult = struct {
     entries: []NamedItem,
     impl_entries: []ImplEntry,
     impl_lookup: []lookup_index.PairEntry,
+    impl_method_lookup: []lookup_index.MemberEntry,
     enum_variant_lookup: []lookup_index.MemberEntry,
     contract_member_lookup: []lookup_index.MemberEntry,
 
@@ -759,6 +844,59 @@ pub const ItemIndexResult = struct {
     pub fn lookupImpl(self: *const ItemIndexResult, trait_name: []const u8, target_name: []const u8) ?ast.ItemId {
         const index = lookup_index.findPair(self.impl_lookup, trait_name, target_name) orelse return null;
         return self.impl_entries[index].item_id;
+    }
+
+    pub fn lookupImplMethod(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) ?ast.ItemId {
+        const method_index = lookup_index.findMember(self.impl_method_lookup, impl_item_id.index(), name) orelse return null;
+        return implMethodAt(file, impl_item_id, method_index);
+    }
+
+    pub fn countImplMethods(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) usize {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return 0;
+        var count: usize = 0;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            if (implMethodAt(file, impl_item_id, entry.index) != null) count += 1;
+        }
+        return count;
+    }
+
+    pub fn lookupImplMethodByReceiver(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        impl_item_id: ast.ItemId,
+        name: []const u8,
+        receiver_kind: ast.ReceiverKind,
+    ) ?ast.ItemId {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return null;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            const method_id = implMethodAt(file, impl_item_id, entry.index) orelse continue;
+            const function = switch (file.item(method_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (functionReceiverKind(file, function) == receiver_kind) return method_id;
+        }
+        return null;
+    }
+
+    pub fn countImplMethodsByReceiver(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        impl_item_id: ast.ItemId,
+        name: []const u8,
+        receiver_kind: ast.ReceiverKind,
+    ) usize {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return 0;
+        var count: usize = 0;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            const method_id = implMethodAt(file, impl_item_id, entry.index) orelse continue;
+            const function = switch (file.item(method_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (functionReceiverKind(file, function) == receiver_kind) count += 1;
+        }
+        return count;
     }
 
     pub fn lookupEnumVariantIndex(self: *const ItemIndexResult, enum_item_id: ast.ItemId, name: []const u8) ?usize {
@@ -786,6 +924,19 @@ pub const ItemIndexResult = struct {
         return null;
     }
 };
+
+fn implMethodAt(file: *const ast.AstFile, impl_item_id: ast.ItemId, method_index: usize) ?ast.ItemId {
+    const impl_item = switch (file.item(impl_item_id).*) {
+        .Impl => |impl_item| impl_item,
+        else => return null,
+    };
+    if (method_index >= impl_item.methods.len) return null;
+    return impl_item.methods[method_index];
+}
+
+fn functionReceiverKind(file: *const ast.AstFile, function: ast.FunctionItem) ast.ReceiverKind {
+    return if (functionHasRuntimeSelf(file, function)) .value_self else .none;
+}
 
 fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
     return switch (item) {

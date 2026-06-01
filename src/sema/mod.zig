@@ -55,6 +55,8 @@ pub const ModuleVerificationFactsResult = model.ModuleVerificationFactsResult;
 pub const appendTypeMangleName = model.appendTypeMangleName;
 pub const formatEffectSlotPath = model.formatEffectSlotPath;
 pub const effectSlotPathRoot = model.effectSlotPathRoot;
+pub const functionHasRuntimeSelf = model.functionHasRuntimeSelf;
+pub const functionRuntimeSelfParameterIndex = model.functionRuntimeSelfParameterIndex;
 
 pub const buildModuleGraph = module_graph.buildModuleGraph;
 pub const buildItemIndex = module_graph.buildItemIndex;
