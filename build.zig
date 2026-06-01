@@ -81,6 +81,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ora_lexer_mod.addImport("ora_types", ora_types_mod);
 
     const ora_imports_mod = b.createModule(.{
         .root_source_file = b.path("src/imports/mod.zig"),

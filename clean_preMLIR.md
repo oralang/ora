@@ -550,6 +550,11 @@ hand edits across `lexer.zig`, parser identifier/type-token switches,
 "add a width by adding one builtin table row" invariant is not true at the
 token layer yet, even though sema can now consume the table correctly.
 
+Short-term mitigation is now in place: lexer exposes a builtin-type keyword
+token set derived from `types/builtin.zig`, and parser/syntax/LSP consumers use
+that predicate instead of repeating every integer width. The remaining manual
+surface is the `TokenType` enum and keyword row itself.
+
 If direct generation is awkward because `TokenType` lives in `lexer.zig`, a
 short-term acceptable step is:
 

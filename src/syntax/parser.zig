@@ -2030,17 +2030,22 @@ const Parser = struct {
     }
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        if (tokenStartsPrimaryNameExpr(kind)) {
+            if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less) {
+                return self.parseExternalProxyExprNode();
+            }
+            if (self.looksLikeGenericTypeValueExpr(terminators)) {
+                return self.parsePathOrGenericTypeNode(terminators);
+            }
+            return self.parseSingleTokenExprNode(SyntaxKind.NameExpr);
+        }
+
+        return switch (kind) {
             .Dot => if (self.peekKind(1) == .LeftBrace)
                 self.parseAnonymousStructLiteralExprNode(terminators)
             else
                 self.parseExpressionErrorNode("expected expression"),
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
-                self.parseExternalProxyExprNode()
-            else if (self.looksLikeGenericTypeValueExpr(terminators))
-                self.parsePathOrGenericTypeNode(terminators)
-            else
-                self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
             .IntegerLiteral => self.parseIntegerLiteralExprNode(),
             .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
             .LeftParen => self.parseParenLikeExprNode(),
@@ -2186,37 +2191,16 @@ const Parser = struct {
     }
 
     fn parseTypePrimaryNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        return switch (kind) {
             .LeftParen => self.parseTupleTypeNode(),
             .LeftBracket => self.parseArrayTypeNode(),
             .Slice => self.parseSliceTypeNode(),
             .Struct => self.parseAnonymousStructTypeNode(),
-            .Map,
-            .Identifier,
-            .Error,
-            .Result,
-            .From,
-            .To,
-            .U8,
-            .U16,
-            .U32,
-            .U64,
-            .U128,
-            .U160,
-            .U256,
-            .I8,
-            .I16,
-            .I32,
-            .I64,
-            .I128,
-            .I256,
-            .Bool,
-            .Address,
-            .String,
-            .Bytes,
-            .Void,
-            => self.parsePathOrGenericTypeNode(stops),
-            else => self.parseTypeErrorNode("expected type expression"),
+            else => if (tokenStartsTypePath(kind))
+                self.parsePathOrGenericTypeNode(stops)
+            else
+                self.parseTypeErrorNode("expected type expression"),
         };
     }
 
@@ -2935,9 +2919,24 @@ const Parser = struct {
         return units.isEtherUnit(self.source_text[token.range.start..token.range.end]);
     }
 
-    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+    fn tokenStartsPrimaryNameExpr(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .Result, .From, .To, .Error => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenStartsTypePath(kind: green.TokenKind) bool {
+        return switch (kind) {
+            .Map, .Identifier, .Error, .Result, .From, .To => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+        if (lexer.isBuiltinTypeKeyword(kind)) return true;
+        return switch (kind) {
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice => true,
             else => false,
         };
     }
@@ -3326,8 +3325,9 @@ fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
 }
 
 fn isIdentifierLike(kind: green.TokenKind) bool {
+    if (lexer.isBuiltinTypeKeyword(kind)) return true;
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice => true,
         else => false,
     };
 }

@@ -373,16 +373,13 @@ fn isDeclarationKeyword(tt: TokenType) bool {
 
 fn isOtherKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .Immutable, .Storage, .Memory, .Tstore, .As, .Call, .Staticcall, .Void, .From, .To => true,
+        .Immutable, .Storage, .Memory, .Tstore, .As, .Call, .Staticcall, .From, .To => true,
         else => false,
     };
 }
 
 fn isTypeKeyword(tt: TokenType) bool {
-    return switch (tt) {
-        .U8, .U16, .U32, .U64, .U128, .U160, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
-        else => false,
-    };
+    return lexer_mod.isTypeKeyword(tt);
 }
 
 fn isOperator(tt: TokenType) bool {
