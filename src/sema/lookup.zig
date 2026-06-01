@@ -17,6 +17,11 @@ pub const MemberEntry = struct {
     index: usize,
 };
 
+pub const MemberRange = struct {
+    start: usize,
+    end: usize,
+};
+
 pub fn buildNamed(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -94,6 +99,11 @@ pub fn sortMembers(entries: []MemberEntry) void {
 }
 
 pub fn findMember(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?usize {
+    const range = findMemberRange(entries, owner_index, name) orelse return null;
+    return entries[range.start].index;
+}
+
+pub fn findMemberRange(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?MemberRange {
     var left: usize = 0;
     var right: usize = entries.len;
     while (left < right) {
@@ -106,7 +116,15 @@ pub fn findMember(entries: []const MemberEntry, owner_index: usize, name: []cons
     if (left >= entries.len) return null;
     if (entries[left].owner_index != owner_index) return null;
     if (!std.mem.eql(u8, entries[left].name, name)) return null;
-    return entries[left].index;
+
+    var end = left + 1;
+    while (end < entries.len and
+        entries[end].owner_index == owner_index and
+        std.mem.eql(u8, entries[end].name, name))
+    {
+        end += 1;
+    }
+    return .{ .start = left, .end = end };
 }
 
 fn namedLessThan(_: void, lhs: NamedEntry, rhs: NamedEntry) bool {
@@ -184,6 +202,10 @@ test "member lookup returns original first duplicate within owner" {
     try std.testing.expectEqual(@as(?usize, 0), findMember(&entries, 2, "Beta"));
     try std.testing.expectEqual(@as(?usize, 1), findMember(&entries, 1, "Beta"));
     try std.testing.expectEqual(@as(?usize, null), findMember(&entries, 1, "Alpha"));
+    const range = findMemberRange(&entries, 2, "Beta").?;
+    try std.testing.expectEqual(@as(usize, 2), range.end - range.start);
+    try std.testing.expectEqual(@as(usize, 0), entries[range.start].index);
+    try std.testing.expectEqual(@as(usize, 3), entries[range.start + 1].index);
 }
 
 test "pair lookup returns original first duplicate" {

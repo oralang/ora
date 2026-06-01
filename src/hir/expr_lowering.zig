@@ -648,29 +648,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?mlir.MlirValue {
             const function = self.function orelse return null;
             const contract_id = function.parent_contract orelse return null;
-            const contract = switch (self.parent.file.item(contract_id).*) {
-                .Contract => |contract| contract,
-                else => return null,
-            };
-
-            for (contract.members) |member_id| {
-                switch (self.parent.file.item(member_id).*) {
-                    .Field => |field| {
-                        if (!std.mem.eql(u8, field.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    .Constant => |constant| {
-                        if (!std.mem.eql(u8, constant.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    .Function => |function_item| {
-                        if (!std.mem.eql(u8, function_item.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    else => {},
-                }
-            }
-            return null;
+            const member_id = self.parent.item_index.lookupContractMemberWithRoles(self.parent.file, contract_id, name.name, .{
+                .field = true,
+                .constant = true,
+                .function = true,
+            }) orelse return null;
+            return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
         }
 
         pub fn lowerUnary(self: *FunctionLowerer, unary: ast.UnaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -4024,67 +4007,57 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             switch (self.parent.file.item(item_id).*) {
-                .Contract => |contract| {
-                    for (contract.members) |member_id| {
-                        const member = self.parent.file.item(member_id).*;
-                        switch (member) {
-                            .Field => |contract_field| {
-                                if (!std.mem.eql(u8, contract_field.name, field.name)) continue;
-                                if (contract_field.binding_kind == .immutable) {
-                                    if (contract_field.value) |value| {
-                                        return try self.lowerExpr(value, locals);
-                                    }
+                .Contract => {
+                    const member_id = self.parent.item_index.lookupContractMemberWithRoles(self.parent.file, item_id, field.name, .{
+                        .field = true,
+                        .constant = true,
+                        .function = true,
+                        .struct_ = true,
+                        .enum_ = true,
+                        .bitfield = true,
+                    }) orelse return null;
+                    switch (self.parent.file.item(member_id).*) {
+                        .Field => |contract_field| {
+                            if (contract_field.binding_kind == .immutable) {
+                                if (contract_field.value) |value| {
+                                    return try self.lowerExpr(value, locals);
                                 }
-                                const op = switch (contract_field.storage_class) {
-                                    .storage => mlir.oraSLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .memory => mlir.oraMLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .tstore => mlir.oraTLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .none => std.mem.zeroes(mlir.MlirOperation),
-                                };
-                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                            },
-                            .Constant => |constant| {
-                                if (std.mem.eql(u8, constant.name, field.name)) {
-                                    return try self.lowerExpr(constant.value, locals);
-                                }
-                            },
-                            .Function => |function| {
-                                if (std.mem.eql(u8, function.name, field.name)) {
-                                    const op = mlir.oraFunctionRefOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(field.range),
-                                        strRef(function.name),
-                                        result_type,
-                                    );
-                                    if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                                }
-                            },
-                            .Struct => |struct_item| {
-                                if (std.mem.eql(u8, struct_item.name, field.name)) return null;
-                            },
-                            .Enum => |enum_item| {
-                                if (std.mem.eql(u8, enum_item.name, field.name)) return null;
-                            },
-                            .Bitfield => |bitfield_item| {
-                                if (std.mem.eql(u8, bitfield_item.name, field.name)) return null;
-                            },
-                            else => {},
-                        }
+                            }
+                            const op = switch (contract_field.storage_class) {
+                                .storage => mlir.oraSLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .memory => mlir.oraMLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .tstore => mlir.oraTLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .none => std.mem.zeroes(mlir.MlirOperation),
+                            };
+                            if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        },
+                        .Constant => |constant| return try self.lowerExpr(constant.value, locals),
+                        .Function => |function| {
+                            const op = mlir.oraFunctionRefOpCreate(
+                                self.parent.context,
+                                self.parent.location(field.range),
+                                strRef(function.name),
+                                result_type,
+                            );
+                            if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        },
+                        .Struct, .Enum, .Bitfield => return null,
+                        else => {},
                     }
                 },
                 else => {},

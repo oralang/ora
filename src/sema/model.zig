@@ -39,6 +39,48 @@ pub const ImplEntry = struct {
     item_id: ast.ItemId,
 };
 
+pub const ContractMemberRole = enum {
+    field,
+    constant,
+    function,
+    struct_,
+    bitfield,
+    enum_,
+    type_alias,
+    trait_,
+    log_decl,
+    error_decl,
+};
+
+pub const ContractMemberRoles = packed struct(u16) {
+    field: bool = false,
+    constant: bool = false,
+    function: bool = false,
+    struct_: bool = false,
+    bitfield: bool = false,
+    enum_: bool = false,
+    type_alias: bool = false,
+    trait_: bool = false,
+    log_decl: bool = false,
+    error_decl: bool = false,
+    _padding: u6 = 0,
+
+    pub fn contains(self: ContractMemberRoles, role: ContractMemberRole) bool {
+        return switch (role) {
+            .field => self.field,
+            .constant => self.constant,
+            .function => self.function,
+            .struct_ => self.struct_,
+            .bitfield => self.bitfield,
+            .enum_ => self.enum_,
+            .type_alias => self.type_alias,
+            .trait_ => self.trait_,
+            .log_decl => self.log_decl,
+            .error_decl => self.error_decl,
+        };
+    }
+};
+
 pub const TraitMethodSignature = struct {
     name: []const u8,
     receiver_kind: ast.ReceiverKind,
@@ -694,6 +736,7 @@ pub const ItemIndexResult = struct {
     impl_entries: []ImplEntry,
     impl_lookup: []lookup_index.PairEntry,
     enum_variant_lookup: []lookup_index.MemberEntry,
+    contract_member_lookup: []lookup_index.MemberEntry,
 
     pub fn deinit(self: *ItemIndexResult) void {
         self.arena.deinit();
@@ -721,7 +764,44 @@ pub const ItemIndexResult = struct {
     pub fn lookupEnumVariantIndex(self: *const ItemIndexResult, enum_item_id: ast.ItemId, name: []const u8) ?usize {
         return lookup_index.findMember(self.enum_variant_lookup, enum_item_id.index(), name);
     }
+
+    pub fn lookupContractMemberWithRoles(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        contract_item_id: ast.ItemId,
+        name: []const u8,
+        roles: ContractMemberRoles,
+    ) ?ast.ItemId {
+        const range = lookup_index.findMemberRange(self.contract_member_lookup, contract_item_id.index(), name) orelse return null;
+        const contract = switch (file.item(contract_item_id).*) {
+            .Contract => |contract| contract,
+            else => return null,
+        };
+        for (self.contract_member_lookup[range.start..range.end]) |entry| {
+            if (entry.index >= contract.members.len) return null;
+            const member_id = contract.members[entry.index];
+            const role = contractMemberRole(file.item(member_id).*) orelse continue;
+            if (roles.contains(role)) return member_id;
+        }
+        return null;
+    }
 };
+
+fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
+    return switch (item) {
+        .Field => .field,
+        .Constant => .constant,
+        .Function => .function,
+        .Struct => .struct_,
+        .Bitfield => .bitfield,
+        .Enum => .enum_,
+        .TypeAlias => .type_alias,
+        .Trait => .trait_,
+        .LogDecl => .log_decl,
+        .ErrorDecl => .error_decl,
+        else => null,
+    };
+}
 
 pub const NameResolutionResult = struct {
     arena: std.heap.ArenaAllocator,

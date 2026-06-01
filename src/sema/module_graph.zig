@@ -117,6 +117,7 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .impl_entries = &[_]ImplEntry{},
         .impl_lookup = &[_]lookup.PairEntry{},
         .enum_variant_lookup = &[_]lookup.MemberEntry{},
+        .contract_member_lookup = &[_]lookup.MemberEntry{},
     };
     errdefer result.deinit();
 
@@ -124,8 +125,9 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     var entries: std.ArrayList(NamedItem) = .{};
     var impl_entries: std.ArrayList(ImplEntry) = .{};
     var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
+    var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &enum_variant_lookup);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &enum_variant_lookup, &contract_member_lookup);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
@@ -133,10 +135,12 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         }
     }.lessThan);
     lookup.sortMembers(enum_variant_lookup.items);
+    lookup.sortMembers(contract_member_lookup.items);
     result.entries = try entries.toOwnedSlice(arena);
     result.impl_entries = try impl_entries.toOwnedSlice(arena);
     result.impl_lookup = try lookup.buildPair(ImplEntry, arena, result.impl_entries, "trait_name", "target_name");
     result.enum_variant_lookup = try enum_variant_lookup.toOwnedSlice(arena);
+    result.contract_member_lookup = try contract_member_lookup.toOwnedSlice(arena);
     return result;
 }
 
@@ -148,6 +152,7 @@ fn collectItemEntry(
     entries: *std.ArrayList(NamedItem),
     impl_entries: *std.ArrayList(ImplEntry),
     enum_variant_lookup: *std.ArrayList(lookup.MemberEntry),
+    contract_member_lookup: *std.ArrayList(lookup.MemberEntry),
 ) !void {
     const item = file.item(item_id).*;
     const name = switch (item) {
@@ -190,10 +195,33 @@ fn collectItemEntry(
     try entries.append(allocator, .{ .name = name, .item_id = item_id });
 
     if (item == .Contract) {
-        for (item.Contract.members) |member_id| {
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, enum_variant_lookup);
+        for (item.Contract.members, 0..) |member_id, member_index| {
+            if (contractMemberName(file.item(member_id).*)) |member_name| {
+                try contract_member_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = member_name,
+                    .index = member_index,
+                });
+            }
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, enum_variant_lookup, contract_member_lookup);
         }
     }
+}
+
+fn contractMemberName(item: ast.Item) ?[]const u8 {
+    return switch (item) {
+        .Function => |function| function.name,
+        .Field => |field| field.name,
+        .Constant => |constant| constant.name,
+        .Struct => |struct_item| struct_item.name,
+        .Bitfield => |bitfield| bitfield.name,
+        .Enum => |enum_item| enum_item.name,
+        .Trait => |trait_item| trait_item.name,
+        .TypeAlias => |type_alias| type_alias.name,
+        .LogDecl => |log_decl| log_decl.name,
+        .ErrorDecl => |error_decl| error_decl.name,
+        else => null,
+    };
 }
 
 fn containsModuleId(values: []const source.ModuleId, needle: source.ModuleId) bool {

@@ -4044,24 +4044,15 @@ const TypeChecker = struct {
             },
             .Field => |field| blk: {
                 const base_item_id = self.resolveBuiltinItemReference(field.base) orelse break :blk null;
-                const contract = switch (self.file.item(base_item_id).*) {
-                    .Contract => |contract| contract,
-                    else => break :blk null,
-                };
-                for (contract.members) |member_id| {
-                    const member_name = switch (self.file.item(member_id).*) {
-                        .LogDecl => |log| log.name,
-                        .Struct => |s| s.name,
-                        .Function => |f| f.name,
-                        .Bitfield => |b| b.name,
-                        .Enum => |e| e.name,
-                        .Constant => |c| c.name,
-                        .ErrorDecl => |e| e.name,
-                        else => continue,
-                    };
-                    if (std.mem.eql(u8, member_name, field.name)) break :blk member_id;
-                }
-                break :blk null;
+                break :blk self.item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{
+                    .log_decl = true,
+                    .struct_ = true,
+                    .function = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                    .constant = true,
+                    .error_decl = true,
+                });
             },
             else => null,
         };
@@ -4175,13 +4166,10 @@ const TypeChecker = struct {
                                 const method = self.findTraitMethodSignature(trait_interface, field.name) orelse break :blk null;
                                 break :blk self.functionTypeFromTraitSignature(method);
                             },
-                            .Contract => |contract| {
-                                for (contract.members) |member_id| {
-                                    const member = self.file.item(member_id).*;
-                                    if (member != .Function or !std.mem.eql(u8, member.Function.name, field.name)) continue;
-                                    const ty = self.item_types[member_id.index()];
-                                    break :blk if (ty.kind() == .function) ty else null;
-                                }
+                            .Contract => {
+                                const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field.name, .{ .function = true }) orelse break :blk null;
+                                const ty = self.item_types[member_id.index()];
+                                break :blk if (ty.kind() == .function) ty else null;
                             },
                             else => {},
                         },
@@ -5082,17 +5070,13 @@ const TypeChecker = struct {
         if (self.current_contract) |contract_id| {
             if (contract_id.index() >= self.file.items.len or self.file.item(contract_id).* != .Contract) {
                 if (self.item_index.lookup(trimmed)) |item_id| return item_id;
-            } else {
-                const contract = self.file.item(contract_id).Contract;
-                for (contract.members) |member_id| {
-                    switch (self.file.item(member_id).*) {
-                        .Struct => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .Enum => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .Bitfield => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .TypeAlias => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        else => {},
-                    }
-                }
+            } else if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, trimmed, .{
+                .struct_ = true,
+                .enum_ = true,
+                .bitfield = true,
+                .type_alias = true,
+            })) |member_id| {
+                return member_id;
             }
         }
         if (self.item_index.lookup(trimmed)) |item_id| return item_id;
@@ -6645,18 +6629,12 @@ const TypeChecker = struct {
 
     fn lookupNamedFieldSlot(self: *TypeChecker, name: []const u8) ?EffectSlot {
         if (self.current_contract) |contract_id| {
-            const contract = self.file.item(contract_id).Contract;
-            for (contract.members) |member_id| {
-                switch (self.file.item(member_id).*) {
-                    .Field => |field| {
-                        if (field.storage_class == .none) continue;
-                        if (std.mem.eql(u8, field.name, name)) return .{
-                            .name = field.name,
-                            .region = declarationRegion(field.storage_class),
-                        };
-                    },
-                    else => {},
-                }
+            if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, name, .{ .field = true })) |member_id| {
+                const field = self.file.item(member_id).Field;
+                if (field.storage_class != .none) return .{
+                    .name = field.name,
+                    .region = declarationRegion(field.storage_class),
+                };
             }
         }
         return self.fieldSlotForBinding(if (self.item_index.lookup(name)) |item_id| .{ .item = item_id } else null);
@@ -6817,18 +6795,8 @@ const TypeChecker = struct {
             .Field => |field| blk: {
                 const base_type = self.expr_types[field.base.index()];
                 const contract_item_id = self.itemIdForType(base_type) orelse break :blk null;
-                switch (self.file.item(contract_item_id).*) {
-                    .Contract => |contract| {
-                        for (contract.members) |member_id| {
-                            switch (self.file.item(member_id).*) {
-                                .Function => |function| if (std.mem.eql(u8, function.name, field.name)) break :blk member_id,
-                                else => {},
-                            }
-                        }
-                    },
-                    else => {},
-                }
-                break :blk null;
+                if (self.file.item(contract_item_id).* != .Contract) break :blk null;
+                break :blk self.item_index.lookupContractMemberWithRoles(self.file, contract_item_id, field.name, .{ .function = true });
             },
             .Group => |group| self.calleeFunctionItem(group.expr),
             else => null,
@@ -7158,20 +7126,16 @@ const TypeChecker = struct {
                 }
                 break :blk .{ .unknown = {} };
             },
-            .Contract => |contract| blk: {
-                for (contract.members) |member_id| {
-                    const member = self.file.item(member_id).*;
-                    switch (member) {
-                        .Field => |field| if (std.mem.eql(u8, field.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Constant => |constant| if (std.mem.eql(u8, constant.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Function => |function| if (std.mem.eql(u8, function.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Struct => |struct_item| if (std.mem.eql(u8, struct_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Bitfield => |bitfield_item| if (std.mem.eql(u8, bitfield_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Enum => |enum_item| if (std.mem.eql(u8, enum_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        else => {},
-                    }
-                }
-                break :blk .{ .unknown = {} };
+            .Contract => blk: {
+                const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field_name, .{
+                    .field = true,
+                    .constant = true,
+                    .function = true,
+                    .struct_ = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                }) orelse break :blk .{ .unknown = {} };
+                break :blk self.item_types[member_id.index()];
             },
             .Enum => |enum_item| blk: {
                 if (self.instantiatedEnumByName(enum_item.name)) |_| break :blk base_type;

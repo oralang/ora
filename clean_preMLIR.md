@@ -1242,6 +1242,9 @@ Current status:
 - Instantiated struct/enum/bitfield lookup is indexed both in the stable
   `TypeCheckResult` and in the live `TypeChecker` while generic instantiations
   are being created.
+- Contract-member lookup by name and role is indexed for sema/HIR/comptime
+  consumers; remaining `contract.members` loops are traversal or index
+  construction, not local lookup policy.
 
 Plan:
 

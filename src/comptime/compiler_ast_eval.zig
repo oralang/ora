@@ -17,6 +17,7 @@ const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_comptime_encoder = @import("../abi/comptime_encoder.zig");
 const abi_comptime_decoder = @import("../abi/comptime_decoder.zig");
 const compile_options = @import("../compile_options.zig");
+const module_graph = @import("../sema/module_graph.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = model.ConstValue;
@@ -92,6 +93,13 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
     const values = try arena.alloc(?ConstValue, file.expressions.len);
     @memset(values, null);
 
+    var fallback_item_index: ?model.ItemIndexResult = null;
+    defer if (fallback_item_index) |*item_index| item_index.deinit();
+    if (options.type_query == null) {
+        fallback_item_index = try module_graph.buildItemIndex(arena, file);
+    }
+    const fallback_item_index_ptr: ?*const model.ItemIndexResult = if (fallback_item_index) |*item_index| item_index else null;
+
     var evaluator = ConstEvaluator{
         .allocator = arena,
         .file = file,
@@ -99,6 +107,7 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
         .env = CtEnv.init(arena, options.config),
         .module_id = options.module_id,
         .type_query = options.type_query,
+        .fallback_item_index = fallback_item_index_ptr,
         .chain_id = options.chain_id,
     };
     defer evaluator.env.deinit();
@@ -142,6 +151,7 @@ const ConstEvaluator = struct {
     env: CtEnv,
     module_id: ?source.ModuleId = null,
     type_query: ?TypeQuery = null,
+    fallback_item_index: ?*const model.ItemIndexResult = null,
     chain_id: u64,
     current_typecheck_key: ?model.TypeCheckKey = null,
     current_contract: ?ast.ItemId = null,
@@ -1380,13 +1390,18 @@ const ConstEvaluator = struct {
 
     fn lookupNamedItem(self: *ConstEvaluator, name: []const u8) ?ast.ItemId {
         if (self.current_contract) |contract_id| {
-            const contract_item = self.file.item(contract_id).*;
-            if (contract_item == .Contract) {
-                for (contract_item.Contract.members) |member_id| {
-                    if (self.itemName(member_id)) |item_name| {
-                        if (std.mem.eql(u8, item_name, name)) return member_id;
-                    }
-                }
+            if (self.currentItemIndex() catch null) |item_index| {
+                if (item_index.lookupContractMemberWithRoles(self.file, contract_id, name, .{
+                    .function = true,
+                    .struct_ = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                    .trait_ = true,
+                    .field = true,
+                    .constant = true,
+                    .log_decl = true,
+                    .error_decl = true,
+                })) |member_id| return member_id;
             }
         }
         for (self.file.root_items) |item_id| {
@@ -1510,8 +1525,8 @@ const ConstEvaluator = struct {
     }
 
     fn currentItemIndex(self: *ConstEvaluator) !?*const model.ItemIndexResult {
-        const module_id = self.module_id orelse return null;
-        const type_query = self.type_query orelse return null;
+        const type_query = self.type_query orelse return self.fallback_item_index;
+        const module_id = self.module_id orelse return self.fallback_item_index;
         return try type_query.item_index(type_query.context, module_id);
     }
 
@@ -1965,17 +1980,16 @@ const ConstEvaluator = struct {
                                     break :blk null;
                                 }
                             },
-                            .Contract => |contract| {
+                            .Contract => {
                                 const module_typecheck = typecheck orelse break :blk null;
-                                for (contract.members) |member_id| {
-                                    const member = self.file.item(member_id).*;
-                                    if (member != .Function or !std.mem.eql(u8, member.Function.name, field.name)) continue;
-                                    break :blk try self.functionReferenceFromItemType(
-                                        field.name,
-                                        module_typecheck.itemLocatedType(member_id).type,
-                                        self.functionRuntimeSelfParameterIndex(member.Function),
-                                    );
-                                }
+                                const item_index = (self.currentItemIndex() catch null) orelse break :blk null;
+                                const member_id = item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{ .function = true }) orelse break :blk null;
+                                const member = self.file.item(member_id).*;
+                                break :blk try self.functionReferenceFromItemType(
+                                    field.name,
+                                    module_typecheck.itemLocatedType(member_id).type,
+                                    self.functionRuntimeSelfParameterIndex(member.Function),
+                                );
                             },
                             else => {},
                         }
@@ -1999,15 +2013,18 @@ const ConstEvaluator = struct {
             .Name => |name| self.lookupNamedItem(name.name),
             .Field => |field| blk: {
                 const base_item_id = self.resolveContractMemberPath(field.base) orelse break :blk null;
-                const contract = switch (self.file.item(base_item_id).*) {
-                    .Contract => |contract| contract,
-                    else => break :blk null,
-                };
-                for (contract.members) |member_id| {
-                    const member_name = self.itemName(member_id) orelse continue;
-                    if (std.mem.eql(u8, member_name, field.name)) break :blk member_id;
-                }
-                break :blk null;
+                const item_index = (self.currentItemIndex() catch null) orelse break :blk null;
+                break :blk item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{
+                    .function = true,
+                    .struct_ = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                    .trait_ = true,
+                    .field = true,
+                    .constant = true,
+                    .log_decl = true,
+                    .error_decl = true,
+                });
             },
             else => null,
         };
