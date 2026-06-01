@@ -7118,6 +7118,24 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
         },
         .{
             .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(bytes01, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "@abiDecode: type 'bytes01' has no ABI representation",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(bytes1_6, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "@abiDecode: type 'bytes1_6' has no ABI representation",
+        },
+        .{
+            .source =
             \\struct Pair { left: u256, right: u256 }
             \\pub fn run(payload: bytes) -> u256 {
             \\    let decoded = @abiDecode(Pair, payload);

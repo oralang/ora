@@ -692,6 +692,15 @@ pub fn build(b: *std.Build) void {
     check_abi_layout_ownership_step.dependOn(&abi_layout_ownership_cmd.step);
     test_step.dependOn(&abi_layout_ownership_cmd.step);
 
+    // zig build check-no-duplicate-fixed-bytes-parsers
+    const no_duplicate_fixed_bytes_parsers_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-duplicate-fixed-bytes-parsers.sh",
+    });
+    const check_no_duplicate_fixed_bytes_parsers_step = b.step("check-no-duplicate-fixed-bytes-parsers", "Run fixed-bytes parser ownership static checks");
+    check_no_duplicate_fixed_bytes_parsers_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
+    test_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
+
     // zig build check-sir-shift-operand-order
     const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",

@@ -8,6 +8,7 @@ const descriptors = @import("type_descriptors.zig");
 const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
+const type_builtin = @import("ora_types").builtin;
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -1491,7 +1492,7 @@ const TypeChecker = struct {
                 if (std.mem.eql(u8, named.name, "u256") or
                     std.mem.eql(u8, named.name, "bool") or
                     std.mem.eql(u8, named.name, "address") or
-                    runtimeFixedBytesSpellingLen(named.name) != null)
+                    type_builtin.parseFixedBytesName(named.name) != null)
                 {
                     break :blk true;
                 }
@@ -1534,7 +1535,7 @@ const TypeChecker = struct {
             .named => |named| blk: {
                 if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
                 if (parseIntegerSpelling(named.name) != null) break :blk 1;
-                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
+                if (type_builtin.parseFixedBytesName(named.name) != null) break :blk 1;
                 const item_id = self.item_index.lookup(named.name) orelse break :blk null;
                 break :blk switch (self.file.item(item_id).*) {
                     .Enum => if (self.enumHasPayload(named.name)) null else 1,
@@ -1627,16 +1628,6 @@ const TypeChecker = struct {
         if (name.len < 2) return null;
         if (name[0] != 'u' and name[0] != 'i') return null;
         _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
-    }
-
-    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-        if (!std.mem.startsWith(u8, name, "bytes")) return null;
-        if (name.len <= "bytes".len) return null;
-        const digits = name["bytes".len..];
-        if (digits.len > 1 and digits[0] == '0') return null;
-        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-        if (len < 1 or len > 32) return null;
-        return len;
     }
 
     fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
@@ -3648,7 +3639,7 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
         if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
         if (parseIntegerSpelling(name) != null) return true;
-        if (parseFixedBytesSpelling(name) != null) return true;
+        if (type_builtin.parseFixedBytesName(name) != null) return true;
         if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
         if (self.instantiatedBitfieldByName(name) != null) return true;
 
@@ -3698,7 +3689,7 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
         if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
         if (parseIntegerSpelling(name) != null) return true;
-        if (parseFixedBytesSpelling(name) != null) return true;
+        if (type_builtin.parseFixedBytesName(name) != null) return true;
         if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
         if (self.instantiatedBitfieldByName(name) != null) return true;
 
@@ -3796,7 +3787,7 @@ const TypeChecker = struct {
         return switch (ty) {
             .fixed_bytes => |fixed_bytes| fixed_bytes.len >= 1 and fixed_bytes.len <= 32,
             .named => |named| blk: {
-                if (runtimeFixedBytesSpellingLen(named.name) != null) break :blk true;
+                if (type_builtin.parseFixedBytesName(named.name) != null) break :blk true;
                 const item_id = self.item_index.lookup(named.name) orelse break :blk false;
                 break :blk switch (self.file.item(item_id).*) {
                     .TypeAlias => |type_alias| self.isRuntimeAbiDecodeFixedBytes(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
@@ -3805,14 +3796,6 @@ const TypeChecker = struct {
             },
             else => false,
         };
-    }
-
-    fn runtimeFixedBytesSpellingLen(name: []const u8) ?u8 {
-        if (!std.mem.startsWith(u8, name, "bytes")) return null;
-        const digits = name["bytes".len..];
-        if (digits.len == 0) return null;
-        const len = std.fmt.parseInt(u8, digits, 10) catch return null;
-        return if (len >= 1 and len <= 32) len else null;
     }
 
     fn isRuntimeAbiDecodeU256(self: *TypeChecker, ty: Type) bool {
@@ -3863,7 +3846,7 @@ const TypeChecker = struct {
     fn abiEncodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
         if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
         if (parseIntegerSpelling(name) != null) return false;
-        if (parseFixedBytesSpelling(name) != null) return false;
+        if (type_builtin.parseFixedBytesName(name) != null) return false;
         if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
         if (self.instantiatedBitfieldByName(name)) |_| return false;
         if (self.instantiatedStructByName(name)) |_| return self.abiEncodeStructIsUnsupported(name);
@@ -3905,7 +3888,7 @@ const TypeChecker = struct {
     fn abiDecodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
         if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
         if (parseIntegerSpelling(name) != null) return false;
-        if (parseFixedBytesSpelling(name) != null) return false;
+        if (type_builtin.parseFixedBytesName(name) != null) return false;
         if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
         if (self.instantiatedBitfieldByName(name)) |_| return false;
         if (self.instantiatedStructByName(name)) |_| return self.abiDecodeStructIsUnsupported(name);
@@ -7078,7 +7061,7 @@ const TypeChecker = struct {
             std.mem.eql(u8, trimmed, "string") or
             std.mem.eql(u8, trimmed, "address") or
             std.mem.eql(u8, trimmed, "bytes") or
-            parseFixedBytesSpelling(trimmed) != null)
+            type_builtin.parseFixedBytesName(trimmed) != null)
         {
             return descriptorFromPathName(self.file, self.item_index, trimmed);
         }

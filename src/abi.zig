@@ -9,6 +9,7 @@ const compiler_abi = @import("hir/abi.zig");
 const compiler_abi_layout_context = @import("abi/layout_context.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
 const sema_refinements = @import("sema/refinements.zig");
+const type_builtin = @import("ora_types").builtin;
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
@@ -1206,7 +1207,7 @@ const CompilerAbiGenerator = struct {
                 if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
                 if (sema_refinements.isPathFormName(named.name)) return self.resolveSemaType(ctx, .address, &.{});
                 if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
-                if (parseFixedBytesSpelling(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
+                if (type_builtin.parseFixedBytesName(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
                 return error.UnsupportedAbiType;
             },
             else => return error.UnsupportedAbiType,
@@ -1222,16 +1223,6 @@ const CompilerAbiGenerator = struct {
         };
         const bits = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
         return .{ .integer = .{ .bits = bits, .signed = signed, .spelling = name } };
-    }
-
-    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-        if (!std.mem.startsWith(u8, name, "bytes")) return null;
-        if (name.len <= "bytes".len) return null;
-        const digits = name["bytes".len..];
-        if (digits.len > 1 and digits[0] == '0') return null;
-        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-        if (len < 1 or len > 32) return null;
-        return len;
     }
 
     fn resolveArrayType(
@@ -1720,6 +1711,13 @@ test "ABI bounds-backed predicates preserve range metadata" {
     try std.testing.expectEqual(@as(?u256, 10000), built.max_value);
 }
 
+test "ABI default widgets use canonical fixed bytes parsing" {
+    try std.testing.expectEqualStrings("bytes", defaultWidgetForWireType("bytes32") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(defaultWidgetForWireType("bytes01") == null);
+    try std.testing.expect(defaultWidgetForWireType("bytes+5") == null);
+    try std.testing.expect(defaultWidgetForWireType("bytes1_6") == null);
+}
+
 fn functionHasBareSelf(file: *const compiler.AstFile, function: compiler.ast.FunctionItem) bool {
     if (function.parameters.len == 0) return false;
     return std.mem.eql(u8, patternName(file, function.parameters[0].pattern), "self");
@@ -1994,19 +1992,10 @@ fn defaultWidgetForWireType(wire_type: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, wire_type, "uint")) return "number";
     if (std.mem.startsWith(u8, wire_type, "int")) return "number";
     if (std.mem.eql(u8, wire_type, "address")) return "address";
-    if (std.mem.eql(u8, wire_type, "bytes") or isFixedBytesWireType(wire_type)) return "bytes";
+    if (std.mem.eql(u8, wire_type, "bytes") or type_builtin.parseFixedBytesName(wire_type) != null) return "bytes";
     if (std.mem.eql(u8, wire_type, "string")) return "text";
     if (std.mem.eql(u8, wire_type, "bool")) return "select";
     return null;
-}
-
-fn isFixedBytesWireType(wire_type: []const u8) bool {
-    if (!std.mem.startsWith(u8, wire_type, "bytes")) return false;
-    if (wire_type.len <= "bytes".len) return false;
-    const digits = wire_type["bytes".len..];
-    if (digits.len > 1 and digits[0] == '0') return false;
-    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return false;
-    return len >= 1 and len <= 32;
 }
 
 fn writeWireType(writer: anytype, wire_type: []const u8) !void {

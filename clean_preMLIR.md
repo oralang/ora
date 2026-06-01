@@ -13,6 +13,82 @@ every frontend module and is months of work. It must be sequenced by value and
 risk, not executed top-to-bottom. See "Sequencing By Value And Risk" below
 before starting any phase.
 
+## Core Compiler Principle: No Hidden Behavior, Fail Fast
+
+This is a foundational principle of the Ora compiler, above any cleanup phase. It
+applies to all current and future work, and every review gates on it.
+
+Ora is a smart-contract language whose pillars are auditability and formal
+verification. Transparency is required at all cost. The compiler must never
+silently "be smart" about user code or invent behavior the user did not write.
+
+Rules:
+
+- **No default paths for semantic decisions.** Type, width, signedness, region,
+  encoding, and layout decisions must come from explicit, resolved facts. An
+  indeterminate value at a lowering, encoding, or codegen boundary **halts
+  compilation with a diagnostic** — it never assumes a value (no
+  `bits orelse 256`, no `signed orelse false`, no silent `orelse .unknown`).
+- **Fail fast, fail closed.** When the compiler cannot prove what the user meant,
+  it stops and says so. It does not guess, pad, truncate, widen, or pick a
+  "reasonable" fallback. A wrong-but-plausible compile is the worst outcome for a
+  contract.
+- **Defaults that are genuine language rules live in exactly one place.** If a
+  rule like "an untyped integer literal resolves to `u256`" exists, it is applied
+  once, explicitly, at a single resolution point, producing a fully resolved type.
+  Downstream consumers receive resolved facts and error on anything indeterminate.
+  Defaulting is never re-invented by individual consumers.
+- **No hidden behavior in lowering.** Each stage lowers what the resolved facts
+  say and nothing else. Convenience fallbacks that mask missing information are
+  prohibited.
+
+Open architect decision (gates the systemic fix below): is "an untyped integer
+resolves to `u256`" a real Ora language rule? If yes, it is applied once at
+resolution and downstream is non-optional + fail-closed. If no, indeterminate
+width/sign is always an error.
+
+Known violation to remediate (tracked under P2.2): `IntegerType.bits`/`.signed`
+are optional, and ~10 consumers across `abi`, `hir`, and `comptime` silently
+default to unsigned/`256` (`abi/layout.zig`, `abi/comptime_decoder.zig`,
+`abi/layout_context.zig`, `comptime/compiler_ast_eval.zig`,
+`hir/module_lowering.zig`, `hir/function_core.zig`, `hir/expr_lowering.zig`,
+`hir/mod.zig`). The fix is to resolve width/sign once and make the field
+non-optional downstream, deleting every silent default. Phase 5's `layout.zig`
+defaults are fixed (fail-closed, with tests pinning missing bits/signedness).
+
+Remediation method — strictly 1-to-1, never a blanket sweep. For each remaining
+site, trace where its integer comes from and decide individually:
+
+- if `bits`/`signed` are guaranteed resolved there, the `orelse` is dead code
+  masking that guarantee — replace with a fail-closed error/diagnostic;
+- if the value can actually be null there, that is an upstream bug (an
+  unresolved type reached lowering) — fix it upstream; the site only surfaced it.
+
+A mechanical find-replace of `orelse 256` would itself violate the principle by
+"being smart" about sites it did not actually diagnose. End state is uniform
+(zero defaults); the diagnosis is per-site.
+
+Ratified integer model (architect, 2026-06-01) — the concrete application of this
+principle to integers. Full spec, with coercion rules, fail-closed boundary,
+enforcement, and test matrix:
+**[docs/compiler/integer-type-model.md](docs/compiler/integer-type-model.md)**.
+Implement from that spec; the decisions below are firm:
+
+- A bare integer literal has **no type** — it is a `ComptimeInt` (arbitrary
+  precision, comptime-only). It acquires a concrete type only from explicit
+  context, fit-checked, or it is a compile error. It never defaults to a width.
+- Two distinct kinds: `ComptimeInt` (no width/sign) and `ResolvedInt{bits,signed}`
+  with **non-optional** fields — the only integer with a runtime representation.
+  This split makes the ~10 silent defaults uncompilable, not merely removed.
+- **D1:** mixed resolved widths/signs require an explicit cast →
+  `error.MixedIntegerTypes`. No implicit widening or sign conversion.
+- **D2:** unannotated integers resolve from local context only (no whole-program
+  inference); unresolvable → `error.AmbiguousIntegerType`.
+- **D3:** comptime integer math is arbitrary precision; the `≤ i256`/`u256` bound
+  is enforced only at binding to a runtime location.
+
+These rules gate the P2.2 integer-resolution slice and every future review.
+
 ## Zig Implementation Principles
 
 Target Zig version: the package declares `.minimum_zig_version = "0.15.0"` and
@@ -123,12 +199,23 @@ PR notes:
 - PRs that claim performance wins should include before/after measurements or a
   narrow explanation of the eliminated work, such as one full-body walk removed
   or an `O(n)` lookup replaced by an indexed lookup.
+- Every de-duplication slice must end with a mechanical `rg` proof that the
+  collapsed pattern has no remaining definitions outside the canonical owner. If
+  an exception remains, list it explicitly as tracked debt with owner, reason,
+  and cleanup phase. Do not rely on the original audit list being exhaustive.
+- When a duplicated pattern is easy to reintroduce and affects semantic
+  correctness, add a build-time tripwire script, following the style of
+  `check-abi-layout-ownership.sh`, so future local parsers/switches fail CI
+  instead of relying on review memory.
 
 ## Roadmap
 
 ### P1 Findings
 
 - P1.1: Canonical Ora type source of truth, including fixed-bytes handling.
+  The fixed-bytes parser debt was reopened by sweep, then closed by routing the
+  surviving parsers through `types/builtin.zig` and adding a duplicate-parser
+  tripwire.
 - P1.2: Reusable AST visitor/fold framework for repeated semantic tree walks.
 - P1.3: Reusable effect-slot set/algebra instead of local list operations.
 - P1.4: Normalized runtime/verification `Effect` model and behavior.
@@ -196,6 +283,30 @@ The compiler currently has several competing type authorities:
 
 This creates drift risk. Adding or changing a builtin type requires updating
 multiple local switches and parsers.
+
+### Status Correction: Fixed-Bytes Cleanup Reopened And Closed
+
+P1.1 was reopened after a post-slice sweep found surviving fixed-bytes parsers
+outside `src/types/builtin.zig`. That sweep found:
+
+| Site | Prior behavior | Cleanup |
+| --- | --- | --- |
+| `src/sema/type_check.zig` `parseFixedBytesSpelling` | strict-ish local parser | delegated to `builtin.parseFixedBytesName` |
+| `src/abi.zig` `parseFixedBytesSpelling` | strict-ish local parser | delegated to `builtin.parseFixedBytesName` |
+| `src/abi.zig` `isFixedBytesWireType` | strict-ish local parser | replaced with `builtin.parseFixedBytesName(wire_type) != null` |
+| `src/sema/type_check.zig` `runtimeFixedBytesSpellingLen` | lenient `parseInt` path; accepted `bytes01`, `bytes+5`, and `bytes1_6` | replaced with the canonical strict parser and rejection tests |
+
+The last site is a real behavioral fork. The accepted language decision is that
+only `bytes1` through `bytes32` are fixed-bytes spellings; signed, zero-padded,
+separator, or otherwise decorated forms are ordinary identifiers or invalid in
+their later context. Cleanup of these sites is therefore a correctness fix, not
+legacy compatibility.
+
+The durable tripwire is `scripts/check-no-duplicate-fixed-bytes-parsers.sh`,
+wired into `zig build test`. It fails if local fixed-bytes parsing reappears
+outside `src/types/builtin.zig` or the explicitly allowlisted ABI delegation
+wrappers. The same pattern should later cover local integer-width parsers and
+per-payload effect-flag switches.
 
 ### Goal
 
@@ -560,6 +671,13 @@ Validation:
 - ABI runtime encoder/decoder tests.
 - Compiler ABI tests.
 
+Additional gate:
+
+- `src/abi/layout.zig` must fail closed if `IntegerType.bits` or
+  `IntegerType.signed` is null. ABI layout may validate resolved integer facts
+  against `types/builtin.zig`, but it must not infer missing width/signedness
+  from spelling or silently fall back to `u256`.
+
 ### Phase 6: Decide Fate Of `TypeInfo`/`OraType`
 
 Although numbered last, this is largely dead/transitional-code cleanup and can
@@ -609,11 +727,66 @@ short-term acceptable step is:
 - add a compile-time validation test that every builtin type source name has a
   matching keyword/token entry
 
-Long-term, either:
+Long-term, the two candidate models were:
 
-- builtin types do not need dedicated token kinds and parse as identifiers, or
-- `BuiltinTypeSpec` includes enough token information to generate/check lexer
-  keyword rows.
+- builtin types do not need dedicated token kinds and parse as identifiers
+  (prelude-identifier model, as in Zig/Rust), or
+- builtin types stay reserved keyword tokens, with the keyword rows
+  generated/validated from `types/builtin.zig` (keyword model).
+
+Decision (architect, 2026-06-01): adopt the **keyword model**. Dedicated token
+kinds stay; the short-term mitigation above is the permanent answer. Phase 7 is
+considered closed under this decision. Rationale, specific to Ora:
+
+- Ora already chose a closed, curated integer-width set (`u24`/`i96` are
+  rejected). That is the keyword philosophy — the blessed set is the lexical
+  set. The identifier model's main payoff is free arbitrary widths, which Ora
+  deliberately discarded; adopting it would pay that model's costs without its
+  benefit and force a "lex as identifier, reject in resolver" split.
+- Auditability/verification is a pillar. Reserved primitive tokens make shadowing
+  of `address`/`bool`/`u256`/`bytes32` impossible at the lexer, ironclad. The
+  identifier model can only approximate that via resolver rules and risks holes.
+- The original motivation (drift across ~9 enumerated switches) is already
+  neutralized by the compile-time sync guard, so there is no maintenance pressure
+  to switch. New widths are a rare, compile-enforced 3-edit event.
+
+Revisit condition: if Ora later decides to support a large or arbitrary
+integer-width family (e.g. odd widths like `u24` for gas-optimal EVM storage
+packing), the economics flip toward the prelude-identifier model. At that point,
+reopen Phase 7 as its own language-design slice with explicit reserved-word
+handling — not as a refactoring chore.
+
+## Parked Decision: Integer Width Family vs Bitfield Packing
+
+Revisit at the END of this plan, with real contract use-cases in hand. This is a
+language-design decision, not cleanup; it must not ride on a refactor slice.
+
+Constraints that frame the decision:
+
+- **ABI boundary is hard.** The EVM/Solidity ABI encodes integers only in
+  multiples of 8 (`uint8`..`uint256`). Arbitrary widths (`u7`, `u23`) cannot be
+  public params or `abi.encode`/`decode`d. Supporting them would create a
+  two-tier type system (ABI-able vs internal-only) — rejected. Any integer-family
+  expansion is multiples of 8 only.
+- **Split the motivation first.** Sub-byte/bit-granular packing (`u3`, `u6`,
+  flag sets) is `bitfield` territory, not the scalar integer family. Byte-granular
+  arithmetic values (`u24`, `u48`, `u96` as the `address`+`u96` slot complement)
+  are the only integer-type case. Decide whether the real need is storage density
+  (use bitfields/packed structs — already in the language) or odd-byte arithmetic.
+- **No curated subset.** Adding only `u96` recreates "why `u96` and not `u72`".
+  It is binary: keep the minimal curated set (`u8/16/32/64/128/160/256`) and pack
+  via bitfields, OR go full Solidity parity (every multiple of 8, `u8`..`u256` +
+  signed, 64 types). No arbitrary cutoff.
+- **Cost is conceptual, not technical.** Z3 handles any bitvector width; overflow
+  is mechanical per width; EVM codegen already masks/extends sub-256 values
+  (parameterized by width, no new code path); the table-driven design makes new
+  rows trivial. The real cost of "all multiples of 8" is 64 integer types of
+  surface for auditors/users to reason about vs 7.
+
+Architect lean (not final): keep the curated set and use bitfields for packing,
+unless concrete use-cases show genuine demand for odd-byte arithmetic across the
+ABI. Expanding to 64 types is hard to reverse and is permanent surface; bitfields
+are the EVM-idiomatic packing tool already present.
 
 ## Expected Deletions Or Shrinkage
 
@@ -636,7 +809,7 @@ The cleanup should remove or significantly reduce:
 - `comptime.pathTypeId` primitive chain
 - `sema.descriptorFromPathName` primitive chain
 - `resolve.isRecognizedTypeValueName` primitive chain
-- duplicate fixed-bytes parsers in comptime and ABI
+- duplicate fixed-bytes parsers in sema, comptime, and ABI
 - ABI integer spelling helpers where possible
 
 ## Invariants
@@ -1150,10 +1323,25 @@ Plan:
 `types.OraType`, `sema.Type`, comptime `TypeId`, sema `ConstValue`, and
 comptime `ConstValue` encode overlapping facts.
 
+The integer-resolution portion has a dedicated, ratify-before-coding spec:
+**[docs/compiler/integer-type-model.md](docs/compiler/integer-type-model.md)** —
+the `ComptimeInt` vs `ResolvedInt` split, the single resolution gate, coercion
+rules, fit checks, fail-closed boundary, enforcement, and a test matrix. The
+implementor works from that spec; architect must first ratify its D1–D3.
+
 Plan:
 
 - Let P1.1 establish type metadata ownership.
 - Then migrate semantic type ownership into `src/types`.
+- Resolve integer width and signedness exactly once. Downstream semantic types
+  should carry non-null integer width/signedness, or use a distinct unresolved
+  type state before resolution. The current nullable `IntegerType.bits` and
+  `IntegerType.signed` force every consumer to answer "what if null?" and have
+  produced repeated local `orelse false` / `orelse 256` defaults across ABI,
+  HIR, and comptime.
+- Sweep and remove silent integer defaults in ABI/HIR/comptime after the
+  resolved type model exists. Null at a lowering/encoding boundary should mean
+  an upstream bug, not "assume unsigned 256".
 - Introduce interning/handles where comptime needs stable IDs. This is gated on
   the Comptime TypeId Stability Audit (see P1.1 Migration Plan). Do not
   renumber comptime IDs; preserve existing numeric assignments and generate only
