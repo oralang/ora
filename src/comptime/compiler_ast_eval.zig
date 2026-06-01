@@ -1,7 +1,9 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const abi_type_names = @import("../abi/type_names.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
+const type_builtin = @import("ora_types").builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
@@ -23,7 +25,6 @@ const CtEnum = comptime_mod.CtEnum;
 const CtErrorUnion = comptime_mod.CtErrorUnion;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
-const type_ids = comptime_mod.type_ids;
 const SourceSpan = error_mod.SourceSpan;
 const Stage = stage_mod.Stage;
 const LimitCheck = comptime_mod.LimitCheck;
@@ -35,9 +36,6 @@ const evalUnary = bridge.evalUnary;
 const EvalConfig = comptime_mod.EvalConfig;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
 const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
-const fixed_bytes_type_id_base: u32 = 500_000;
-const abi_decode_error_type_id: u32 = 900_000;
-const named_type_id_base: u32 = 1_000_000;
 const named_type_id_module_stride: u32 = 100_000;
 
 fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]const u8 {
@@ -50,61 +48,6 @@ fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8
     const hash = try allocator.alloc(u8, 32);
     std.crypto.hash.sha3.Keccak256.hash(bytes, hash[0..32], .{});
     return hash;
-}
-
-fn fixedBytesTypeId(len: u8) ?u32 {
-    if (len == 0 or len > 32) return null;
-    return fixed_bytes_type_id_base + len;
-}
-
-fn fixedBytesLenForTypeId(type_id: u32) ?u8 {
-    if (type_id <= fixed_bytes_type_id_base or type_id > fixed_bytes_type_id_base + 32) return null;
-    return @intCast(type_id - fixed_bytes_type_id_base);
-}
-
-fn fixedBytesLenFromName(name: []const u8) ?u8 {
-    if (!std.mem.startsWith(u8, name, "bytes")) return null;
-    if (name.len == "bytes".len) return null;
-    const len = std.fmt.parseInt(u8, name["bytes".len..], 10) catch return null;
-    return if (fixedBytesTypeId(len) != null) len else null;
-}
-
-fn fixedBytesTypeName(len: u8) ?[]const u8 {
-    return switch (len) {
-        1 => "bytes1",
-        2 => "bytes2",
-        3 => "bytes3",
-        4 => "bytes4",
-        5 => "bytes5",
-        6 => "bytes6",
-        7 => "bytes7",
-        8 => "bytes8",
-        9 => "bytes9",
-        10 => "bytes10",
-        11 => "bytes11",
-        12 => "bytes12",
-        13 => "bytes13",
-        14 => "bytes14",
-        15 => "bytes15",
-        16 => "bytes16",
-        17 => "bytes17",
-        18 => "bytes18",
-        19 => "bytes19",
-        20 => "bytes20",
-        21 => "bytes21",
-        22 => "bytes22",
-        23 => "bytes23",
-        24 => "bytes24",
-        25 => "bytes25",
-        26 => "bytes26",
-        27 => "bytes27",
-        28 => "bytes28",
-        29 => "bytes29",
-        30 => "bytes30",
-        31 => "bytes31",
-        32 => "bytes32",
-        else => null,
-    };
 }
 
 pub const TypeQuery = struct {
@@ -1651,74 +1594,26 @@ const ConstEvaluator = struct {
     }
 
     fn typeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return fixedBytesTypeName(len);
-        return switch (type_id) {
-            type_ids.u8_id => "u8",
-            type_ids.u16_id => "u16",
-            type_ids.u32_id => "u32",
-            type_ids.u64_id => "u64",
-            type_ids.u128_id => "u128",
-            type_ids.u160_id => "u160",
-            type_ids.u256_id => "u256",
-            type_ids.i8_id => "i8",
-            type_ids.i16_id => "i16",
-            type_ids.i32_id => "i32",
-            type_ids.i64_id => "i64",
-            type_ids.i128_id => "i128",
-            type_ids.i256_id => "i256",
-            type_ids.bool_id => "bool",
-            type_ids.address_id => "address",
-            type_ids.string_id => "string",
-            type_ids.bytes_id => "bytes",
-            type_ids.void_id => "void",
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return type_builtin.fixedBytesName(len);
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| return spec.source_name;
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null;
     }
 
     fn abiTypeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return fixedBytesTypeName(len);
-        return switch (type_id) {
-            type_ids.u8_id => "uint8",
-            type_ids.u16_id => "uint16",
-            type_ids.u32_id => "uint32",
-            type_ids.u64_id => "uint64",
-            type_ids.u128_id => "uint128",
-            type_ids.u160_id => "uint160",
-            type_ids.u256_id => "uint256",
-            type_ids.i8_id => "int8",
-            type_ids.i16_id => "int16",
-            type_ids.i32_id => "int32",
-            type_ids.i64_id => "int64",
-            type_ids.i128_id => "int128",
-            type_ids.i256_id => "int256",
-            type_ids.bool_id => "bool",
-            type_ids.address_id => "address",
-            type_ids.string_id => "string",
-            type_ids.bytes_id => "bytes",
-            type_ids.void_id => "void",
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return abi_type_names.fixedBytesAbiName(len);
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| return abi_type_names.builtinSpecAbiName(spec);
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null;
     }
 
     fn typeByteSizeForTypeId(self: *ConstEvaluator, type_id: u32) ?u256 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return len;
-        return switch (type_id) {
-            type_ids.u8_id, type_ids.i8_id => 1,
-            type_ids.u16_id, type_ids.i16_id => 2,
-            type_ids.u32_id, type_ids.i32_id => 4,
-            type_ids.u64_id, type_ids.i64_id => 8,
-            type_ids.u128_id, type_ids.i128_id => 16,
-            type_ids.u160_id => 20,
-            type_ids.u256_id, type_ids.i256_id => 32,
-            type_ids.bool_id => 1,
-            type_ids.address_id => 20,
-            type_ids.bytes_id, type_ids.string_id => null,
-            type_ids.void_id => 0,
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id|
-                self.itemByteSize(item_id)
-            else
-                null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return len;
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| {
+            return if (spec.byte_width) |width| @as(u256, width) else null;
+        }
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id|
+            self.itemByteSize(item_id)
+        else
+            null;
     }
 
     fn itemByteSize(self: *ConstEvaluator, item_id: ast.ItemId) ?u256 {
@@ -2251,34 +2146,15 @@ const ConstEvaluator = struct {
         return switch (ty) {
             .integer => |integer| blk: {
                 const bits = integer.bits orelse 256;
-                if (integer.signed orelse false) {
-                    break :blk switch (bits) {
-                        8 => type_ids.i8_id,
-                        16 => type_ids.i16_id,
-                        32 => type_ids.i32_id,
-                        64 => type_ids.i64_id,
-                        128 => type_ids.i128_id,
-                        256 => type_ids.i256_id,
-                        else => null,
-                    };
-                }
-                break :blk switch (bits) {
-                    8 => type_ids.u8_id,
-                    16 => type_ids.u16_id,
-                    32 => type_ids.u32_id,
-                    64 => type_ids.u64_id,
-                    128 => type_ids.u128_id,
-                    160 => type_ids.u160_id,
-                    256 => type_ids.u256_id,
-                    else => null,
-                };
+                const spec = type_builtin.lookupIntegerBuiltin(integer.signed orelse false, bits) orelse break :blk null;
+                break :blk spec.comptime_type_id;
             },
-            .bool => type_ids.bool_id,
-            .address => type_ids.address_id,
-            .fixed_bytes => |fixed_bytes| fixedBytesTypeId(fixed_bytes.len),
-            .string => type_ids.string_id,
-            .bytes => type_ids.bytes_id,
-            .void => type_ids.void_id,
+            .bool => type_builtin.lookupBuiltinById(.bool).comptime_type_id,
+            .address => type_builtin.lookupBuiltinById(.address).comptime_type_id,
+            .fixed_bytes => |fixed_bytes| type_builtin.fixedBytesTypeId(fixed_bytes.len),
+            .string => type_builtin.lookupBuiltinById(.string).comptime_type_id,
+            .bytes => type_builtin.lookupBuiltinById(.bytes).comptime_type_id,
+            .void => type_builtin.lookupBuiltinById(.void).comptime_type_id,
             .struct_ => |named| self.pathTypeId(named.name),
             .contract => |named| self.pathTypeId(named.name),
             .bitfield => |named| self.pathTypeId(named.name),
@@ -2659,7 +2535,7 @@ const ConstEvaluator = struct {
 
     fn abiDecodeErr(self: *ConstEvaluator, err: abi_comptime_decoder.DecodeError) !CtValue {
         const err_value = CtValue{ .adt_val = .{
-            .type_id = abi_decode_error_type_id,
+            .type_id = type_builtin.abi_decode_error_type_id,
             .variant_id = @intFromEnum(err),
             .payload = null,
         } };
@@ -3219,40 +3095,23 @@ const ConstEvaluator = struct {
                 else => null,
             };
         }
-        if (std.mem.eql(u8, trimmed, "u8")) return type_ids.u8_id;
-        if (std.mem.eql(u8, trimmed, "u16")) return type_ids.u16_id;
-        if (std.mem.eql(u8, trimmed, "u32")) return type_ids.u32_id;
-        if (std.mem.eql(u8, trimmed, "u64")) return type_ids.u64_id;
-        if (std.mem.eql(u8, trimmed, "u128")) return type_ids.u128_id;
-        if (std.mem.eql(u8, trimmed, "u160")) return type_ids.u160_id;
-        if (std.mem.eql(u8, trimmed, "u256")) return type_ids.u256_id;
-        if (std.mem.eql(u8, trimmed, "i8")) return type_ids.i8_id;
-        if (std.mem.eql(u8, trimmed, "i16")) return type_ids.i16_id;
-        if (std.mem.eql(u8, trimmed, "i32")) return type_ids.i32_id;
-        if (std.mem.eql(u8, trimmed, "i64")) return type_ids.i64_id;
-        if (std.mem.eql(u8, trimmed, "i128")) return type_ids.i128_id;
-        if (std.mem.eql(u8, trimmed, "i256")) return type_ids.i256_id;
-        if (std.mem.eql(u8, trimmed, "bool")) return type_ids.bool_id;
-        if (std.mem.eql(u8, trimmed, "address")) return type_ids.address_id;
-        if (std.mem.eql(u8, trimmed, "string")) return type_ids.string_id;
-        if (std.mem.eql(u8, trimmed, "bytes")) return type_ids.bytes_id;
-        if (fixedBytesLenFromName(trimmed)) |len| return fixedBytesTypeId(len);
-        if (std.mem.eql(u8, trimmed, "void")) return type_ids.void_id;
+        if (type_builtin.lookupBuiltinByName(trimmed)) |spec| return spec.comptime_type_id;
+        if (type_builtin.parseFixedBytesName(trimmed)) |len| return type_builtin.fixedBytesTypeId(len);
         if (self.lookupNamedItem(trimmed)) |item_id| return self.namedTypeId(item_id);
         return null;
     }
 
     fn namedTypeId(self: *ConstEvaluator, item_id: ast.ItemId) u32 {
         const module_component: u32 = if (self.module_id) |module_id| @intCast(module_id.index() + 1) else 0;
-        return named_type_id_base +
+        return type_builtin.named_type_id_base +
             module_component * named_type_id_module_stride +
             @as(u32, @intCast(item_id.index()));
     }
 
     fn namedTypeRefForTypeId(self: *ConstEvaluator, type_id: u32) ?NamedTypeRef {
         _ = self;
-        if (type_id < named_type_id_base) return null;
-        const offset = type_id - named_type_id_base;
+        if (type_id < type_builtin.named_type_id_base) return null;
+        const offset = type_id - type_builtin.named_type_id_base;
         const module_component = offset / named_type_id_module_stride;
         const item_component = offset % named_type_id_module_stride;
         return .{

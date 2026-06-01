@@ -519,6 +519,17 @@ Update `src/comptime/compiler_ast_eval.zig`:
   `fixedBytesTypeName` move to `src/types/builtin.zig` or a sibling
   `src/types/fixed_bytes.zig` re-exported by the builtin module.
 
+Status, 2026-06-01:
+
+- Implemented for the comptime evaluator. Primitive source names, ABI names,
+  byte widths, type-name lookup, path-to-TypeId lookup, and model-type-to-TypeId
+  lookup now delegate to the builtin table plus ABI-owned name helpers.
+- Numeric assignments remain frozen in `src/types/builtin.zig`; `src/comptime/value.zig`
+  derives its exported primitive constants from those explicit rows.
+- `typeNameForTypeId` remains a band dispatcher: fixed bytes use the fixed-bytes
+  formula, primitive builtins use table lookup, and named types keep the existing
+  named-type formula.
+
 Validation:
 
 - Comptime tests.

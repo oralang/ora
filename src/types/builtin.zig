@@ -172,6 +172,14 @@ pub fn parseIntegerBuiltin(name: []const u8) ?BuiltinTypeSpec {
     return if (spec.category == .Integer) spec else null;
 }
 
+pub fn lookupIntegerBuiltin(signed: bool, bits: u16) ?BuiltinTypeSpec {
+    for (builtin_types) |spec| {
+        if (spec.category != .Integer) continue;
+        if (spec.signed == signed and spec.bit_width == bits) return spec;
+    }
+    return null;
+}
+
 /// Parses a fixed-bytes family name like "bytes20" into its length, or null.
 ///
 /// The suffix must be a plain canonical decimal: no leading zero ("bytes01"),
@@ -297,6 +305,11 @@ test "integer builtin metadata is table-driven" {
     try std.testing.expectEqual(@as(?u16, 160), u160_spec.bit_width);
     try std.testing.expectEqual(@as(?u16, 20), u160_spec.byte_width);
     try std.testing.expectEqual(@as(?bool, false), u160_spec.signed);
+
+    const unsigned_160 = lookupIntegerBuiltin(false, 160) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(BuiltinTypeId.u160, unsigned_160.id);
+    try std.testing.expect(lookupIntegerBuiltin(true, 160) == null);
+    try std.testing.expect(lookupIntegerBuiltin(false, 24) == null);
 
     const i128_spec = parseIntegerBuiltin("i128") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(BuiltinTypeId.i128, i128_spec.id);

@@ -164,29 +164,34 @@ pub const ConstErrorUnion = struct {
 // TypeId ↔ OraType mapping (well-known IDs for primitives)
 // ============================================================================
 
+const builtin = @import("ora_types").builtin;
 const OraType = @import("ora_types").type_info.OraType;
 
 /// Well-known TypeId values for primitive Ora types.
 /// These are stable constants used by the comptime system.
 pub const type_ids = struct {
-    pub const u8_id: TypeId = 1;
-    pub const u16_id: TypeId = 2;
-    pub const u32_id: TypeId = 3;
-    pub const u64_id: TypeId = 4;
-    pub const u128_id: TypeId = 5;
-    pub const u256_id: TypeId = 6;
-    pub const i8_id: TypeId = 7;
-    pub const i16_id: TypeId = 8;
-    pub const i32_id: TypeId = 9;
-    pub const i64_id: TypeId = 10;
-    pub const i128_id: TypeId = 11;
-    pub const i256_id: TypeId = 12;
-    pub const bool_id: TypeId = 13;
-    pub const address_id: TypeId = 14;
-    pub const string_id: TypeId = 15;
-    pub const bytes_id: TypeId = 16;
-    pub const void_id: TypeId = 17;
-    pub const u160_id: TypeId = 18;
+    fn builtinComptimeTypeId(comptime id: builtin.BuiltinTypeId) TypeId {
+        return @intCast(builtin.lookupBuiltinById(id).comptime_type_id);
+    }
+
+    pub const u8_id: TypeId = builtinComptimeTypeId(.u8);
+    pub const u16_id: TypeId = builtinComptimeTypeId(.u16);
+    pub const u32_id: TypeId = builtinComptimeTypeId(.u32);
+    pub const u64_id: TypeId = builtinComptimeTypeId(.u64);
+    pub const u128_id: TypeId = builtinComptimeTypeId(.u128);
+    pub const u256_id: TypeId = builtinComptimeTypeId(.u256);
+    pub const i8_id: TypeId = builtinComptimeTypeId(.i8);
+    pub const i16_id: TypeId = builtinComptimeTypeId(.i16);
+    pub const i32_id: TypeId = builtinComptimeTypeId(.i32);
+    pub const i64_id: TypeId = builtinComptimeTypeId(.i64);
+    pub const i128_id: TypeId = builtinComptimeTypeId(.i128);
+    pub const i256_id: TypeId = builtinComptimeTypeId(.i256);
+    pub const bool_id: TypeId = builtinComptimeTypeId(.bool);
+    pub const address_id: TypeId = builtinComptimeTypeId(.address);
+    pub const string_id: TypeId = builtinComptimeTypeId(.string);
+    pub const bytes_id: TypeId = builtinComptimeTypeId(.bytes);
+    pub const void_id: TypeId = builtinComptimeTypeId(.void);
+    pub const u160_id: TypeId = builtinComptimeTypeId(.u160);
 
     /// Convert an OraType to a well-known TypeId (primitives only).
     pub fn fromOraType(ot: OraType) ?TypeId {
@@ -215,26 +220,30 @@ pub const type_ids = struct {
 
     /// Convert a well-known TypeId back to an OraType.
     pub fn toOraType(tid: TypeId) ?OraType {
-        return switch (tid) {
-            u8_id => OraType{ .u8 = {} },
-            u16_id => OraType{ .u16 = {} },
-            u32_id => OraType{ .u32 = {} },
-            u64_id => OraType{ .u64 = {} },
-            u128_id => OraType{ .u128 = {} },
-            u160_id => OraType{ .u160 = {} },
-            u256_id => OraType{ .u256 = {} },
-            i8_id => OraType{ .i8 = {} },
-            i16_id => OraType{ .i16 = {} },
-            i32_id => OraType{ .i32 = {} },
-            i64_id => OraType{ .i64 = {} },
-            i128_id => OraType{ .i128 = {} },
-            i256_id => OraType{ .i256 = {} },
-            bool_id => OraType{ .bool = {} },
-            address_id => OraType{ .address = {} },
-            string_id => OraType{ .string = {} },
-            bytes_id => OraType{ .bytes = {} },
-            void_id => OraType{ .void = {} },
-            else => null,
+        const spec = builtin.lookupBuiltinByComptimeTypeId(tid) orelse return null;
+        return oraTypeFromBuiltinId(spec.id);
+    }
+
+    fn oraTypeFromBuiltinId(id: builtin.BuiltinTypeId) OraType {
+        return switch (id) {
+            .u8 => .{ .u8 = {} },
+            .u16 => .{ .u16 = {} },
+            .u32 => .{ .u32 = {} },
+            .u64 => .{ .u64 = {} },
+            .u128 => .{ .u128 = {} },
+            .u160 => .{ .u160 = {} },
+            .u256 => .{ .u256 = {} },
+            .i8 => .{ .i8 = {} },
+            .i16 => .{ .i16 = {} },
+            .i32 => .{ .i32 = {} },
+            .i64 => .{ .i64 = {} },
+            .i128 => .{ .i128 = {} },
+            .i256 => .{ .i256 = {} },
+            .bool => .{ .bool = {} },
+            .address => .{ .address = {} },
+            .string => .{ .string = {} },
+            .bytes => .{ .bytes = {} },
+            .void => .{ .void = {} },
         };
     }
 };
