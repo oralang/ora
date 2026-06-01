@@ -2015,13 +2015,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_type = self.parent.typecheck.exprType(field.base);
                     const enum_name = base_type.name() orelse break :blk null;
                     if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                        const variant_index = instantiated.variantIndex(field.name) orelse break :blk null;
                         var next_value: i64 = 0;
-                        for (instantiated.variants) |variant| {
+                        for (instantiated.variants[0 .. variant_index + 1], 0..) |variant, index| {
                             const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
                                 .integer => |literal| literal,
                                 else => next_value,
                             } else next_value;
-                            if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                            if (index == variant_index) break :blk resolved_value;
                             next_value = resolved_value + 1;
                         }
                         break :blk null;
@@ -2029,13 +2030,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const item_id = self.parent.item_index.lookup(enum_name) orelse break :blk null;
                     if (self.parent.file.item(item_id).* != .Enum) break :blk null;
                     const enum_item = self.parent.file.item(item_id).Enum;
+                    const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field.name) orelse break :blk null;
                     var next_value: i64 = 0;
-                    for (enum_item.variants) |variant| {
+                    for (enum_item.variants[0 .. variant_index + 1], 0..) |variant, index| {
                         const resolved_value = if (variant.value) |value_expr|
                             try @This().enumPatternIntegerValueStrict(self, value_expr)
                         else
                             next_value;
-                        if (std.mem.eql(u8, variant.name, field.name)) break :blk resolved_value;
+                        if (index == variant_index) break :blk resolved_value;
                         next_value = resolved_value + 1;
                     }
                     break :blk null;

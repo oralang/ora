@@ -11,6 +11,12 @@ pub const PairEntry = struct {
     index: usize,
 };
 
+pub const MemberEntry = struct {
+    owner_index: usize,
+    name: []const u8,
+    index: usize,
+};
+
 pub fn buildNamed(
     comptime T: type,
     allocator: std.mem.Allocator,
@@ -83,6 +89,26 @@ pub fn findPair(entries: []const PairEntry, first: []const u8, second: []const u
     return entries[left].index;
 }
 
+pub fn sortMembers(entries: []MemberEntry) void {
+    std.sort.heap(MemberEntry, entries, {}, memberLessThan);
+}
+
+pub fn findMember(entries: []const MemberEntry, owner_index: usize, name: []const u8) ?usize {
+    var left: usize = 0;
+    var right: usize = entries.len;
+    while (left < right) {
+        const mid = left + (right - left) / 2;
+        switch (compareMemberToKey(entries[mid], owner_index, name)) {
+            .lt => left = mid + 1,
+            .eq, .gt => right = mid,
+        }
+    }
+    if (left >= entries.len) return null;
+    if (entries[left].owner_index != owner_index) return null;
+    if (!std.mem.eql(u8, entries[left].name, name)) return null;
+    return entries[left].index;
+}
+
 fn namedLessThan(_: void, lhs: NamedEntry, rhs: NamedEntry) bool {
     return switch (std.mem.order(u8, lhs.name, rhs.name)) {
         .lt => true,
@@ -103,12 +129,28 @@ fn pairLessThan(_: void, lhs: PairEntry, rhs: PairEntry) bool {
     };
 }
 
+fn memberLessThan(_: void, lhs: MemberEntry, rhs: MemberEntry) bool {
+    if (lhs.owner_index < rhs.owner_index) return true;
+    if (lhs.owner_index > rhs.owner_index) return false;
+    return switch (std.mem.order(u8, lhs.name, rhs.name)) {
+        .lt => true,
+        .gt => false,
+        .eq => lhs.index < rhs.index,
+    };
+}
+
 fn comparePairToKey(entry: PairEntry, first: []const u8, second: []const u8) std.math.Order {
     return switch (std.mem.order(u8, entry.first, first)) {
         .lt => .lt,
         .gt => .gt,
         .eq => std.mem.order(u8, entry.second, second),
     };
+}
+
+fn compareMemberToKey(entry: MemberEntry, owner_index: usize, name: []const u8) std.math.Order {
+    if (entry.owner_index < owner_index) return .lt;
+    if (entry.owner_index > owner_index) return .gt;
+    return std.mem.order(u8, entry.name, name);
 }
 
 test "named lookup returns original first duplicate" {
@@ -127,6 +169,21 @@ test "named lookup returns original first duplicate" {
     try std.testing.expectEqual(@as(?usize, 0), findNamed(entries, "Beta"));
     try std.testing.expectEqual(@as(?usize, null), findNamed(entries, "Missing"));
     try std.testing.expectEqualStrings("Beta", findNamedItem(Item, &items, entries, "Beta").?.name);
+}
+
+test "member lookup returns original first duplicate within owner" {
+    var entries = [_]MemberEntry{
+        .{ .owner_index = 2, .name = "Beta", .index = 0 },
+        .{ .owner_index = 1, .name = "Beta", .index = 1 },
+        .{ .owner_index = 2, .name = "Alpha", .index = 2 },
+        .{ .owner_index = 2, .name = "Beta", .index = 3 },
+    };
+    sortMembers(&entries);
+
+    try std.testing.expectEqual(@as(?usize, 2), findMember(&entries, 2, "Alpha"));
+    try std.testing.expectEqual(@as(?usize, 0), findMember(&entries, 2, "Beta"));
+    try std.testing.expectEqual(@as(?usize, 1), findMember(&entries, 1, "Beta"));
+    try std.testing.expectEqual(@as(?usize, null), findMember(&entries, 1, "Alpha"));
 }
 
 test "pair lookup returns original first duplicate" {

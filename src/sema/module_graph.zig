@@ -116,23 +116,27 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .entries = &[_]NamedItem{},
         .impl_entries = &[_]ImplEntry{},
         .impl_lookup = &[_]lookup.PairEntry{},
+        .enum_variant_lookup = &[_]lookup.MemberEntry{},
     };
     errdefer result.deinit();
 
     const arena = result.arena.allocator();
     var entries: std.ArrayList(NamedItem) = .{};
     var impl_entries: std.ArrayList(ImplEntry) = .{};
+    var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &enum_variant_lookup);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
             return std.mem.order(u8, lhs.name, rhs.name) == .lt;
         }
     }.lessThan);
+    lookup.sortMembers(enum_variant_lookup.items);
     result.entries = try entries.toOwnedSlice(arena);
     result.impl_entries = try impl_entries.toOwnedSlice(arena);
     result.impl_lookup = try lookup.buildPair(ImplEntry, arena, result.impl_entries, "trait_name", "target_name");
+    result.enum_variant_lookup = try enum_variant_lookup.toOwnedSlice(arena);
     return result;
 }
 
@@ -143,6 +147,7 @@ fn collectItemEntry(
     prefix: ?[]const u8,
     entries: *std.ArrayList(NamedItem),
     impl_entries: *std.ArrayList(ImplEntry),
+    enum_variant_lookup: *std.ArrayList(lookup.MemberEntry),
 ) !void {
     const item = file.item(item_id).*;
     const name = switch (item) {
@@ -150,7 +155,16 @@ fn collectItemEntry(
         .Function => item.Function.name,
         .Struct => item.Struct.name,
         .Bitfield => item.Bitfield.name,
-        .Enum => item.Enum.name,
+        .Enum => blk: {
+            for (item.Enum.variants, 0..) |variant, index| {
+                try enum_variant_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = variant.name,
+                    .index = index,
+                });
+            }
+            break :blk item.Enum.name;
+        },
         .Trait => item.Trait.name,
         .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
@@ -177,7 +191,7 @@ fn collectItemEntry(
 
     if (item == .Contract) {
         for (item.Contract.members) |member_id| {
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries);
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, enum_variant_lookup);
         }
     }
 }

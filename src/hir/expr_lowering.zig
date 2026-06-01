@@ -1343,22 +1343,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (adt_sema_type.kind() != .enum_) return null;
             const enum_name = adt_sema_type.enum_.name;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, variant_name)) return variant.payload_type;
-                }
-                return null;
+                const variant = instantiated.variantByName(variant_name) orelse return null;
+                return variant.payload_type;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
             const enum_item = switch (self.parent.file.item(item_id).*) {
                 .Enum => |enum_item| enum_item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, variant_name)) {
-                    return try @This().enumVariantPayloadSemaType(self, variant.payload);
-                }
-            }
-            return null;
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, variant_name) orelse return null;
+            return try @This().enumVariantPayloadSemaType(self, enum_item.variants[variant_index].payload);
         }
 
         fn enumVariantPayloadSemaType(
@@ -3767,20 +3761,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return false;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) return true;
-                }
-                return false;
+                return instantiated.variantIndex(field_name) != null;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
-            const enum_item = switch (self.parent.file.item(item_id).*) {
-                .Enum => |item| item,
+            switch (self.parent.file.item(item_id).*) {
+                .Enum => {},
                 else => return false,
-            };
-            for (enum_item.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, field_name)) return true;
             }
-            return false;
+            return self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) != null;
         }
 
         fn attachEnumConstantValueAttrs(
@@ -3813,13 +3801,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                const variant_index = instantiated.variantIndex(field_name) orelse return null;
                 var next_value: i64 = 0;
-                for (instantiated.variants) |variant| {
+                for (instantiated.variants[0 .. variant_index + 1], 0..) |variant, index| {
                     const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
                         .integer => |literal| literal,
                         else => next_value,
                     } else next_value;
-                    if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+                    if (index == variant_index) return resolved_value;
                     next_value = resolved_value + 1;
                 }
                 return null;
@@ -3829,10 +3818,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Enum => |item| item,
                 else => return null,
             };
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
             var next_value: i64 = 0;
-            for (enum_item.variants) |variant| {
+            for (enum_item.variants[0 .. variant_index + 1], 0..) |variant, index| {
                 const resolved_value = if (variant.value) |expr_id| @This().enumIntegerValue(self, expr_id) orelse next_value else next_value;
-                if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+                if (index == variant_index) return resolved_value;
                 next_value = resolved_value + 1;
             }
             return null;
@@ -3842,41 +3832,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                    if (variant.explicit_value) |explicit| switch (explicit) {
-                        .string => |literal| return literal,
-                        else => return null,
-                    };
-                    return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
-                }
-                return null;
+                const variant = instantiated.variantByName(field_name) orelse return null;
+                if (variant.explicit_value) |explicit| switch (explicit) {
+                    .string => |literal| return literal,
+                    else => return null,
+                };
+                return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
             const enum_item = switch (self.parent.file.item(item_id).*) {
                 .Enum => |item| item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |expr_id| return @This().enumStringValue(self, expr_id);
-                return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
-            }
-            return null;
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
+            const variant = enum_item.variants[variant_index];
+            if (variant.value) |expr_id| return @This().enumStringValue(self, expr_id);
+            return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
         }
 
         fn enumFieldBytesValue(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) anyerror!?[]const u8 {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                    if (variant.explicit_value) |explicit| switch (explicit) {
-                        .bytes => |literal| return literal,
-                        else => return null,
-                    };
-                    return null;
-                }
+                const variant = instantiated.variantByName(field_name) orelse return null;
+                if (variant.explicit_value) |explicit| switch (explicit) {
+                    .bytes => |literal| return literal,
+                    else => return null,
+                };
                 return null;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
@@ -3884,11 +3866,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Enum => |item| item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |expr_id| return @This().enumBytesValue(self, expr_id);
-                return null;
-            }
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
+            if (enum_item.variants[variant_index].value) |expr_id| return @This().enumBytesValue(self, expr_id);
             return null;
         }
 

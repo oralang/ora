@@ -81,6 +81,16 @@ pub const InstantiatedEnum = struct {
     mangled_name: []const u8,
     repr_type: ?Type = null,
     variants: []const InstantiatedEnumVariant = &.{},
+    variant_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn variantIndex(self: InstantiatedEnum, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.variant_lookup, name);
+    }
+
+    pub fn variantByName(self: InstantiatedEnum, name: []const u8) ?InstantiatedEnumVariant {
+        const index = self.variantIndex(name) orelse return null;
+        return self.variants[index];
+    }
 };
 
 pub const InstantiatedEnumVariant = struct {
@@ -683,6 +693,7 @@ pub const ItemIndexResult = struct {
     entries: []NamedItem,
     impl_entries: []ImplEntry,
     impl_lookup: []lookup_index.PairEntry,
+    enum_variant_lookup: []lookup_index.MemberEntry,
 
     pub fn deinit(self: *ItemIndexResult) void {
         self.arena.deinit();
@@ -705,6 +716,10 @@ pub const ItemIndexResult = struct {
     pub fn lookupImpl(self: *const ItemIndexResult, trait_name: []const u8, target_name: []const u8) ?ast.ItemId {
         const index = lookup_index.findPair(self.impl_lookup, trait_name, target_name) orelse return null;
         return self.impl_entries[index].item_id;
+    }
+
+    pub fn lookupEnumVariantIndex(self: *const ItemIndexResult, enum_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.enum_variant_lookup, enum_item_id.index(), name);
     }
 };
 

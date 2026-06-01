@@ -2632,27 +2632,19 @@ const TypeChecker = struct {
         if (enum_type.kind() != .enum_) return null;
         const enum_name = enum_type.enum_.name;
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, field.name)) {
-                    return .{ .enum_type = enum_type, .payload_type = variant.payload_type };
-                }
-            }
-            return null;
+            const variant = instantiated.variantByName(field.name) orelse return null;
+            return .{ .enum_type = enum_type, .payload_type = variant.payload_type };
         }
         const item_id = self.item_index.lookup(enum_name) orelse return null;
         const enum_item = switch (self.file.item(item_id).*) {
             .Enum => |enum_item| enum_item,
             else => return null,
         };
-        for (enum_item.variants) |variant| {
-            if (std.mem.eql(u8, variant.name, field.name)) {
-                return .{
-                    .enum_type = enum_type,
-                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
-                };
-            }
-        }
-        return null;
+        const variant_index = self.item_index.lookupEnumVariantIndex(item_id, field.name) orelse return null;
+        return .{
+            .enum_type = enum_type,
+            .payload_type = self.resolveEnumVariantPayloadType(enum_item.variants[variant_index].payload, &.{}) catch return null,
+        };
     }
 
     fn checkEnumVariantConstructorCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !bool {
@@ -5157,16 +5149,12 @@ const TypeChecker = struct {
         const variant_name = name[dot_index + 1 ..];
 
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, variant_name)) {
-                    return .{
-                        .enum_type = .{ .enum_ = .{ .name = enum_name } },
-                        .variant_name = variant_name,
-                        .payload_type = variant.payload_type,
-                    };
-                }
-            }
-            return null;
+            const variant = instantiated.variantByName(variant_name) orelse return null;
+            return .{
+                .enum_type = .{ .enum_ = .{ .name = enum_name } },
+                .variant_name = variant_name,
+                .payload_type = variant.payload_type,
+            };
         }
 
         const item_id = self.lookupTypeItemInScope(enum_name) orelse return null;
@@ -5174,16 +5162,12 @@ const TypeChecker = struct {
             .Enum => |enum_item| enum_item,
             else => return null,
         };
-        for (enum_item.variants) |variant| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return .{
-                    .enum_type = .{ .enum_ = .{ .name = enum_item.name } },
-                    .variant_name = variant_name,
-                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
-                };
-            }
-        }
-        return null;
+        const variant_index = self.item_index.lookupEnumVariantIndex(item_id, variant_name) orelse return null;
+        return .{
+            .enum_type = .{ .enum_ = .{ .name = enum_item.name } },
+            .variant_name = variant_name,
+            .payload_type = self.resolveEnumVariantPayloadType(enum_item.variants[variant_index].payload, &.{}) catch return null,
+        };
     }
 
     fn checkEnumVariantStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !void {
@@ -5411,6 +5395,7 @@ const TypeChecker = struct {
         const mangled_name = try self.mangleGenericStructName(enum_item.name, bindings);
 
         if (self.instantiatedEnumByName(mangled_name) == null) {
+            const variants = try self.resolveEnumVariantPayloads(enum_item, bindings);
             try self.instantiated_enums.append(self.arena, .{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
@@ -5418,7 +5403,8 @@ const TypeChecker = struct {
                     try self.resolveTypeExprWithBindings(type_expr, bindings)
                 else
                     null,
-                .variants = try self.resolveEnumVariantPayloads(enum_item, bindings),
+                .variants = variants,
+                .variant_lookup = try lookup_index.buildNamed(model.InstantiatedEnumVariant, self.arena, variants, "name"),
             });
         }
 
@@ -7139,11 +7125,7 @@ const TypeChecker = struct {
         }
         if (base_type.kind() == .enum_) {
             if (self.instantiatedEnumByName(base_type.enum_.name)) |instantiated| {
-                const enum_item = self.file.item(instantiated.template_item_id).Enum;
-                for (enum_item.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) return base_type;
-                }
-                return .{ .unknown = {} };
+                return if (instantiated.variantIndex(field_name) != null) base_type else .{ .unknown = {} };
             }
         }
         if (base_type.kind() == .bitfield) {
@@ -7189,9 +7171,7 @@ const TypeChecker = struct {
             },
             .Enum => |enum_item| blk: {
                 if (self.instantiatedEnumByName(enum_item.name)) |_| break :blk base_type;
-                for (enum_item.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) break :blk base_type;
-                }
+                if (self.item_index.lookupEnumVariantIndex(item_id, field_name) != null) break :blk base_type;
                 break :blk .{ .unknown = {} };
             },
             .ErrorDecl => |error_decl| blk: {
@@ -8452,21 +8432,15 @@ const TypeChecker = struct {
 
         const enum_name = variant_enum_type.name() orelse return null;
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants, 0..) |variant, index| {
-                if (std.mem.eql(u8, variant.name, field.name)) return index;
-            }
-            return null;
+            return instantiated.variantIndex(field.name);
         }
 
         const item_id = self.item_index.lookup(enum_name) orelse return null;
-        const enum_item = switch (self.file.item(item_id).*) {
-            .Enum => |enum_item| enum_item,
+        switch (self.file.item(item_id).*) {
+            .Enum => {},
             else => return null,
-        };
-        for (enum_item.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, field.name)) return index;
         }
-        return null;
+        return self.item_index.lookupEnumVariantIndex(item_id, field.name);
     }
 
     fn validateMatchPatternFamily(self: *TypeChecker, condition_type: Type, arms: anytype, range: source.TextRange) !void {

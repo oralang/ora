@@ -861,16 +861,12 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, idx| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return CtValue{ .adt_val = CtEnum{
-                    .type_id = self.namedTypeId(item_id),
-                    .variant_id = @intCast(idx),
-                    .payload = null,
-                } };
-            }
-        }
-        return null;
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, variant_name) orelse return null;
+        return CtValue{ .adt_val = CtEnum{
+            .type_id = self.namedTypeId(item_id),
+            .variant_id = @intCast(variant_index),
+            .payload = null,
+        } };
     }
 
     const EnumVariantRef = struct {
@@ -895,12 +891,8 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, field.name)) {
-                return .{ .item_id = item_id, .variant_id = @intCast(index) };
-            }
-        }
-        return null;
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, field.name) orelse return null;
+        return .{ .item_id = item_id, .variant_id = @intCast(variant_index) };
     }
 
     fn enumVariantRefFromStructLiteral(self: *ConstEvaluator, struct_literal: ast.StructLiteralExpr) ?EnumVariantRef {
@@ -911,10 +903,16 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return .{ .item_id = item_id, .variant_id = @intCast(index) };
-            }
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, variant_name) orelse return null;
+        return .{ .item_id = item_id, .variant_id = @intCast(variant_index) };
+    }
+
+    fn enumVariantIndex(self: *ConstEvaluator, item_id: ast.ItemId, variants: []const ast.EnumVariant, name: []const u8) ?usize {
+        if (self.currentItemIndex() catch null) |item_index| {
+            return item_index.lookupEnumVariantIndex(item_id, name);
+        }
+        for (variants, 0..) |variant, index| {
+            if (std.mem.eql(u8, variant.name, name)) return index;
         }
         return null;
     }
