@@ -703,7 +703,7 @@ const ConstEvaluator = struct {
                     },
                     .tuple_ref => |heap_id| blk_field: {
                         const elems = self.env.heap.getTuple(heap_id).elems;
-                        const field_index = self.anonymousStructFieldIndexForExpr(field.base, field.name) orelse break :blk_field null;
+                        const field_index = (try self.anonymousStructFieldIndexForExpr(field.base, field.name)) orelse break :blk_field null;
                         if (field_index >= elems.len) break :blk_field null;
                         break :blk_field elems[field_index];
                     },
@@ -1374,18 +1374,12 @@ const ConstEvaluator = struct {
 
     fn lookupNamedItem(self: *ConstEvaluator, name: []const u8) ?ast.ItemId {
         if (self.current_contract) |contract_id| {
-            if (self.currentItemIndex() catch null) |item_index| {
-                if (item_index.lookupContractMemberWithRoles(self.file, contract_id, name, .{
-                    .function = true,
-                    .struct_ = true,
-                    .bitfield = true,
-                    .enum_ = true,
-                    .trait_ = true,
-                    .field = true,
-                    .constant = true,
-                    .log_decl = true,
-                    .error_decl = true,
-                })) |member_id| return member_id;
+            switch (self.file.item(contract_id).*) {
+                .Contract => |contract| for (contract.members) |member_id| {
+                    const member_name = self.itemName(member_id) orelse continue;
+                    if (std.mem.eql(u8, member_name, name)) return member_id;
+                },
+                else => {},
             }
         }
         for (self.file.root_items) |item_id| {
@@ -1564,7 +1558,7 @@ const ConstEvaluator = struct {
                 const type_query = self.type_query orelse break :blk null;
                 break :blk try type_query.resolve_import_alias(type_query.context, base_module_id, field.name);
             },
-            .Group => |group| self.importedModuleForExpr(group.expr),
+            .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
         };
     }
@@ -1755,8 +1749,8 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) ?CallableFunction {
-        const typecheck = (self.currentModuleTypeCheckResult() catch return null) orelse return null;
+    fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) !?CallableFunction {
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         const base_value = (self.evalExprCtValue(field.base) catch null) orelse self.typeExprCtValue(field.base);
         const target_name = if (base_value) |value|
             self.concreteTypeNameForCtValue(value)
@@ -1773,7 +1767,7 @@ const ConstEvaluator = struct {
             const trait_method = trait_interface.methodByName(field.name) orelse continue;
             if (!trait_method.is_comptime) continue;
 
-            const item_index = (self.currentItemIndex() catch null) orelse return null;
+            const item_index = (try self.currentItemIndex()) orelse return null;
             const method_count = item_index.countImplMethods(self.file, impl_interface.impl_item_id, field.name);
             if (method_count == 0) continue;
             if (matched_impl_item_id != null or method_count > 1) return null;
@@ -1819,7 +1813,7 @@ const ConstEvaluator = struct {
         }
     }
 
-    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?CallableFunction {
+    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) !?CallableFunction {
         switch (self.file.expression(callee).*) {
             .Name => |name| {
                 const function_item_id = self.lookupNamedItem(name.name) orelse return null;
@@ -1834,9 +1828,9 @@ const ConstEvaluator = struct {
                 };
             },
             .Field => |field| {
-                if ((self.importedModuleForExpr(field.base) catch null)) |target_module_id| {
-                    const target_file = self.astFileForModule(target_module_id) catch return null;
-                    const function_item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch return null) orelse return null;
+                if (try self.importedModuleForExpr(field.base)) |target_module_id| {
+                    const target_file = try self.astFileForModule(target_module_id);
+                    const function_item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse return null;
                     const item = target_file.item(function_item_id).*;
                     if (item == .Function) {
                         return .{
@@ -1848,9 +1842,9 @@ const ConstEvaluator = struct {
                         };
                     }
                 }
-                return self.resolveConcreteTraitMethodCall(field);
+                return try self.resolveConcreteTraitMethodCall(field);
             },
-            .Group => |group| return self.lookupCallableFunction(group.expr),
+            .Group => |group| return try self.lookupCallableFunction(group.expr),
             else => return null,
         }
     }
@@ -1901,13 +1895,13 @@ const ConstEvaluator = struct {
                     .Name => |name| name.name,
                     else => null,
                 }) |base_name| {
-                    if ((self.resolveImportAlias(base_name) catch null)) |target_module_id| {
-                        const target_file = self.astFileForModule(target_module_id) catch break :blk null;
+                    if (try self.resolveImportAlias(base_name)) |target_module_id| {
+                        const target_file = try self.astFileForModule(target_module_id);
                         const target_typecheck = if (self.type_query) |query|
-                            (query.module_typecheck(query.context, target_module_id) catch break :blk null)
+                            try query.module_typecheck(query.context, target_module_id)
                         else
                             break :blk null;
-                        const item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch break :blk null) orelse break :blk null;
+                        const item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse break :blk null;
                         const item = target_file.item(item_id).*;
                         if (item != .Function) break :blk null;
                         break :blk try self.functionReferenceFromItemType(
@@ -1920,7 +1914,7 @@ const ConstEvaluator = struct {
                     if (self.lookupNamedItem(base_name)) |base_item_id| {
                         switch (self.file.item(base_item_id).*) {
                             .Trait => |trait_item| {
-                                if (self.currentItemIndex() catch null) |item_index| {
+                                if (try self.currentItemIndex()) |item_index| {
                                     if (item_index.lookupTraitMethod(self.file, base_item_id, field.name)) |method| {
                                         const signature = (try self.signatureForTraitMethod(method)) orelse break :blk null;
                                         break :blk AbiFunctionReference{
@@ -1946,7 +1940,7 @@ const ConstEvaluator = struct {
                             },
                             .Contract => {
                                 const module_typecheck = typecheck orelse break :blk null;
-                                const item_index = (self.currentItemIndex() catch null) orelse break :blk null;
+                                const item_index = (try self.currentItemIndex()) orelse break :blk null;
                                 const member_id = item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{ .function = true }) orelse break :blk null;
                                 const member = self.file.item(member_id).*;
                                 break :blk try self.functionReferenceFromItemType(
@@ -1971,13 +1965,13 @@ const ConstEvaluator = struct {
     /// Resolves `Name` or `Contract.Member` paths to an item id, recursing
     /// through `.Group` wrappers. Returns null for anything else (imports,
     /// traits, expressions). Used by the event/struct ABI reference resolvers.
-    fn resolveContractMemberPath(self: *ConstEvaluator, expr_id: ast.ExprId) ?ast.ItemId {
+    fn resolveContractMemberPath(self: *ConstEvaluator, expr_id: ast.ExprId) !?ast.ItemId {
         return switch (self.file.expression(expr_id).*) {
-            .Group => |group| self.resolveContractMemberPath(group.expr),
+            .Group => |group| try self.resolveContractMemberPath(group.expr),
             .Name => |name| self.lookupNamedItem(name.name),
             .Field => |field| blk: {
-                const base_item_id = self.resolveContractMemberPath(field.base) orelse break :blk null;
-                const item_index = (self.currentItemIndex() catch null) orelse break :blk null;
+                const base_item_id = (try self.resolveContractMemberPath(field.base)) orelse break :blk null;
+                const item_index = (try self.currentItemIndex()) orelse break :blk null;
                 break :blk item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{
                     .function = true,
                     .struct_ = true,
@@ -1995,7 +1989,7 @@ const ConstEvaluator = struct {
     }
 
     fn resolveAbiEventReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?AbiEventReference {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .LogDecl) return null;
         const signature = (try self.signatureForLogDecl(item.LogDecl)) orelse return null;
@@ -2003,20 +1997,20 @@ const ConstEvaluator = struct {
     }
 
     fn resolveAbiStructReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?AbiStructReference {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Struct) return null;
         return .{ .item = item.Struct };
     }
 
     fn resolveReflectionStructReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?ast.StructItem {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         return if (item == .Struct) item.Struct else null;
     }
 
     fn resolveReflectionTraitReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?ReflectionTraitReference {
-        if (self.resolveContractMemberPath(expr_id)) |item_id| {
+        if (try self.resolveContractMemberPath(expr_id)) |item_id| {
             const item = self.file.item(item_id).*;
             return if (item == .Trait) .{
                 .module_id = self.module_id orelse return null,
@@ -2097,17 +2091,17 @@ const ConstEvaluator = struct {
         return .{ .tuple_ref = try self.env.heap.allocTuple(copied) };
     }
 
-    fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) ?usize {
-        const fields = self.anonymousStructFieldsForExpr(expr_id) orelse return null;
+    fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?usize {
+        const fields = (try self.anonymousStructFieldsForExpr(expr_id)) orelse return null;
         return model.anonymousStructFieldIndex(fields, field_name);
     }
 
-    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) ?[]const model.AnonymousStructField {
-        if (self.currentTypeCheckResult() catch null) |typecheck| {
+    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?[]const model.AnonymousStructField {
+        if (try self.currentTypeCheckResult()) |typecheck| {
             const ty = typecheck.exprType(expr_id);
             if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
         }
-        if (self.currentModuleTypeCheckResult() catch null) |typecheck| {
+        if (try self.currentModuleTypeCheckResult()) |typecheck| {
             const ty = typecheck.exprType(expr_id);
             if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
         }
@@ -2573,7 +2567,7 @@ const ConstEvaluator = struct {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.evalAbiEncodeVoidCallArgument(group.expr),
             .Call => |call| blk: {
-                const callable = self.lookupCallableFunction(call.callee) orelse break :blk false;
+                const callable = (try self.lookupCallableFunction(call.callee)) orelse break :blk false;
                 const function = callable.function;
                 if (function.return_type != null) break :blk false;
 
@@ -2847,7 +2841,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
-        const callable = self.lookupCallableFunction(call.callee) orelse {
+        const callable = (try self.lookupCallableFunction(call.callee)) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
             return null;
@@ -2916,7 +2910,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalCallCtValue(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
-        const callable = self.lookupCallableFunction(call.callee) orelse {
+        const callable = (try self.lookupCallableFunction(call.callee)) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
             return null;

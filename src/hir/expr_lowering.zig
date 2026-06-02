@@ -2473,8 +2473,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return switch (self.parent.file.expression(expr_id).*) {
                 .Group => |group| try @This().calleeImportedFunctionTarget(self, group.expr),
                 .Field => |field| blk: {
-                    const target_module_id = @This().importedModuleForExpr(self, field.base) orelse break :blk null;
-                    const target_item_id = (query.lookup_item(query.context, target_module_id, field.name) catch null) orelse break :blk null;
+                    const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
+                    const target_item_id = (try query.lookup_item(query.context, target_module_id, field.name)) orelse break :blk null;
                     const target_file = try query.ast_file(query.context, target_module_id);
                     break :blk switch (target_file.item(target_item_id).*) {
                         .Function => |function| .{
@@ -3920,15 +3920,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn importedModuleForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) ?source.ModuleId {
+        fn importedModuleForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) !?source.ModuleId {
             const query = self.parent.module_query orelse return null;
             return switch (self.parent.file.expression(expr_id).*) {
-                .Name => |name| query.resolve_import_alias(query.context, self.parent.module_id, name.name) catch null,
+                .Name => |name| try query.resolve_import_alias(query.context, self.parent.module_id, name.name),
                 .Field => |field| blk: {
-                    const base_module_id = @This().importedModuleForExpr(self, field.base) orelse break :blk null;
-                    break :blk query.resolve_import_alias(query.context, base_module_id, field.name) catch null;
+                    const base_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
+                    break :blk try query.resolve_import_alias(query.context, base_module_id, field.name);
                 },
-                .Group => |group| @This().importedModuleForExpr(self, group.expr),
+                .Group => |group| try @This().importedModuleForExpr(self, group.expr),
                 else => null,
             };
         }
@@ -3939,8 +3939,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             const query = self.parent.module_query orelse return null;
-            const target_module_id = @This().importedModuleForExpr(self, field.base) orelse return null;
-            const target_item_id = (query.lookup_item(query.context, target_module_id, field.name) catch null) orelse return null;
+            const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse return null;
+            const target_item_id = (try query.lookup_item(query.context, target_module_id, field.name)) orelse return null;
             const target_file = try query.ast_file(query.context, target_module_id);
             const target_typecheck = try query.module_typecheck(query.context, target_module_id);
             const target_const_eval = try query.const_eval(query.context, target_module_id);

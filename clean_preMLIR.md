@@ -1261,10 +1261,16 @@ Current status:
   support checks, struct/anonymous-struct shape construction, literal
   lowering, or bitfield layout prefix accumulation; they are not local by-name
   field lookup policy.
-- Follow-up audit: `currentItemIndex() catch null` and similar `catch null`
-  paths in semantic/comptime/lowering code must be classified. Query failure is
-  not "fact absent"; error channels should propagate unless a constrained
-  callback API makes that impossible and the behavior is documented.
+- `catch null` query-failure audit is complete for import/item-index paths:
+  sema import helpers, HIR imported-field lowering, comptime callable
+  resolution, comptime contract-member paths, and comptime anonymous-struct
+  field lookup now propagate query errors instead of treating them as absent.
+  Remaining query-shaped `catch null` sites are constrained callback APIs
+  (`abiDecode*` resolver callbacks that return `?`) or local fallback helpers
+  that can still answer from the AST. Other remaining `catch null` uses are
+  parsers, integer conversion, arithmetic probes, allocation in optional
+  formatting helpers, or best-effort constant folding and are outside this
+  query-failure audit.
 
 Plan:
 

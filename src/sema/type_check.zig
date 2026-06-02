@@ -595,43 +595,43 @@ const TypeChecker = struct {
     comptime_depth: usize = 0,
     diagnostics: *diagnostics.DiagnosticList,
 
-    fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?source.ModuleId {
+    fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?source.ModuleId {
         const query = self.import_query orelse return null;
         return switch (self.file.expression(expr_id).*) {
-            .Name => |name| query.resolve_import_alias(query.context, self.module_id, name.name) catch null,
+            .Name => |name| try query.resolve_import_alias(query.context, self.module_id, name.name),
             .Field => |field| blk: {
-                const base_module_id = self.importedModuleForExpr(field.base) orelse break :blk null;
-                break :blk query.resolve_import_alias(query.context, base_module_id, field.name) catch null;
+                const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
+                break :blk try query.resolve_import_alias(query.context, base_module_id, field.name);
             },
-            .Group => |group| self.importedModuleForExpr(group.expr),
+            .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
         };
     }
 
-    fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) ?Type {
+    fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) !?Type {
         const query = self.import_query orelse return null;
-        const item_id = (query.lookup_item(query.context, module_id, name) catch null) orelse return null;
-        const typecheck = query.module_typecheck(query.context, module_id) catch return null;
+        const item_id = (try query.lookup_item(query.context, module_id, name)) orelse return null;
+        const typecheck = try query.module_typecheck(query.context, module_id);
         return typecheck.item_types[item_id.index()];
     }
 
-    fn importedTypeForPath(self: *const TypeChecker, path: []const u8) ?Type {
+    fn importedTypeForPath(self: *const TypeChecker, path: []const u8) !?Type {
         const query = self.import_query orelse return null;
         var parts = std.mem.splitScalar(u8, path, '.');
         const first = parts.next() orelse return null;
-        var module_id = (query.resolve_import_alias(query.context, self.module_id, first) catch null) orelse return null;
+        var module_id = (try query.resolve_import_alias(query.context, self.module_id, first)) orelse return null;
         while (parts.next()) |part| {
             if (parts.peek() == null) {
-                const item_id = (query.lookup_item(query.context, module_id, part) catch null) orelse return null;
-                const typecheck = query.module_typecheck(query.context, module_id) catch return null;
+                const item_id = (try query.lookup_item(query.context, module_id, part)) orelse return null;
+                const typecheck = try query.module_typecheck(query.context, module_id);
                 return typecheck.item_types[item_id.index()];
             }
-            module_id = (query.resolve_import_alias(query.context, module_id, part) catch null) orelse return null;
+            module_id = (try query.resolve_import_alias(query.context, module_id, part)) orelse return null;
         }
         return null;
     }
 
-    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) ?ResolvedCall {
+    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) !?ResolvedCall {
         const query = self.import_query orelse return null;
         const callee_field = switch (self.file.expression(call.callee).*) {
             .Field => |field| field,
@@ -641,9 +641,9 @@ const TypeChecker = struct {
             },
             else => return null,
         };
-        const target_module_id = self.importedModuleForExpr(callee_field.base) orelse return null;
-        const target_item_id = (query.lookup_item(query.context, target_module_id, callee_field.name) catch null) orelse return null;
-        const target_file = (query.ast_file(query.context, target_module_id) catch return null);
+        const target_module_id = (try self.importedModuleForExpr(callee_field.base)) orelse return null;
+        const target_item_id = (try query.lookup_item(query.context, target_module_id, callee_field.name)) orelse return null;
+        const target_file = try query.ast_file(query.context, target_module_id);
         const target_item = target_file.item(target_item_id).*;
         const function = switch (target_item) {
             .Function => |function| function,
@@ -652,13 +652,13 @@ const TypeChecker = struct {
         if (function.parent_contract != null or function.is_comptime) return null;
 
         const bindings = if (function.is_generic) blk: {
-            const inferred = self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call) orelse return null;
+            const inferred = (try self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call)) orelse return null;
             break :blk inferred;
         } else &.{};
 
-        const runtime_parameter_types = self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings) orelse return null;
+        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings)) orelse return null;
         if (!function.is_generic and call.args.len != runtime_parameter_types.len) return null;
-        const return_type = self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings) orelse return null;
+        const return_type = (try self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
         return .{
             .module_id = target_module_id,
             .item_id = target_item_id,
@@ -674,13 +674,13 @@ const TypeChecker = struct {
         target_file: *const ast.AstFile,
         function: ast.FunctionItem,
         bindings: []const GenericTypeBinding,
-    ) ?[]const Type {
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+    ) !?[]const Type {
+        const runtime_params = try self.runtimeFunctionParameters(function);
         if (runtime_params.len == 0) return &.{};
 
         const query = self.import_query orelse return null;
-        const target_item_index = query.item_index(query.context, target_module_id) catch return null;
-        const target_typecheck = query.module_typecheck(query.context, target_module_id) catch return null;
+        const target_item_index = try query.item_index(query.context, target_module_id);
+        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -698,10 +698,10 @@ const TypeChecker = struct {
         imported_checker.current_contract = null;
         imported_checker.current_function_item = null;
 
-        const resolved = self.arena.alloc(Type, runtime_params.len) catch return null;
+        const resolved = try self.arena.alloc(Type, runtime_params.len);
         for (runtime_params, 0..) |parameter, index| {
             resolved[index] = if (function.is_generic)
-                imported_checker.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch .{ .unknown = {} }
+                try imported_checker.resolveTypeExprWithBindings(parameter.type_expr, bindings)
             else
                 imported_checker.pattern_types[parameter.pattern.index()].type;
         }
@@ -715,10 +715,10 @@ const TypeChecker = struct {
         target_item_id: ast.ItemId,
         function: ast.FunctionItem,
         bindings: []const GenericTypeBinding,
-    ) ?Type {
+    ) !?Type {
         const query = self.import_query orelse return null;
-        const target_item_index = query.item_index(query.context, target_module_id) catch return null;
-        const target_typecheck = query.module_typecheck(query.context, target_module_id) catch return null;
+        const target_item_index = try query.item_index(query.context, target_module_id);
+        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
 
         if (!function.is_generic) {
             const item_type = target_typecheck.item_types[target_item_id.index()];
@@ -744,7 +744,7 @@ const TypeChecker = struct {
             imported_checker.expr_effects = target_typecheck.expr_effects;
             imported_checker.current_contract = null;
             imported_checker.current_function_item = null;
-            return imported_checker.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
+            return try imported_checker.resolveTypeExprWithBindings(type_expr, bindings);
         }
 
         return .{ .void = {} };
@@ -756,28 +756,28 @@ const TypeChecker = struct {
         target_file: *const ast.AstFile,
         function: ast.FunctionItem,
         call: ast.CallExpr,
-    ) ?[]const GenericTypeBinding {
+    ) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCountInFile(target_file, function);
         if (comptime_count == 0) return &.{};
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+        const runtime_params = try self.runtimeFunctionParameters(function);
         const effective_runtime_count = runtime_params.len;
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+            const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternNameInFile(target_file, parameter.pattern) orelse return null;
-                const value = self.genericBindingValueForImportedCallArg(target_file, parameter, call.args[index]) orelse return null;
+                const value = (try self.genericBindingValueForImportedCallArg(target_file, parameter, call.args[index])) orelse return null;
                 bindings[index] = .{ .name = name, .value = value };
             }
-            self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings) catch return null;
+            try self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+        const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
@@ -788,7 +788,7 @@ const TypeChecker = struct {
             self.inferBindingFromArgTypeInFile(target_file, function, inferable_type_count, param.type_expr, arg_type, bindings);
         }
 
-        self.refineGenericBindingsForImportedRuntimeArgs(
+        try self.refineGenericBindingsForImportedRuntimeArgs(
             target_module_id,
             target_file,
             function,
@@ -796,12 +796,12 @@ const TypeChecker = struct {
             runtime_params,
             call.args,
             bindings,
-        ) catch return null;
+        );
 
         for (bindings) |binding| {
             if (binding.name.len == 0) return null;
         }
-        self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings) catch return null;
+        try self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings);
         return bindings;
     }
 
@@ -1920,11 +1920,11 @@ const TypeChecker = struct {
             const item = self.file.item(item_id).*;
             if (item != .Import) continue;
             const alias = item.Import.alias orelse continue;
-            const module_id = (query.resolve_import_alias(query.context, self.module_id, alias) catch null) orelse continue;
+            const module_id = (try query.resolve_import_alias(query.context, self.module_id, alias)) orelse continue;
             if (imported_modules.contains(module_id)) continue;
             try imported_modules.put(module_id, {});
 
-            const imported_typecheck = query.module_typecheck(query.context, module_id) catch continue;
+            const imported_typecheck = try query.module_typecheck(query.context, module_id);
             for (imported_typecheck.impl_interfaces) |impl_interface| {
                 try self.recordVisibleImplKey(&seen, &reported, impl_interface.trait_name, impl_interface.target_name, item.Import.range);
             }
@@ -2384,8 +2384,8 @@ const TypeChecker = struct {
             .Call => |call| {
                 try self.visitExpr(call.callee);
                 for (call.args) |arg| try self.visitExpr(arg);
-                self.call_resolutions[expr_id.index()] = self.importedFunctionCallResolution(call);
-                const result_type = self.callReturnType(call);
+                self.call_resolutions[expr_id.index()] = try self.importedFunctionCallResolution(call);
+                const result_type = try self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.checkEnumVariantConstructorCall(expr_id, call)) {
                     return;
@@ -2412,7 +2412,7 @@ const TypeChecker = struct {
                             };
                             if (function) |resolved_function| {
                                 if (resolved_function.is_generic) {
-                                    const bindings = self.genericTypeBindingsForCall(resolved_function, call);
+                                    const bindings = try self.genericTypeBindingsForCall(resolved_function, call);
                                     if (bindings == null) {
                                         try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
                                     } else {
@@ -2579,9 +2579,9 @@ const TypeChecker = struct {
         };
     }
 
-    fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
-        if (self.importedCallReturnType(call)) |result| return result;
-        if (self.genericCallReturnType(call)) |result| return result;
+    fn callReturnType(self: *TypeChecker, call: ast.CallExpr) !Type {
+        if (try self.importedCallReturnType(call)) |result| return result;
+        if (try self.genericCallReturnType(call)) |result| return result;
         if (self.externProxyCallReturnType(call)) |result| return result;
         if (self.enumVariantConstructorInfo(call.callee)) |info| return info.enum_type;
         if (self.calleeErrorDeclItem(call.callee)) |item_id| {
@@ -2688,8 +2688,8 @@ const TypeChecker = struct {
         return true;
     }
 
-    fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
-        const resolved = self.importedFunctionCallResolution(call) orelse return null;
+    fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
+        const resolved = (try self.importedFunctionCallResolution(call)) orelse return null;
         return resolved.return_type;
     }
 
@@ -2730,7 +2730,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+    fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
         const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
         const function = switch (self.file.item(callee_id).*) {
             .Function => |function| function,
@@ -2738,8 +2738,8 @@ const TypeChecker = struct {
         };
         if (!function.is_generic) return null;
 
-        const bindings = self.genericTypeBindingsForCall(function, call) orelse return .{ .unknown = {} };
-        const runtime_parameters = self.runtimeFunctionParameters(function) catch return .{ .unknown = {} };
+        const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return .{ .unknown = {} };
+        const runtime_parameters = try self.runtimeFunctionParameters(function);
         const comptime_count = self.leadingComptimeParameterCount(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
@@ -2750,7 +2750,7 @@ const TypeChecker = struct {
             call.args.len;
         if (effective_runtime_count != runtime_arg_count) return .{ .unknown = {} };
         if (function.return_type) |type_expr| {
-            return self.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
+            return try self.resolveTypeExprWithBindings(type_expr, bindings);
         }
         return .{ .void = {} };
     }
@@ -2778,29 +2778,29 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
+    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCount(function);
         if (comptime_count == 0) return &.{};
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+        const runtime_params = try self.runtimeFunctionParameters(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_params.len - @as(usize, if (method_receiver_supplied) 1 else 0);
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+            const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternName(parameter.pattern) orelse return null;
-                const value = self.genericBindingValueForCallArg(parameter, call.args[index]) orelse return null;
+                const value = (try self.genericBindingValueForCallArg(parameter, call.args[index])) orelse return null;
                 bindings[index] = .{ .name = name, .value = value };
             }
-            self.validateGenericTraitBounds(function, call.range, bindings) catch return null;
+            try self.validateGenericTraitBounds(function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+        const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
@@ -2812,12 +2812,12 @@ const TypeChecker = struct {
             self.inferBindingFromArgType(function, inferable_type_count, param.type_expr, arg_type, bindings);
         }
 
-        self.refineGenericBindingsForRuntimeArgs(function, inferable_type_count, infer_runtime_params, call.args, bindings) catch return null;
+        try self.refineGenericBindingsForRuntimeArgs(function, inferable_type_count, infer_runtime_params, call.args, bindings);
 
         for (bindings) |binding| {
             if (binding.name.len == 0) return null;
         }
-        self.validateGenericTraitBounds(function, call.range, bindings) catch return null;
+        try self.validateGenericTraitBounds(function, call.range, bindings);
         return bindings;
     }
 
@@ -3342,7 +3342,7 @@ const TypeChecker = struct {
             const comptime_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
             const bindings = if (function.is_generic)
-                self.genericTypeBindingsForCall(function, call) orelse return
+                (try self.genericTypeBindingsForCall(function, call)) orelse return
             else
                 &.{};
             if (function.is_generic) {
@@ -4497,13 +4497,13 @@ const TypeChecker = struct {
         };
     }
 
-    fn importedTypeArgFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
+    fn importedTypeArgFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?Type {
         return switch (self.file.expression(expr_id).*) {
             .Field => |field| blk: {
-                const module_id = self.importedModuleForExpr(field.base) orelse break :blk null;
-                break :blk self.importedItemType(module_id, field.name);
+                const module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
+                break :blk try self.importedItemType(module_id, field.name);
             },
-            .Group => |group| self.importedTypeArgFromExpr(group.expr),
+            .Group => |group| try self.importedTypeArgFromExpr(group.expr),
             else => null,
         };
     }
@@ -4537,12 +4537,12 @@ const TypeChecker = struct {
         };
     }
 
-    fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
+    fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) !?GenericBindingValue {
         if (self.isGenericTypeParameter(parameter)) {
             if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
-            if (self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
+            if (try self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
@@ -4555,12 +4555,12 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn genericBindingValueForImportedCallArg(self: *const TypeChecker, target_file: *const ast.AstFile, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
+    fn genericBindingValueForImportedCallArg(self: *const TypeChecker, target_file: *const ast.AstFile, parameter: ast.Parameter, arg_expr: ast.ExprId) !?GenericBindingValue {
         if (self.isGenericTypeParameterInFile(target_file, parameter)) {
             if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
-            if (self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
+            if (try self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
@@ -4834,7 +4834,7 @@ const TypeChecker = struct {
                     try self.emitInvalidIntegerTypeName(path.range, trimmed);
                     break :blk .{ .unknown = {} };
                 }
-                if (self.importedTypeForPath(trimmed)) |imported_type| {
+                if (try self.importedTypeForPath(trimmed)) |imported_type| {
                     break :blk imported_type;
                 }
                 if (self.item_index.lookup(trimmed)) |item_id| {
@@ -4893,7 +4893,7 @@ const TypeChecker = struct {
             try self.emitInvalidIntegerTypeName(generic.range, generic.name);
             return .{ .unknown = {} };
         }
-        if (self.importedTypeForPath(generic.name)) |imported_type| {
+        if (try self.importedTypeForPath(generic.name)) |imported_type| {
             return imported_type;
         }
         if (self.lookupTypeItemInScope(generic.name)) |item_id| {
@@ -7116,10 +7116,10 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !Type {
-        if (self.importedModuleForExpr(base_expr_id)) |module_id| {
-            if (self.importedItemType(module_id, field_name)) |ty| return ty;
+        if (try self.importedModuleForExpr(base_expr_id)) |module_id| {
+            if (try self.importedItemType(module_id, field_name)) |ty| return ty;
             if (self.import_query) |query| {
-                if ((query.resolve_import_alias(query.context, module_id, field_name) catch null) != null) {
+                if ((try query.resolve_import_alias(query.context, module_id, field_name)) != null) {
                     return .{ .unknown = {} };
                 }
             }
