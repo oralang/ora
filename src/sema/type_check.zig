@@ -9,6 +9,7 @@ const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
 const type_builtin = @import("ora_types").builtin;
+const abi_public_policy = @import("../abi/public_policy.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -1371,20 +1372,16 @@ const TypeChecker = struct {
         }
     }
 
-    const PublicAbiPosition = enum {
-        input,
-        output,
-    };
-
     fn validatePublicFunctionAbi(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {
         if (self.current_contract == null) return;
         if (function.visibility != .public) return;
 
+        const public_abi = self.publicAbiPolicy();
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             if (self.parameterIsBareSelf(parameter)) continue;
             const param_type = self.pattern_types[parameter.pattern.index()].type;
-            if (self.publicAbiSupportsType(param_type, .input)) continue;
+            if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
             if (param_type.kind() == .error_union) {
                 try self.emitRangeError(
@@ -1400,7 +1397,7 @@ const TypeChecker = struct {
             });
         }
 
-        if (function.return_type != null and !self.publicAbiSupportsType(self.current_return_type.?, .output)) {
+        if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
             try self.emitRangeError(function.range, "public function '{s}' uses unsupported return ABI type '{s}'", .{
                 function.name,
                 diagnosticTypeDisplayName(self, self.current_return_type.?),
@@ -1408,200 +1405,25 @@ const TypeChecker = struct {
         }
     }
 
-    fn publicAbiSupportsType(self: *const TypeChecker, ty: Type, position: PublicAbiPosition) bool {
-        return switch (ty) {
-            .unknown => true,
-            .void => position == .output,
-            .bool, .address, .string, .bytes, .fixed_bytes, .integer, .bitfield => true,
-            .enum_ => |named| !self.enumHasPayload(named.name),
-            .refinement => |refinement| self.publicAbiSupportsType(refinement.base_type.*, position),
-            .array => |array| self.publicAbiSupportsType(array.element_type.*, position),
-            .slice => |slice| self.publicAbiSupportsType(slice.element_type.*, position),
-            .tuple => |elements| blk: {
-                for (elements) |element| {
-                    if (!self.publicAbiSupportsType(element, position)) break :blk false;
-                }
-                break :blk true;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                for (struct_type.fields) |field| {
-                    if (!self.publicAbiSupportsType(field.ty, position)) break :blk false;
-                }
-                break :blk true;
-            },
-            .struct_, .contract, .named => true,
-            .error_union => |error_union| switch (position) {
-                .input => self.publicAbiSupportsResultInput(ty),
-                .output => self.publicAbiSupportsType(error_union.payload_type.*, .output),
-            },
-            else => false,
-        };
-    }
+    const PublicAbiPolicyProvider = struct {
+        checker: *const TypeChecker,
 
-    fn publicAbiSupportsResultInput(self: *const TypeChecker, ty: Type) bool {
-        const error_union = switch (ty) {
-            .error_union => |error_union| error_union,
-            else => return false,
-        };
-        if (error_union.error_types.len != 1) return false;
-        if (!self.publicAbiSupportsResultCarrierType(error_union.payload_type.*)) return false;
-        const payload_words = self.publicAbiStaticWordCount(error_union.payload_type.*);
-        if (!self.publicAbiErrorTypeHasPayload(error_union.error_types[0])) return true;
-        if (!self.publicAbiSupportsResultCarrierType(error_union.error_types[0])) return false;
-        const error_words = self.publicAbiStaticWordCount(error_union.error_types[0]);
-        if (payload_words == 1 and error_words != null and error_words.? > 1) return false;
-        return true;
-    }
-
-    fn publicAbiSupportsResultCarrierType(self: *const TypeChecker, ty: Type) bool {
-        if (self.publicAbiStaticWordCount(ty) != null) return true;
-        return switch (ty) {
-            .bytes, .string => true,
-            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(slice.element_type.*),
-            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(array.element_type.*),
-            .anonymous_struct => |struct_type| {
-                for (struct_type.fields) |field| {
-                    if (!self.publicAbiSupportsResultCarrierType(field.ty)) return false;
-                }
-                return true;
-            },
-            .tuple => |elements| {
-                for (elements) |element| {
-                    if (!self.publicAbiSupportsResultCarrierType(element)) return false;
-                }
-                return true;
-            },
-            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(refinement.base_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .ErrorDecl => |error_decl| error_blk: {
-                        for (error_decl.parameters) |parameter| {
-                            const payload = self.pattern_types[parameter.pattern.index()].type;
-                            if (!self.publicAbiSupportsResultCarrierType(payload)) break :error_blk false;
-                        }
-                        break :error_blk true;
-                    },
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes => true,
-            .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
-            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "u256") or
-                    std.mem.eql(u8, named.name, "bool") or
-                    std.mem.eql(u8, named.name, "address") or
-                    type_builtin.parseFixedBytesName(named.name) != null)
-                {
-                    break :blk true;
-                }
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.publicAbiSupportsResultDynamicArrayElement(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn publicAbiStaticWordCount(self: *const TypeChecker, ty: Type) ?usize {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .bitfield => 1,
-            .enum_ => |named| if (self.enumHasPayload(named.name)) null else 1,
-            .refinement => |refinement| self.publicAbiStaticWordCount(refinement.base_type.*),
-            .tuple => |elements| blk: {
-                var total: usize = 0;
-                for (elements) |element| {
-                    total += self.publicAbiStaticWordCount(element) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .array => |array| blk: {
-                const len = array.len orelse break :blk null;
-                const element_words = self.publicAbiStaticWordCount(array.element_type.*) orelse break :blk null;
-                break :blk element_words * len;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                var total: usize = 0;
-                for (struct_type.fields) |field| {
-                    total += self.publicAbiStaticWordCount(field.ty) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
-            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
-                if (parseIntegerSpelling(named.name) != null) break :blk 1;
-                if (type_builtin.parseFixedBytesName(named.name) != null) break :blk 1;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk null;
-                break :blk switch (self.file.item(item_id).*) {
-                    .Enum => if (self.enumHasPayload(named.name)) null else 1,
-                    .Bitfield => 1,
-                    .Struct => self.publicAbiStaticWordCountForStructDecl(named.name),
-                    .Contract => self.publicAbiStaticWordCountForContractDecl(named.name),
-                    .ErrorDecl => |error_decl| blk2: {
-                        var total: usize = 0;
-                        for (error_decl.parameters) |parameter| {
-                            total += self.publicAbiStaticWordCount(self.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
-                        }
-                        break :blk2 total;
-                    },
-                    else => null,
-                };
-            },
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForNamedStruct(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        return switch (self.file.item(item_id).*) {
-            .Struct => self.publicAbiStaticWordCountForStructDecl(name),
-            .Contract => self.publicAbiStaticWordCountForContractDecl(name),
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForStructDecl(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        const struct_item = switch (self.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (struct_item.fields) |field| {
-            total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return null) orelse return null;
+        pub fn patternType(self: @This(), pattern_id: ast.PatternId) Type {
+            return self.checker.pattern_types[pattern_id.index()].type;
         }
-        return total;
-    }
 
-    fn publicAbiStaticWordCountForContractDecl(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        const contract_item = switch (self.file.item(item_id).*) {
-            .Contract => |contract_item| contract_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (contract_item.members) |member_id| {
-            switch (self.file.item(member_id).*) {
-                .Field => |field| {
-                    if (field.type_expr) |type_expr| {
-                        total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch return null) orelse return null;
-                    } else return null;
-                },
-                else => {},
-            }
+        pub fn enumHasPayload(self: @This(), name: []const u8) bool {
+            return self.checker.enumHasPayload(name);
         }
-        return total;
+    };
+
+    fn publicAbiPolicy(self: *const TypeChecker) abi_public_policy.Policy(PublicAbiPolicyProvider) {
+        return .{
+            .allocator = self.arena,
+            .file = self.file,
+            .item_index = self.item_index,
+            .provider = .{ .checker = self },
+        };
     }
 
     fn checkDuplicateTraitBounds(self: *TypeChecker, bounds: []const ast.TraitBound) anyerror!void {
@@ -1619,15 +1441,6 @@ const TypeChecker = struct {
                 break;
             }
         }
-    }
-
-    fn publicAbiErrorTypeHasPayload(self: *const TypeChecker, ty: Type) bool {
-        const name = ty.name() orelse return true;
-        const item_id = self.item_index.lookup(name) orelse return true;
-        return switch (self.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => true,
-        };
     }
 
     fn parseIntegerSpelling(name: []const u8) ?void {

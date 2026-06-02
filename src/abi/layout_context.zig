@@ -4,19 +4,10 @@ const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout = @import("layout.zig");
+const public_policy = @import("public_policy.zig");
 
-pub const ResultInputMode = enum {
-    none,
-    narrow_payloadless,
-    wide_payloadless,
-    wide_single_error,
-};
-
-pub const ResultCarrierPlan = struct {
-    mode: ResultInputMode,
-    payload: sema.Type,
-    err: ?sema.Type = null,
-};
+pub const ResultInputMode = public_policy.ResultInputMode;
+pub const ResultCarrierPlan = public_policy.ResultCarrierPlan;
 
 pub const LayoutContext = struct {
     allocator: std.mem.Allocator,
@@ -56,31 +47,8 @@ pub const LayoutContext = struct {
     }
 
     pub fn planResultCarrier(self: *const LayoutContext, ty: sema.Type) ?ResultCarrierPlan {
-        const error_union = switch (ty) {
-            .error_union => |error_union| error_union,
-            else => return null,
-        };
-        if (error_union.error_types.len != 1) return null;
-        const payload = error_union.payload_type.*;
-        if (!self.resultInputCarrierShapeSupported(payload)) return null;
-
-        const err_ty = error_union.error_types[0];
-        const payload_words = self.staticWordCountForType(payload);
-        if (!self.errorTypeHasPayload(err_ty)) {
-            const mode: ResultInputMode = if (payload_words != null and payload_words.? == 1 and self.resultInputPayloadFitsNarrowCarrier(payload) and self.payloadlessErrorHasRuntimeId(err_ty))
-                .narrow_payloadless
-            else
-                .wide_payloadless;
-            return .{ .mode = mode, .payload = payload };
-        }
-
-        if (!self.resultInputCarrierShapeSupported(err_ty)) return null;
-        if (payload_words != null and payload_words.? == 1) {
-            if (self.staticWordCountForType(err_ty)) |error_words| {
-                if (error_words > 1) return null;
-            }
-        }
-        return .{ .mode = .wide_single_error, .payload = payload, .err = err_ty };
+        const policy = self.publicPolicy();
+        return policy.planResultCarrier(ty);
     }
 
     pub fn errorTypeHasPayload(self: *const LayoutContext, ty: sema.Type) bool {
@@ -272,82 +240,48 @@ pub const LayoutContext = struct {
         return .{ .tuple = elements };
     }
 
-    fn resultInputCarrierShapeSupported(self: *const LayoutContext, ty: sema.Type) bool {
-        if (self.staticWordCountForType(ty) != null) return true;
-        return switch (ty) {
-            .bytes, .string => true,
-            .slice => |slice| self.resultInputDynamicArrayElementSupported(slice.element_type.*),
-            .array => |array| array.len == null and self.resultInputDynamicArrayElementSupported(array.element_type.*),
-            .anonymous_struct => |struct_type| {
-                for (struct_type.fields) |field| {
-                    if (!self.resultInputCarrierShapeSupported(field.ty)) return false;
-                }
-                return true;
-            },
-            .tuple => |elements| {
-                for (elements) |element| {
-                    if (!self.resultInputCarrierShapeSupported(element)) return false;
-                }
-                return true;
-            },
-            .refinement => |refinement| self.resultInputCarrierShapeSupported(refinement.base_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .ErrorDecl => |error_decl| error_blk: {
-                        for (error_decl.parameters) |parameter| {
-                            const payload = self.typecheck.pattern_types[parameter.pattern.index()].type;
-                            if (!self.resultInputCarrierShapeSupported(payload)) break :error_blk false;
-                        }
-                        break :error_blk true;
-                    },
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn resultInputDynamicArrayElementSupported(self: *const LayoutContext, ty: sema.Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer => true,
-            .enum_, .bitfield => self.staticWordCountForType(ty) != null,
-            .named => |named| blk: {
-                if (abi_layout.parseFixedBytesSpelling(named.name) != null) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .Enum, .Bitfield => self.staticWordCountForType(ty) != null,
-                    else => false,
-                };
-            },
-            .refinement => |refinement| self.resultInputDynamicArrayElementSupported(refinement.base_type.*),
-            else => false,
-        };
-    }
-
-    fn resultInputPayloadFitsNarrowCarrier(self: *const LayoutContext, ty: sema.Type) bool {
-        return switch (ty) {
-            .bool, .address => true,
-            .integer => |integer| (integer.bits orelse bitsFromIntegerSpelling(integer.spelling) orelse 256) <= 255,
-            .refinement => |refinement| self.resultInputPayloadFitsNarrowCarrier(refinement.base_type.*),
-            else => false,
-        };
-    }
-
-    fn payloadlessErrorHasRuntimeId(self: *const LayoutContext, ty: sema.Type) bool {
-        const error_name = ty.name() orelse return false;
-        if (self.item_index.lookup(error_name)) |item_id| {
-            return self.file.item(item_id).* == .ErrorDecl;
-        }
-        return false;
-    }
-
     fn structFieldCount(self: *const LayoutContext, name: []const u8) ?usize {
         if (self.typecheck.instantiatedStructByName(name)) |instantiated| return instantiated.fields.len;
         const item_id = self.item_index.lookup(name) orelse return null;
         return switch (self.file.item(item_id).*) {
             .Struct => |struct_item| struct_item.fields.len,
             else => null,
+        };
+    }
+
+    const PublicPolicyProvider = struct {
+        context: *const LayoutContext,
+
+        pub fn patternType(self: @This(), pattern_id: ast.PatternId) sema.Type {
+            return self.context.typecheck.pattern_types[pattern_id.index()].type;
+        }
+
+        pub fn enumHasPayload(self: @This(), name: []const u8) bool {
+            if (self.context.typecheck.instantiatedEnumByName(name)) |instantiated| {
+                return instantiatedEnumHasPayload(instantiated);
+            }
+            const item_id = self.context.item_index.lookup(name) orelse return false;
+            return switch (self.context.file.item(item_id).*) {
+                .Enum => |enum_item| enumItemHasPayload(enum_item),
+                else => false,
+            };
+        }
+
+        pub fn staticWordCount(self: @This(), ty: sema.Type) ?usize {
+            return self.context.staticWordCountForType(ty);
+        }
+
+        pub fn errorTypeHasPayload(self: @This(), ty: sema.Type) bool {
+            return self.context.errorTypeHasPayload(ty);
+        }
+    };
+
+    fn publicPolicy(self: *const LayoutContext) public_policy.Policy(PublicPolicyProvider) {
+        return .{
+            .allocator = self.allocator,
+            .file = self.file,
+            .item_index = self.item_index,
+            .provider = .{ .context = self },
         };
     }
 };
@@ -360,13 +294,6 @@ fn storeType(allocator: std.mem.Allocator, ty: sema.Type) !*const sema.Type {
 
 fn uintType(bits: u16, spelling: []const u8) sema.Type {
     return .{ .integer = .{ .bits = bits, .signed = false, .spelling = spelling } };
-}
-
-fn bitsFromIntegerSpelling(spelling: ?[]const u8) ?u16 {
-    const text = spelling orelse return null;
-    if (text.len < 2) return null;
-    if (text[0] != 'u' and text[0] != 'i') return null;
-    return std.fmt.parseUnsigned(u16, text[1..], 10) catch null;
 }
 
 fn enumItemHasPayload(enum_item: ast.EnumItem) bool {

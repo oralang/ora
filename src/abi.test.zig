@@ -8,6 +8,7 @@ const ora_root = @import("ora_root");
 const abi = ora_root.abi;
 const abi_layout = ora_root.abi_layout;
 const abi_layout_context = ora_root.abi_layout_context;
+const abi_public_policy = ora_root.abi_public_policy;
 const abi_comptime_decoder = ora_root.abi_comptime_decoder;
 const abi_comptime_encoder = ora_root.abi_comptime_encoder;
 const compiler = ora_root.compiler;
@@ -62,6 +63,103 @@ fn serializeAbiLayoutForType(ty: compiler.sema.Type) ![]const u8 {
     const layout = try abi_layout.fromType(testing.allocator, ty);
     defer layout.deinit(testing.allocator);
     return abi_layout.serializeForMlirAttr(testing.allocator, layout);
+}
+
+const PublicPolicyTestProvider = struct {
+    pub fn patternType(_: @This(), _: compiler.ast.PatternId) compiler.sema.Type {
+        return .unknown;
+    }
+
+    pub fn enumHasPayload(_: @This(), _: []const u8) bool {
+        return false;
+    }
+
+    pub fn errorTypeHasPayload(_: @This(), _: compiler.sema.Type) bool {
+        return false;
+    }
+};
+
+const PublicPolicyTest = abi_public_policy.Policy(PublicPolicyTestProvider);
+
+const PublicPolicyTestContext = struct {
+    file: compiler.ast.AstFile,
+    item_index: compiler.sema.ItemIndexResult,
+
+    fn init() PublicPolicyTestContext {
+        return .{
+            .file = .{
+                .arena = std.heap.ArenaAllocator.init(testing.allocator),
+                .file_id = compiler.ast.AstFileId.fromIndex(0),
+                .root_items = &.{},
+                .items = &.{},
+                .bodies = &.{},
+                .statements = &.{},
+                .expressions = &.{},
+                .type_exprs = &.{},
+                .patterns = &.{},
+            },
+            .item_index = .{
+                .arena = std.heap.ArenaAllocator.init(testing.allocator),
+                .entries = &.{},
+                .impl_entries = &.{},
+                .impl_lookup = &.{},
+                .trait_method_lookup = &.{},
+                .impl_method_lookup = &.{},
+                .impl_method_owner_lookup = &.{},
+                .struct_field_lookup = &.{},
+                .bitfield_field_lookup = &.{},
+                .enum_variant_lookup = &.{},
+                .contract_member_lookup = &.{},
+            },
+        };
+    }
+
+    fn deinit(self: *PublicPolicyTestContext) void {
+        self.item_index.deinit();
+        self.file.deinit();
+    }
+
+    fn policy(self: *PublicPolicyTestContext) PublicPolicyTest {
+        return .{
+            .allocator = testing.allocator,
+            .file = &self.file,
+            .item_index = &self.item_index,
+            .provider = .{},
+        };
+    }
+};
+
+test "public ABI policy static word count fails closed for non-builtin integers" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } }));
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{ .spelling = "u500" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{} }));
+
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u8" } }));
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .named = .{ .name = "u500" } }));
+}
+
+test "public ABI policy Result dynamic arrays accept only canonical u256 integer elements" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    const error_types = [_]compiler.sema.Type{.{ .named = .{ .name = "Failure" } }};
+    const u256_element: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u500_element: compiler.sema.Type = .{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } };
+    const u256_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u256_element } };
+    const u500_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u500_element } };
+
+    try testing.expect(policy.planResultCarrier(.{ .error_union = .{ .payload_type = &u256_slice, .error_types = &error_types } }) != null);
+    try testing.expect(policy.planResultCarrier(.{ .error_union = .{ .payload_type = &u500_slice, .error_types = &error_types } }) == null);
 }
 
 const ExpectedSirNeedleCount = struct {
