@@ -1249,11 +1249,18 @@ Current status:
   records. AST trait-method lookups by `(trait item, method name)`, raw impl
   method lookups by `(impl item, method name)`, and reverse `method -> impl`
   lookup are indexed in `ItemIndexResult`.
+- Struct/bitfield field lookup is indexed in `ItemIndexResult`; instantiated
+  struct/bitfield records carry their own field indexes; anonymous-struct field
+  lookup is routed through one shared semantic helper.
 - Remaining `trait_item.methods`/`impl_item.methods` loops are classified as
   traversal/materialization/index construction: declaration validation,
   resolver binding, visiting/lowering every impl method, building semantic
   method signatures, ghost `self` discovery, and comptime `@traitMethods`
   reflection.
+- Remaining field loops are classified as traversal/materialization, ABI
+  support checks, struct/anonymous-struct shape construction, literal
+  lowering, or bitfield layout prefix accumulation; they are not local by-name
+  field lookup policy.
 
 Plan:
 

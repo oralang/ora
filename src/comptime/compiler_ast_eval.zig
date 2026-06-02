@@ -1171,12 +1171,8 @@ const ConstEvaluator = struct {
 
     fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) ?usize {
         const item_id = self.itemIdForNamedTypeId(type_id) orelse return null;
-        const item = self.file.item(item_id).*;
-        if (item != .Struct) return null;
-        for (item.Struct.fields, 0..) |field, idx| {
-            if (std.mem.eql(u8, field.name, field_name)) return idx;
-        }
-        return null;
+        const item_index = (self.currentItemIndex() catch null) orelse return null;
+        return item_index.lookupStructFieldIndex(item_id, field_name);
     }
 
     fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?model.Type {
@@ -1185,19 +1181,14 @@ const ConstEvaluator = struct {
         if (expr_type != .struct_) return null;
 
         if (typecheck.instantiatedStructByName(expr_type.struct_.name)) |instantiated| {
-            for (instantiated.fields) |field| {
-                if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-            }
+            if (instantiated.fieldByName(field_name)) |field| return field.ty;
             return null;
         }
 
         const item_id = self.lookupNamedItem(expr_type.struct_.name) orelse return null;
-        const item = self.file.item(item_id).*;
-        if (item != .Struct) return null;
-        for (item.Struct.fields) |field| {
-            if (std.mem.eql(u8, field.name, field_name)) return try self.modelTypeFromTypeExpr(field.type_expr);
-        }
-        return null;
+        const item_index = (self.currentItemIndex() catch null) orelse return null;
+        const field = item_index.lookupStructField(self.file, item_id, field_name) orelse return null;
+        return try self.modelTypeFromTypeExpr(field.type_expr);
     }
 
     fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const model.AnonymousStructField {
@@ -1333,13 +1324,6 @@ const ConstEvaluator = struct {
         const field_id: comptime_mod.FieldId = @intCast(field_index);
         for (struct_data.fields) |field| {
             if (field.field_id == field_id) return field.value;
-        }
-        return null;
-    }
-
-    fn findAnonymousStructFieldIndex(fields: []const model.AnonymousStructField, name: []const u8) ?usize {
-        for (fields, 0..) |field, index| {
-            if (std.mem.eql(u8, field.name, name)) return index;
         }
         return null;
     }
@@ -2115,10 +2099,7 @@ const ConstEvaluator = struct {
 
     fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) ?usize {
         const fields = self.anonymousStructFieldsForExpr(expr_id) orelse return null;
-        for (fields, 0..) |field, index| {
-            if (std.mem.eql(u8, field.name, field_name)) return index;
-        }
-        return null;
+        return model.anonymousStructFieldIndex(fields, field_name);
     }
 
     fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) ?[]const model.AnonymousStructField {
@@ -2371,7 +2352,7 @@ const ConstEvaluator = struct {
         const fields = (try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(enum_value.variant_id)].payload)) orelse return false;
 
         for (destructure.fields) |field| {
-            const index = findAnonymousStructFieldIndex(fields, field.name) orelse return false;
+            const index = model.anonymousStructFieldIndex(fields, field.name) orelse return false;
             if (index >= payload.elems.len) return false;
             try self.bindPatternCtValue(field.binding, payload.elems[index]);
         }

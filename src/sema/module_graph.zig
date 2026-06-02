@@ -119,6 +119,8 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
         .trait_method_lookup = &[_]lookup.MemberEntry{},
         .impl_method_lookup = &[_]lookup.MemberEntry{},
         .impl_method_owner_lookup = &[_]lookup.IndexEntry{},
+        .struct_field_lookup = &[_]lookup.MemberEntry{},
+        .bitfield_field_lookup = &[_]lookup.MemberEntry{},
         .enum_variant_lookup = &[_]lookup.MemberEntry{},
         .contract_member_lookup = &[_]lookup.MemberEntry{},
     };
@@ -130,10 +132,12 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     var trait_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var impl_method_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var impl_method_owner_lookup: std.ArrayList(lookup.IndexEntry) = .{};
+    var struct_field_lookup: std.ArrayList(lookup.MemberEntry) = .{};
+    var bitfield_field_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var enum_variant_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     var contract_member_lookup: std.ArrayList(lookup.MemberEntry) = .{};
     for (file.root_items) |item_id| {
-        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &trait_method_lookup, &impl_method_lookup, &impl_method_owner_lookup, &enum_variant_lookup, &contract_member_lookup);
+        try collectItemEntry(arena, file, item_id, null, &entries, &impl_entries, &trait_method_lookup, &impl_method_lookup, &impl_method_owner_lookup, &struct_field_lookup, &bitfield_field_lookup, &enum_variant_lookup, &contract_member_lookup);
     }
     std.sort.heap(NamedItem, entries.items, {}, struct {
         fn lessThan(_: void, lhs: NamedItem, rhs: NamedItem) bool {
@@ -143,6 +147,8 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     lookup.sortMembers(trait_method_lookup.items);
     lookup.sortMembers(impl_method_lookup.items);
     lookup.sortIndexes(impl_method_owner_lookup.items);
+    lookup.sortMembers(struct_field_lookup.items);
+    lookup.sortMembers(bitfield_field_lookup.items);
     lookup.sortMembers(enum_variant_lookup.items);
     lookup.sortMembers(contract_member_lookup.items);
     result.entries = try entries.toOwnedSlice(arena);
@@ -151,6 +157,8 @@ pub fn buildItemIndex(allocator: std.mem.Allocator, file: *const ast.AstFile) !I
     result.trait_method_lookup = try trait_method_lookup.toOwnedSlice(arena);
     result.impl_method_lookup = try impl_method_lookup.toOwnedSlice(arena);
     result.impl_method_owner_lookup = try impl_method_owner_lookup.toOwnedSlice(arena);
+    result.struct_field_lookup = try struct_field_lookup.toOwnedSlice(arena);
+    result.bitfield_field_lookup = try bitfield_field_lookup.toOwnedSlice(arena);
     result.enum_variant_lookup = try enum_variant_lookup.toOwnedSlice(arena);
     result.contract_member_lookup = try contract_member_lookup.toOwnedSlice(arena);
     return result;
@@ -166,6 +174,8 @@ fn collectItemEntry(
     trait_method_lookup: *std.ArrayList(lookup.MemberEntry),
     impl_method_lookup: *std.ArrayList(lookup.MemberEntry),
     impl_method_owner_lookup: *std.ArrayList(lookup.IndexEntry),
+    struct_field_lookup: *std.ArrayList(lookup.MemberEntry),
+    bitfield_field_lookup: *std.ArrayList(lookup.MemberEntry),
     enum_variant_lookup: *std.ArrayList(lookup.MemberEntry),
     contract_member_lookup: *std.ArrayList(lookup.MemberEntry),
 ) !void {
@@ -173,8 +183,26 @@ fn collectItemEntry(
     const name = switch (item) {
         .Contract => item.Contract.name,
         .Function => item.Function.name,
-        .Struct => item.Struct.name,
-        .Bitfield => item.Bitfield.name,
+        .Struct => blk: {
+            for (item.Struct.fields, 0..) |field, field_index| {
+                try struct_field_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = field.name,
+                    .index = field_index,
+                });
+            }
+            break :blk item.Struct.name;
+        },
+        .Bitfield => blk: {
+            for (item.Bitfield.fields, 0..) |field, field_index| {
+                try bitfield_field_lookup.append(allocator, .{
+                    .owner_index = item_id.index(),
+                    .name = field.name,
+                    .index = field_index,
+                });
+            }
+            break :blk item.Bitfield.name;
+        },
         .Enum => blk: {
             for (item.Enum.variants, 0..) |variant, index| {
                 try enum_variant_lookup.append(allocator, .{
@@ -242,7 +270,7 @@ fn collectItemEntry(
                     .index = member_index,
                 });
             }
-            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, trait_method_lookup, impl_method_lookup, impl_method_owner_lookup, enum_variant_lookup, contract_member_lookup);
+            try collectItemEntry(allocator, file, member_id, item.Contract.name, entries, impl_entries, trait_method_lookup, impl_method_lookup, impl_method_owner_lookup, struct_field_lookup, bitfield_field_lookup, enum_variant_lookup, contract_member_lookup);
         }
     }
 }

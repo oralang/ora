@@ -723,42 +723,48 @@ const Lowerer = struct {
     pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) ?ResolvedBitfieldField {
         if (self.instantiatedBitfieldByName(bitfield_name)) |bitfield| {
             const template = self.file.item(bitfield.template_item_id).Bitfield;
+            const field_index = bitfield.fieldIndex(field_name) orelse return null;
+            if (field_index >= bitfield.fields.len or field_index >= template.fields.len) return null;
             var next_offset: u32 = 0;
-            for (bitfield.fields, 0..) |field, index| {
+            for (bitfield.fields[0..field_index]) |field| {
                 const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
                 const offset = field.offset orelse next_offset;
-                const sign = self.bitfieldFieldSignFromType(field.ty);
-                if (std.mem.eql(u8, field.name, field_name)) {
-                    return .{
-                        .field = template.fields[index],
-                        .field_type = field.ty,
-                        .offset = offset,
-                        .width = width,
-                        .sign = sign,
-                    };
-                }
                 next_offset = offset + width;
             }
-            return null;
+            const field = bitfield.fields[field_index];
+            const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+            const offset = field.offset orelse next_offset;
+            return .{
+                .field = template.fields[field_index],
+                .field_type = field.ty,
+                .offset = offset,
+                .width = width,
+                .sign = self.bitfieldFieldSignFromType(field.ty),
+            };
         }
-        const bitfield = self.bitfieldItemByName(bitfield_name) orelse return null;
+        const bitfield_item_id = self.item_index.lookup(bitfield_name) orelse return null;
+        const bitfield = switch (self.file.item(bitfield_item_id).*) {
+            .Bitfield => |bitfield| bitfield,
+            else => return null,
+        };
+        const field_index = self.item_index.lookupBitfieldFieldIndex(bitfield_item_id, field_name) orelse return null;
+        if (field_index >= bitfield.fields.len) return null;
         var next_offset: u32 = 0;
-        for (bitfield.fields) |field| {
+        for (bitfield.fields[0..field_index]) |field| {
             const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
             const offset = field.offset orelse next_offset;
-            const sign = self.bitfieldFieldSign(field.type_expr);
-            if (std.mem.eql(u8, field.name, field_name)) {
-                return .{
-                    .field = field,
-                    .field_type = null,
-                    .offset = offset,
-                    .width = width,
-                    .sign = sign,
-                };
-            }
             next_offset = offset + width;
         }
-        return null;
+        const field = bitfield.fields[field_index];
+        const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
+        const offset = field.offset orelse next_offset;
+        return .{
+            .field = field,
+            .field_type = null,
+            .offset = offset,
+            .width = width,
+            .sign = self.bitfieldFieldSign(field.type_expr),
+        };
     }
 
     pub fn isGenericTypeParameter(self: *const Lowerer, parameter: ast.Parameter) bool {

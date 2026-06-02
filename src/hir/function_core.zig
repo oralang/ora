@@ -2433,27 +2433,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Field => |field| blk: {
                     const base_type = @This().patternType(self, field.base, locals);
                     if (base_type.kind() == .anonymous_struct) {
-                        for (base_type.anonymous_struct.fields) |struct_field| {
-                            if (std.mem.eql(u8, struct_field.name, field.name)) break :blk struct_field.ty;
-                        }
+                        if (base_type.anonymous_struct.fieldByName(field.name)) |struct_field| break :blk struct_field.ty;
                     }
                     if (base_type.kind() == .struct_) {
                         if (self.parent.typecheck.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
-                            for (instantiated.fields) |struct_field| {
-                                if (std.mem.eql(u8, struct_field.name, field.name)) break :blk struct_field.ty;
-                            }
+                            if (instantiated.fieldByName(field.name)) |struct_field| break :blk struct_field.ty;
                         }
                     }
                     const type_name = base_type.name() orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
                     const item_id = self.parent.item_index.lookup(type_name) orelse break :blk self.parent.typecheck.pattern_types[pattern_id.index()].type;
                     break :blk switch (self.parent.file.item(item_id).*) {
                         .Struct => |struct_item| blk2: {
-                            for (struct_item.fields) |struct_field| {
-                                if (std.mem.eql(u8, struct_field.name, field.name)) {
-                                    break :blk2 type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, struct_field.type_expr) catch self.parent.typecheck.pattern_types[pattern_id.index()].type;
-                                }
-                            }
-                            break :blk2 self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                            _ = struct_item;
+                            const struct_field = self.parent.item_index.lookupStructField(self.parent.file, item_id, field.name) orelse break :blk2 self.parent.typecheck.pattern_types[pattern_id.index()].type;
+                            break :blk2 type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, struct_field.type_expr) catch self.parent.typecheck.pattern_types[pattern_id.index()].type;
                         },
                         .ErrorDecl => |error_decl| blk2: {
                             for (error_decl.parameters) |parameter| {

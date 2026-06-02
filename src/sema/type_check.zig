@@ -5146,8 +5146,9 @@ const TypeChecker = struct {
         }
 
         const payload_fields = payload_type.anonymous_struct.fields;
+        const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.arena, struct_literal.fields, "name");
         for (payload_fields) |field| {
-            const init = self.findStructLiteralField(struct_literal.fields, field.name) orelse {
+            const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field.name) orelse {
                 try self.emitExprError(expr_id, "missing field '{s}' for ADT variant '{s}'", .{ field.name, info.variant_name });
                 continue;
             };
@@ -5162,26 +5163,10 @@ const TypeChecker = struct {
         }
 
         for (struct_literal.fields) |init| {
-            if (self.findAnonymousStructField(payload_fields, init.name) == null) {
+            if (model.anonymousStructFieldByName(payload_fields, init.name) == null) {
                 try self.emitRangeError(init.range, "unknown field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
             }
         }
-    }
-
-    fn findStructLiteralField(self: *const TypeChecker, fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-        _ = self;
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
-        }
-        return null;
-    }
-
-    fn findAnonymousStructField(self: *const TypeChecker, fields: []const model.AnonymousStructField, name: []const u8) ?model.AnonymousStructField {
-        _ = self;
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
-        }
-        return null;
     }
 
     fn contextualizeLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
@@ -5291,6 +5276,7 @@ const TypeChecker = struct {
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .fields = fields,
+                .field_lookup = try lookup_index.buildNamed(InstantiatedStructField, self.arena, fields, "name"),
             });
         }
 
@@ -5504,6 +5490,7 @@ const TypeChecker = struct {
                 else
                     null,
                 .fields = fields,
+                .field_lookup = try lookup_index.buildNamed(InstantiatedBitfieldField, self.arena, fields, "name"),
             });
         }
 
@@ -7069,9 +7056,7 @@ const TypeChecker = struct {
         if (self.concreteImplMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
             if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
-                for (instantiated.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-                }
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
                 return .{ .unknown = {} };
             }
         }
@@ -7082,29 +7067,21 @@ const TypeChecker = struct {
         }
         if (base_type.kind() == .bitfield) {
             if (self.instantiatedBitfieldByName(base_type.bitfield.name)) |instantiated| {
-                for (instantiated.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-                }
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
                 return .{ .unknown = {} };
             }
         }
         const item_id = self.itemIdForType(base_type) orelse return .{ .unknown = {} };
         return switch (self.file.item(item_id).*) {
             .Struct => |struct_item| blk: {
-                for (struct_item.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) {
-                        break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
-                    }
-                }
-                break :blk .{ .unknown = {} };
+                _ = struct_item;
+                const field = self.item_index.lookupStructField(self.file, item_id, field_name) orelse break :blk .{ .unknown = {} };
+                break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
             },
             .Bitfield => |bitfield_item| blk: {
-                for (bitfield_item.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) {
-                        break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
-                    }
-                }
-                break :blk .{ .unknown = {} };
+                _ = bitfield_item;
+                const field = self.item_index.lookupBitfieldField(self.file, item_id, field_name) orelse break :blk .{ .unknown = {} };
+                break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
             },
             .Contract => blk: {
                 const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field_name, .{
@@ -8115,7 +8092,7 @@ const TypeChecker = struct {
         }
 
         for (destructure.fields) |binding_field| {
-            const field = self.findAnonymousStructField(fields, binding_field.name) orelse {
+            const field = model.anonymousStructFieldByName(fields, binding_field.name) orelse {
                 self.pattern_types[binding_field.binding.index()] = LocatedType.unlocated(.{ .unknown = {} });
                 try self.emitRangeError(binding_field.range, "unknown ADT payload field '{s}'", .{binding_field.name});
                 continue;
@@ -8124,15 +8101,9 @@ const TypeChecker = struct {
         }
 
         if (!destructure.has_rest) {
+            const binding_lookup = try lookup_index.buildNamed(ast.nodes.StructDestructureField, self.arena, destructure.fields, "name");
             for (fields) |field| {
-                var found = false;
-                for (destructure.fields) |binding_field| {
-                    if (std.mem.eql(u8, binding_field.name, field.name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
+                if (lookup_index.findNamed(binding_lookup, field.name) == null) {
                     try self.emitRangeError(range, "missing ADT payload field '{s}'", .{field.name});
                 }
             }
@@ -8661,10 +8632,8 @@ fn overflowTupleFieldType(base_type: Type, field_name: []const u8) ?Type {
 
 fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
     if (base_type.kind() != .anonymous_struct) return null;
-    for (base_type.anonymous_struct.fields) |field| {
-        if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-    }
-    return null;
+    const field = base_type.anonymous_struct.fieldByName(field_name) orelse return null;
+    return field.ty;
 }
 
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {

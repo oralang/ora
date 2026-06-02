@@ -200,6 +200,16 @@ pub const InstantiatedStruct = struct {
     template_item_id: ast.ItemId,
     mangled_name: []const u8,
     fields: []const InstantiatedStructField,
+    field_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn fieldIndex(self: InstantiatedStruct, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.field_lookup, name);
+    }
+
+    pub fn fieldByName(self: InstantiatedStruct, name: []const u8) ?InstantiatedStructField {
+        const index = self.fieldIndex(name) orelse return null;
+        return self.fields[index];
+    }
 };
 
 pub const InstantiatedEnum = struct {
@@ -243,6 +253,16 @@ pub const InstantiatedBitfield = struct {
     mangled_name: []const u8,
     base_type: ?Type,
     fields: []const InstantiatedBitfieldField,
+    field_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn fieldIndex(self: InstantiatedBitfield, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.field_lookup, name);
+    }
+
+    pub fn fieldByName(self: InstantiatedBitfield, name: []const u8) ?InstantiatedBitfieldField {
+        const index = self.fieldIndex(name) orelse return null;
+        return self.fields[index];
+    }
 };
 
 pub const Binding = union(enum) {
@@ -339,7 +359,28 @@ pub const AnonymousStructField = struct {
 
 pub const AnonymousStructType = struct {
     fields: []const AnonymousStructField,
+
+    pub fn fieldIndex(self: AnonymousStructType, name: []const u8) ?usize {
+        return anonymousStructFieldIndex(self.fields, name);
+    }
+
+    pub fn fieldByName(self: AnonymousStructType, name: []const u8) ?AnonymousStructField {
+        const index = self.fieldIndex(name) orelse return null;
+        return self.fields[index];
+    }
 };
+
+pub fn anonymousStructFieldIndex(fields: []const AnonymousStructField, name: []const u8) ?usize {
+    for (fields, 0..) |field, index| {
+        if (std.mem.eql(u8, field.name, name)) return index;
+    }
+    return null;
+}
+
+pub fn anonymousStructFieldByName(fields: []const AnonymousStructField, name: []const u8) ?AnonymousStructField {
+    const index = anonymousStructFieldIndex(fields, name) orelse return null;
+    return fields[index];
+}
 
 pub const ErrorUnionType = struct {
     payload_type: *const Type,
@@ -822,6 +863,8 @@ pub const ItemIndexResult = struct {
     trait_method_lookup: []lookup_index.MemberEntry,
     impl_method_lookup: []lookup_index.MemberEntry,
     impl_method_owner_lookup: []lookup_index.IndexEntry,
+    struct_field_lookup: []lookup_index.MemberEntry,
+    bitfield_field_lookup: []lookup_index.MemberEntry,
     enum_variant_lookup: []lookup_index.MemberEntry,
     contract_member_lookup: []lookup_index.MemberEntry,
 
@@ -866,6 +909,34 @@ pub const ItemIndexResult = struct {
     pub fn lookupImplContainingMethod(self: *const ItemIndexResult, method_item_id: ast.ItemId) ?ast.ItemId {
         const impl_index = lookup_index.findIndex(self.impl_method_owner_lookup, method_item_id.index()) orelse return null;
         return ast.ItemId.fromIndex(impl_index);
+    }
+
+    pub fn lookupStructFieldIndex(self: *const ItemIndexResult, struct_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.struct_field_lookup, struct_item_id.index(), name);
+    }
+
+    pub fn lookupStructField(self: *const ItemIndexResult, file: *const ast.AstFile, struct_item_id: ast.ItemId, name: []const u8) ?ast.StructField {
+        const field_index = self.lookupStructFieldIndex(struct_item_id, name) orelse return null;
+        const struct_item = switch (file.item(struct_item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return null,
+        };
+        if (field_index >= struct_item.fields.len) return null;
+        return struct_item.fields[field_index];
+    }
+
+    pub fn lookupBitfieldFieldIndex(self: *const ItemIndexResult, bitfield_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.bitfield_field_lookup, bitfield_item_id.index(), name);
+    }
+
+    pub fn lookupBitfieldField(self: *const ItemIndexResult, file: *const ast.AstFile, bitfield_item_id: ast.ItemId, name: []const u8) ?ast.BitfieldField {
+        const field_index = self.lookupBitfieldFieldIndex(bitfield_item_id, name) orelse return null;
+        const bitfield_item = switch (file.item(bitfield_item_id).*) {
+            .Bitfield => |bitfield_item| bitfield_item,
+            else => return null,
+        };
+        if (field_index >= bitfield_item.fields.len) return null;
+        return bitfield_item.fields[field_index];
     }
 
     pub fn countImplMethods(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) usize {
