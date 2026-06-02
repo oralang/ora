@@ -1261,6 +1261,10 @@ Current status:
   support checks, struct/anonymous-struct shape construction, literal
   lowering, or bitfield layout prefix accumulation; they are not local by-name
   field lookup policy.
+- Follow-up audit: `currentItemIndex() catch null` and similar `catch null`
+  paths in semantic/comptime/lowering code must be classified. Query failure is
+  not "fact absent"; error channels should propagate unless a constrained
+  callback API makes that impossible and the behavior is documented.
 
 Plan:
 

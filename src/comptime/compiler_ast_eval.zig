@@ -602,7 +602,7 @@ const ConstEvaluator = struct {
                 const fields = try self.allocator.alloc(CtAggregate.StructField, struct_literal.fields.len);
                 for (struct_literal.fields, 0..) |field, idx| {
                     _ = try self.evalExprImpl(field.value, use_cache);
-                    const field_index = self.structFieldIndex(type_id, field.name) orelse break :blk null;
+                    const field_index = (try self.structFieldIndex(type_id, field.name)) orelse break :blk null;
                     const value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null;
                     if (try self.structLiteralFieldType(expr_id, field.name)) |field_type| {
                         if (!try self.validateCtValueForType(value, field_type, field.range)) break :blk null;
@@ -698,7 +698,7 @@ const ConstEvaluator = struct {
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
+                        const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse break :blk_field null;
                         break :blk_field self.structFieldValue(struct_data, field_index);
                     },
                     .tuple_ref => |heap_id| blk_field: {
@@ -1169,9 +1169,9 @@ const ConstEvaluator = struct {
         return out;
     }
 
-    fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) ?usize {
+    fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) !?usize {
         const item_id = self.itemIdForNamedTypeId(type_id) orelse return null;
-        const item_index = (self.currentItemIndex() catch null) orelse return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
         return item_index.lookupStructFieldIndex(item_id, field_name);
     }
 
@@ -1186,7 +1186,7 @@ const ConstEvaluator = struct {
         }
 
         const item_id = self.lookupNamedItem(expr_type.struct_.name) orelse return null;
-        const item_index = (self.currentItemIndex() catch null) orelse return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
         const field = item_index.lookupStructField(self.file, item_id, field_name) orelse return null;
         return try self.modelTypeFromTypeExpr(field.type_expr);
     }
@@ -1336,7 +1336,7 @@ const ConstEvaluator = struct {
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
+                        const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse break :blk_field null;
                         break :blk_field self.structFieldValue(struct_data, field_index);
                     },
                     else => null,
@@ -1365,7 +1365,7 @@ const ConstEvaluator = struct {
         return switch (base) {
             .struct_ref => |heap_id| blk: {
                 const struct_data = self.env.heap.getStruct(heap_id);
-                const field_index = self.structFieldIndex(struct_data.type_id, field_name) orelse break :blk null;
+                const field_index = (try self.structFieldIndex(struct_data.type_id, field_name)) orelse break :blk null;
                 break :blk CtValue{ .struct_ref = try self.env.heap.setStructField(heap_id, @intCast(field_index), value) };
             },
             else => null,
@@ -4099,7 +4099,7 @@ const ConstEvaluator = struct {
                 };
                 const struct_data = self.env.heap.getStruct(heap_id);
                 for (destructure.fields) |field| {
-                    const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                    const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse return null;
                     const field_value = self.structFieldValue(struct_data, field_index) orelse return null;
                     try self.bindPatternCtValue(field.binding, field_value);
                 }
@@ -4233,7 +4233,7 @@ const ConstEvaluator = struct {
                     .struct_ref => |heap_id| self.env.heap.getStruct(heap_id),
                     else => return null,
                 };
-                const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse return null;
                 const current_field = self.structFieldValue(struct_data, field_index) orelse return null;
                 const next_value = switch (assign.op) {
                     .assign => rhs_ct,
