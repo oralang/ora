@@ -10,7 +10,7 @@ const expr_lowering = @import("expr_lowering.zig");
 const function_core = @import("function_core.zig");
 const hir_locals = @import("locals.zig");
 const module_lowering = @import("module_lowering.zig");
-const refinement_cleanup = @import("refinement_cleanup.zig");
+const refinement_guards = @import("../mlir/refinement_guards.zig");
 const support = @import("support.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
@@ -46,6 +46,7 @@ pub const ModuleQuery = struct {
     item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult,
     resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult,
     module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult,
+    module_verification_facts: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ModuleVerificationFactsResult,
     const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult,
     lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
     resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
@@ -53,6 +54,87 @@ pub const ModuleQuery = struct {
 
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
+
+const VerificationFactEntry = struct {
+    owner_index: usize,
+    fact_index: usize,
+};
+
+const VerificationTraitMethodFactEntry = struct {
+    trait_item_index: usize,
+    method_index: usize,
+    fact_index: usize,
+};
+
+const VerificationStatementFactEntry = struct {
+    item_index: usize,
+    stmt_index: usize,
+    fact_index: usize,
+};
+
+fn verificationFactEntryLessThan(_: void, lhs: VerificationFactEntry, rhs: VerificationFactEntry) bool {
+    if (lhs.owner_index != rhs.owner_index) return lhs.owner_index < rhs.owner_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn verificationTraitMethodFactEntryLessThan(_: void, lhs: VerificationTraitMethodFactEntry, rhs: VerificationTraitMethodFactEntry) bool {
+    if (lhs.trait_item_index != rhs.trait_item_index) return lhs.trait_item_index < rhs.trait_item_index;
+    if (lhs.method_index != rhs.method_index) return lhs.method_index < rhs.method_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn verificationStatementFactEntryLessThan(_: void, lhs: VerificationStatementFactEntry, rhs: VerificationStatementFactEntry) bool {
+    if (lhs.item_index != rhs.item_index) return lhs.item_index < rhs.item_index;
+    if (lhs.stmt_index != rhs.stmt_index) return lhs.stmt_index < rhs.stmt_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
+    var entries: std.ArrayList(VerificationFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.itemId() orelse continue;
+        try entries.append(allocator, .{
+            .owner_index = owner.index(),
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationFactEntry, entries.items, {}, verificationFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
+
+fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
+    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.traitMethod() orelse continue;
+        try entries.append(allocator, .{
+            .trait_item_index = owner.trait_item.index(),
+            .method_index = owner.method_index,
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationTraitMethodFactEntry, entries.items, {}, verificationTraitMethodFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
+
+fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
+    var entries: std.ArrayList(VerificationStatementFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.statementOwner() orelse continue;
+        try entries.append(allocator, .{
+            .item_index = owner.item.index(),
+            .stmt_index = owner.stmt.index(),
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationStatementFactEntry, entries.items, {}, verificationStatementFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
 
 pub const HirSymbolKind = enum {
     contract,
@@ -130,7 +212,7 @@ pub const LoweringResult = struct {
     }
 
     pub fn cleanupRefinementGuards(self: *LoweringResult, proven_guard_ids: *const std.StringHashMap(void)) void {
-        refinement_cleanup.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
+        refinement_guards.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
     }
 };
 
@@ -143,6 +225,7 @@ pub fn lowerModule(
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    verification_facts: *const sema.ModuleVerificationFactsResult,
     module_query: ?ModuleQuery,
 ) !LoweringResult {
     var result = LoweringResult{
@@ -165,8 +248,13 @@ pub fn lowerModule(
     result.module.raw_module = mlir.oraModuleCreateEmpty(support.locationFromRange(result.context, sources, file.file_id, root_range));
     if (mlir.oraModuleIsNull(result.module.raw_module)) return error.MlirModuleCreationFailed;
 
+    const arena = result.arena.allocator();
+    const verification_fact_lookup = try buildVerificationFactLookup(arena, verification_facts.facts);
+    const verification_trait_method_fact_lookup = try buildVerificationTraitMethodFactLookup(arena, verification_facts.facts);
+    const verification_statement_fact_lookup = try buildVerificationStatementFactLookup(arena, verification_facts.facts);
+
     var lowerer = Lowerer{
-        .allocator = result.arena.allocator(),
+        .allocator = arena,
         .context = result.context,
         .module_id = module_id,
         .sources = sources,
@@ -175,12 +263,16 @@ pub fn lowerModule(
         .resolution = resolution,
         .const_eval = const_eval,
         .typecheck = typecheck,
+        .verification_facts = verification_facts,
+        .verification_fact_lookup = verification_fact_lookup,
+        .verification_trait_method_fact_lookup = verification_trait_method_fact_lookup,
+        .verification_statement_fact_lookup = verification_statement_fact_lookup,
         .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
-        .contract_body_blocks = try result.arena.allocator().alloc(mlir.MlirBlock, file.items.len),
-        .monomorphized_function_names = std.StringHashMap(void).init(result.arena.allocator()),
+        .contract_body_blocks = try arena.alloc(mlir.MlirBlock, file.items.len),
+        .monomorphized_function_names = std.StringHashMap(void).init(arena),
     };
     @memset(lowerer.contract_body_blocks, std.mem.zeroes(mlir.MlirBlock));
 
@@ -236,6 +328,10 @@ const Lowerer = struct {
     resolution: *const sema.NameResolutionResult,
     const_eval: *const sema.ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
+    verification_facts: *const sema.ModuleVerificationFactsResult,
+    verification_fact_lookup: []const VerificationFactEntry,
+    verification_trait_method_fact_lookup: []const VerificationTraitMethodFactEntry,
+    verification_statement_fact_lookup: []const VerificationStatementFactEntry,
     module_query: ?ModuleQuery,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
@@ -323,6 +419,125 @@ const Lowerer = struct {
         const frame = self.synthetic_stack[self.synthetic_stack_len - 1];
         self.current_synthetic_index = frame.index;
         self.current_synthetic_count = frame.count;
+    }
+
+    pub fn itemVerificationFactEntries(self: *const Lowerer, item_id: ast.ItemId) []const VerificationFactEntry {
+        const owner_index = item_id.index();
+        var low: usize = 0;
+        var high = self.verification_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.verification_fact_lookup[mid].owner_index < owner_index) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_fact_lookup.len and self.verification_fact_lookup[low].owner_index == owner_index) {
+            low += 1;
+        }
+        return self.verification_fact_lookup[start..low];
+    }
+
+    pub fn verificationFact(self: *const Lowerer, entry: VerificationFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn traitMethodVerificationFactEntries(self: *const Lowerer, owner: sema.VerificationTraitMethodOwner) []const VerificationTraitMethodFactEntry {
+        const trait_item_index = owner.trait_item.index();
+        var low: usize = 0;
+        var high = self.verification_trait_method_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry = self.verification_trait_method_fact_lookup[mid];
+            if (entry.trait_item_index < trait_item_index or
+                (entry.trait_item_index == trait_item_index and entry.method_index < owner.method_index))
+            {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_trait_method_fact_lookup.len) {
+            const entry = self.verification_trait_method_fact_lookup[low];
+            if (entry.trait_item_index != trait_item_index or entry.method_index != owner.method_index) break;
+            low += 1;
+        }
+        return self.verification_trait_method_fact_lookup[start..low];
+    }
+
+    pub fn traitMethodVerificationFact(self: *const Lowerer, entry: VerificationTraitMethodFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn statementVerificationFactEntries(self: *const Lowerer, owner: sema.VerificationStatementOwner) []const VerificationStatementFactEntry {
+        const item_index = owner.item.index();
+        const stmt_index = owner.stmt.index();
+        var low: usize = 0;
+        var high = self.verification_statement_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry = self.verification_statement_fact_lookup[mid];
+            if (entry.item_index < item_index or
+                (entry.item_index == item_index and entry.stmt_index < stmt_index))
+            {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_statement_fact_lookup.len) {
+            const entry = self.verification_statement_fact_lookup[low];
+            if (entry.item_index != item_index or entry.stmt_index != stmt_index) break;
+            low += 1;
+        }
+        return self.verification_statement_fact_lookup[start..low];
+    }
+
+    pub fn statementVerificationFact(self: *const Lowerer, entry: VerificationStatementFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn traitMethodForVerificationOwner(self: *const Lowerer, owner: sema.VerificationTraitMethodOwner) ?ast.nodes.TraitMethod {
+        const trait_item = switch (self.file.item(owner.trait_item).*) {
+            .Trait => |trait_item| trait_item,
+            else => return null,
+        };
+        if (owner.method_index >= trait_item.methods.len) return null;
+        return trait_item.methods[owner.method_index];
+    }
+
+    pub fn makeVerificationFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
+        return buildVerificationFactLookup(self.allocator, facts);
+    }
+
+    pub fn makeVerificationTraitMethodFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
+        return buildVerificationTraitMethodFactLookup(self.allocator, facts);
+    }
+
+    pub fn makeVerificationStatementFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
+        return buildVerificationStatementFactLookup(self.allocator, facts);
+    }
+
+    pub fn itemHasVerificationFact(self: *const Lowerer, item_id: ast.ItemId, kind: sema.VerificationFactKind) bool {
+        for (self.itemVerificationFactEntries(item_id)) |entry| {
+            if (self.verificationFact(entry).kind != kind) continue;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn ghostDeclarationContextName(self: *const Lowerer, item_id: ast.ItemId) ?[]const u8 {
+        if (self.itemHasVerificationFact(item_id, .ghost_function)) return "ghost_function";
+        if (self.itemHasVerificationFact(item_id, .ghost_field)) return "ghost_variable";
+        if (self.itemHasVerificationFact(item_id, .ghost_constant)) return "ghost_constant";
+        return null;
     }
 
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
@@ -1146,7 +1361,6 @@ const FunctionLowerer = struct {
     in_try_block: bool = false,
     in_ghost_context: bool = false,
     extra_verification_clauses: []const ExtraVerificationClause = &.{},
-    trait_ghost_self_pattern: ?ast.PatternId = null,
     current_scf_carried_locals: ?[]const hir_locals.LocalId = null,
     loop_context: ?*const support.LoopContext = null,
     block_context: ?*const support.BlockContext = null,
@@ -1164,6 +1378,8 @@ const FunctionLowerer = struct {
     pub const cloneLocals = FunctionCore.cloneLocals;
     pub const lowerBody = FunctionCore.lowerBody;
     pub const lowerStmt = FunctionCore.lowerStmt;
+    pub const lowerInvariantFact = FunctionCore.lowerInvariantFact;
+    pub const lowerStatementInvariants = FunctionCore.lowerStatementInvariants;
     pub const ensureDeferredReturnSlots = FunctionCore.ensureDeferredReturnSlots;
     pub const appendDeferredReturnTerminator = FunctionCore.appendDeferredReturnTerminator;
     pub const appendDeferredReturnCheck = FunctionCore.appendDeferredReturnCheck;

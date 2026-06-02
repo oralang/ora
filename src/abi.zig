@@ -1166,7 +1166,8 @@ const CompilerAbiGenerator = struct {
         _ = stack;
         switch (ty) {
             .bool, .address, .string, .bytes, .fixed_bytes, .integer => {
-                const wire = try compiler_abi.canonicalAbiType(self.allocator, ty);
+                const layout_ctx = self.layoutContext(ctx);
+                const wire = try layout_ctx.canonicalAbiTypeForType(ty);
                 errdefer self.allocator.free(wire);
                 var node = AbiTypeNode{
                     .kind = .primitive,

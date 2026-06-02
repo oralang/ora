@@ -1471,57 +1471,65 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             field: ast.FieldExpr,
             trait_name: []const u8,
             method: sema.TraitMethodSignature,
-            ast_method: ?ast.nodes.TraitMethod = null,
+            trait_method_owner: ?sema.VerificationTraitMethodOwner = null,
         };
 
-        fn externTraitMethodAst(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?ast.nodes.TraitMethod {
+        fn externTraitMethodOwner(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?sema.VerificationTraitMethodOwner {
             const trait_item_id = self.parent.item_index.lookup(trait_name) orelse return null;
-            return self.parent.item_index.lookupTraitMethod(self.parent.file, trait_item_id, method_name);
+            const method_index = self.parent.item_index.lookupTraitMethodIndex(trait_item_id, method_name) orelse return null;
+            return .{
+                .trait_item = trait_item_id,
+                .method_index = method_index,
+            };
         }
 
         fn externSummaryLocals(
             self: *FunctionLowerer,
             base_locals: *const LocalEnv,
-            ast_method: ast.nodes.TraitMethod,
+            trait_method: ast.nodes.TraitMethod,
             args: []const mlir.MlirValue,
         ) anyerror!LocalEnv {
             var clause_locals = try self.cloneLocals(base_locals);
-            const bind_count = @min(ast_method.parameters.len, args.len);
+            const bind_count = @min(trait_method.parameters.len, args.len);
             for (0..bind_count) |index| {
-                try self.bindPatternValue(ast_method.parameters[index].pattern, args[index], &clause_locals);
+                try self.bindPatternValue(trait_method.parameters[index].pattern, args[index], &clause_locals);
             }
             return clause_locals;
         }
 
         fn emitExternSummaryRequires(
             self: *FunctionLowerer,
-            ast_method: ?ast.nodes.TraitMethod,
+            owner: ?sema.VerificationTraitMethodOwner,
             base_locals: *const LocalEnv,
             args: []const mlir.MlirValue,
         ) anyerror!void {
-            const method = ast_method orelse return;
-            for (method.clauses) |clause| {
-                if (clause.kind != .requires) continue;
+            const fact_owner = owner orelse return;
+            const method = self.parent.traitMethodForVerificationOwner(fact_owner) orelse return error.InvalidVerificationFact;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const fact = self.parent.traitMethodVerificationFact(entry);
+                if (fact.kind != .requires) continue;
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
                 var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
-                const condition = try self.lowerExpr(clause.expr, &clause_locals);
-                const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(clause.range), condition, strRef("extern trait summary requires"));
+                const condition = try self.lowerExpr(expr, &clause_locals);
+                const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(fact.range), condition, strRef("extern trait summary requires"));
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "extern_trait_summary").attribute);
                 appendOp(self.block, op);
             }
         }
 
-        fn externSummaryHasEnsures(ast_method: ?ast.nodes.TraitMethod) bool {
-            const method = ast_method orelse return false;
-            for (method.clauses) |clause| {
-                if (clause.kind == .ensures or clause.kind == .ensures_ok) return true;
+        fn externSummaryHasEnsures(self: *FunctionLowerer, owner: ?sema.VerificationTraitMethodOwner) bool {
+            const fact_owner = owner orelse return false;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const kind = self.parent.traitMethodVerificationFact(entry).kind;
+                if (kind == .ensures or kind == .ensures_ok) return true;
             }
             return false;
         }
 
-        fn externSummaryHasClauses(ast_method: ?ast.nodes.TraitMethod) bool {
-            const method = ast_method orelse return false;
-            return method.clauses.len > 0;
+        fn externSummaryHasClauses(self: *FunctionLowerer, owner: ?sema.VerificationTraitMethodOwner) bool {
+            const fact_owner = owner orelse return false;
+            return self.parent.traitMethodVerificationFactEntries(fact_owner).len > 0;
         }
 
         fn externReturndataStrictSupports(ty: sema.Type) bool {
@@ -1584,13 +1592,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerExternSummaryEnsuresCondition(
             self: *FunctionLowerer,
-            ast_method: ?ast.nodes.TraitMethod,
+            owner: ?sema.VerificationTraitMethodOwner,
             base_locals: *const LocalEnv,
             args: []const mlir.MlirValue,
             result: mlir.MlirValue,
             block: mlir.MlirBlock,
         ) anyerror!?mlir.MlirValue {
-            const method = ast_method orelse return null;
+            const fact_owner = owner orelse return null;
+            const method = self.parent.traitMethodForVerificationOwner(fact_owner) orelse return error.InvalidVerificationFact;
             const previous_block = self.block;
             const previous_result = self.current_return_value;
             self.block = block;
@@ -1601,12 +1610,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             var combined: ?mlir.MlirValue = null;
-            for (method.clauses) |clause| {
-                if (clause.kind != .ensures and clause.kind != .ensures_ok) continue;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const fact = self.parent.traitMethodVerificationFact(entry);
+                if (fact.kind != .ensures and fact.kind != .ensures_ok) continue;
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
                 var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
-                const condition = try self.lowerExpr(clause.expr, &clause_locals);
+                const condition = try self.lowerExpr(expr, &clause_locals);
                 combined = if (combined) |acc| blk: {
-                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(clause.range), acc, condition);
+                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(fact.range), acc, condition);
                     if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(block, and_op);
                 } else condition;
@@ -1637,7 +1648,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (call.args) |arg| {
                 try encode_args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
             }
-            try @This().emitExternSummaryRequires(self, resolved.ast_method, locals, encode_args.items);
+            try @This().emitExternSummaryRequires(self, resolved.trait_method_owner, locals, encode_args.items);
 
             const layout_context = @This().layoutContext(self);
             const encode_op = try abi_runtime_encoder.createAbiEncodeWithSelectorOp(
@@ -1669,14 +1680,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 defaultIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(external_call_op)) return error.MlirOperationCreationFailed;
-            if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(resolved.ast_method)) {
+            if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(self, resolved.trait_method_owner)) {
                 mlir.oraOperationSetAttributeByName(external_call_op, strRef("ora.trusted_extern_frame"), namedStringAttr(self.parent.context, "ora.trusted_extern_frame", "caller_storage").attribute);
             }
             appendOp(self.block, external_call_op);
             const success = mlir.oraOperationGetResult(external_call_op, 0);
             const returndata = mlir.oraOperationGetResult(external_call_op, 1);
 
-            const has_extern_summary_ensures = @This().externSummaryHasEnsures(resolved.ast_method);
+            const has_extern_summary_ensures = @This().externSummaryHasEnsures(self, resolved.trait_method_owner);
             const if_result_types = if (has_extern_summary_ensures)
                 [_]mlir.MlirType{ result_type, boolType(self.parent.context) }
             else
@@ -1712,7 +1723,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
                 appendOp(then_block, decode_op);
                 const decoded = mlir.oraOperationGetResult(decode_op, 0);
-                const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
+                const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.trait_method_owner, locals, encode_args.items, decoded, then_block);
                 const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
                 if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
                 if (external_result_requires_wide) {
@@ -1767,7 +1778,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(unwrap_op)) return error.MlirOperationCreationFailed;
                     appendOp(summary_ok_block, unwrap_op);
                     const decoded_payload = mlir.oraOperationGetResult(unwrap_op, 0);
-                    const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded_payload, summary_ok_block);
+                    const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.trait_method_owner, locals, encode_args.items, decoded_payload, summary_ok_block);
                     const condition = summary_condition orelse appendValueOp(summary_ok_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                     try support.appendScfYieldValues(self.parent.context, summary_ok_block, loc, &[_]mlir.MlirValue{ decoded_result, condition });
 
@@ -2023,7 +2034,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .field = field,
                 .trait_name = base_type.external_proxy.trait_name,
                 .method = method,
-                .ast_method = @This().externTraitMethodAst(self, base_type.external_proxy.trait_name, method.name),
+                .trait_method_owner = @This().externTraitMethodOwner(self, base_type.external_proxy.trait_name, method.name),
             };
         }
 

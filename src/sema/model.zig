@@ -683,10 +683,108 @@ pub const ConstValue = union(enum) {
     tuple: []const ConstValue,
 };
 
+pub const VerificationFactKind = enum {
+    requires,
+    guard,
+    ensures,
+    ensures_ok,
+    ensures_err,
+    modifies,
+    contract_invariant,
+    loop_invariant,
+    assert,
+    assume,
+    havoc,
+    ghost_function,
+    ghost_field,
+    ghost_constant,
+    ghost_block,
+    ghost_axiom,
+    old,
+    quantified,
+
+    pub fn fromSpecClause(kind: ast.SpecClauseKind) ?VerificationFactKind {
+        return switch (kind) {
+            .requires => .requires,
+            .guard => .guard,
+            .ensures => .ensures,
+            .ensures_ok => .ensures_ok,
+            .ensures_err => .ensures_err,
+            .modifies => .modifies,
+            .invariant => null,
+        };
+    }
+
+    pub fn specClauseKind(self: VerificationFactKind) ?ast.SpecClauseKind {
+        return switch (self) {
+            .requires => .requires,
+            .guard => .guard,
+            .ensures => .ensures,
+            .ensures_ok => .ensures_ok,
+            .ensures_err => .ensures_err,
+            .modifies => .modifies,
+            .contract_invariant => .invariant,
+            else => null,
+        };
+    }
+};
+
+pub const VerificationContext = enum {
+    source,
+    contract,
+    loop,
+    ghost_block,
+    trait_ghost_block,
+    ghost_declaration,
+    trait_method_contract,
+};
+
+pub const VerificationTraitMethodOwner = struct {
+    trait_item: ast.ItemId,
+    method_index: usize,
+};
+
+pub const VerificationStatementOwner = struct {
+    item: ast.ItemId,
+    stmt: ast.StmtId,
+};
+
+pub const VerificationFactOwner = union(enum) {
+    none,
+    item: ast.ItemId,
+    trait_method: VerificationTraitMethodOwner,
+    statement: VerificationStatementOwner,
+
+    pub fn itemId(self: VerificationFactOwner) ?ast.ItemId {
+        return switch (self) {
+            .item => |item_id| item_id,
+            else => null,
+        };
+    }
+
+    pub fn traitMethod(self: VerificationFactOwner) ?VerificationTraitMethodOwner {
+        return switch (self) {
+            .trait_method => |owner| owner,
+            else => null,
+        };
+    }
+
+    pub fn statementOwner(self: VerificationFactOwner) ?VerificationStatementOwner {
+        return switch (self) {
+            .statement => |owner| owner,
+            else => null,
+        };
+    }
+};
+
 pub const VerificationFact = struct {
-    kind: ast.SpecClauseKind,
-    expr: ast.ExprId,
+    kind: VerificationFactKind,
+    owner: VerificationFactOwner = .none,
+    expr: ?ast.ExprId = null,
+    label: ?[]const u8 = null,
+    target_name: ?[]const u8 = null,
     range: source.TextRange,
+    context: VerificationContext = .source,
 };
 
 pub const EffectSlot = struct {
@@ -841,6 +939,8 @@ pub const TypeCheckKey = union(enum) {
 pub const VerificationFactsKey = union(enum) {
     item: ast.ItemId,
     body: ast.BodyId,
+    trait_method: VerificationTraitMethodOwner,
+    statement: VerificationStatementOwner,
 };
 
 pub const ModuleGraphResult = struct {
@@ -892,13 +992,17 @@ pub const ItemIndexResult = struct {
     }
 
     pub fn lookupTraitMethod(self: *const ItemIndexResult, file: *const ast.AstFile, trait_item_id: ast.ItemId, name: []const u8) ?ast.nodes.TraitMethod {
-        const method_index = lookup_index.findMember(self.trait_method_lookup, trait_item_id.index(), name) orelse return null;
+        const method_index = self.lookupTraitMethodIndex(trait_item_id, name) orelse return null;
         const trait_item = switch (file.item(trait_item_id).*) {
             .Trait => |trait_item| trait_item,
             else => return null,
         };
         if (method_index >= trait_item.methods.len) return null;
         return trait_item.methods[method_index];
+    }
+
+    pub fn lookupTraitMethodIndex(self: *const ItemIndexResult, trait_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.trait_method_lookup, trait_item_id.index(), name);
     }
 
     pub fn lookupImplMethod(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) ?ast.ItemId {
@@ -1061,6 +1165,8 @@ pub const TypeCheckResult = struct {
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
+    pattern_initializers: []?ast.ExprId,
+    pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []Effect,
@@ -1084,6 +1190,14 @@ pub const TypeCheckResult = struct {
 
     pub fn exprType(self: *const TypeCheckResult, id: ast.ExprId) Type {
         return self.expr_types[id.index()];
+    }
+
+    pub fn patternInitializer(self: *const TypeCheckResult, id: ast.PatternId) ?ast.ExprId {
+        return self.pattern_initializers[id.index()];
+    }
+
+    pub fn patternBindingKind(self: *const TypeCheckResult, id: ast.PatternId) ?ast.BindingKind {
+        return self.pattern_binding_kinds[id.index()];
     }
 
     pub fn exprCallResolution(self: *const TypeCheckResult, id: ast.ExprId) ?ResolvedCall {

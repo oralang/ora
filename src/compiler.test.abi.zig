@@ -71,15 +71,15 @@ const ExpectedU256Return = struct {
 
 var noop_decode_resolver_context: u8 = 0;
 
-fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
+fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) anyerror!?u32 {
     return null;
 }
 
-fn noopDecodeStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+fn noopDecodeStructFields(_: *anyopaque, _: []const u8) anyerror!?[]const compiler.sema.AnonymousStructField {
     return null;
 }
 
-fn noopDecodeEnumVariantCount(_: *anyopaque, _: []const u8) ?usize {
+fn noopDecodeEnumVariantCount(_: *anyopaque, _: []const u8) anyerror!?usize {
     return null;
 }
 

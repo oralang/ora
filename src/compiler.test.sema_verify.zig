@@ -385,7 +385,28 @@ test "compiler lowers checked modifies declarations into HIR metadata" {
         \\}
     ;
 
-    const hir_text = try renderHirTextForSource(source_text);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract_id = ast_file.root_items[0];
+    const contract = ast_file.item(contract_id).Contract;
+    var function_id: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        if (ast_file.item(member_id).* == .Function) {
+            function_id = member_id;
+            break;
+        }
+    }
+    try testing.expect(function_id != null);
+
+    const function_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = function_id.? });
+    try testing.expectEqual(@as(usize, 1), function_facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.modifies, function_facts.facts[0].kind);
+    try testing.expectEqual(function_id.?, function_facts.facts[0].owner.itemId().?);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "ora.modifies_slots = [\"config.owner\", \"balances[param#0]\", \"allowances[param#0][param#1]\"]"));
@@ -499,14 +520,14 @@ test "compiler verification facts include guard clauses" {
     const body_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .body = ast_file.item(function_id).Function.body });
 
     try testing.expectEqual(@as(usize, 3), function_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, function_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, function_facts.facts[1].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, function_facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, function_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.guard, function_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, function_facts.facts[2].kind);
 
     try testing.expectEqual(@as(usize, 3), body_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, body_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, body_facts.facts[1].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, body_facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, body_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.guard, body_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, body_facts.facts[2].kind);
 }
 
 test "compiler lowers guard clauses through runtime assert and assume" {
@@ -616,15 +637,64 @@ test "compiler verification facts respect item and body keys" {
     const body_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .body = function.body });
 
     try testing.expectEqual(@as(usize, 1), contract_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.invariant, contract_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.contract_invariant, contract_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.contract, contract_facts.facts[0].context);
 
     try testing.expectEqual(@as(usize, 2), function_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, function_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, function_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, function_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, function_facts.facts[1].kind);
 
     try testing.expectEqual(@as(usize, 2), body_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, body_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, body_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, body_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, body_facts.facts[1].kind);
+}
+
+test "compiler verification facts include loop invariants and havoc targets" {
+    const source_text =
+        \\pub fn run(limit: u256) {
+        \\    let total = 0;
+        \\    while (total < limit)
+        \\        invariant total <= limit;
+        \\    {
+        \\        havoc total;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function_id = ast_file.root_items[0];
+    const function = ast_file.item(function_id).Function;
+    const body = ast_file.body(function.body);
+    const while_stmt_id = body.statements[1];
+    const while_stmt = ast_file.statement(while_stmt_id).While;
+    const havoc_stmt_id = ast_file.body(while_stmt.body).statements[0];
+
+    const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = function_id });
+    try testing.expectEqual(@as(usize, 2), facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.loop_invariant, facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.loop, facts.facts[0].context);
+    try testing.expect(facts.facts[0].expr != null);
+    try testing.expect(facts.facts[0].target_name == null);
+    const loop_owner = facts.facts[0].owner.statementOwner().?;
+    try testing.expectEqual(function_id, loop_owner.item);
+    try testing.expectEqual(while_stmt_id, loop_owner.stmt);
+
+    try testing.expectEqual(compiler.sema.VerificationFactKind.havoc, facts.facts[1].kind);
+    try testing.expect(facts.facts[1].expr == null);
+    try testing.expectEqualStrings("total", facts.facts[1].target_name.?);
+    const havoc_owner = facts.facts[1].owner.statementOwner().?;
+    try testing.expectEqual(function_id, havoc_owner.item);
+    try testing.expectEqual(havoc_stmt_id, havoc_owner.stmt);
+
+    const statement_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{
+        .statement = .{ .item = function_id, .stmt = while_stmt_id },
+    });
+    try testing.expectEqual(@as(usize, 1), statement_facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.loop_invariant, statement_facts.facts[0].kind);
 }
 
 test "compiler inserts parameter refinement guards in HIR" {
@@ -911,6 +981,17 @@ test "compiler lowers ghost items into ghost AST nodes" {
     const ghost_body = ast_file.body(ghost_block.body);
     try testing.expectEqual(@as(usize, 1), ghost_body.statements.len);
     try testing.expect(ast_file.statement(ghost_body.statements[0]).* == .VariableDecl);
+
+    const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(@as(usize, 4), facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_constant, facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_field, facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_function, facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_block, facts.facts[3].kind);
+    try testing.expectEqual(contract.members[0], facts.facts[0].owner.itemId().?);
+    try testing.expectEqual(contract.members[1], facts.facts[1].owner.itemId().?);
+    try testing.expectEqual(contract.members[2], facts.facts[2].owner.itemId().?);
+    try testing.expectEqual(contract.members[3], facts.facts[3].owner.itemId().?);
 }
 
 test "compiler lowers ghost declarations into verification HIR" {

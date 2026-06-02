@@ -3940,7 +3940,7 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.emit_mlir_sir) {
-        const refinement_guards = @import("mlir/refinement_guards.zig");
+        const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
             refinement_guards.cleanupRefinementGuards(ctx, final_module, &vr.proven_guard_ids);
         } else {

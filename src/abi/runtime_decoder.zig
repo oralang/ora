@@ -4,7 +4,6 @@ const mlir_helpers = @import("mlir_helpers");
 const sema = @import("../sema/mod.zig");
 const abi_layout = @import("layout.zig");
 const abi_layout_context = @import("layout_context.zig");
-const hir_abi = @import("../hir/abi.zig");
 
 const strRef = mlir_helpers.strRef;
 
@@ -221,7 +220,7 @@ fn attrsForReturnType(
     layout_context: abi_layout_context.LayoutContext,
     return_type: sema.Type,
 ) !struct { return_types: mlir.MlirAttribute, layout: mlir.MlirAttribute } {
-    const return_abi_type = try decodeReturnAbiType(allocator, layout_context, return_type);
+    const return_abi_type = try decodeReturnAbiType(layout_context, return_type);
     defer allocator.free(return_abi_type);
     var return_type_attrs = [_]mlir.MlirAttribute{
         mlir.oraStringAttrCreate(mlir_context, strRef(return_abi_type)),
@@ -280,27 +279,11 @@ fn layoutTypeForReturn(return_type: sema.Type, single_storage: *[1]sema.Type) se
 }
 
 fn decodeReturnAbiType(
-    allocator: std.mem.Allocator,
     layout_context: abi_layout_context.LayoutContext,
     return_type: sema.Type,
 ) ![]const u8 {
     const unwrapped = unwrapRefinement(return_type);
-    if (try immediateDecodeReturnAbiType(allocator, unwrapped)) |abi_type| {
-        return abi_type;
-    }
-    return layout_context.canonicalAbiTypeForType(return_type) catch hir_abi.externReturnAbiType(allocator, return_type);
-}
-
-fn immediateDecodeReturnAbiType(allocator: std.mem.Allocator, unwrapped: sema.Type) !?[]const u8 {
-    return switch (unwrapped) {
-        .void => try allocator.dupe(u8, "void"),
-        .tuple => try allocator.dupe(u8, "tuple"),
-        .anonymous_struct => try allocator.dupe(u8, "struct"),
-        // Named structs and contract references decode through tuple-shaped
-        // return metadata; the layout attribute carries the concrete ABI shape.
-        .struct_, .contract => try allocator.dupe(u8, "tuple"),
-        else => null,
-    };
+    return layout_context.publicReturnAbiTypeForType(unwrapped);
 }
 
 test "runtime decoder recursively unwraps refined tuple returns" {
@@ -317,13 +300,6 @@ test "runtime decoder recursively unwraps refined tuple returns" {
     } };
 
     try std.testing.expectEqual(sema.TypeKind.tuple, unwrapRefinement(outer_refined).kind());
-
-    const return_abi_type = (try immediateDecodeReturnAbiType(
-        std.testing.allocator,
-        unwrapRefinement(outer_refined),
-    )) orelse return error.TestUnexpectedResult;
-    defer std.testing.allocator.free(return_abi_type);
-    try std.testing.expectEqualStrings("tuple", return_abi_type);
 }
 
 test "runtime decoder doubly-refined tuple serializes flat layout (no double wrap)" {

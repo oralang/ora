@@ -1,52 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
 const ast = @import("../ast/mod.zig");
-const sema = @import("../sema/mod.zig");
-const abi_layout = @import("../abi/layout.zig");
-
-pub fn canonicalAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
-    return abi_layout.canonicalAbiTypeFromType(allocator, ty);
-}
-
-pub fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-    return abi_layout.parseFixedBytesSpelling(name);
-}
-
-pub fn fixedBytesAbiType(allocator: std.mem.Allocator, fixed_bytes: sema.FixedBytesType) ![]const u8 {
-    if (fixed_bytes.spelling) |spelling| return allocator.dupe(u8, spelling);
-    return std.fmt.allocPrint(allocator, "bytes{d}", .{fixed_bytes.len});
-}
-
-pub fn externReturnAbiType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
-    return switch (ty) {
-        .tuple => allocator.dupe(u8, "tuple"),
-        .anonymous_struct => allocator.dupe(u8, "struct"),
-        .bitfield => allocator.dupe(u8, "uint256"),
-        .struct_, .contract => allocator.dupe(u8, "tuple"),
-        else => canonicalAbiType(allocator, ty),
-    };
-}
-
-pub fn staticAbiWordCount(ty: sema.Type) ?usize {
-    return abi_layout.staticWordCountForType(ty);
-}
-
-pub fn signatureForMethod(allocator: std.mem.Allocator, name: []const u8, has_self: bool, param_types: []const sema.Type) ![]const u8 {
-    var signature_parts: std.ArrayList([]const u8) = .{};
-    defer {
-        for (signature_parts.items) |part| allocator.free(part);
-        signature_parts.deinit(allocator);
-    }
-
-    _ = has_self;
-    for (param_types) |param_type| {
-        try signature_parts.append(allocator, try canonicalAbiType(allocator, param_type));
-    }
-
-    const joined = try std.mem.join(allocator, ",", signature_parts.items);
-    defer allocator.free(joined);
-    return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
-}
 
 pub fn metadataStringLiteral(file: *const ast.AstFile, metadata: []const ast.ItemId, name: []const u8) ?[]const u8 {
     for (metadata) |metadata_id| {

@@ -9,7 +9,7 @@ const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
 const type_builtin = @import("ora_types").builtin;
-const abi_public_policy = @import("../abi/public_policy.zig");
+const abi_policy = @import("../abi/policy.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -357,6 +357,8 @@ pub fn typeCheck(
         .item_effects = &.{},
         .item_modifies = &.{},
         .pattern_types = &.{},
+        .pattern_initializers = &.{},
+        .pattern_binding_kinds = &.{},
         .expr_types = &.{},
         .call_resolutions = &.{},
         .expr_effects = &.{},
@@ -381,6 +383,8 @@ pub fn typeCheck(
     const item_effects = try arena.alloc(Effect, file.items.len);
     const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
+    const pattern_initializers = try arena.alloc(?ast.ExprId, file.patterns.len);
+    const pattern_binding_kinds = try arena.alloc(?ast.BindingKind, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     const call_resolutions = try arena.alloc(?ResolvedCall, file.expressions.len);
     const expr_effects = try arena.alloc(Effect, file.expressions.len);
@@ -393,6 +397,8 @@ pub fn typeCheck(
     @memset(item_effects, .pure);
     @memset(item_modifies, null);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
+    @memset(pattern_initializers, null);
+    @memset(pattern_binding_kinds, null);
     @memset(expr_types, .{ .unknown = {} });
     @memset(call_resolutions, null);
     @memset(expr_effects, .pure);
@@ -424,6 +430,10 @@ pub fn typeCheck(
     for (file.statements) |statement| {
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
+            if (decl.value) |expr_id| {
+                pattern_initializers[decl.pattern.index()] = expr_id;
+            }
+            pattern_binding_kinds[decl.pattern.index()] = decl.binding_kind;
             if (decl.type_expr) |type_expr| {
                 _ = type_expr;
                 pattern_types[decl.pattern.index()] = LocatedType.withRegion(.{ .unknown = {} }, declarationRegion(decl.storage_class));
@@ -445,6 +455,8 @@ pub fn typeCheck(
         .item_effects = item_effects,
         .item_modifies = item_modifies,
         .pattern_types = pattern_types,
+        .pattern_initializers = pattern_initializers,
+        .pattern_binding_kinds = pattern_binding_kinds,
         .expr_types = expr_types,
         .call_resolutions = call_resolutions,
         .expr_effects = expr_effects,
@@ -542,6 +554,8 @@ pub fn typeCheck(
     result.item_effects = item_effects;
     result.item_modifies = item_modifies;
     result.pattern_types = pattern_types;
+    result.pattern_initializers = pattern_initializers;
+    result.pattern_binding_kinds = pattern_binding_kinds;
     result.expr_types = expr_types;
     result.call_resolutions = call_resolutions;
     result.expr_effects = expr_effects;
@@ -573,6 +587,8 @@ const TypeChecker = struct {
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
+    pattern_initializers: []?ast.ExprId,
+    pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []Effect,
@@ -693,6 +709,8 @@ const TypeChecker = struct {
         imported_checker.item_effects = target_typecheck.item_effects;
         imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
+        imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+        imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
         imported_checker.expr_effects = target_typecheck.expr_effects;
@@ -740,6 +758,8 @@ const TypeChecker = struct {
             imported_checker.item_effects = target_typecheck.item_effects;
             imported_checker.item_modifies = target_typecheck.item_modifies;
             imported_checker.pattern_types = target_typecheck.pattern_types;
+            imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+            imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
             imported_checker.expr_types = target_typecheck.expr_types;
             imported_checker.call_resolutions = target_typecheck.call_resolutions;
             imported_checker.expr_effects = target_typecheck.expr_effects;
@@ -1376,7 +1396,7 @@ const TypeChecker = struct {
         if (self.current_contract == null) return;
         if (function.visibility != .public) return;
 
-        const public_abi = self.publicAbiPolicy();
+        const public_abi = self.abiPolicy();
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             if (self.parameterIsBareSelf(parameter)) continue;
@@ -1415,9 +1435,22 @@ const TypeChecker = struct {
         pub fn enumHasPayload(self: @This(), name: []const u8) bool {
             return self.checker.enumHasPayload(name);
         }
+
+        pub fn instantiatedStructFields(self: @This(), name: []const u8) ?[]const InstantiatedStructField {
+            const instantiated = self.checker.instantiatedStructByName(name) orelse return null;
+            return instantiated.fields;
+        }
+
+        pub fn hasInstantiatedEnum(self: @This(), name: []const u8) bool {
+            return self.checker.instantiatedEnumByName(name) != null;
+        }
+
+        pub fn hasInstantiatedBitfield(self: @This(), name: []const u8) bool {
+            return self.checker.instantiatedBitfieldByName(name) != null;
+        }
     };
 
-    fn publicAbiPolicy(self: *const TypeChecker) abi_public_policy.Policy(PublicAbiPolicyProvider) {
+    fn abiPolicy(self: *const TypeChecker) abi_policy.Policy(PublicAbiPolicyProvider) {
         return .{
             .allocator = self.arena,
             .file = self.file,
@@ -1441,12 +1474,6 @@ const TypeChecker = struct {
                 break;
             }
         }
-    }
-
-    fn parseIntegerSpelling(name: []const u8) ?void {
-        if (name.len < 2) return null;
-        if (name[0] != 'u' and name[0] != 'i') return null;
-        _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
     }
 
     fn checkImplConformance(self: *TypeChecker, impl_item_id: ast.ItemId, impl_item: anytype) anyerror!void {
@@ -3292,7 +3319,8 @@ const TypeChecker = struct {
         }
 
         const arg_type = self.expr_types[builtin.args[0].index()];
-        if (self.abiEncodeIsUnsupported(arg_type)) {
+        const policy = self.abiPolicy();
+        if (!policy.supportsAbiEncode(arg_type)) {
             try self.emitRangeError(builtin.range, "@abiEncode: type '{s}' has no ABI representation", .{
                 diagnosticTypeDisplayName(self, arg_type),
             });
@@ -3322,15 +3350,16 @@ const TypeChecker = struct {
             break :blk self.expr_types[builtin.args[0].index()];
         };
 
-        if (self.abiDecodeIsUnsupported(target_type)) {
+        const policy = self.abiPolicy();
+        if (!policy.supportsAbiDecode(target_type)) {
             try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
                 builtin.name, diagnosticTypeDisplayName(self, target_type),
             });
-        } else if (std.mem.eql(u8, builtin.name, "abiDecodePermissive") and self.comptime_depth == 0 and !self.runtimeAbiDecodePermissiveSupportsType(target_type)) {
+        } else if (std.mem.eql(u8, builtin.name, "abiDecodePermissive") and self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .permissive)) {
             try self.emitRangeError(builtin.range, "runtime @abiDecodePermissive does not yet support target type '{s}'", .{
                 diagnosticTypeDisplayName(self, target_type),
             });
-        } else if (self.comptime_depth == 0 and !self.runtimeAbiDecodeSupportsType(target_type)) {
+        } else if (self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .strict)) {
             try self.emitRangeError(builtin.range, "runtime @abiDecode does not yet support target type '{s}'", .{
                 diagnosticTypeDisplayName(self, target_type),
             });
@@ -3344,386 +3373,6 @@ const TypeChecker = struct {
                 builtin.name, diagnosticTypeDisplayName(self, bytes_type),
             }),
         }
-    }
-
-    fn abiEncodeIsUnsupported(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .bitfield, .void => false,
-            .enum_ => |named| self.enumHasPayload(named.name),
-            .string, .bytes => false,
-            .slice => |slice| self.abiEncodeIsUnsupported(slice.element_type.*),
-            .array => |array| self.abiEncodeIsUnsupported(array.element_type.*),
-            .tuple => |elements| blk: {
-                for (elements) |element| {
-                    if (self.abiEncodeIsUnsupported(element)) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                for (struct_type.fields) |field| {
-                    if (self.abiEncodeIsUnsupported(field.ty)) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            },
-            .struct_ => |named| self.abiEncodeStructIsUnsupported(named.name),
-            .named => |named| self.abiEncodeNamedIsUnsupported(named.name),
-            .refinement => |refinement| self.abiEncodeIsUnsupported(refinement.base_type.*),
-            else => true,
-        };
-    }
-
-    fn abiDecodeIsUnsupported(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .refinement => |refinement| refinements.isCompileTimeOnly(refinement) or self.abiDecodeIsUnsupported(refinement.base_type.*),
-            .slice => |slice| self.abiDecodeIsUnsupported(slice.element_type.*),
-            .array => |array| self.abiDecodeIsUnsupported(array.element_type.*),
-            .tuple => |elements| blk: {
-                for (elements) |element| {
-                    if (self.abiDecodeIsUnsupported(element)) break :blk true;
-                }
-                break :blk false;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                for (struct_type.fields) |field| {
-                    if (self.abiDecodeIsUnsupported(field.ty)) break :blk true;
-                }
-                break :blk false;
-            },
-            .struct_ => |named| self.abiDecodeStructIsUnsupported(named.name),
-            .named => |named| self.abiDecodeNamedIsUnsupported(named.name),
-            else => self.abiEncodeIsUnsupported(ty),
-        };
-    }
-
-    fn runtimeAbiDecodeSupportsType(self: *TypeChecker, ty: Type) bool {
-        return self.runtimeAbiDecodeSupportsTypeInContext(ty, true);
-    }
-
-    fn runtimeAbiDecodePermissiveSupportsType(self: *TypeChecker, ty: Type) bool {
-        return self.runtimeAbiDecodePermissiveSupportsTypeInContext(ty, true);
-    }
-
-    fn runtimeAbiDecodePermissiveSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .enum_, .bitfield, .void => true,
-            .integer => |integer| (integer.bits orelse 256) > 0,
-            .string, .bytes => allow_top_level_dynamic,
-            .slice => |slice| allow_top_level_dynamic and self.isRuntimeAbiDecodeU256(slice.element_type.*),
-            .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
-                refinements.hasNativeMlirTypeName(refinement.name) and
-                self.runtimeAbiDecodePermissiveSupportsTypeInContext(refinement.base_type.*, allow_top_level_dynamic),
-            .tuple => |elements| blk: {
-                if (elements.len <= 1) break :blk false;
-                if (allow_top_level_dynamic and elements.len == 2 and
-                    self.isRuntimeAbiDecodeU256(elements[0]) and
-                    (self.isRuntimeAbiDecodeDynamicBytesLike(elements[1]) or self.isRuntimeAbiDecodeU256Slice(elements[1])))
-                {
-                    break :blk true;
-                }
-                for (elements) |element| {
-                    if (element == .void or !self.runtimeAbiDecodePermissiveSupportsTypeInContext(element, false)) break :blk false;
-                }
-                break :blk true;
-            },
-            .named => |named| self.runtimeAbiDecodePermissiveSupportsNamed(named.name, allow_top_level_dynamic),
-            else => false,
-        };
-    }
-
-    fn runtimeAbiDecodePermissiveSupportsNamed(self: *TypeChecker, name: []const u8, allow_top_level_dynamic: bool) bool {
-        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
-        if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
-        if (parseIntegerSpelling(name) != null) return true;
-        if (type_builtin.parseFixedBytesName(name) != null) return true;
-        if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
-        if (self.instantiatedBitfieldByName(name) != null) return true;
-
-        const item_id = self.item_index.lookup(name) orelse return false;
-        return switch (self.file.item(item_id).*) {
-            .Enum => !self.enumHasPayload(name),
-            .Bitfield => true,
-            .TypeAlias => |type_alias| self.runtimeAbiDecodePermissiveSupportsTypeInContext(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false, allow_top_level_dynamic),
-            else => false,
-        };
-    }
-
-    fn runtimeAbiDecodeSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
-        // This is narrower than ABI representability. It tracks the runtime
-        // memory/result lowering surface so source code fails in sema instead
-        // of reaching OraToSIR with an accepted-but-unlowerable decode op.
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .enum_, .bitfield, .void => true,
-            .integer => |integer| (integer.bits orelse 256) > 0,
-            .string, .bytes => allow_top_level_dynamic,
-            .slice => |slice| allow_top_level_dynamic and
-                (self.isRuntimeAbiDecodeU256(slice.element_type.*) or
-                    self.isRuntimeAbiDecodeAddress(slice.element_type.*) or
-                    self.isRuntimeAbiDecodeBool(slice.element_type.*) or
-                    self.isRuntimeAbiDecodeFixedBytes(slice.element_type.*)),
-            .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
-                refinements.hasNativeMlirTypeName(refinement.name) and
-                self.runtimeAbiDecodeSupportsTypeInContext(refinement.base_type.*, allow_top_level_dynamic),
-            .tuple => |elements| blk: {
-                // Source-level one-element tuple types are rejected during AST
-                // lowering. Keep this defensive guard for synthetic Type values
-                // and for empty tuples, which runtime memory/result decode does
-                // not lower yet.
-                if (elements.len <= 1) break :blk false;
-                if (allow_top_level_dynamic and self.runtimeAbiDecodeSupportsTopLevelMixedDynamicTuple(elements)) break :blk true;
-                for (elements) |element| {
-                    if (element == .void or !self.runtimeAbiDecodeSupportsTypeInContext(element, false)) break :blk false;
-                }
-                break :blk true;
-            },
-            .named => |named| self.runtimeAbiDecodeSupportsNamed(named.name, allow_top_level_dynamic),
-            else => false,
-        };
-    }
-
-    fn runtimeAbiDecodeSupportsNamed(self: *TypeChecker, name: []const u8, allow_top_level_dynamic: bool) bool {
-        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
-        if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
-        if (parseIntegerSpelling(name) != null) return true;
-        if (type_builtin.parseFixedBytesName(name) != null) return true;
-        if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
-        if (self.instantiatedBitfieldByName(name) != null) return true;
-
-        const item_id = self.item_index.lookup(name) orelse return false;
-        return switch (self.file.item(item_id).*) {
-            .Enum => !self.enumHasPayload(name),
-            .Bitfield => true,
-            .TypeAlias => |type_alias| self.runtimeAbiDecodeSupportsTypeInContext(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false, allow_top_level_dynamic),
-            else => false,
-        };
-    }
-
-    fn runtimeAbiDecodeSupportsTopLevelMixedDynamicTuple(self: *TypeChecker, elements: []const Type) bool {
-        return elements.len == 2 and
-            self.isRuntimeAbiDecodeU256(elements[0]) and
-            (self.isRuntimeAbiDecodeDynamicBytesLike(elements[1]) or
-                self.isRuntimeAbiDecodeU256Slice(elements[1]) or
-                self.isRuntimeAbiDecodeAddressSlice(elements[1]) or
-                self.isRuntimeAbiDecodeBoolSlice(elements[1]) or
-                self.isRuntimeAbiDecodeFixedBytesSlice(elements[1]));
-    }
-
-    fn isRuntimeAbiDecodeDynamicBytesLike(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .string, .bytes => true,
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "string") or std.mem.eql(u8, named.name, "bytes")) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeDynamicBytesLike(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeU256Slice(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .slice => |slice| self.isRuntimeAbiDecodeU256(slice.element_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeU256Slice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeAddressSlice(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .slice => |slice| self.isRuntimeAbiDecodeAddress(slice.element_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeAddressSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeBoolSlice(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .slice => |slice| self.isRuntimeAbiDecodeBool(slice.element_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeBoolSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeFixedBytesSlice(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .slice => |slice| self.isRuntimeAbiDecodeFixedBytes(slice.element_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeFixedBytesSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeFixedBytes(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .fixed_bytes => |fixed_bytes| fixed_bytes.len >= 1 and fixed_bytes.len <= 32,
-            .named => |named| blk: {
-                if (type_builtin.parseFixedBytesName(named.name) != null) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeFixedBytes(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeU256(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "u256")) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeU256(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeBool(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .bool => true,
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "bool")) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeBool(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn isRuntimeAbiDecodeAddress(self: *TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .address => true,
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "address")) break :blk true;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeAddress(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn abiEncodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
-        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
-        if (parseIntegerSpelling(name) != null) return false;
-        if (type_builtin.parseFixedBytesName(name) != null) return false;
-        if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
-        if (self.instantiatedBitfieldByName(name)) |_| return false;
-        if (self.instantiatedStructByName(name)) |_| return self.abiEncodeStructIsUnsupported(name);
-
-        const item_id = self.item_index.lookup(name) orelse return true;
-        return switch (self.file.item(item_id).*) {
-            .Enum => self.enumHasPayload(name),
-            .Bitfield => false,
-            .Struct => self.abiEncodeStructIsUnsupported(name),
-            .TypeAlias => |type_alias| self.abiEncodeIsUnsupported(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return true),
-            else => true,
-        };
-    }
-
-    fn abiEncodeStructIsUnsupported(self: *TypeChecker, name: []const u8) bool {
-        if (self.instantiatedStructByName(name)) |instantiated| {
-            for (instantiated.fields) |field| {
-                if (self.abiEncodeIsUnsupported(field.ty)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        const item_id = self.item_index.lookup(name) orelse return true;
-        const struct_item = switch (self.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return true,
-        };
-        for (struct_item.fields) |field| {
-            const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return true;
-            if (self.abiEncodeIsUnsupported(field_type)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    fn abiDecodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
-        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
-        if (parseIntegerSpelling(name) != null) return false;
-        if (type_builtin.parseFixedBytesName(name) != null) return false;
-        if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
-        if (self.instantiatedBitfieldByName(name)) |_| return false;
-        if (self.instantiatedStructByName(name)) |_| return self.abiDecodeStructIsUnsupported(name);
-
-        const item_id = self.item_index.lookup(name) orelse return true;
-        return switch (self.file.item(item_id).*) {
-            .Enum => self.enumHasPayload(name),
-            .Bitfield => false,
-            .Struct => self.abiDecodeStructIsUnsupported(name),
-            .TypeAlias => |type_alias| self.abiDecodeIsUnsupported(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return true),
-            else => true,
-        };
-    }
-
-    fn abiDecodeStructIsUnsupported(self: *TypeChecker, name: []const u8) bool {
-        if (self.instantiatedStructByName(name)) |instantiated| {
-            for (instantiated.fields) |field| {
-                if (self.abiDecodeIsUnsupported(field.ty)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        const item_id = self.item_index.lookup(name) orelse return true;
-        const struct_item = switch (self.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return true,
-        };
-        for (struct_item.fields) |field| {
-            const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return true;
-            if (self.abiDecodeIsUnsupported(field_type)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     fn checkChainIdBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
@@ -4137,6 +3786,8 @@ const TypeChecker = struct {
         imported_checker.item_effects = target_typecheck.item_effects;
         imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
+        imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+        imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
         imported_checker.expr_effects = target_typecheck.expr_effects;
@@ -5805,70 +5456,58 @@ const TypeChecker = struct {
     }
 
     fn validateExprExternalCalls(self: *TypeChecker, expr_id: ast.ExprId, state: *ExternalCallValidationState) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Call => |call| {
-                try self.validateExprExternalCalls(call.callee, state);
-                for (call.args) |arg| try self.validateExprExternalCalls(arg, state);
-
-                if (self.externProxyMethodSignature(call.callee)) |method| {
-                    if (method.extern_call_kind == .call) {
-                        try self.mergeStorageSlots(&state.frozen_pre_call_writes, state.current_writes.items);
-                    }
-                    return;
-                }
-
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                            const writes = self.item_effects[callee_id.index()].writeSlots();
-                            try self.emitExternalCallWriteDiagnostics(call.range, writes, state.frozen_pre_call_writes.items);
-                            try self.mergeStorageSlots(&state.current_writes, writes);
-                        },
-                        else => {},
-                    }
-                }
-            },
-            .Unary => |unary| try self.validateExprExternalCalls(unary.operand, state),
-            .Binary => |binary| {
-                try self.validateExprExternalCalls(binary.lhs, state);
-                try self.validateExprExternalCalls(binary.rhs, state);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprExternalCalls(element, state),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprExternalCalls(element, state),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprExternalCalls(field.value, state),
-            .Switch => |switch_expr| {
-                try self.validateExprExternalCalls(switch_expr.condition, state);
-                for (switch_expr.arms) |arm| {
-                    try self.validateSwitchPatternExternalCalls(arm.pattern, state);
-                    try self.validateExprExternalCalls(arm.value, state);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.validateExprExternalCalls(else_expr, state);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprExternalCalls(arg, state),
-            .Field => |field| try self.validateExprExternalCalls(field.base, state),
-            .Index => |index| {
-                try self.validateExprExternalCalls(index.base, state);
-                try self.validateExprExternalCalls(index.index, state);
-            },
-            .Group => |group| try self.validateExprExternalCalls(group.expr, state),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
+        var visitor = ExternalCallExprValidator{
+            .checker = self,
+            .state = state,
+        };
+        try ast.walk.walkExpr(ExternalCallExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternExternalCalls(self: *TypeChecker, pattern: ast.SwitchPattern, state: *ExternalCallValidationState) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.validateExprExternalCalls(expr_id, state),
-            .Range => |range_pattern| {
-                try self.validateExprExternalCalls(range_pattern.start, state);
-                try self.validateExprExternalCalls(range_pattern.end, state);
-            },
-            .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternExternalCalls(alternative, state),
-            .Ok, .Err, .Else => {},
-        }
+        var visitor = ExternalCallExprValidator{
+            .checker = self,
+            .state = state,
+        };
+        try ast.walk.walkSwitchPattern(ExternalCallExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
+
+    const validation_expr_walk_options: ast.walk.WalkOptions = .{
+        .walk_pattern_bindings = false,
+        .walk_external_proxy_exprs = false,
+        .walk_error_return_args = false,
+        .walk_old_exprs = false,
+    };
+
+    const ExternalCallExprValidator = struct {
+        checker: *TypeChecker,
+        state: *ExternalCallValidationState,
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Call => |call| {
+                    if (self.checker.externProxyMethodSignature(call.callee)) |method| {
+                        if (method.extern_call_kind == .call) {
+                            try self.checker.mergeStorageSlots(&self.state.frozen_pre_call_writes, self.state.current_writes.items);
+                        }
+                        return;
+                    }
+
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| {
+                                try self.checker.ensureFunctionEffectSummary(callee_id, function);
+                                const writes = self.checker.item_effects[callee_id.index()].writeSlots();
+                                try self.checker.emitExternalCallWriteDiagnostics(call.range, writes, self.state.frozen_pre_call_writes.items);
+                                try self.checker.mergeStorageSlots(&self.state.current_writes, writes);
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    };
 
     fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.statement(statement_id).*) {
@@ -5968,59 +5607,38 @@ const TypeChecker = struct {
     }
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Call => |call| {
-                try self.validateExprLocks(call.callee, locked_slots);
-                for (call.args) |arg| try self.validateExprLocks(arg, locked_slots);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                        },
-                        else => {},
-                    }
-                }
-            },
-            .Unary => |unary| try self.validateExprLocks(unary.operand, locked_slots),
-            .Binary => |binary| {
-                try self.validateExprLocks(binary.lhs, locked_slots);
-                try self.validateExprLocks(binary.rhs, locked_slots);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprLocks(element, locked_slots),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprLocks(element, locked_slots),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprLocks(field.value, locked_slots),
-            .Switch => |switch_expr| {
-                try self.validateExprLocks(switch_expr.condition, locked_slots);
-                for (switch_expr.arms) |arm| {
-                    try self.validateSwitchPatternLocks(arm.pattern, locked_slots);
-                    try self.validateExprLocks(arm.value, locked_slots);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.validateExprLocks(else_expr, locked_slots);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprLocks(arg, locked_slots),
-            .Field => |field| try self.validateExprLocks(field.base, locked_slots),
-            .Index => |index| {
-                try self.validateExprLocks(index.base, locked_slots);
-                try self.validateExprLocks(index.index, locked_slots);
-            },
-            .Group => |group| try self.validateExprLocks(group.expr, locked_slots),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
+        _ = locked_slots;
+        var visitor = LockExprValidator{
+            .checker = self,
+        };
+        try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.validateExprLocks(expr_id, locked_slots),
-            .Range => |range_pattern| {
-                try self.validateExprLocks(range_pattern.start, locked_slots);
-                try self.validateExprLocks(range_pattern.end, locked_slots);
-            },
-            .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternLocks(alternative, locked_slots),
-            .Ok, .Err, .Else => {},
-        }
+        _ = locked_slots;
+        var visitor = LockExprValidator{
+            .checker = self,
+        };
+        try ast.walk.walkSwitchPattern(LockExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
+
+    const LockExprValidator = struct {
+        checker: *TypeChecker,
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Call => |call| {
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| try self.checker.ensureFunctionEffectSummary(callee_id, function),
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    };
 
     fn statementExpr(self: *TypeChecker, statement_id: ast.StmtId) ?ast.ExprId {
         return switch (self.file.statement(statement_id).*) {
@@ -6128,6 +5746,13 @@ const TypeChecker = struct {
         }
     };
 
+    const effect_collector_walk_options: ast.walk.WalkOptions = .{
+        .walk_assignment_target_patterns = false,
+        .walk_pattern_bindings = false,
+        .walk_external_proxy_exprs = false,
+        .walk_old_exprs = false,
+    };
+
     fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !std.ArrayList(EffectSlot) {
         return unique_list.clone(EffectSlot, self.arena, items);
     }
@@ -6182,141 +5807,100 @@ const TypeChecker = struct {
     }
 
     fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, state: *EffectCollectorState) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| {
-            try self.collectStmtEffects(statement_id, state);
-        }
-    }
-
-    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, state: *EffectCollectorState) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| {
-                try self.collectExprEffects(expr_id, state);
-            },
-            .Return => |ret| if (ret.value) |expr_id| {
-                try self.collectExprEffects(expr_id, state);
-            },
-            .If => |if_stmt| {
-                try self.collectExprEffects(if_stmt.condition, state);
-                try self.collectBodyEffects(if_stmt.then_body, state);
-                if (if_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, state);
-            },
-            .While => |while_stmt| {
-                try self.collectExprEffects(while_stmt.condition, state);
-                for (while_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, state);
-                try self.collectBodyEffects(while_stmt.body, state);
-            },
-            .For => |for_stmt| {
-                try self.collectExprEffects(for_stmt.iterable, state);
-                if (for_stmt.range_end) |end_expr| try self.collectExprEffects(end_expr, state);
-                for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, state);
-                try self.collectBodyEffects(for_stmt.body, state);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprEffects(switch_stmt.condition, state);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternEffects(arm.pattern, state);
-                    try self.collectBodyEffects(arm.body, state);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, state);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyEffects(try_stmt.try_body, state);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyEffects(catch_clause.body, state);
-            },
-            .Log => |log_stmt| {
-                state.flags.has_log = true;
-                for (log_stmt.args) |arg| try self.collectExprEffects(arg, state);
-            },
-            .Havoc => state.flags.has_havoc = true,
-            .Lock => state.flags.has_lock = true,
-            .Unlock => state.flags.has_unlock = true,
-            .Break => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
-            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
-            .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, state),
-            .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, state),
-            .Assign => |assign| {
-                try self.collectExprEffects(assign.value, state);
-                try self.collectPatternTargetEffects(assign.target, assign.op, state);
-            },
-            .Expr => |expr_stmt| try self.collectExprEffects(expr_stmt.expr, state),
-            .Block => |block| try self.collectBodyEffects(block.body, state),
-            .LabeledBlock => |block| try self.collectBodyEffects(block.body, state),
-            .Error => {},
-        }
+        var visitor = EffectCollector{
+            .checker = self,
+            .root = state,
+        };
+        try ast.walk.walkBody(EffectCollector, &visitor, self.file, body_id, effect_collector_walk_options);
     }
 
     fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) anyerror!void {
-        var expr_state = EffectCollectorState.init();
-        switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .TypeValue, .Result, .Error => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, &expr_state),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, &expr_state),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, &expr_state),
-            .Switch => |switch_expr| {
-                try self.collectExprEffects(switch_expr.condition, &expr_state);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternEffects(arm.pattern, &expr_state);
-                    try self.collectExprEffects(arm.value, &expr_state);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, &expr_state);
-            },
-            .Comptime, .ExternalProxy => {},
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, &expr_state),
-            .Name => {
-                if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
-                    try self.appendUniqueSlot(&expr_state.reads, slot);
-                }
-            },
-            .Unary => |unary| try self.collectExprEffects(unary.operand, &expr_state),
-            .Binary => |binary| {
-                try self.collectExprEffects(binary.lhs, &expr_state);
-                try self.collectExprEffects(binary.rhs, &expr_state);
-            },
-            .Call => |call| {
-                try self.collectExprEffects(call.callee, &expr_state);
-                for (call.args) |arg| try self.collectExprEffects(arg, &expr_state);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                            try self.mergeEffect(&expr_state, self.item_effects[callee_id.index()]);
-                        },
-                        else => {},
-                    }
-                } else if (self.callableType(call.callee).kind() == .function) {
-                    expr_state.flags.has_external = true;
-                }
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, &expr_state),
-            .Field => |field| try self.collectExprEffects(field.base, &expr_state),
-            .Index => |index| {
-                try self.collectExprEffects(index.index, &expr_state);
-                if (self.lockSlotForExpr(expr_id)) |slot| {
-                    try self.appendUniqueSlot(&expr_state.reads, slot);
-                } else {
-                    try self.collectExprEffects(index.base, &expr_state);
-                }
-            },
-            .Group => |group| try self.collectExprEffects(group.expr, &expr_state),
-            .Old, .Quantified => {},
-        }
-        self.expr_effects[expr_id.index()] = self.effectFromState(expr_state);
-        try self.mergeEffect(state, self.expr_effects[expr_id.index()]);
+        var visitor = EffectCollector{
+            .checker = self,
+            .root = state,
+        };
+        try ast.walk.walkExpr(EffectCollector, &visitor, self.file, expr_id, effect_collector_walk_options);
     }
 
-    fn collectSwitchPatternEffects(self: *TypeChecker, pattern: ast.SwitchPattern, state: *EffectCollectorState) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprEffects(expr_id, state),
-            .Range => |range_pattern| {
-                try self.collectExprEffects(range_pattern.start, state);
-                try self.collectExprEffects(range_pattern.end, state);
-            },
-            .NamedError => |named_error| try self.collectExprEffects(named_error.callee, state),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternEffects(alternative, state),
-            .Ok, .Err, .Else => {},
+    const EffectCollector = struct {
+        checker: *TypeChecker,
+        root: *EffectCollectorState,
+        expr_stack: std.ArrayList(EffectCollectorState) = .{},
+
+        fn current(self: *@This()) *EffectCollectorState {
+            if (self.expr_stack.items.len == 0) return self.root;
+            return &self.expr_stack.items[self.expr_stack.items.len - 1];
         }
-    }
+
+        pub fn enterStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!ast.walk.WalkControl {
+            switch (file.statement(statement_id).*) {
+                .Log => self.current().flags.has_log = true,
+                .Havoc => self.current().flags.has_havoc = true,
+                .Lock => {
+                    self.current().flags.has_lock = true;
+                    return .skip_children;
+                },
+                .Unlock => {
+                    self.current().flags.has_unlock = true;
+                    return .skip_children;
+                },
+                else => {},
+            }
+            return .descend;
+        }
+
+        pub fn exitStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!void {
+            switch (file.statement(statement_id).*) {
+                .Assign => |assign| try self.checker.collectPatternTargetEffects(assign.target, assign.op, self.current()),
+                else => {},
+            }
+        }
+
+        pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
+            try self.expr_stack.append(self.checker.arena, EffectCollectorState.init());
+            switch (file.expression(expr_id).*) {
+                .Index => |index| {
+                    try ast.walk.walkExpr(EffectCollector, self, file, index.index, effect_collector_walk_options);
+                    if (self.checker.lockSlotForExpr(expr_id)) |slot| {
+                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                    } else {
+                        try ast.walk.walkExpr(EffectCollector, self, file, index.base, effect_collector_walk_options);
+                    }
+                    return .skip_children;
+                },
+                else => return .descend,
+            }
+        }
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Name => {
+                    if (self.checker.fieldSlotForBinding(self.checker.resolution.expr_bindings[expr_id.index()])) |slot| {
+                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                    }
+                },
+                .Call => |call| {
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| {
+                                try self.checker.ensureFunctionEffectSummary(callee_id, function);
+                                try self.checker.mergeEffect(self.current(), self.checker.item_effects[callee_id.index()]);
+                            },
+                            else => {},
+                        }
+                    } else if (self.checker.callableType(call.callee).kind() == .function) {
+                        self.current().flags.has_external = true;
+                    }
+                },
+                else => {},
+            }
+
+            const expr_state = self.expr_stack.pop() orelse unreachable;
+            const effect = self.checker.effectFromState(expr_state);
+            self.checker.expr_effects[expr_id.index()] = effect;
+            try self.checker.mergeEffect(self.current(), effect);
+        }
+    };
 
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
@@ -6470,18 +6054,13 @@ const TypeChecker = struct {
     }
 
     fn localAliasEnvironmentKeySegment(self: *TypeChecker, pattern_id: ast.PatternId) ?KeySegment {
-        for (self.file.statements) |statement| {
-            if (statement != .VariableDecl) continue;
-            const decl = statement.VariableDecl;
-            if (decl.pattern.index() != pattern_id.index()) continue;
-            switch (decl.binding_kind) {
-                .let_, .constant, .immutable => {},
-                .var_ => return null,
-            }
-            const value = decl.value orelse return null;
-            return self.environmentKeySegmentForExpr(value);
+        const binding_kind = self.pattern_binding_kinds[pattern_id.index()] orelse return null;
+        switch (binding_kind) {
+            .let_, .constant, .immutable => {},
+            .var_ => return null,
         }
-        return null;
+        const value = self.initializerExprForPattern(pattern_id) orelse return null;
+        return self.environmentKeySegmentForExpr(value);
     }
 
     fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
@@ -6587,139 +6166,39 @@ const TypeChecker = struct {
         const previous_function_item = self.current_function_item;
         self.current_function_item = item_id;
         defer self.current_function_item = previous_function_item;
-        try self.collectBodyDirectCallees(function.body, callees);
+
+        var visitor = DirectCalleeCollector{
+            .checker = self,
+            .callees = callees,
+        };
+        try ast.walk.walkBody(DirectCalleeCollector, &visitor, self.file, function.body, .{
+            .walk_pattern_bindings = false,
+            .walk_external_proxy_exprs = false,
+            .walk_old_exprs = false,
+        });
     }
 
-    fn collectBodyDirectCallees(self: *TypeChecker, body_id: ast.BodyId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| try self.collectStmtDirectCallees(statement_id, callees);
-    }
+    const DirectCalleeCollector = struct {
+        checker: *TypeChecker,
+        callees: *std.ArrayList(ast.ItemId),
 
-    fn collectStmtDirectCallees(self: *TypeChecker, statement_id: ast.StmtId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Return => |ret| if (ret.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .If => |if_stmt| {
-                try self.collectExprDirectCallees(if_stmt.condition, callees);
-                try self.collectBodyDirectCallees(if_stmt.then_body, callees);
-                if (if_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
-            },
-            .While => |while_stmt| {
-                try self.collectExprDirectCallees(while_stmt.condition, callees);
-                for (while_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
-                try self.collectBodyDirectCallees(while_stmt.body, callees);
-            },
-            .For => |for_stmt| {
-                try self.collectExprDirectCallees(for_stmt.iterable, callees);
-                if (for_stmt.range_end) |end_expr| try self.collectExprDirectCallees(end_expr, callees);
-                for (for_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
-                try self.collectBodyDirectCallees(for_stmt.body, callees);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprDirectCallees(switch_stmt.condition, callees);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
-                    try self.collectBodyDirectCallees(arm.body, callees);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyDirectCallees(try_stmt.try_body, callees);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyDirectCallees(catch_clause.body, callees);
-            },
-            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Lock => |lock_stmt| try self.collectExprDirectCallees(lock_stmt.path, callees),
-            .Unlock => |unlock_stmt| try self.collectExprDirectCallees(unlock_stmt.path, callees),
-            .Assert => |assert_stmt| try self.collectExprDirectCallees(assert_stmt.condition, callees),
-            .Assume => |assume_stmt| try self.collectExprDirectCallees(assume_stmt.condition, callees),
-            .Assign => |assign| {
-                try self.collectExprDirectCallees(assign.value, callees);
-                try self.collectPatternDirectCallees(assign.target, callees);
-            },
-            .Expr => |expr_stmt| try self.collectExprDirectCallees(expr_stmt.expr, callees),
-            .Block => |block| try self.collectBodyDirectCallees(block.body, callees),
-            .LabeledBlock => |block| try self.collectBodyDirectCallees(block.body, callees),
-            .Havoc, .Error => {},
-            .Break => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            _ = file;
+            switch (self.checker.file.expression(expr_id).*) {
+                .Call => |call| if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                    try self.checker.appendUniqueItemId(self.callees, callee_id);
+                },
+                else => {},
+            }
         }
-    }
-
-    fn collectExprDirectCallees(self: *TypeChecker, expr_id: ast.ExprId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprDirectCallees(element, callees),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprDirectCallees(element, callees),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprDirectCallees(field.value, callees),
-            .Switch => |switch_expr| {
-                try self.collectExprDirectCallees(switch_expr.condition, callees);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
-                    try self.collectExprDirectCallees(arm.value, callees);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprDirectCallees(else_expr, callees);
-            },
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Unary => |unary| try self.collectExprDirectCallees(unary.operand, callees),
-            .Binary => |binary| {
-                try self.collectExprDirectCallees(binary.lhs, callees);
-                try self.collectExprDirectCallees(binary.rhs, callees);
-            },
-            .Call => |call| {
-                try self.collectExprDirectCallees(call.callee, callees);
-                for (call.args) |arg| try self.collectExprDirectCallees(arg, callees);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| try self.appendUniqueItemId(callees, callee_id);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Field => |field| try self.collectExprDirectCallees(field.base, callees),
-            .Index => |index| {
-                try self.collectExprDirectCallees(index.base, callees);
-                try self.collectExprDirectCallees(index.index, callees);
-            },
-            .Group => |group| try self.collectExprDirectCallees(group.expr, callees),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
-    }
-
-    fn collectPatternDirectCallees(self: *TypeChecker, pattern_id: ast.PatternId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.pattern(pattern_id).*) {
-            .Field => |field| try self.collectPatternDirectCallees(field.base, callees),
-            .Index => |index| {
-                try self.collectPatternDirectCallees(index.base, callees);
-                try self.collectExprDirectCallees(index.index, callees);
-            },
-            .Name, .StructDestructure, .Error => {},
-        }
-    }
-
-    fn collectSwitchPatternDirectCallees(self: *TypeChecker, pattern: ast.SwitchPattern, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Range => |range_pattern| {
-                try self.collectExprDirectCallees(range_pattern.start, callees);
-                try self.collectExprDirectCallees(range_pattern.end, callees);
-            },
-            .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternDirectCallees(alternative, callees),
-            .Ok, .Err, .Else => {},
-        }
-    }
+    };
 
     fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
         try unique_list.appendUnique(ast.ItemId, self.arena, items, item_id, itemIdEql);
     }
 
     fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
-        for (self.file.statements) |statement| {
-            switch (statement) {
-                .VariableDecl => |decl| {
-                    if (decl.pattern != pattern_id) continue;
-                    return decl.value;
-                },
-                else => {},
-            }
-        }
-        return null;
+        return self.pattern_initializers[pattern_id.index()];
     }
 
     fn storeType(self: *TypeChecker, ty: Type) !*const Type {
@@ -7414,115 +6893,33 @@ const TypeChecker = struct {
     }
 
     fn collectBodyErrorTypes(self: *TypeChecker, body_id: ast.BodyId, error_types: *std.ArrayList(Type)) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| {
-            try self.collectStmtErrorTypes(statement_id, error_types);
-        }
+        var visitor = ErrorTypeCollector{
+            .checker = self,
+            .error_types = error_types,
+        };
+        try ast.walk.walkBody(ErrorTypeCollector, &visitor, self.file, body_id, .{
+            .walk_assignment_target_patterns = false,
+            .walk_pattern_bindings = false,
+            .enter_comptime_bodies = true,
+            .enter_quantified_bodies = true,
+            .walk_external_proxy_exprs = false,
+            .walk_old_exprs = false,
+        });
     }
 
-    fn collectStmtErrorTypes(self: *TypeChecker, statement_id: ast.StmtId, error_types: *std.ArrayList(Type)) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .Return => |ret| if (ret.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .If => |if_stmt| {
-                try self.collectExprErrorTypes(if_stmt.condition, error_types);
-                try self.collectBodyErrorTypes(if_stmt.then_body, error_types);
-                if (if_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
-            },
-            .While => |while_stmt| {
-                try self.collectExprErrorTypes(while_stmt.condition, error_types);
-                for (while_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
-                try self.collectBodyErrorTypes(while_stmt.body, error_types);
-            },
-            .For => |for_stmt| {
-                try self.collectExprErrorTypes(for_stmt.iterable, error_types);
-                if (for_stmt.range_end) |end_expr| try self.collectExprErrorTypes(end_expr, error_types);
-                for (for_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
-                try self.collectBodyErrorTypes(for_stmt.body, error_types);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprErrorTypes(switch_stmt.condition, error_types);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
-                    try self.collectBodyErrorTypes(arm.body, error_types);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyErrorTypes(try_stmt.try_body, error_types);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyErrorTypes(catch_clause.body, error_types);
-            },
-            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            .Lock => |lock_stmt| try self.collectExprErrorTypes(lock_stmt.path, error_types),
-            .Unlock => |unlock_stmt| try self.collectExprErrorTypes(unlock_stmt.path, error_types),
-            .Assert => |assert_stmt| try self.collectExprErrorTypes(assert_stmt.condition, error_types),
-            .Assume => |assume_stmt| try self.collectExprErrorTypes(assume_stmt.condition, error_types),
-            .Assign => |assign| try self.collectExprErrorTypes(assign.value, error_types),
-            .Expr => |expr_stmt| try self.collectExprErrorTypes(expr_stmt.expr, error_types),
-            .Block => |block| try self.collectBodyErrorTypes(block.body, error_types),
-            .LabeledBlock => |block| try self.collectBodyErrorTypes(block.body, error_types),
-            else => {},
-        }
-    }
+    const ErrorTypeCollector = struct {
+        checker: *TypeChecker,
+        error_types: *std.ArrayList(Type),
 
-    fn collectExprErrorTypes(self: *TypeChecker, expr_id: ast.ExprId, error_types: *std.ArrayList(Type)) anyerror!void {
-        const expr_type = self.expr_types[expr_id.index()];
-        if (expr_type.kind() == .error_union) {
-            for (expr_type.errorTypes()) |error_type| try self.appendUniqueErrorType(error_types, error_type);
+        pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
+            _ = file;
+            const expr_type = self.checker.expr_types[expr_id.index()];
+            if (expr_type.kind() == .error_union) {
+                for (expr_type.errorTypes()) |error_type| try self.checker.appendUniqueErrorType(self.error_types, error_type);
+            }
+            return .descend;
         }
-
-        switch (self.file.expression(expr_id).*) {
-            .Unary => |unary| try self.collectExprErrorTypes(unary.operand, error_types),
-            .Binary => |binary| {
-                try self.collectExprErrorTypes(binary.lhs, error_types);
-                try self.collectExprErrorTypes(binary.rhs, error_types);
-            },
-            .Call => |call| {
-                try self.collectExprErrorTypes(call.callee, error_types);
-                for (call.args) |arg| try self.collectExprErrorTypes(arg, error_types);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            .Field => |field| try self.collectExprErrorTypes(field.base, error_types),
-            .Index => |index| {
-                try self.collectExprErrorTypes(index.base, error_types);
-                try self.collectExprErrorTypes(index.index, error_types);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprErrorTypes(element, error_types),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprErrorTypes(element, error_types),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprErrorTypes(field.value, error_types),
-            .Switch => |switch_expr| {
-                try self.collectExprErrorTypes(switch_expr.condition, error_types);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
-                    try self.collectExprErrorTypes(arm.value, error_types);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprErrorTypes(else_expr, error_types);
-            },
-            .Comptime => |comptime_expr| {
-                try self.collectBodyErrorTypes(comptime_expr.body, error_types);
-            },
-            .Group => |group| try self.collectExprErrorTypes(group.expr, error_types),
-            .Quantified => |quantified| {
-                if (quantified.condition) |condition| try self.collectExprErrorTypes(condition, error_types);
-                try self.collectExprErrorTypes(quantified.body, error_types);
-            },
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            else => {},
-        }
-    }
-
-    fn collectSwitchPatternErrorTypes(self: *TypeChecker, pattern: ast.SwitchPattern, error_types: *std.ArrayList(Type)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .Range => |range_pattern| {
-                try self.collectExprErrorTypes(range_pattern.start, error_types);
-                try self.collectExprErrorTypes(range_pattern.end, error_types);
-            },
-            .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternErrorTypes(alternative, error_types),
-            .Ok, .Err, .Else => {},
-        }
-    }
+    };
 
     fn appendUniqueErrorType(self: *TypeChecker, error_types: *std.ArrayList(Type), error_type: Type) anyerror!void {
         try unique_list.appendUnique(Type, self.arena, error_types, error_type, typeEql);

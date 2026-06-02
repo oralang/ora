@@ -1666,7 +1666,7 @@ const ConstEvaluator = struct {
     fn typeExprAbiName(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) anyerror!?[]const u8 {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
-                if (hir_abi.parseFixedBytesSpelling(path.name)) |_| break :blk try self.allocator.dupe(u8, path.name);
+                if (type_builtin.parseFixedBytesName(path.name)) |_| break :blk try self.allocator.dupe(u8, path.name);
                 if (self.pathTypeId(path.name)) |type_id| break :blk self.abiTypeNameForTypeId(type_id);
                 break :blk null;
             },
@@ -1962,6 +1962,15 @@ const ConstEvaluator = struct {
         };
     }
 
+    fn signatureForAbiFunctionReference(self: *ConstEvaluator, function_ref: AbiFunctionReference) !?[]const u8 {
+        const layout_ctx = (try self.currentLayoutContext()) orelse return null;
+        return try layout_ctx.signatureForMethod(
+            function_ref.name,
+            function_ref.has_self,
+            function_ref.param_types,
+        );
+    }
+
     /// Resolves `Name` or `Contract.Member` paths to an item id, recursing
     /// through `.Group` wrappers. Returns null for anything else (imports,
     /// traits, expressions). Used by the event/struct ABI reference resolvers.
@@ -2050,6 +2059,13 @@ const ConstEvaluator = struct {
     fn buildTraitMethodsCtValue(self: *ConstEvaluator, trait_ref: ReflectionTraitReference) !CtValue {
         const type_query = self.type_query orelse return error.NotComptime;
         const typecheck = try type_query.module_typecheck(type_query.context, trait_ref.module_id);
+        const item_index = try type_query.item_index(type_query.context, trait_ref.module_id);
+        const layout_ctx = abi_layout_context.LayoutContext{
+            .allocator = self.allocator,
+            .file = trait_ref.file,
+            .item_index = item_index,
+            .typecheck = typecheck,
+        };
         const trait_interface = typecheck.traitInterfaceByName(trait_ref.item.name) orelse return error.NotComptime;
         const elems = try self.allocator.alloc(CtValue, trait_interface.methods.len);
         for (trait_interface.methods, 0..) |method, index| {
@@ -2063,8 +2079,7 @@ const ConstEvaluator = struct {
                 declared_errors[err_index] = .{ .string_ref = try self.env.heap.allocString(err_name) };
             }
 
-            const signature = try hir_abi.signatureForMethod(
-                self.allocator,
+            const signature = try layout_ctx.signatureForMethod(
                 method.name,
                 method.receiver_kind != .none,
                 method.param_types,
@@ -2521,16 +2536,16 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn abiDecodeTypeIdForType(context: *anyopaque, ty: model.Type) ?u32 {
+    fn abiDecodeTypeIdForType(context: *anyopaque, ty: model.Type) anyerror!?u32 {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
         return self.typeIdForModelType(ty);
     }
 
-    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) ?[]const model.AnonymousStructField {
+    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) anyerror!?[]const model.AnonymousStructField {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
-        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         if (typecheck.instantiatedStructByName(name)) |instantiated| {
-            const fields = self.allocator.alloc(model.AnonymousStructField, instantiated.fields.len) catch return null;
+            const fields = try self.allocator.alloc(model.AnonymousStructField, instantiated.fields.len);
             for (instantiated.fields, 0..) |field, index| {
                 fields[index] = .{ .name = field.name, .ty = field.ty };
             }
@@ -2541,20 +2556,20 @@ const ConstEvaluator = struct {
             .Struct => |struct_item| struct_item,
             else => return null,
         };
-        const item_index = (self.currentItemIndex() catch null) orelse return null;
-        const fields = self.allocator.alloc(model.AnonymousStructField, struct_item.fields.len) catch return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
+        const fields = try self.allocator.alloc(model.AnonymousStructField, struct_item.fields.len);
         for (struct_item.fields, 0..) |field, index| {
             fields[index] = .{
                 .name = field.name,
-                .ty = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, field.type_expr) catch return null,
+                .ty = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, field.type_expr),
             };
         }
         return fields;
     }
 
-    fn abiDecodeEnumVariantCount(context: *anyopaque, name: []const u8) ?usize {
+    fn abiDecodeEnumVariantCount(context: *anyopaque, name: []const u8) anyerror!?usize {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
-        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         if (typecheck.instantiatedEnumByName(name)) |instantiated| return instantiated.variants.len;
         const item_id = self.lookupNamedItem(name) orelse return null;
         return switch (self.file.item(item_id).*) {
@@ -2677,12 +2692,7 @@ const ConstEvaluator = struct {
         if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
             if (builtin.args.len != 1) return null;
             const function_ref = (try self.resolveAbiFunctionReference(builtin.args[0])) orelse return null;
-            const signature = function_ref.signature orelse try hir_abi.signatureForMethod(
-                self.allocator,
-                function_ref.name,
-                function_ref.has_self,
-                function_ref.param_types,
-            );
+            const signature = function_ref.signature orelse (try self.signatureForAbiFunctionReference(function_ref)) orelse return null;
             if (std.mem.eql(u8, builtin.name, "abiSignature")) return .{ .string = signature };
 
             const selector = hir_abi.keccakSelectorValue(signature);

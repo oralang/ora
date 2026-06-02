@@ -43,9 +43,9 @@ pub const DecodeMode = enum {
 
 pub const TypeResolver = struct {
     context: *anyopaque,
-    typeIdForType: *const fn (*anyopaque, sema.Type) ?u32,
-    structFields: *const fn (*anyopaque, []const u8) ?[]const sema.AnonymousStructField,
-    enumVariantCount: *const fn (*anyopaque, []const u8) ?usize,
+    typeIdForType: *const fn (*anyopaque, sema.Type) anyerror!?u32,
+    structFields: *const fn (*anyopaque, []const u8) anyerror!?[]const sema.AnonymousStructField,
+    enumVariantCount: *const fn (*anyopaque, []const u8) anyerror!?usize,
 };
 
 pub fn decodeComptimeValue(
@@ -252,9 +252,9 @@ fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *con
     if (target_type == .enum_) {
         // TODO(decoder): explicit enum values are not represented here yet.
         // Encoding and decoding both use the positional variant id.
-        const count = resolver.enumVariantCount(resolver.context, target_type.enum_.name) orelse return error.AbiDecoderInternalShapeMismatch;
+        const count = (try resolver.enumVariantCount(resolver.context, target_type.enum_.name)) orelse return error.AbiDecoderInternalShapeMismatch;
         if (value >= count) return .{ .err = .enum_out_of_range };
-        const type_id = resolver.typeIdForType(resolver.context, target_type) orelse return error.AbiDecoderInternalShapeMismatch;
+        const type_id = (try resolver.typeIdForType(resolver.context, target_type)) orelse return error.AbiDecoderInternalShapeMismatch;
         return .{ .value = .{ .adt_val = .{
             .type_id = type_id,
             .variant_id = @intCast(value),
@@ -487,9 +487,9 @@ fn decodeTupleAt(
             } };
         },
         .struct_ => |named| {
-            const fields = resolver.structFields(resolver.context, named.name) orelse return error.AbiDecoderInternalShapeMismatch;
+            const fields = (try resolver.structFields(resolver.context, named.name)) orelse return error.AbiDecoderInternalShapeMismatch;
             if (fields.len != tuple.elements.len) return error.AbiDecoderInternalShapeMismatch;
-            const type_id = resolver.typeIdForType(resolver.context, target_type) orelse return error.AbiDecoderInternalShapeMismatch;
+            const type_id = (try resolver.typeIdForType(resolver.context, target_type)) orelse return error.AbiDecoderInternalShapeMismatch;
             const types = try allocator.alloc(sema.Type, fields.len);
             for (fields, 0..) |field, index| {
                 types[index] = field.ty;

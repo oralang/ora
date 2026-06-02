@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("ora_types").builtin;
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
+const abi_type_names = @import("type_names.zig");
 
 pub const LayoutError = error{
     UnsupportedAbiType,
@@ -201,17 +202,8 @@ fn fromTypeAtPath(allocator: std.mem.Allocator, ty: sema.Type, path: []const Val
 
 pub fn canonicalAbiType(allocator: std.mem.Allocator, node: LayoutNode) ![]const u8 {
     return switch (node) {
-        .static_word => |word| switch (word.encoding) {
-            .uint => |bits| std.fmt.allocPrint(allocator, "uint{d}", .{bits}),
-            .int => |bits| std.fmt.allocPrint(allocator, "int{d}", .{bits}),
-            .bool => allocator.dupe(u8, "bool"),
-            .address => allocator.dupe(u8, "address"),
-            .fixed_bytes => |len| std.fmt.allocPrint(allocator, "bytes{d}", .{len}),
-        },
-        .dynamic_bytes => |bytes| allocator.dupe(u8, switch (bytes.kind) {
-            .bytes => "bytes",
-            .string => "string",
-        }),
+        .static_word => |word| allocator.dupe(u8, try staticEncodingAbiName(word.encoding)),
+        .dynamic_bytes => |bytes| allocator.dupe(u8, dynamicBytesAbiName(bytes.kind)),
         .dynamic_array => |array| blk: {
             const element_text = try canonicalAbiType(allocator, array.element.*);
             defer allocator.free(element_text);
@@ -281,17 +273,8 @@ pub fn staticWordCountForType(ty: sema.Type) ?usize {
 
 pub fn serializeForMlirAttr(allocator: std.mem.Allocator, node: LayoutNode) ![]const u8 {
     return switch (node) {
-        .static_word => |word| switch (word.encoding) {
-            .uint => |bits| std.fmt.allocPrint(allocator, "static(uint{d})", .{bits}),
-            .int => |bits| std.fmt.allocPrint(allocator, "static(int{d})", .{bits}),
-            .bool => allocator.dupe(u8, "static(bool)"),
-            .address => allocator.dupe(u8, "static(address)"),
-            .fixed_bytes => |len| std.fmt.allocPrint(allocator, "static(bytes{d})", .{len}),
-        },
-        .dynamic_bytes => |bytes| allocator.dupe(u8, switch (bytes.kind) {
-            .bytes => "dynamic(bytes)",
-            .string => "dynamic(string)",
-        }),
+        .static_word => |word| std.fmt.allocPrint(allocator, "static({s})", .{try staticEncodingAbiName(word.encoding)}),
+        .dynamic_bytes => |bytes| std.fmt.allocPrint(allocator, "dynamic({s})", .{dynamicBytesAbiName(bytes.kind)}),
         .dynamic_array => |array| blk: {
             const element = try serializeForMlirAttr(allocator, array.element.*);
             defer allocator.free(element);
@@ -329,6 +312,23 @@ fn fixedBytesLen(fixed_bytes: sema.FixedBytesType) !u8 {
 
 fn staticWordNode(allocator: std.mem.Allocator, path: []const ValuePathSegment, encoding: StaticEncoding) !LayoutNode {
     return .{ .static_word = .{ .path = try clonePath(allocator, path), .encoding = encoding } };
+}
+
+fn staticEncodingAbiName(encoding: StaticEncoding) LayoutError![]const u8 {
+    return switch (encoding) {
+        .uint => |bits| abi_type_names.integerAbiName(false, bits) orelse error.InvalidIntegerWidth,
+        .int => |bits| abi_type_names.integerAbiName(true, bits) orelse error.InvalidIntegerWidth,
+        .bool => abi_type_names.builtinAbiName(.bool),
+        .address => abi_type_names.builtinAbiName(.address),
+        .fixed_bytes => |len| abi_type_names.fixedBytesAbiName(len) orelse error.InvalidFixedBytesWidth,
+    };
+}
+
+fn dynamicBytesAbiName(kind: DynamicBytesKind) []const u8 {
+    return switch (kind) {
+        .bytes => abi_type_names.builtinAbiName(.bytes),
+        .string => abi_type_names.builtinAbiName(.string),
+    };
 }
 
 fn clonePath(allocator: std.mem.Allocator, path: []const ValuePathSegment) !ValuePath {

@@ -419,9 +419,10 @@ pub const CompilerDb = struct {
                 const root = try self.verificationFacts(module_id, .{ .body = ast.BodyId.fromIndex(0) });
                 try facts.appendSlice(arena, root.facts);
             } else {
+                const visited_items = try arena.alloc(bool, ast_file.items.len);
+                @memset(visited_items, false);
                 for (ast_file.root_items) |item_id| {
-                    const item_facts = try self.verificationFacts(module_id, .{ .item = item_id });
-                    try facts.appendSlice(arena, item_facts.facts);
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, item_id, visited_items, arena, &facts);
                 }
             }
 
@@ -429,6 +430,48 @@ pub const CompilerDb = struct {
             slot.* = result;
         }
         return slot.*.?;
+    }
+
+    fn appendVerificationFactsForItemTree(
+        self: *CompilerDb,
+        module_id: source.ModuleId,
+        ast_file: *const ast.AstFile,
+        item_id: ast.ItemId,
+        visited_items: []bool,
+        allocator: std.mem.Allocator,
+        facts: *std.ArrayList(sema.VerificationFact),
+    ) !void {
+        const item_index = item_id.index();
+        if (item_index >= visited_items.len or visited_items[item_index]) return;
+        visited_items[item_index] = true;
+
+        const item_facts = try self.verificationFacts(module_id, .{ .item = item_id });
+        try facts.appendSlice(allocator, item_facts.facts);
+
+        switch (ast_file.item(item_id).*) {
+            .Contract => |contract| {
+                for (contract.members) |member_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, member_id, visited_items, allocator, facts);
+                }
+            },
+            .Impl => |impl_item| {
+                for (impl_item.methods) |method_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, method_id, visited_items, allocator, facts);
+                }
+            },
+            .Trait => {},
+            .Struct => |struct_item| {
+                for (struct_item.metadata) |metadata_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                }
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.metadata) |metadata_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                }
+            },
+            else => {},
+        }
     }
 
     pub fn lowerToHir(self: *CompilerDb, module_id: source.ModuleId) !*const hir.LoweringResult {
@@ -444,18 +487,19 @@ pub const CompilerDb = struct {
             compilerPhaseLog("lower-to-hir {s} resolve", .{module.name});
             const typecheck = try self.moduleTypeCheck(module_id);
             compilerPhaseLog("lower-to-hir {s} typecheck", .{module.name});
-            _ = try self.moduleVerificationFacts(module_id);
+            const verification_facts = try self.moduleVerificationFacts(module_id);
             compilerPhaseLog("lower-to-hir {s} verification-facts", .{module.name});
             const const_eval = try self.constEval(module_id);
             compilerPhaseLog("lower-to-hir {s} consteval", .{module.name});
             const result = try self.allocator.create(hir.LoweringResult);
             errdefer self.allocator.destroy(result);
-            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck, .{
+            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck, verification_facts, .{
                 .context = self,
                 .ast_file = astFileForComptime,
                 .item_index = itemIndexForComptime,
                 .resolution = resolveNamesForComptime,
                 .module_typecheck = moduleTypeCheckForComptime,
+                .module_verification_facts = moduleVerificationFactsForComptime,
                 .const_eval = constEvalForComptime,
                 .lookup_item = lookupItemForComptime,
                 .resolve_import_alias = resolveImportAliasForComptime,
@@ -572,6 +616,8 @@ pub const CompilerDb = struct {
         const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
         const item_modifies = try arena_allocator.alloc(?[]sema.EffectSlot, ast_file.items.len);
         const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
+        const pattern_initializers = try arena_allocator.alloc(?ast.ExprId, ast_file.patterns.len);
+        const pattern_binding_kinds = try arena_allocator.alloc(?ast.BindingKind, ast_file.patterns.len);
         const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
         const call_resolutions = try arena_allocator.alloc(?sema.ResolvedCall, ast_file.expressions.len);
         const expr_effects = try arena_allocator.alloc(sema.Effect, ast_file.expressions.len);
@@ -582,6 +628,8 @@ pub const CompilerDb = struct {
         for (item_effects) |*effect| effect.* = .pure;
         @memset(item_modifies, null);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
+        @memset(pattern_initializers, null);
+        @memset(pattern_binding_kinds, null);
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
         @memset(call_resolutions, null);
         for (expr_effects) |*effect| effect.* = .pure;
@@ -595,6 +643,8 @@ pub const CompilerDb = struct {
             .item_effects = item_effects,
             .item_modifies = item_modifies,
             .pattern_types = pattern_types,
+            .pattern_initializers = pattern_initializers,
+            .pattern_binding_kinds = pattern_binding_kinds,
             .expr_types = expr_types,
             .call_resolutions = call_resolutions,
             .expr_effects = expr_effects,
@@ -651,6 +701,11 @@ fn ensureTypeCheckedForComptime(context: *anyopaque, module_id: source.ModuleId,
 fn moduleTypeCheckForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.moduleTypeCheck(module_id);
+}
+
+fn moduleVerificationFactsForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ModuleVerificationFactsResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.moduleVerificationFacts(module_id);
 }
 
 fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult {
@@ -735,6 +790,20 @@ fn verificationCacheKey(key: sema.VerificationFactsKey) u64 {
     return switch (key) {
         .item => |item_id| (@as(u64, 0) << 32) | @intFromEnum(item_id),
         .body => |body_id| (@as(u64, 1) << 32) | @intFromEnum(body_id),
+        .trait_method => |owner| blk: {
+            const trait_index: u64 = @intFromEnum(owner.trait_item);
+            const method_index: u64 = @intCast(owner.method_index);
+            std.debug.assert(trait_index <= 0x7fff_ffff);
+            std.debug.assert(method_index <= 0x7fff_ffff);
+            break :blk (@as(u64, 2) << 62) | (trait_index << 31) | method_index;
+        },
+        .statement => |owner| blk: {
+            const item_index: u64 = @intFromEnum(owner.item);
+            const stmt_index: u64 = @intFromEnum(owner.stmt);
+            std.debug.assert(item_index <= 0x7fff_ffff);
+            std.debug.assert(stmt_index <= 0x7fff_ffff);
+            break :blk (@as(u64, 3) << 62) | (item_index << 31) | stmt_index;
+        },
     };
 }
 

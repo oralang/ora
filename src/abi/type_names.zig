@@ -36,6 +36,19 @@ pub fn fixedBytesAbiName(len: u8) ?[]const u8 {
     return builtin.fixedBytesName(len);
 }
 
+pub fn integerAbiName(signed: bool, bits: u16) ?[]const u8 {
+    const spec = builtin.lookupIntegerBuiltin(signed, bits) orelse return null;
+    return builtinSpecAbiName(spec);
+}
+
+pub fn publicTupleReturnAbiName() []const u8 {
+    return "tuple";
+}
+
+pub fn publicStructReturnAbiName() []const u8 {
+    return "struct";
+}
+
 test "ABI builtin names are derived from builtin type metadata" {
     try std.testing.expectEqualStrings("uint8", builtinAbiName(.u8));
     try std.testing.expectEqualStrings("uint160", builtinAbiName(.u160));
@@ -43,4 +56,6 @@ test "ABI builtin names are derived from builtin type metadata" {
     try std.testing.expectEqualStrings("address", builtinAbiName(.address));
     try std.testing.expectEqualStrings("void", builtinAbiName(.void));
     try std.testing.expectEqualStrings("bytes20", fixedBytesAbiName(20) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("uint256", integerAbiName(false, 256) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("int128", integerAbiName(true, 128) orelse return error.TestUnexpectedResult);
 }

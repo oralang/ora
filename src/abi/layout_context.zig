@@ -4,10 +4,11 @@ const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout = @import("layout.zig");
-const public_policy = @import("public_policy.zig");
+const abi_policy = @import("policy.zig");
+const abi_type_names = @import("type_names.zig");
 
-pub const ResultInputMode = public_policy.ResultInputMode;
-pub const ResultCarrierPlan = public_policy.ResultCarrierPlan;
+pub const ResultInputMode = abi_policy.ResultInputMode;
+pub const ResultCarrierPlan = abi_policy.ResultCarrierPlan;
 
 pub const LayoutContext = struct {
     allocator: std.mem.Allocator,
@@ -26,6 +27,28 @@ pub const LayoutContext = struct {
         defer arena.deinit();
         const ty = try type_descriptors.descriptorFromTypeExpr(arena.allocator(), self.file, self.item_index, type_expr_id);
         return self.canonicalAbiTypeForType(ty);
+    }
+
+    pub fn publicReturnAbiTypeForType(self: *const LayoutContext, ty: sema.Type) anyerror![]const u8 {
+        if (abi_policy.publicReturnAbiTypeName(ty)) |name| return self.allocator.dupe(u8, name);
+        return self.canonicalAbiTypeForType(ty);
+    }
+
+    pub fn signatureForMethod(self: *const LayoutContext, name: []const u8, has_self: bool, param_types: []const sema.Type) anyerror![]const u8 {
+        var parts: std.ArrayList([]const u8) = .{};
+        defer {
+            for (parts.items) |part| self.allocator.free(part);
+            parts.deinit(self.allocator);
+        }
+
+        _ = has_self;
+        for (param_types) |param_type| {
+            try parts.append(self.allocator, try self.canonicalAbiTypeForType(param_type));
+        }
+
+        const joined = try std.mem.join(self.allocator, ",", parts.items);
+        defer self.allocator.free(joined);
+        return std.fmt.allocPrint(self.allocator, "{s}({s})", .{ name, joined });
     }
 
     pub fn staticWordCountForType(self: *const LayoutContext, ty: sema.Type) ?usize {
@@ -47,7 +70,7 @@ pub const LayoutContext = struct {
     }
 
     pub fn planResultCarrier(self: *const LayoutContext, ty: sema.Type) ?ResultCarrierPlan {
-        const policy = self.publicPolicy();
+        const policy = self.abiPolicy();
         return policy.planResultCarrier(ty);
     }
 
@@ -144,7 +167,7 @@ pub const LayoutContext = struct {
             if (instantiated.repr_type) |repr| return self.normalizeType(arena, repr);
             // Unlike bitfields, scalar enums have an established default
             // representation in Ora's ABI and HIR lowering: uint256/i256.
-            return uintType(256, "uint256");
+            return uintType(256, abi_type_names.builtinAbiName(.u256));
         }
 
         const item_id = self.item_index.lookup(name) orelse return error.UnsupportedAbiType;
@@ -157,7 +180,7 @@ pub const LayoutContext = struct {
                 }
                 // Unlike bitfields, scalar enums have an established default
                 // representation in Ora's ABI and HIR lowering: uint256/i256.
-                break :blk uintType(256, "uint256");
+                break :blk uintType(256, abi_type_names.builtinAbiName(.u256));
             },
             else => error.UnsupportedAbiType,
         };
@@ -227,7 +250,7 @@ pub const LayoutContext = struct {
     }
 
     fn normalizeErrorPayloadTypeFromDecl(self: *const LayoutContext, arena: std.mem.Allocator, error_decl: ast.ErrorDeclItem) anyerror!sema.Type {
-        if (error_decl.parameters.len == 0) return uintType(256, "uint256");
+        if (error_decl.parameters.len == 0) return uintType(256, abi_type_names.builtinAbiName(.u256));
         if (error_decl.parameters.len == 1) {
             const param_ty = self.typecheck.pattern_types[error_decl.parameters[0].pattern.index()].type;
             return self.normalizeType(arena, param_ty);
@@ -249,7 +272,7 @@ pub const LayoutContext = struct {
         };
     }
 
-    const PublicPolicyProvider = struct {
+    const AbiPolicyProvider = struct {
         context: *const LayoutContext,
 
         pub fn patternType(self: @This(), pattern_id: ast.PatternId) sema.Type {
@@ -267,6 +290,19 @@ pub const LayoutContext = struct {
             };
         }
 
+        pub fn instantiatedStructFields(self: @This(), name: []const u8) ?[]const sema.InstantiatedStructField {
+            const instantiated = self.context.typecheck.instantiatedStructByName(name) orelse return null;
+            return instantiated.fields;
+        }
+
+        pub fn hasInstantiatedEnum(self: @This(), name: []const u8) bool {
+            return self.context.typecheck.instantiatedEnumByName(name) != null;
+        }
+
+        pub fn hasInstantiatedBitfield(self: @This(), name: []const u8) bool {
+            return self.context.typecheck.instantiatedBitfieldByName(name) != null;
+        }
+
         pub fn staticWordCount(self: @This(), ty: sema.Type) ?usize {
             return self.context.staticWordCountForType(ty);
         }
@@ -276,7 +312,7 @@ pub const LayoutContext = struct {
         }
     };
 
-    fn publicPolicy(self: *const LayoutContext) public_policy.Policy(PublicPolicyProvider) {
+    fn abiPolicy(self: *const LayoutContext) abi_policy.Policy(AbiPolicyProvider) {
         return .{
             .allocator = self.allocator,
             .file = self.file,

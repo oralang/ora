@@ -3,7 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
-const hir_abi = @import("abi.zig");
+const type_builtin = @import("ora_types").builtin;
 const hir_locals = @import("locals.zig");
 
 pub const LoopContext = struct {
@@ -91,7 +91,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     if (std.mem.eql(u8, trimmed, "string")) return stringType(ctx);
     if (std.mem.eql(u8, trimmed, "bytes")) return bytesType(ctx);
     if (std.mem.eql(u8, trimmed, "void")) return mlir.oraNoneTypeCreate(ctx);
-    if (hir_abi.parseFixedBytesSpelling(trimmed) != null) return defaultIntegerType(ctx);
+    if (type_builtin.parseFixedBytesName(trimmed) != null) return defaultIntegerType(ctx);
     if (parseSignedIntegerType(trimmed)) |int_info| {
         return mlir.oraIntegerTypeCreate(ctx, int_info.bits);
     }

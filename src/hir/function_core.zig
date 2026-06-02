@@ -64,7 +64,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .deferred_return_kind = .none,
                 .deferred_return_carried_locals = &.{},
                 .in_try_block = false,
-                .in_ghost_context = function.is_ghost,
+                .in_ghost_context = parent.itemHasVerificationFact(item_id, .ghost_function),
                 .current_scf_carried_locals = null,
                 .block_context = null,
                 .unrolled_loop_context = null,
@@ -119,14 +119,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         pub fn lower(self: *FunctionLowerer) anyerror!void {
             if (self.function) |function| {
                 try @This().insertParameterRefinementGuards(self, function);
-                for (function.clauses) |clause| {
-                    if (clause.kind != .requires) continue;
-                    const condition = try self.lowerExpr(clause.expr, &self.locals);
-                    const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
-                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                    appendOp(self.block, op);
-                }
-                try @This().emitGuardClauses(self, function, &self.locals);
+                try @This().emitRequiresClauses(self, &self.locals);
+                try @This().emitGuardClauses(self, &self.locals);
                 for (self.extra_verification_clauses) |clause| {
                     if (clause.kind != .requires) continue;
                     const condition = try @This().lowerExtraVerificationClauseCondition(self, clause, &self.locals);
@@ -168,12 +162,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return locals.clone();
         }
 
+        fn emitRequiresClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
+            const item_id = self.item_id orelse return;
+            for (self.parent.itemVerificationFactEntries(item_id)) |entry| {
+                const fact = self.parent.verificationFact(entry);
+                if (fact.kind != .requires) continue;
+                const expr = try @This().factExpr(fact.*);
+                const condition = try self.lowerExpr(expr, locals);
+                const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, op);
+            }
+        }
+
         fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv, exit_kind: EnsureExitKind, ok_result_value: ?mlir.MlirValue) anyerror!void {
-            if (self.function) |function| {
-                for (function.clauses) |clause| {
-                    if (!@This().ensureClauseApplies(clause.kind, exit_kind)) continue;
-                    const condition = try @This().lowerEnsureClauseCondition(self, clause.kind, clause.expr, locals, ok_result_value);
-                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
+            if (self.item_id) |item_id| {
+                for (self.parent.itemVerificationFactEntries(item_id)) |entry| {
+                    const fact = self.parent.verificationFact(entry);
+                    if (!@This().ensureFactApplies(fact.kind, exit_kind)) continue;
+                    const expr = try @This().factExpr(fact.*);
+                    const condition = try @This().lowerEnsureCondition(self, fact.kind == .ensures_ok, expr, locals, ok_result_value);
+                    const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
                     if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
                     appendOp(self.block, ensure);
                 }
@@ -181,12 +190,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (self.extra_verification_clauses) |clause| {
                 if (!@This().ensureClauseApplies(clause.kind, exit_kind)) continue;
                 const condition = blk: {
-                    const previous_result = self.current_return_value;
-                    if (clause.kind == .ensures_ok and ok_result_value != null) {
-                        self.current_return_value = ok_result_value;
-                    }
-                    defer self.current_return_value = previous_result;
-                    break :blk try @This().lowerExtraVerificationClauseCondition(self, clause, locals);
+                    var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
+                    break :blk try @This().lowerEnsureCondition(self, clause.kind == .ensures_ok, clause.expr, &clause_locals, ok_result_value);
                 };
                 const ensure = mlir.oraEnsuresOpCreate(self.parent.context, self.parent.location(clause.range), condition);
                 if (mlir.oraOperationIsNull(ensure)) return error.MlirOperationCreationFailed;
@@ -197,19 +202,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
         }
 
-        fn lowerEnsureClauseCondition(
+        fn lowerEnsureCondition(
             self: *FunctionLowerer,
-            kind: ast.SpecClauseKind,
+            bind_ok_result: bool,
             expr: ast.ExprId,
             locals: *LocalEnv,
             ok_result_value: ?mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             const previous_result = self.current_return_value;
-            if (kind == .ensures_ok and ok_result_value != null) {
+            if (bind_ok_result and ok_result_value != null) {
                 self.current_return_value = ok_result_value;
             }
             defer self.current_return_value = previous_result;
             return self.lowerExpr(expr, locals);
+        }
+
+        fn ensureFactApplies(kind: sema.VerificationFactKind, exit_kind: EnsureExitKind) bool {
+            return switch (kind) {
+                .ensures => true,
+                .ensures_ok => exit_kind == .ok,
+                .ensures_err => exit_kind == .err,
+                else => false,
+            };
         }
 
         fn ensureClauseApplies(kind: ast.SpecClauseKind, exit_kind: EnsureExitKind) bool {
@@ -221,10 +235,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn emitGuardClauses(self: *FunctionLowerer, function: ast.FunctionItem, locals: *LocalEnv) anyerror!void {
-            for (function.clauses) |clause| {
-                if (clause.kind != .guard) continue;
-                try @This().emitRuntimeGuard(self, clause, locals);
+        fn emitGuardClauses(self: *FunctionLowerer, locals: *LocalEnv) anyerror!void {
+            const item_id = self.item_id orelse return;
+            for (self.parent.itemVerificationFactEntries(item_id)) |entry| {
+                const fact = self.parent.verificationFact(entry);
+                if (fact.kind != .guard) continue;
+                try @This().emitRuntimeGuard(self, fact.range, try @This().factExpr(fact.*), locals);
             }
         }
 
@@ -232,11 +248,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (self.extra_verification_clauses) |clause| {
                 if (clause.kind != .guard) continue;
                 var clause_locals = try @This().localsWithExtraVerificationAliases(self, locals, clause);
-                try @This().emitRuntimeGuard(self, .{
-                    .range = clause.range,
-                    .kind = .guard,
-                    .expr = clause.expr,
-                }, &clause_locals);
+                try @This().emitRuntimeGuard(self, clause.range, clause.expr, &clause_locals);
             }
         }
 
@@ -253,16 +265,64 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return clause_locals;
         }
 
-        fn emitRuntimeGuard(self: *FunctionLowerer, clause: ast.SpecClause, locals: *LocalEnv) anyerror!void {
-            const condition = try self.lowerExpr(clause.expr, locals);
-            const loc = self.parent.location(clause.range);
-            const message = try @This().guardMessage(self, clause.expr);
-            const line_col = self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = clause.range });
+        fn factExpr(fact: sema.VerificationFact) !ast.ExprId {
+            return fact.expr orelse error.InvalidVerificationFact;
+        }
+
+        fn statementFactOwner(self: *FunctionLowerer, statement_id: ast.StmtId) !sema.VerificationStatementOwner {
+            return .{
+                .item = self.item_id orelse return error.InvalidVerificationFact,
+                .stmt = statement_id,
+            };
+        }
+
+        pub fn lowerInvariantFact(self: *FunctionLowerer, fact: sema.VerificationFact, locals: *LocalEnv) anyerror!void {
+            const value = try self.lowerExpr(try @This().factExpr(fact), locals);
+            const op = mlir.oraInvariantOpCreate(
+                self.parent.context,
+                self.parent.location(fact.range),
+                value,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            if (fact.label) |label| {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.label"), namedStringAttr(self.parent.context, "ora.label", label).attribute);
+            }
+            appendOp(self.block, op);
+        }
+
+        pub fn lowerStatementInvariants(self: *FunctionLowerer, statement_id: ast.StmtId, locals: *LocalEnv) anyerror!void {
+            const owner = try @This().statementFactOwner(self, statement_id);
+            for (self.parent.statementVerificationFactEntries(owner)) |entry| {
+                const fact = self.parent.statementVerificationFact(entry);
+                if (fact.kind != .loop_invariant) continue;
+                try @This().lowerInvariantFact(self, fact.*, locals);
+            }
+        }
+
+        fn lowerHavocFact(self: *FunctionLowerer, statement_id: ast.StmtId) anyerror!void {
+            const owner = try @This().statementFactOwner(self, statement_id);
+            for (self.parent.statementVerificationFactEntries(owner)) |entry| {
+                const fact = self.parent.statementVerificationFact(entry);
+                if (fact.kind != .havoc) continue;
+                const target_name = fact.target_name orelse return error.InvalidVerificationFact;
+                const op = mlir.oraHavocOpCreate(self.parent.context, self.parent.location(fact.range), strRef(target_name));
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                appendOp(self.block, op);
+                return;
+            }
+            return error.InvalidVerificationFact;
+        }
+
+        fn emitRuntimeGuard(self: *FunctionLowerer, range: source.TextRange, expr: ast.ExprId, locals: *LocalEnv) anyerror!void {
+            const condition = try self.lowerExpr(expr, locals);
+            const loc = self.parent.location(range);
+            const message = try @This().guardMessage(self, expr);
+            const line_col = self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = range });
             const guard_id = try std.fmt.allocPrint(self.parent.allocator, "guard:{s}:{d}:{d}:{d}:guard_clause", .{
                 self.parent.sources.file(self.parent.file.file_id).path,
                 line_col.line,
                 line_col.column,
-                clause.range.len(),
+                range.len(),
             });
             defer self.parent.allocator.free(message);
             defer self.parent.allocator.free(guard_id);
@@ -1265,10 +1325,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     appendOp(self.block, op);
                     return false;
                 },
-                .Havoc => |havoc_stmt| {
-                    const op = mlir.oraHavocOpCreate(self.parent.context, self.parent.location(havoc_stmt.range), strRef(havoc_stmt.name));
-                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                    appendOp(self.block, op);
+                .Havoc => {
+                    try @This().lowerHavocFact(self, statement_id);
                     return false;
                 },
                 .Block => |block_stmt| {
@@ -1279,8 +1337,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return self.lowerLabeledBlockStmt(block_stmt, locals);
                 },
                 .If => |if_stmt| return self.lowerIfStmt(if_stmt, locals),
-                .While => |while_stmt| return self.lowerWhileStmt(while_stmt, locals),
-                .For => |for_stmt| return @This().lowerForStmt(self, for_stmt, locals),
+                .While => |while_stmt| return self.lowerWhileStmt(statement_id, while_stmt, locals),
+                .For => |for_stmt| return @This().lowerForStmt(self, statement_id, for_stmt, locals),
                 .Switch => |switch_stmt| return self.lowerSwitchStmt(switch_stmt, locals),
                 .Try => |try_stmt| return self.lowerTryStmt(try_stmt, locals),
                 .Break => |jump| {
@@ -2530,7 +2588,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             appendOp(self.block, op);
         }
 
-        fn lowerForStmt(self: *FunctionLowerer, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
+        fn lowerForStmt(self: *FunctionLowerer, statement_id: ast.StmtId, for_stmt: ast.ForStmt, locals: *LocalEnv) anyerror!bool {
             if (try @This().lowerUnrolledFiniteForStmt(self, for_stmt, locals)) |terminated| {
                 return terminated;
             }
@@ -2769,7 +2827,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     then_lowerer.deferred_return_carried_locals = carried_locals.items;
                 }
                 var then_locals = try self.cloneLocals(&body_locals);
-                try @This().lowerLoopInvariants(&then_lowerer, for_stmt.invariants, &then_locals);
+                try @This().lowerStatementInvariants(&then_lowerer, statement_id, &then_locals);
                 _ = try then_lowerer.lowerBody(for_stmt.body, &then_locals);
                 if (!support.blockEndsWithTerminator(then_block)) {
                     try then_lowerer.appendScfYieldFromLocals(then_block, for_stmt.range, &then_locals, carried_locals.items);
@@ -2785,7 +2843,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     @This().annotateCarriedLocalResults(self, carried_locals.items, if_op);
                 }
             } else {
-                try @This().lowerLoopInvariants(&body_lowerer, for_stmt.invariants, &body_locals);
+                try @This().lowerStatementInvariants(&body_lowerer, statement_id, &body_locals);
                 _ = try body_lowerer.lowerBody(for_stmt.body, &body_locals);
             }
             if (!support.blockEndsWithTerminator(body_block)) {
@@ -3062,39 +3120,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => null,
             };
-        }
-
-        fn lowerLoopInvariants(self: *FunctionLowerer, invariants: []const ast.ExprId, locals: *LocalEnv) anyerror!void {
-            for (invariants) |expr_id| {
-                const InvariantInfo = struct {
-                    expr_id: ast.ExprId,
-                    label: ?[]const u8,
-                };
-                const invariant_info: InvariantInfo = switch (self.parent.file.expression(expr_id).*) {
-                    .Call => |call| blk: {
-                        if (call.args.len == 1) {
-                            const label = switch (self.parent.file.expression(call.callee).*) {
-                                .Name => |name| name.name,
-                                else => null,
-                            };
-                            break :blk .{ .expr_id = call.args[0], .label = label };
-                        }
-                        break :blk .{ .expr_id = expr_id, .label = null };
-                    },
-                    else => .{ .expr_id = expr_id, .label = null },
-                };
-                const value = try self.lowerExpr(invariant_info.expr_id, locals);
-                const op = mlir.oraInvariantOpCreate(
-                    self.parent.context,
-                    self.parent.location(support.exprRange(self.parent.file, expr_id)),
-                    value,
-                );
-                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                if (invariant_info.label) |label| {
-                    mlir.oraOperationSetAttributeByName(op, strRef("ora.label"), namedStringAttr(self.parent.context, "ora.label", label).attribute);
-                }
-                appendOp(self.block, op);
-            }
         }
 
         fn convertIndexToIndexType(self: *FunctionLowerer, index: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {

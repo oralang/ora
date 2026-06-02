@@ -37,7 +37,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .TypeAlias => {},
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
-                .GhostBlock => |ghost_block| try @This().lowerGhostBlock(self, ghost_block, parent_block),
+                .GhostBlock => |ghost_block| try @This().lowerGhostBlock(self, item_id, ghost_block, parent_block),
                 .Field => |field| try self.lowerField(item_id, field, parent_block),
                 .Constant => |constant| try self.lowerConstant(item_id, constant, parent_block),
                 .Error => {},
@@ -66,8 +66,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             self.guarded_storage_roots = &guarded_storage_roots;
             defer self.guarded_storage_roots = previous_guarded_roots;
 
-            for (contract.invariants) |expr_id| {
-                try contract_lowerer.lowerInvariant(expr_id);
+            for (self.itemVerificationFactEntries(item_id)) |entry| {
+                const fact = self.verificationFact(entry);
+                if (fact.kind != .contract_invariant) continue;
+                try contract_lowerer.lowerInvariant(fact.*);
             }
             for (self.typecheck.instantiated_structs) |instantiated| {
                 if (self.enclosingContractForItem(instantiated.template_item_id)) |contract_id| {
@@ -117,70 +119,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
         }
 
-        fn lowerImplGhostBlock(self: *Lowerer, impl_item: ast.ImplItem, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
-            var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
-            function_lowerer.in_ghost_context = true;
-
-            var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
-            if (@This().firstImplSelfPattern(self, impl_item)) |pattern_id| {
-                function_lowerer.trait_ghost_self_pattern = pattern_id;
-                const self_value = try @This().lowerImplGhostSelfValue(self, impl_item, ghost_block.range, &function_lowerer);
-                try locals.bindPattern(self.file, pattern_id, self_value);
-            }
-
-            _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
-        }
-
-        fn lowerImplGhostSelfValue(self: *Lowerer, impl_item: ast.ImplItem, range: source.TextRange, function_lowerer: *FunctionLowerer) anyerror!mlir.MlirValue {
-            const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return error.MlirOperationCreationFailed;
-            const self_type = mlir.oraStructTypeGet(self.context, strRef(impl_item.target_name));
-
-            switch (self.file.item(target_item_id).*) {
-                .Contract => {
-                    const created = mlir.oraStructInstantiateOpCreate(self.context, self.location(range), strRef(impl_item.target_name), null, 0, self_type);
-                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
-                },
-                .Struct => |struct_item| {
-                    var operands: std.ArrayList(mlir.MlirValue) = .{};
-                    for (struct_item.fields) |field| {
-                        try operands.append(self.allocator, try function_lowerer.defaultValue(self.lowerTypeExpr(field.type_expr), field.range));
-                    }
-                    const created = mlir.oraStructInstantiateOpCreate(
-                        self.context,
-                        self.location(range),
-                        strRef(impl_item.target_name),
-                        if (operands.items.len == 0) null else operands.items.ptr,
-                        operands.items.len,
-                        self_type,
-                    );
-                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
-                },
-                else => {},
-            }
-
-            return error.MlirOperationCreationFailed;
-        }
-
         pub fn enclosingContractForItem(self: *const Lowerer, item_id: ast.ItemId) ?ast.ItemId {
             for (self.file.items, 0..) |item, index| {
                 if (item != .Contract) continue;
                 for (item.Contract.members) |member_id| {
                     if (member_id.index() == item_id.index()) return ast.ItemId.fromIndex(index);
-                }
-            }
-            return null;
-        }
-
-        fn firstImplSelfPattern(self: *Lowerer, impl_item: ast.ImplItem) ?ast.PatternId {
-            for (impl_item.methods) |method_item_id| {
-                const item = self.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                for (item.Function.parameters) |parameter| {
-                    if (parameter.is_comptime) continue;
-                    const pattern = self.file.pattern(parameter.pattern).*;
-                    if (pattern != .Name) break;
-                    if (std.mem.eql(u8, pattern.Name.name, "self")) return parameter.pattern;
-                    break;
                 }
             }
             return null;
@@ -313,6 +256,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const target_item_index = try self.module_query.?.item_index(self.module_query.?.context, target_module_id);
             const target_resolution = try self.module_query.?.resolution(self.module_query.?.context, target_module_id);
             const target_typecheck = try self.module_query.?.module_typecheck(self.module_query.?.context, target_module_id);
+            const target_verification_facts = try self.module_query.?.module_verification_facts(self.module_query.?.context, target_module_id);
+            const target_verification_fact_lookup = try self.makeVerificationFactLookup(target_verification_facts.facts);
+            const target_verification_trait_method_fact_lookup = try self.makeVerificationTraitMethodFactLookup(target_verification_facts.facts);
+            const target_verification_statement_fact_lookup = try self.makeVerificationStatementFactLookup(target_verification_facts.facts);
             const target_const_eval = try self.module_query.?.const_eval(self.module_query.?.context, target_module_id);
 
             const module_name = try self.allocator.dupe(u8, self.sources.module(target_module_id).name);
@@ -334,6 +281,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .resolution = target_resolution,
                 .const_eval = target_const_eval,
                 .typecheck = target_typecheck,
+                .verification_facts = target_verification_facts,
+                .verification_fact_lookup = target_verification_fact_lookup,
+                .verification_trait_method_fact_lookup = target_verification_trait_method_fact_lookup,
+                .verification_statement_fact_lookup = target_verification_statement_fact_lookup,
                 .module_query = self.module_query,
                 .module_body = self.module_body,
                 .items = self.items,
@@ -560,7 +511,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 param_types.items.len,
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-            if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
             for (parameters, 0..) |parameter, index| {
                 const param_type = if (concrete_runtime_parameter_types) |resolved|
@@ -655,6 +606,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             attrs: *std.ArrayList(mlir.MlirNamedAttribute),
             item_id: ast.ItemId,
         ) anyerror!void {
+            if (!self.itemHasVerificationFact(item_id, .modifies)) return;
             if (item_id.index() >= self.typecheck.item_modifies.len) return;
             const slots = self.typecheck.item_modifies[item_id.index()] orelse return;
 
@@ -716,58 +668,85 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return true;
         }
 
+        const TraitMethodMatch = struct {
+            method: ast.nodes.TraitMethod,
+            owner: sema.VerificationTraitMethodOwner,
+        };
+
         fn traitVerificationClausesForImplMethod(self: *Lowerer, method_item_id: ast.ItemId) anyerror![]const FunctionLowerer.ExtraVerificationClause {
             const impl_item = @This().enclosingImplForMethod(self, method_item_id) orelse return &.{};
             const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return &.{};
-            const trait_item = switch (self.file.item(trait_item_id).*) {
-                .Trait => |trait_item| trait_item,
-                else => return &.{},
-            };
 
             var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
-            if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |trait_method| {
-                const aliases = try @This().traitMethodPatternAliases(self, trait_method, self.file.item(method_item_id).Function);
-                for (trait_method.clauses) |clause| {
-                    try clauses.append(self.allocator, .{
-                        .kind = clause.kind,
-                        .expr = clause.expr,
-                        .range = clause.range,
-                        .verification_context = "trait_method_contract",
-                        .pattern_aliases = aliases,
-                    });
+            if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |matched| {
+                const aliases = try @This().traitMethodPatternAliases(self, matched.method, self.file.item(method_item_id).Function);
+                for (self.traitMethodVerificationFactEntries(matched.owner)) |entry| {
+                    const fact = self.traitMethodVerificationFact(entry);
+                    try @This().appendExtraVerificationClauseFromFact(self, &clauses, fact.*, "trait_method_contract", aliases);
                 }
             }
 
-            const ghost_id = trait_item.ghost_block orelse return clauses.toOwnedSlice(self.allocator);
-            const ghost_block = self.file.item(ghost_id).GhostBlock;
-            const body = self.file.body(ghost_block.body).*;
-            for (body.statements) |stmt_id| {
-                switch (self.file.statement(stmt_id).*) {
-                    .Assert => |assert_stmt| {
-                        try clauses.append(self.allocator, .{
-                            .kind = .ensures,
-                            .expr = assert_stmt.condition,
-                            .range = assert_stmt.range,
-                            .verification_context = "ghost_axiom",
-                        });
-                    },
-                    .Assume => |assume_stmt| {
-                        try clauses.append(self.allocator, .{
-                            .kind = .requires,
-                            .expr = assume_stmt.condition,
-                            .range = assume_stmt.range,
-                            .verification_context = "ghost_axiom",
-                        });
-                    },
-                    else => {},
-                }
-            }
+            try @This().appendTraitGhostFactClauses(self, trait_item_id, &clauses);
             return clauses.toOwnedSlice(self.allocator);
         }
 
-        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item_id: ast.ItemId, method_item_id: ast.ItemId) ?ast.nodes.TraitMethod {
+        fn appendExtraVerificationClauseFromFact(
+            self: *Lowerer,
+            clauses: *std.ArrayList(FunctionLowerer.ExtraVerificationClause),
+            fact: sema.VerificationFact,
+            verification_context: []const u8,
+            pattern_aliases: []const FunctionLowerer.PatternAlias,
+        ) anyerror!void {
+            const kind = fact.kind.specClauseKind() orelse return;
+            const expr = fact.expr orelse return error.InvalidVerificationFact;
+            try clauses.append(self.allocator, .{
+                .kind = kind,
+                .expr = expr,
+                .range = fact.range,
+                .verification_context = verification_context,
+                .pattern_aliases = pattern_aliases,
+            });
+        }
+
+        fn appendTraitGhostFactClauses(
+            self: *Lowerer,
+            trait_item_id: ast.ItemId,
+            clauses: *std.ArrayList(FunctionLowerer.ExtraVerificationClause),
+        ) anyerror!void {
+            for (self.itemVerificationFactEntries(trait_item_id)) |entry| {
+                const fact = self.verificationFact(entry);
+                if (fact.context != .trait_ghost_block) continue;
+                const kind: ast.SpecClauseKind = switch (fact.kind) {
+                    .assert => .ensures,
+                    .assume => .requires,
+                    .ghost_axiom => continue,
+                    else => unreachable,
+                };
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
+                try clauses.append(self.allocator, .{
+                    .kind = kind,
+                    .expr = expr,
+                    .range = fact.range,
+                    .verification_context = "ghost_axiom",
+                });
+            }
+        }
+
+        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item_id: ast.ItemId, method_item_id: ast.ItemId) ?TraitMethodMatch {
             const method = self.file.item(method_item_id).Function;
-            return self.item_index.lookupTraitMethod(self.file, trait_item_id, method.name);
+            const method_index = self.item_index.lookupTraitMethodIndex(trait_item_id, method.name) orelse return null;
+            const trait_item = switch (self.file.item(trait_item_id).*) {
+                .Trait => |trait_item| trait_item,
+                else => return null,
+            };
+            if (method_index >= trait_item.methods.len) return null;
+            return .{
+                .method = trait_item.methods[method_index],
+                .owner = .{
+                    .trait_item = trait_item_id,
+                    .method_index = method_index,
+                },
+            };
         }
 
         fn traitMethodPatternAliases(self: *Lowerer, trait_method: ast.nodes.TraitMethod, impl_method: ast.FunctionItem) anyerror![]const FunctionLowerer.PatternAlias {
@@ -881,7 +860,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     else => body_type,
                 };
                 if (abi_return_type.kind() != .void) {
-                    const abi_return = abi_support.externReturnAbiType(self.allocator, abi_return_type) catch |err| switch (err) {
+                    const abi_return = @This().publicReturnAbiTypeForType(self, abi_return_type) catch |err| switch (err) {
                         error.UnsupportedAbiType => blk: {
                             const return_type_id = function.return_type.?;
                             const layout = @This().abiLayoutForType(self, abi_return_type) catch try @This().abiLayoutForTypeExpr(self, return_type_id);
@@ -934,7 +913,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                     break :blk created;
                 } else try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
-                if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
+                if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
                 if (field.type_expr) |_| {
                     try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
@@ -970,7 +949,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .none => try self.createNamedPlaceholderOp("ora.field_decl", field.name, field.range, ty),
             };
-            if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
             if (field.type_expr) |_| {
                 try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
@@ -995,7 +974,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (try @This().constValueAttr(self, value, sema_result_type, result_type)) |value_attr| {
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (!mlir.oraOperationIsNull(created)) {
-                        if (constant.is_ghost) @This().attachGhostAttrs(self, created, "ghost_constant");
+                        if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, created, context);
                         appendOp(parent_block, created);
                         try self.appendItemHandle(item_id, .constant, constant.name, constant.range, created);
                         return;
@@ -1057,14 +1036,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 else => try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type),
             };
-            if (constant.is_ghost) @This().attachGhostAttrs(self, op, "ghost_constant");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .constant, constant.name, constant.range, op);
         }
 
-        pub fn lowerGhostBlock(self: *Lowerer, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
+        pub fn lowerGhostBlock(self: *Lowerer, item_id: ast.ItemId, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
             var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
-            function_lowerer.in_ghost_context = true;
+            function_lowerer.item_id = item_id;
+            function_lowerer.in_ghost_context = self.itemHasVerificationFact(item_id, .ghost_block);
             var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
             _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
         }
@@ -1350,7 +1330,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             for (error_decl.parameters, 0..) |param, index| {
                 param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
             }
-            const maybe_signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+            const maybe_signature = @This().abiSignatureForMethod(self, error_decl.name, false, param_types) catch |err| switch (err) {
                 error.UnsupportedAbiType => null,
                 else => return err,
             };
@@ -1403,7 +1383,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
             }
 
-            const signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+            const signature = @This().abiSignatureForMethod(self, error_decl.name, false, param_types) catch |err| switch (err) {
                 error.UnsupportedAbiType => try std.fmt.allocPrint(self.allocator, "{s}#ora-internal-error/{d}", .{ error_decl.name, error_decl.parameters.len }),
                 else => return err,
             };
@@ -1513,6 +1493,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn abiLayoutForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
             const ctx = @This().abiLayoutContext(self);
             return ctx.canonicalAbiTypeForType(ty);
+        }
+
+        fn publicReturnAbiTypeForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.publicReturnAbiTypeForType(ty);
+        }
+
+        fn abiSignatureForMethod(self: *Lowerer, name: []const u8, has_self: bool, param_types: []const sema.Type) anyerror![]const u8 {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.signatureForMethod(name, has_self, param_types);
         }
 
         fn publicResultInputMode(self: *Lowerer, ty: sema.Type) abi_layout_context.ResultInputMode {

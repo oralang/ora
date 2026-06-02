@@ -28,7 +28,6 @@ const boolType = support.boolType;
 const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
-const exprRange = support.exprRange;
 const memRefType = support.memRefType;
 const namedBoolAttr = support.namedBoolAttr;
 const namedStringAttr = support.namedStringAttr;
@@ -473,7 +472,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return false;
         }
 
-        pub fn lowerWhileStmt(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
+        pub fn lowerWhileStmt(self: *FunctionLowerer, statement_id: ast.StmtId, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
             if (try @This().lowerUnrolledFiniteWhileStmt(self, while_stmt, locals)) |terminated| {
                 return terminated;
             }
@@ -637,16 +636,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
                 appendOp(after_block, clear_continue_store);
             }
-            for (while_stmt.invariants) |expr_id| {
-                const value = try body_lowerer.lowerExpr(expr_id, &body_locals);
-                const op = mlir.oraInvariantOpCreate(
-                    self.parent.context,
-                    self.parent.location(exprRange(self.parent.file, expr_id)),
-                    value,
-                );
-                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                appendOp(after_block, op);
-            }
+            try FunctionLowerer.lowerStatementInvariants(&body_lowerer, statement_id, &body_locals);
             _ = try body_lowerer.lowerBody(while_stmt.body, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, while_stmt.range, &body_locals, carried_locals.items);

@@ -179,8 +179,8 @@ test "compiler aggregates sema and verification across multiple root items" {
 
     const module_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 2), module_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, module_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, module_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, module_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, module_facts.facts[1].kind);
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     const hir_text = try hir_result.renderText(testing.allocator);
