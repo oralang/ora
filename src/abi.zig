@@ -8,8 +8,9 @@ const compiler = @import("compiler.zig");
 const compiler_abi = @import("hir/abi.zig");
 const compiler_abi_layout_context = @import("abi/layout_context.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
-const sema_refinements = @import("sema/refinements.zig");
-const type_builtin = @import("ora_types").builtin;
+const ora_types = @import("ora_types");
+const refinements = ora_types.refinement_semantics;
+const type_builtin = ora_types.builtin;
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
@@ -1204,7 +1205,7 @@ const CompilerAbiGenerator = struct {
                 if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{});
                 if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{});
                 if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
-                if (sema_refinements.isPathFormName(named.name)) return self.resolveSemaType(ctx, .address, &.{});
+                if (refinements.isPathFormName(named.name)) return self.resolveSemaType(ctx, .address, &.{});
                 if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
                 if (type_builtin.parseFixedBytesName(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
                 return error.UnsupportedAbiType;
@@ -1538,7 +1539,7 @@ const CompilerAbiGenerator = struct {
             if (ui_hints.max) |max| self.allocator.free(max);
         }
 
-        if (sema_refinements.kindForName(refinement.name)) |kind| {
+        if (refinements.kindForName(refinement.name)) |kind| {
             switch (kind) {
                 .non_zero_address => {
                     const next_predicate = try self.buildNonZeroAddressPredicate();
@@ -1563,7 +1564,7 @@ const CompilerAbiGenerator = struct {
                     }
                 },
                 .min_value, .max_value, .in_range, .basis_points => {
-                    const bounds = sema_refinements.bounds(refinement) orelse return error.UnsupportedAbiType;
+                    const bounds = refinements.bounds(refinement) orelse return error.UnsupportedAbiType;
                     const built = try buildBoundsBackedPredicate(self.allocator, bounds);
                     self.allocator.free(predicate_json);
                     predicate_json = built.predicate_json;
@@ -1660,7 +1661,7 @@ const BoundsBackedPredicate = struct {
     max_value: ?u256 = null,
 };
 
-fn buildBoundsBackedPredicate(allocator: std.mem.Allocator, bounds: sema_refinements.Bounds) !BoundsBackedPredicate {
+fn buildBoundsBackedPredicate(allocator: std.mem.Allocator, bounds: refinements.Bounds) !BoundsBackedPredicate {
     const min_value = if (bounds.min_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
     const max_value = if (bounds.max_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
 

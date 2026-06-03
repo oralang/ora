@@ -2,7 +2,9 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
-const ConstValue = @import("ora_types").ConstValue;
+const ora_types = @import("ora_types");
+const ConstValue = ora_types.ConstValue;
+const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
@@ -1556,11 +1558,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             switch (ty) {
                 .refinement => |refinement| {
                     try @This().appendAbiParamRefinementSpec(self, parts, refinement.base_type.*);
-                    if (sema.refinements.kindForName(refinement.name) == .non_zero_address) {
+                    if (refinements.kindForName(refinement.name) == .non_zero_address) {
                         try parts.append(self.allocator, try self.allocator.dupe(u8, "nonzero_address"));
                         return;
                     }
-                    if (sema.refinements.bounds(refinement)) |bounds| {
+                    if (refinements.bounds(refinement)) |bounds| {
                         const signed = try @This().refinementBaseIsSignedInteger(bounds.base_type);
                         if (bounds.min_text) |min_text| {
                             const min_value = try @This().parseAbiRefinementBound(min_text, signed);

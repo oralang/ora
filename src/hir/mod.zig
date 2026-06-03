@@ -4,6 +4,7 @@ const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 const ConstEvalResult = sema.ConstEvalResult;
+const refinements = @import("ora_types").refinement_semantics;
 const compiler_query = @import("../compiler_query.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
@@ -41,8 +42,6 @@ pub const abi_layout_test_support = struct {
         };
     }
 };
-
-pub const ModuleQuery = compiler_query.HirView;
 
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
@@ -218,7 +217,7 @@ pub fn lowerModule(
     const_eval: *const ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
     verification_facts: *const sema.ModuleVerificationFactsResult,
-    module_query: ?ModuleQuery,
+    module_query: ?compiler_query.HirView,
 ) !LoweringResult {
     var result = LoweringResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -324,7 +323,7 @@ const Lowerer = struct {
     verification_fact_lookup: []const VerificationFactEntry,
     verification_trait_method_fact_lookup: []const VerificationTraitMethodFactEntry,
     verification_statement_fact_lookup: []const VerificationStatementFactEntry,
-    module_query: ?ModuleQuery,
+    module_query: ?compiler_query.HirView,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
@@ -871,7 +870,7 @@ const Lowerer = struct {
         if (self.substitutedType(name)) |substituted| {
             return self.lowerSemaType(substituted, source.TextRange.empty(0));
         }
-        if (sema.refinements.isPathFormName(name)) {
+        if (refinements.isPathFormName(name)) {
             return mlir.oraNonZeroAddressTypeGet(self.context);
         }
         if (self.item_index.lookup(name)) |item_id| {
@@ -1467,7 +1466,7 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             else => lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
     }
-    if (sema.refinements.isPathFormName(generic.name)) {
+    if (refinements.isPathFormName(generic.name)) {
         return mlir.oraNonZeroAddressTypeGet(lowerer.context);
     }
     return support.lowerPathType(lowerer.context, generic.name);

@@ -7,7 +7,6 @@ const type_check = @import("type_check.zig");
 const verification = @import("verification.zig");
 const type_descriptors = @import("type_descriptors.zig");
 const abi_layout_provider = @import("abi_layout_provider.zig");
-pub const refinements = @import("refinements.zig");
 
 pub const ModuleImport = model.ModuleImport;
 pub const ModuleGraphInput = model.ModuleGraphInput;
@@ -55,7 +54,6 @@ pub const VerificationStatementOwner = model.VerificationStatementOwner;
 pub const VerificationFactOwner = model.VerificationFactOwner;
 pub const VerificationFact = model.VerificationFact;
 pub const TypeCheckKey = model.TypeCheckKey;
-pub const ImportQuery = type_check.ImportQuery;
 pub const VerificationFactsKey = model.VerificationFactsKey;
 pub const ModuleGraphResult = model.ModuleGraphResult;
 pub const ItemIndexResult = model.ItemIndexResult;

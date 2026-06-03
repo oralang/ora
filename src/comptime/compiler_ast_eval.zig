@@ -55,11 +55,9 @@ fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8
     return hash;
 }
 
-pub const TypeQuery = compiler_query.ComptimeView;
-
 pub const ConstEvalOptions = struct {
     module_id: ?source.ModuleId = null,
-    type_query: ?TypeQuery = null,
+    type_query: ?compiler_query.ComptimeView = null,
     config: EvalConfig = .default,
     chain_id: u64 = compile_options.default_chain_id,
 };
@@ -144,7 +142,7 @@ const ConstEvaluator = struct {
     values: []?ConstValue,
     env: CtEnv,
     module_id: ?source.ModuleId = null,
-    type_query: ?TypeQuery = null,
+    type_query: ?compiler_query.ComptimeView = null,
     fallback_item_index: ?*const model.ItemIndexResult = null,
     chain_id: u64,
     current_typecheck_key: ?model.TypeCheckKey = null,

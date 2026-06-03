@@ -51,13 +51,11 @@ const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
-const refinements = @import("refinements.zig");
+const refinements = ora_types.refinement_semantics;
 
 fn isAbiDecodeBuiltinName(name: []const u8) bool {
     return std.mem.eql(u8, name, "abiDecode") or std.mem.eql(u8, name, "abiDecodePermissive");
 }
-
-pub const ImportQuery = compiler_query.SemaView;
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
@@ -348,7 +346,7 @@ pub fn typeCheck(
     resolution: *const NameResolutionResult,
     const_eval: *const ConstEvalResult,
     key: TypeCheckKey,
-    import_query: ?ImportQuery,
+    import_query: ?compiler_query.SemaView,
 ) !TypeCheckResult {
     var result = TypeCheckResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -582,7 +580,7 @@ const TypeChecker = struct {
     item_index: *const ItemIndexResult,
     resolution: *const NameResolutionResult,
     const_eval: *const ConstEvalResult,
-    import_query: ?ImportQuery,
+    import_query: ?compiler_query.SemaView,
     item_types: []Type,
     item_regions: []Region,
     item_effects: []Effect,

@@ -1,10 +1,11 @@
 const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
+const ora_types = @import("ora_types");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
-const refinements = ora_root.compiler.sema.refinements;
+const refinements = ora_types.refinement_semantics;
 
 fn hasLabel(items: []const completion.Item, label: []const u8) bool {
     for (items) |item| {

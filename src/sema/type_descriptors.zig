@@ -1,8 +1,9 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
-const builtin = @import("ora_types").builtin;
+const ora_types = @import("ora_types");
+const builtin = ora_types.builtin;
 const model = @import("model.zig");
-const refinements = @import("refinements.zig");
+const refinements = ora_types.refinement_semantics;
 
 const ItemIndexResult = model.ItemIndexResult;
 const Type = model.Type;

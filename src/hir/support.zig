@@ -3,7 +3,9 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
-const type_builtin = @import("ora_types").builtin;
+const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
+const refinements = ora_types.refinement_semantics;
 const hir_locals = @import("locals.zig");
 
 pub const LoopContext = struct {
@@ -144,11 +146,11 @@ pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementTyp
 }
 
 pub fn isRefinementTypeName(name: []const u8) bool {
-    return sema.refinements.hasNativeMlirTypeName(name);
+    return refinements.hasNativeMlirTypeName(name);
 }
 
 pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const sema.RefinementArg) ?mlir.MlirType {
-    const entry = sema.refinements.entryForName(name) orelse return null;
+    const entry = refinements.entryForName(name) orelse return null;
     if (!entry.has_native_mlir_type) return null;
 
     return switch (entry.kind) {

@@ -721,7 +721,7 @@ test "compiler inserts parameter refinement guards in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "InRange"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "BasisPoints"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZero"));
-    // Runtime guard messages are pinned to sema.refinements.expectationText.
+    // Runtime guard messages are pinned to refinement_semantics.expectationText.
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MinValue value >= 100"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MaxValue value <= 200"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected InRange value between 50 and 150"));
