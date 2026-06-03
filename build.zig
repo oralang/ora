@@ -11,6 +11,105 @@ const std = @import("std");
 const LLVM_REPO_URL = "https://github.com/llvm/llvm-project.git";
 const LLVM_COMMIT = "ee8c14be14deabace692ab51f5d5d432b0a83d58";
 
+const NativeSanitizer = enum {
+    none,
+    address,
+    undefined,
+    address_undefined,
+
+    fn enabled(self: NativeSanitizer) bool {
+        return self != .none;
+    }
+
+    fn suffix(self: NativeSanitizer) []const u8 {
+        return switch (self) {
+            .none => "release",
+            .address => "asan",
+            .undefined => "ubsan",
+            .address_undefined => "asan-ubsan",
+        };
+    }
+
+    fn cmakeFlags(self: NativeSanitizer) []const u8 {
+        return switch (self) {
+            .none => "",
+            .address => "-fsanitize=address -fno-omit-frame-pointer -g",
+            .undefined => "-fsanitize=undefined -fno-omit-frame-pointer -g",
+            .address_undefined => "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        };
+    }
+};
+
+const NativeCMakeStep = struct {
+    step: std.Build.Step,
+    sanitizer: NativeSanitizer,
+};
+
+fn parseNativeSanitizer(value: []const u8) NativeSanitizer {
+    if (std.mem.eql(u8, value, "none")) return .none;
+    if (std.mem.eql(u8, value, "address") or std.mem.eql(u8, value, "asan")) return .address;
+    if (std.mem.eql(u8, value, "undefined") or std.mem.eql(u8, value, "ubsan")) return .undefined;
+    if (std.mem.eql(u8, value, "address,undefined") or
+        std.mem.eql(u8, value, "undefined,address") or
+        std.mem.eql(u8, value, "asan,ubsan") or
+        std.mem.eql(u8, value, "asan-ubsan"))
+    {
+        return .address_undefined;
+    }
+    std.debug.panic("invalid -Dnative-sanitize value '{s}' (expected none, address, undefined, or address,undefined)", .{value});
+}
+
+fn nativeMlirInstallPrefix(b: *std.Build, sanitizer: NativeSanitizer) []const u8 {
+    return if (sanitizer.enabled())
+        b.fmt("vendor/mlir-{s}", .{sanitizer.suffix()})
+    else
+        "vendor/mlir";
+}
+
+fn nativeDialectBuildDir(b: *std.Build, base: []const u8, sanitizer: NativeSanitizer) []const u8 {
+    return if (sanitizer.enabled())
+        b.fmt("{s}-{s}", .{ base, sanitizer.suffix() })
+    else
+        base;
+}
+
+fn joinCmakeFlags(b: *std.Build, base: []const u8, extra: []const u8) []const u8 {
+    if (base.len == 0) return extra;
+    if (extra.len == 0) return base;
+    return b.fmt("{s} {s}", .{ base, extra });
+}
+
+fn appendCmakeDefine(cmake_args: *std.array_list.Managed([]const u8), b: *std.Build, name: []const u8, value: []const u8) !void {
+    try cmake_args.append(b.fmt("-D{s}={s}", .{ name, value }));
+}
+
+fn appendNativeCmakeToolchainFlags(cmake_args: *std.array_list.Managed([]const u8), b: *std.Build, sanitizer: NativeSanitizer) !void {
+    const builtin = @import("builtin");
+    const sanitizer_flags = sanitizer.cmakeFlags();
+
+    if (sanitizer.enabled() and builtin.os.tag == .windows) {
+        std.debug.panic("-Dnative-sanitize is currently supported on macOS/Linux CMake builds only", .{});
+    }
+
+    if (builtin.os.tag == .linux) {
+        try appendCmakeDefine(cmake_args, b, "CMAKE_CXX_FLAGS", joinCmakeFlags(b, "-stdlib=libc++", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_EXE_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_SHARED_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_MODULE_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try appendCmakeDefine(cmake_args, b, "CMAKE_CXX_FLAGS", joinCmakeFlags(b, "-stdlib=libc++", sanitizer_flags));
+        if (sanitizer.enabled()) {
+            try appendCmakeDefine(cmake_args, b, "CMAKE_EXE_LINKER_FLAGS", sanitizer_flags);
+            try appendCmakeDefine(cmake_args, b, "CMAKE_SHARED_LINKER_FLAGS", sanitizer_flags);
+            try appendCmakeDefine(cmake_args, b, "CMAKE_MODULE_LINKER_FLAGS", sanitizer_flags);
+        }
+    } else if (builtin.os.tag == .windows) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
+    }
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -32,6 +131,7 @@ pub fn build(b: *std.Build) void {
     const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
     const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
     const skip_mlir_build = b.option(bool, "skip-mlir", "Skip MLIR/SIR/Ora dialect CMake builds (use existing libs)") orelse false;
+    const native_sanitize = parseNativeSanitizer(b.option([]const u8, "native-sanitize", "Build native MLIR dialect libraries with sanitizer (none, address, undefined, address,undefined)") orelse "none");
 
     // this creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -109,6 +209,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
+    if (native_sanitize.enabled()) {
+        mlir_c_mod.addIncludePath(b.path(b.fmt("{s}/include", .{nativeMlirInstallPrefix(b, native_sanitize)})));
+    }
     mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
     mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
     const mlir_helpers_mod = b.createModule(.{
@@ -204,9 +307,9 @@ pub fn build(b: *std.Build) void {
     // build and link MLIR (required) - only for executable, not library
     const mlir_step = if (skip_mlir_build) null else buildMlirLibraries(b, target, optimize);
     // build SIR dialect first (Ora dialect depends on it)
-    const sir_dialect_step = if (skip_mlir_build) null else buildSIRDialectLibrary(b, mlir_step.?, target, optimize);
-    const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize);
-    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    const sir_dialect_step = if (skip_mlir_build) null else buildSIRDialectLibrary(b, mlir_step.?, target, optimize, native_sanitize);
+    const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize, native_sanitize);
+    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
 
     // build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
@@ -403,7 +506,7 @@ pub fn build(b: *std.Build) void {
     abi_test_mod.addImport("mlir_c_api", mlir_c_mod);
     abi_test_mod.addImport("ora_types", ora_types_mod);
     const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
-    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, abi_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
 
@@ -457,7 +560,7 @@ pub fn build(b: *std.Build) void {
     });
     z3_encoder_test_mod.addImport("mlir_c_api", mlir_c_mod);
     const z3_encoder_tests = b.addTest(.{ .root_module = z3_encoder_test_mod });
-    linkMlirLibraries(b, z3_encoder_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, z3_encoder_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, z3_encoder_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_encoder_tests).step);
 
@@ -471,7 +574,7 @@ pub fn build(b: *std.Build) void {
     z3_verification_test_mod.addImport("ora_lib", lib_mod);
     z3_verification_test_mod.addImport("ora_types", ora_types_mod);
     const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
-    linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
 
@@ -485,7 +588,7 @@ pub fn build(b: *std.Build) void {
     mlir_verifiers_test_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_verifiers_test_mod.addImport("log", log_mod);
     const mlir_verifiers_tests = b.addTest(.{ .root_module = mlir_verifiers_test_mod });
-    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
 
@@ -615,7 +718,7 @@ pub fn build(b: *std.Build) void {
             b.option([]const u8, "compiler-test-filter", "Filter compiler tests by test name substring"),
         ),
     });
-    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, compiler_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
@@ -836,7 +939,6 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const install_prefix = "vendor/mlir";
     try root.makePath(install_prefix);
 
-    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
@@ -995,17 +1097,28 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 }
 
 /// Build Ora dialect library using CMake
-fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, sir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+fn buildOraDialectLibrary(
+    b: *std.Build,
+    mlir_step: *std.Build.Step,
+    sir_dialect_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitizer: NativeSanitizer,
+) *std.Build.Step {
     _ = target;
     _ = optimize;
 
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "cmake-build-ora-dialect",
-        .owner = b,
-        .makeFn = buildOraDialectLibraryImpl,
-    });
+    const native_step = b.allocator.create(NativeCMakeStep) catch @panic("OOM");
+    native_step.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = if (sanitizer.enabled()) b.fmt("cmake-build-ora-dialect-{s}", .{sanitizer.suffix()}) else "cmake-build-ora-dialect",
+            .owner = b,
+            .makeFn = buildOraDialectLibraryImpl,
+        }),
+        .sanitizer = sanitizer,
+    };
+    const step = &native_step.step;
     step.dependOn(mlir_step);
     step.dependOn(sir_dialect_step); // Ora dialect needs SIR headers
     return step;
@@ -1019,15 +1132,16 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const root = b.build_root.handle;
     const build_root = b.build_root.path orelse ".";
+    const native_step: *NativeCMakeStep = @fieldParentPtr("step", step);
+    const sanitizer = native_step.sanitizer;
 
-    const build_dir = "vendor/ora-dialect-build";
+    const build_dir = nativeDialectBuildDir(b, "vendor/ora-dialect-build", sanitizer);
     try root.makePath(build_dir);
 
-    const install_prefix = "vendor/mlir";
-    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+    const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
+    const mlir_dir = b.fmt("{s}/vendor/mlir/lib/cmake/mlir", .{build_root});
 
-    // platform-specific flags
-    const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
@@ -1058,19 +1172,10 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
-        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix_abs}),
     });
 
-    if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
-        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
-    } else if (builtin.os.tag == .macos) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-    }
+    try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
     cfg_child.cwd = build_root;
@@ -1118,17 +1223,27 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 }
 
 /// Build SIR dialect library using CMake
-fn buildSIRDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+fn buildSIRDialectLibrary(
+    b: *std.Build,
+    mlir_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitizer: NativeSanitizer,
+) *std.Build.Step {
     _ = target;
     _ = optimize;
 
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "cmake-build-sir-dialect",
-        .owner = b,
-        .makeFn = buildSIRDialectLibraryImpl,
-    });
+    const native_step = b.allocator.create(NativeCMakeStep) catch @panic("OOM");
+    native_step.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = if (sanitizer.enabled()) b.fmt("cmake-build-sir-dialect-{s}", .{sanitizer.suffix()}) else "cmake-build-sir-dialect",
+            .owner = b,
+            .makeFn = buildSIRDialectLibraryImpl,
+        }),
+        .sanitizer = sanitizer,
+    };
+    const step = &native_step.step;
     step.dependOn(mlir_step);
     return step;
 }
@@ -1141,15 +1256,16 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const root = b.build_root.handle;
     const build_root = b.build_root.path orelse ".";
+    const native_step: *NativeCMakeStep = @fieldParentPtr("step", step);
+    const sanitizer = native_step.sanitizer;
 
-    const build_dir = "vendor/sir-dialect-build";
+    const build_dir = nativeDialectBuildDir(b, "vendor/sir-dialect-build", sanitizer);
     try root.makePath(build_dir);
 
-    const install_prefix = "vendor/mlir";
-    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+    const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
+    const mlir_dir = b.fmt("{s}/vendor/mlir/lib/cmake/mlir", .{build_root});
 
-    // platform-specific flags
-    const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
@@ -1180,19 +1296,10 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
-        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix_abs}),
     });
 
-    if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
-        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
-    } else if (builtin.os.tag == .macos) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-    }
+    try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
     cfg_child.cwd = build_root;
@@ -1247,6 +1354,7 @@ fn linkMlirLibraries(
     ora_dialect_step: ?*std.Build.Step,
     sir_dialect_step: ?*std.Build.Step,
     target: std.Build.ResolvedTarget,
+    sanitizer: NativeSanitizer,
 ) void {
     // depend on MLIR build and dialect builds when requested
     if (mlir_step) |step| exe.step.dependOn(step);
@@ -1255,9 +1363,17 @@ fn linkMlirLibraries(
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
+    const native_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const native_include_path = b.path(b.fmt("{s}/include", .{native_prefix}));
+    const native_lib_path = b.path(b.fmt("{s}/lib", .{native_prefix}));
     const ora_dialect_include_path = b.path("src/mlir/ora/include");
     const sir_dialect_include_path = b.path("src/mlir/IR/include");
 
+    if (sanitizer.enabled()) {
+        exe.addIncludePath(native_include_path);
+        exe.addLibraryPath(native_lib_path);
+        exe.addRPath(native_lib_path);
+    }
     exe.addIncludePath(include_path);
     exe.addIncludePath(ora_dialect_include_path);
     exe.addIncludePath(sir_dialect_include_path);

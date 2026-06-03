@@ -1651,6 +1651,11 @@ Separate reliability close-out:
   cache lifetime. It is closed by replacing the `thread_local` map/memref
   caches and manual clear guard with invocation-owned cache objects passed into
   the relevant lowering patterns (`789cc762`).
+- Native sanitizer coverage is available through
+  `zig build test-mlir -Dnative-sanitize=address --summary all`. Sanitized SIR
+  and Ora dialect artifacts install to a separate `vendor/mlir-*` prefix and
+  are linked before the normal MLIR install, so reliability runs cover
+  project-owned OraToSIR C++ without rebuilding all of LLVM/MLIR.
 - ABI type-shape-only helpers (`layout`, runtime encode/decode, comptime
   decode/test support) now import `ora_types.SemanticType` directly instead of
   reaching through the sema compatibility facade. ABI policy and layout context
