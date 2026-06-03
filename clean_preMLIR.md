@@ -34,30 +34,33 @@ Rules:
   "reasonable" fallback. A wrong-but-plausible compile is the worst outcome for a
   contract.
 - **Defaults that are genuine language rules live in exactly one place.** If a
-  rule like "an untyped integer literal resolves to `u256`" exists, it is applied
-  once, explicitly, at a single resolution point, producing a fully resolved type.
-  Downstream consumers receive resolved facts and error on anything indeterminate.
+  default is ever accepted as a language rule, it is applied once, explicitly, at
+  a single resolution point, producing a fully resolved type. Downstream
+  consumers receive resolved facts and error on anything indeterminate.
   Defaulting is never re-invented by individual consumers.
 - **No hidden behavior in lowering.** Each stage lowers what the resolved facts
   say and nothing else. Convenience fallbacks that mask missing information are
   prohibited.
 
-Open architect decision (gates the systemic fix below): is "an untyped integer
-resolves to `u256`" a real Ora language rule? If yes, it is applied once at
-resolution and downstream is non-optional + fail-closed. If no, indeterminate
-width/sign is always an error.
+P2.2 integer-model decision (architect, 2026-06-01): an untyped integer literal
+does **not** default to `u256`. It remains a comptime integer until a local
+context resolves it. If no local context exists at a runtime boundary, the
+compiler emits a diagnostic instead of inventing a width.
 
-Known violation to remediate (tracked under P2.2): `IntegerType.bits`/`.signed`
-are optional, and ~10 consumers across `abi`, `hir`, and `comptime` silently
-default to unsigned/`256` (`abi/layout.zig`, `abi/comptime_decoder.zig`,
-`abi/layout_context.zig`, `comptime/compiler_ast_eval.zig`,
-`hir/module_lowering.zig`, `hir/function_core.zig`, `hir/expr_lowering.zig`,
-`hir/mod.zig`). The fix is to resolve width/sign once and make the field
-non-optional downstream, deleting every silent default. Phase 5's `layout.zig`
-defaults are fixed (fail-closed, with tests pinning missing bits/signedness).
+Resolved P2.2 enforcement stack:
 
-Remediation method — strictly 1-to-1, never a blanket sweep. For each remaining
-site, trace where its integer comes from and decide individually:
+- `IntegerType.bits` and `IntegerType.signed` are non-optional for resolved
+  runtime integers; unresolved literals use a distinct `comptime_integer` kind.
+- `resolveIntegerExpression` is the single sema gate that turns a comptime
+  integer into a resolved integer through explicit context and fit checks.
+- `scripts/check-no-width-defaults.sh` is wired into the build and rejects
+  reintroduced `.bits orelse`, `.signed orelse`, and stale optional-integer
+  construction patterns.
+- The diagnostics matrix pins overflow, negative-to-unsigned, mixed resolved
+  integer arithmetic/comparison, and peer-context overflow.
+
+Historical remediation method — strictly 1-to-1, never a blanket sweep. For each
+defaulting site, trace where its integer comes from and decide individually:
 
 - if `bits`/`signed` are guaranteed resolved there, the `orelse` is dead code
   masking that guarantee — replace with a fail-closed error/diagnostic;
@@ -80,14 +83,16 @@ Implement from that spec; the decisions below are firm:
 - Two distinct kinds: `ComptimeInt` (no width/sign) and `ResolvedInt{bits,signed}`
   with **non-optional** fields — the only integer with a runtime representation.
   This split makes the ~10 silent defaults uncompilable, not merely removed.
-- **D1:** mixed resolved widths/signs require an explicit cast →
-  `error.MixedIntegerTypes`. No implicit widening or sign conversion.
+- **D1:** mixed resolved widths/signs require an explicit cast. Current
+  user-facing diagnostics report invalid binary operators for incompatible
+  integer types. No implicit widening or sign conversion.
 - **D2:** unannotated integers resolve from local context only (no whole-program
-  inference); unresolvable → `error.AmbiguousIntegerType`.
+  inference); unresolvable forms diagnose at the binding/use site instead of
+  defaulting.
 - **D3:** comptime integer math is arbitrary precision; the `≤ i256`/`u256` bound
   is enforced only at binding to a runtime location.
 
-These rules gate the P2.2 integer-resolution slice and every future review.
+These rules gate every future integer-resolution review.
 
 ## Zig Implementation Principles
 
@@ -498,11 +503,11 @@ Audit result, 2026-06-01:
   those formatted values do not include comptime `TypeId`.
 - ABI manifest `typeId` fields in `src/abi.zig` are hashed string IDs from the
   ABI canonical payload (`t:...`), separate from comptime `u32` TypeIds.
-- `src/comptime/value.zig` `ConstValue` and `src/comptime/pool.zig` preserve
-  TypeIds, but the pool is not currently wired to a serializer or emitted cache.
+- The old comptime persistence prototype preserved TypeIds, but it was not
+  wired to a serializer or emitted cache and has since been removed as dead
+  infrastructure.
 - The only observed raw sentinel IDs are test-only: `42` in
-  `src/comptime/heap.zig` tests and `100` in `src/comptime/value.zig` /
-  `src/comptime/pool.zig` tests.
+  `src/comptime/heap.zig` tests and `100` in `src/comptime/value.zig` tests.
 
 Guard decision:
 
@@ -860,36 +865,50 @@ semantic rediscovery: full subtree walks and local linear rescans rebuild the
 same facts in several places instead of sharing traversal mechanics, lookup
 indexes, and cheap summaries.
 
-Current state:
+Status: closed for the pre-MLIR sema walkers.
 
-- `src/ast/walk.zig` only provides `collectNamesInExpr`.
-- `collectNamesInExpr` walks expressions only and explicitly stops at
-  statement-bearing boundaries like `ComptimeExpr.body`.
-- Sema currently owns several independent recursive traversals over the same
-  `BodyId`, `StmtId`, `ExprId`, `PatternId`, and `SwitchPattern` shapes.
-- The AST module already owns the node storage and typed IDs, so traversal shape
-  belongs there, not inside every semantic analysis.
-- Several semantic helpers do side scans during or near traversal, such as
-  scanning all statements to find a pattern initializer or scanning contract
-  members to resolve a field/callee. These should become explicit indexes or
-  caches, not ad hoc loops inside analyses.
+Implemented state:
 
-Repeated traversal targets:
+- `src/ast/walk.zig` owns generic `walkBody`, `walkStmt`, `walkExpr`,
+  `walkPattern`, and `walkSwitchPattern` helpers.
+- Visitors use optional comptime hooks (`enter*` / `exit*`) and return
+  `WalkControl` to descend, skip children, or stop.
+- `WalkOptions` makes traversal boundaries explicit: switch patterns,
+  assignment target patterns, pattern bindings, comptime bodies, quantified
+  bodies, external proxy operands, error-return args, and `old(...)` operands.
+- `collectNamesInExpr` is now implemented on top of the walker and preserves
+  its legacy behavior: it does not enter statement-bearing bodies and it does
+  not collect switch-pattern expressions.
+- Direct-callee collection, error-type collection, and effect collection now
+  use walker visitors instead of local statement/expression/switch recursive
+  skeletons.
+- External-call and lock validation use the walker for expression and
+  switch-pattern traversal, while their statement-level branch merge/freeze
+  state machines remain explicit by design.
+- `TypeCheckResult` owns dense `PatternId -> initializer ExprId` and
+  `PatternId -> BindingKind` facts. This removes lookup-time scans over
+  `file.statements` for pattern initializer context and keeps those facts
+  module-local when typecheck results are copied for imports.
 
-- External-call validation:
-  `validateStmtExternalCalls`, `validateExprExternalCalls`,
-  `validateSwitchPatternExternalCalls`.
-- Lock validation:
-  `validateStmtLocks`, `validateExprLocks`, `validateSwitchPatternLocks`.
-- Effect collection:
-  `collectStmtEffects`, `collectExprEffects`, `collectSwitchPatternEffects`,
-  `collectPatternTargetEffects`.
-- Direct-callee collection:
-  `collectStmtDirectCallees`, `collectExprDirectCallees`,
-  `collectPatternDirectCallees`.
-- Error-union collection and pattern-binding validation have the same smell.
-- Name resolution also has a separate statement/expression traversal in
-  `src/sema/resolve.zig`.
+Resolved traversal targets:
+
+- External-call validation: expression/switch-pattern traversal migrated;
+  statement-level branch state remains explicit.
+- Lock validation: expression/switch-pattern traversal migrated;
+  statement-level lock-set branch state remains explicit.
+- Effect collection: body/expression/switch traversal migrated; assignment
+  target effects remain a domain-specific helper because they model writes and
+  compound-assignment reads, not generic traversal.
+- Direct-callee collection: migrated.
+- Error-union collection: migrated.
+
+Explicitly not migrated:
+
+- Name resolution in `src/sema/resolve.zig` stays separate. It carries scope and
+  environment state, so it needs a scoped-walker design if revisited.
+- Branch-sensitive lock/external statement validators stay hand-written under
+  the tripwire. Forcing their branch merge/freeze semantics into the generic
+  walker would hide semantic state mutation behind traversal mechanics.
 
 Performance risks:
 
@@ -915,6 +934,16 @@ fit the walker cleanly, **stop**: do not force them through the framework. In
 that case the walker must justify itself on the read-only passes alone, and the
 branch-sensitive walks stay hand-written. The failure mode to avoid is shipping
 the framework *and* keeping the hand-written walks, leaving both to maintain.
+
+Tripwire outcome:
+
+- Passed for read-only and mostly-read-only collectors: name collection,
+  direct-callee collection, error-type collection, and effect collection.
+- Partially passed for branch-sensitive validations: their expression traversal
+  migrated cleanly, but their statement-level state machines intentionally did
+  not.
+- No generic body-summary cache was added. The migrated passes did not need it,
+  so adding one now would be speculative bloat.
 
 Goal:
 
@@ -954,6 +983,7 @@ pub fn walkBody(
     visitor: *Visitor,
     file: *const AstFile,
     body_id: BodyId,
+    comptime options: WalkOptions,
 ) anyerror!void;
 
 pub fn walkStmt(
@@ -961,6 +991,7 @@ pub fn walkStmt(
     visitor: *Visitor,
     file: *const AstFile,
     stmt_id: StmtId,
+    comptime options: WalkOptions,
 ) anyerror!void;
 
 pub fn walkExpr(
@@ -968,6 +999,7 @@ pub fn walkExpr(
     visitor: *Visitor,
     file: *const AstFile,
     expr_id: ExprId,
+    comptime options: WalkOptions,
 ) anyerror!void;
 
 pub fn walkPattern(
@@ -975,43 +1007,22 @@ pub fn walkPattern(
     visitor: *Visitor,
     file: *const AstFile,
     pattern_id: PatternId,
+    comptime options: WalkOptions,
+) anyerror!void;
+
+pub fn walkSwitchPattern(
+    comptime Visitor: type,
+    visitor: *Visitor,
+    file: *const AstFile,
+    pattern: SwitchPattern,
+    comptime options: WalkOptions,
 ) anyerror!void;
 ```
 
 The walker solves traversal duplication. It should be paired with small,
-explicit ID-indexed helpers for facts and reverse lookups:
-
-```zig
-pub fn IdMap(comptime Id: type, comptime T: type) type {
-    return struct {
-        values: []T,
-
-        pub fn get(self: @This(), id: Id) T {
-            return self.values[id.index()];
-        }
-
-        pub fn set(self: *@This(), id: Id, value: T) void {
-            self.values[id.index()] = value;
-        }
-    };
-}
-
-pub const ExprFacts = packed struct {
-    contains_result: bool = false,
-    has_external_call: bool = false,
-    has_call: bool = false,
-    may_write_storage: bool = false,
-};
-
-pub const BodySummary = struct {
-    direct_callees: []const ItemId,
-    error_types: []const Type,
-    expr_facts: IdMap(ExprId, ExprFacts),
-};
-```
-
-The exact home for semantic summaries should stay in `src/sema`; the reusable
-typed-ID storage helper can live beside AST infrastructure if it stays generic.
+explicit ID-indexed helpers for facts and reverse lookups. The first one added
+is the dense pattern fact table in `TypeCheckResult`; broader `IdMap` or
+`BodySummary` helpers are deferred until a real second use appears.
 
 Allocator policy:
 
@@ -1067,73 +1078,74 @@ Useful options:
 
 ```zig
 pub const WalkOptions = struct {
+    walk_switch_patterns: bool = true,
+    walk_assignment_target_patterns: bool = true,
+    walk_pattern_bindings: bool = true,
     enter_comptime_bodies: bool = false,
     enter_quantified_bodies: bool = false,
-    walk_type_exprs: bool = false,
-    walk_spec_clauses: bool = true,
+    walk_external_proxy_exprs: bool = true,
+    walk_error_return_args: bool = true,
+    walk_old_exprs: bool = true,
 };
 ```
 
-Pragmatic indexes/caches to add as migration exposes the need:
+Indexes/caches added:
 
-- `PatternId -> initializer ExprId` so assignment/pattern analyses stop scanning
-  all statements to recover initializer context.
+- `PatternId -> initializer ExprId`.
+- `PatternId -> BindingKind`.
+
+Indexes/caches deliberately not added in this slice:
+
 - Callee resolution cache keyed by expression or call expression ID.
-- Per-expression facts for common subtree predicates.
-- Per-body summaries for direct callees, error types, and other read-only facts.
-- Optional storage/effect summaries after P1.3 introduces reusable effect-slot
-  sets.
+- Per-expression generic facts for common subtree predicates.
+- Per-body summaries for direct callees/error types.
+
+Those are not rejected; they are deferred until a measured or repeated use makes
+them pay for their surface area.
+
+Ownership boundary:
+
 - Semantic member/field/variant/method indexes belong to P1.6. P1.2 should
   consume them when useful, but it should not own their design.
 
-Migration plan:
+Migration result:
 
-1. Extend `src/ast/walk.zig` with generic body/statement/expression/pattern
-   walkers and tests that assert traversal order.
-2. Add a tiny dense `IdMap(Id, T)` helper and first sema-local summary structs.
-   Keep the helper generic; keep semantic facts out of `src/ast`; allocate
-   durable arrays from `TypeCheckResult.arena`.
-3. Add reverse lookup indexes that remove local scans, starting with
-   `PatternId -> initializer ExprId`.
-4. Reimplement `collectNamesInExpr` on top of the generic walker. This proves
-   the framework supports the existing lightweight use case.
-5. Migrate direct-callee collection using the walker plus callee resolution
-   cache. It is mostly read-only and has limited branch-state semantics.
-6. Migrate error-type collection and cheap expression facts next. These should
-   expose gaps in switch-pattern traversal and remove repeated subtree queries.
-7. Merge compatible read-only summaries per body where it is simple and
-   measurable. Do not combine branch-sensitive validation state prematurely.
-8. Migrate effect collection after P1.3 starts, because it should benefit from
-   reusable effect-slot sets.
-9. Migrate lock and external-call validation last. They have branch merge/freeze
-   semantics and should use explicit visitor state rather than hidden walker
-   behavior.
-10. Consider name resolution only after sema traversals prove the API. Name
-   resolution has scope/environment behavior and may need a scoped visitor
-   extension.
+1. Generic AST walkers added in `src/ast/walk.zig`.
+2. `collectNamesInExpr` migrated and pinned with a switch-pattern option test.
+3. Direct-callee collection migrated.
+4. Error-type collection migrated.
+5. Effect collection migrated with explicit visitor state and an indexed-storage
+   special case that preserves existing effect-summary behavior.
+6. Lock/external expression and switch-pattern traversal migrated.
+7. Branch-sensitive lock/external statement validators left explicit under the
+   tripwire.
+8. Dense pattern initializer/binding-kind facts added to remove lookup-time
+   statement scans.
+9. No generic `IdMap`, body summary cache, or callee cache added yet; no bloat
+   without a concrete second use.
 
 Tests to add:
 
-- Walk order for bodies, nested blocks, `if`, `while`, `for`, `switch`, and
-  `try/catch`.
-- Expression walking for tuple, array, struct literal, switch expression,
-  external proxy, call, builtin, field, index, group, old, and quantified.
-- Pattern walking for name, field, index, destructure, and switch patterns.
-- Options controlling `ComptimeExpr.body` and quantified bodies.
-- `collectNamesInExpr` behavior remains unchanged.
+- `walkExpr` switch-pattern option test added.
+- Existing compiler/effect/lock/external suites cover the migrated sema
+  visitors.
+- More direct walker unit tests for every statement/expression shape are useful
+  follow-up coverage, but not required to close P1.2 because the migrated passes
+  exercise the live compiler traversal paths.
 
 Acceptance criteria:
 
-- New semantic analyses do not need to write their own complete AST traversal.
-- Existing migrated passes become smaller and mostly contain semantic hook logic.
-- Traversal choices at body boundaries are explicit in options.
-- No pass scans all `file.statements` just to recover context for a `PatternId`.
-- Caches owned by P1.2 are traversal/body facts, not global semantic lookup
-  tables.
-- Reused summaries avoid repeated full-body walks for read-only facts.
-- The AST walker has no allocator dependency for normal traversal.
-- Durable sema facts are arena-owned by the sema result that invalidates them.
-- No semantic behavior changes after each migration step.
+- Met: migrated sema analyses do not own complete expression/switch traversal
+  skeletons.
+- Met: traversal choices at semantic boundaries are explicit `WalkOptions`.
+- Met: no lookup-time scan over `self.file.statements` remains for
+  `PatternId` initializer context.
+- Met: the AST walker has no allocator dependency for normal traversal.
+- Met: durable pattern facts are arena-owned by `TypeCheckResult`.
+- Met: no semantic behavior change intended; special cases were preserved
+  explicitly rather than hidden in walker defaults.
+- Deferred by design: branch-sensitive statement validators remain explicit,
+  and broader body-summary/callee caches wait for concrete demand.
 
 ### P1.3: Effect-Slot Set Algebra
 
@@ -1204,12 +1216,97 @@ Plan:
 - Make HIR/MLIR lowering consume these facts instead of reclassifying ghost/spec
   context locally where possible.
 
+Audit baseline:
+
+- `src/sema/verification.zig` already provides a cached sema query for
+  verification facts. It is the correct owner to tighten first; do not create a
+  second parallel fact model.
+- The current query owns function spec clauses and contract/trait ghost-block
+  facts, but the old fact shape was too lossy because every fact kind was an
+  `ast.SpecClauseKind`. The model now distinguishes source spec clauses,
+  contract invariants, trait ghost `assert`/`assume`, and trait ghost axioms with
+  explicit verification context.
+- `modifies` source clauses are verification facts, but their checked storage
+  slot payload still lives in sema's write-set/framing state
+  (`TypeCheckResult.item_modifies`) until the framing payload model is stable.
+- HIR no longer locally classifies source-level contract/loop invariant
+  lowering or `havoc` MLIR emission. Those source facts are collected by
+  `src/sema/verification.zig` and consumed through owner-sorted HIR indexes.
+- Remaining invariant/havoc AST uses are classified:
+  `src/hir/control_flow.zig` and `src/hir/function_core.zig` still inspect
+  `*.invariants.len` only as loop-unroll eligibility guards;
+  `src/hir/analysis.zig` still reads `havoc_stmt.name` for carried-local
+  mutation analysis, not verification fact classification; `src/hir/support.zig`
+  uses `Havoc` only for statement ranges. Comptime invariant evaluation remains
+  out of scope for this P1.5 runtime/HIR fact slice.
+- Runtime/refinement-generated verification operations such as path assumptions,
+  parameter refinement guards, slice/division assertions, and refinement-cleanup
+  string handling are not first migration targets. They are lowering-generated
+  facts or MLIR-adjacent cleanup, not source-level sema facts.
+- Post-model audit result: refinement cleanup still correctly reads MLIR op
+  names and `ora.verification_*` attributes because it runs after lowering and
+  after Z3 guard proving. Those strings are MLIR metadata, not pre-MLIR source
+  fact classification. The cleanup work here is to remove duplicated cleanup
+  code, not to force post-lowering attributes back into sema facts.
+
+Status:
+
+- Ghost declaration facts now carry an owning item and distinguish ghost
+  functions, fields, constants, and ghost blocks. Ghost assertion/assumption
+  facts inside ghost functions and ghost blocks are collected under the owning
+  ghost item; trait ghost-block expression axioms keep their existing fact
+  surface.
+- HIR lowering receives module verification facts and consumes them for ghost
+  declaration attributes and ghost assertion context. The old direct
+  `function.is_ghost` / `field.is_ghost` / `constant.is_ghost` HIR checks and
+  the unused impl ghost-block local path were removed.
+- Imported HIR lowering receives the imported module's verification facts
+  through the HIR query capability instead of reusing the current module's facts.
+- Module verification facts are aggregated recursively over declaration
+  ownership (`contract.members`, `impl.methods`, struct/log metadata) with a
+  visited bitmap, so HIR sees facts for nested member items without rescanning
+  bodies or duplicating facts. Trait ghost blocks remain trait-owned to preserve
+  their `trait_ghost_block` context.
+- HIR builds an owner-sorted verification fact index once per lowered module;
+  item lowering reads only that item's fact entries instead of repeatedly
+  scanning the whole module fact list.
+- Ordinary item-owned function clauses (`requires`, `guard`, `ensures`,
+  `ensures_ok`, `ensures_err`) are lowered from sema verification facts instead
+  of direct `function.clauses` walks in HIR. `modifies` lowering is gated by the
+  source fact and still consumes the validated slot payload from
+  `TypeCheckResult.item_modifies`.
+- Verification facts now have a single owner union. Ordinary declarations use
+  `.item`; trait method contracts use `.trait_method = (trait ItemId, method
+  index)`, matching the existing trait-method lookup index.
+- HIR builds a second owner-sorted fact index for trait-method facts. Impl
+  method contract inheritance and extern-trait summaries now consume those sema
+  facts instead of walking `TraitMethod.clauses` locally.
+- Contract invariants and loop invariants are normalized in sema verification
+  facts. The fact carries the lowered invariant expression, optional invariant
+  label, source range, and context (`.contract` or `.loop`); HIR emits
+  `ora.invariant` from the fact instead of reparsing invariant expression shape.
+- Statement-level verification facts use `.statement = (item_id, stmt_id)` as
+  the owner. HIR builds a third owner-sorted fact index for statement facts so
+  each loop or `havoc` statement reads only its own facts.
+- `havoc` facts now carry the target spelling in `target_name`. HIR `ora.havoc`
+  lowering consumes that target from the sema fact and fails closed with
+  `InvalidVerificationFact` if the fact is missing or malformed, instead of
+  falling back to the AST statement string.
+- HIR and the CLI MLIR path now share the same refinement/verification cleanup
+  implementation in `src/mlir/refinement_guards.zig`; the duplicate
+  `src/hir/refinement_cleanup.zig` implementation was removed. The shared pass
+  still preserves the existing behavior: proven refinement guards are removed,
+  unproven guards lower to `cf.assert`, ghost assertions remain verification-only,
+  and other verification ops are erased before SIR emission.
+
 Non-goals:
 
 - Do not change verifier semantics in the first migration.
 - Do not merge verification facts with runtime `Effect` or comptime evaluation
   state.
 - Do not move MLIR verification lowering before the pre-MLIR facts are stable.
+- Do not replace post-lowering MLIR attribute strings with sema facts; Z3 and
+  SIR cleanup consume those attributes after HIR has already emitted MLIR.
 
 Acceptance criteria:
 
@@ -1265,12 +1362,12 @@ Current status:
   sema import helpers, HIR imported-field lowering, comptime callable
   resolution, comptime contract-member paths, and comptime anonymous-struct
   field lookup now propagate query errors instead of treating them as absent.
-  Remaining query-shaped `catch null` sites are constrained callback APIs
-  (`abiDecode*` resolver callbacks that return `?`) or local fallback helpers
-  that can still answer from the AST. Other remaining `catch null` uses are
-  parsers, integer conversion, arithmetic probes, allocation in optional
-  formatting helpers, or best-effort constant folding and are outside this
-  query-failure audit.
+  The `enumVariantIndex` fallback can still answer from the AST and is an
+  accepted equivalent fallback. The `abiDecode*` resolver callbacks now return
+  `!?`, so real query failures propagate through ABI decode instead of becoming
+  "empty type" answers. Other remaining `catch null` uses are parsers, integer
+  conversion, arithmetic probes, allocation in optional formatting helpers, or
+  best-effort constant folding and are outside this query-failure audit.
 
 Plan:
 
@@ -1327,6 +1424,47 @@ Plan:
 - Make HIR lowering consume layout/policy results rather than recomputing public
   ABI attributes.
 
+Status:
+
+- Public function ABI validation in sema now calls the ABI public-policy
+  surface instead of carrying local support/static-word switches.
+- Result carrier planning is ABI-policy-owned; `LayoutContext` delegates to the
+  policy while providing context-aware layout facts.
+- Deliberate tightening: public-ABI integer word-count and Result dynamic-array
+  element checks now fail closed for malformed or non-builtin integers instead
+  of silently treating them as one ABI word. Valid builtin integers such as
+  `u8` and `u256` still count as one word.
+- Runtime `@abiEncode`/`@abiDecode` supportability now calls the ABI
+  public-policy surface instead of carrying sema-local classifiers. Deliberate
+  tightening: runtime encode/decode checks also fail closed for malformed,
+  unresolved, or non-builtin integer types instead of accepting loose `uNNN`
+  spellings or defaulting unresolved integers to `u256`.
+- HIR lowering now consumes `LayoutContext` for public return ABI strings,
+  error selectors/signatures, static word counts, parameter ABI names, and
+  Result input modes. `src/hir/abi.zig` no longer owns semantic type-to-ABI
+  classification; it only carries selector hashing, metadata wire names, and
+  pre-rendered ABI signature string helpers.
+- Canonical primitive/fixed-bytes ABI type names are derived through
+  `src/abi/type_names.zig`, which consumes the P1.1 builtin table. `LayoutNode`
+  rendering no longer formats `uintNNN`, `intNNN`, or `bytesNNN` locally, and
+  public return marker names (`void`, `tuple`, `struct`, bitfield-as-`uint256`)
+  are owned by `src/abi/policy.zig`.
+- Deliberate tightening: direct ABI layout rendering now fails closed for
+  invalid static encodings such as `uint24` or `bytes33` instead of rendering
+  unsupported ABI names. Layouts produced from semantic types already failed
+  closed; this applies the same rule to manually constructed `LayoutNode`s.
+- P2.2/P2.1 neutrality tail complete at the ABI import boundary: `policy.zig`
+  no longer imports sema query/index records or instantiated field structs, and
+  `layout_context.zig` no longer imports sema result/index data or type
+  descriptor logic. `LayoutContext` consumes a neutral provider vtable for
+  type-expression resolution, named-type shape facts, struct/contract/error
+  payload facts, and enum variant counts. The sema-owned adapter that implements
+  that provider remains in `src/sema/abi_layout_provider.zig`, which is the
+  correct ownership direction. The ABI policy API still uses
+  support-classifier return shapes (`bool` / `?usize`) rather than a new
+  error-propagating contract; widening that API would be a separate contract
+  change.
+
 Non-goals:
 
 - Do not change emitted ABI layout in the first migration.
@@ -1355,35 +1493,158 @@ Plan:
 - Expose restricted stage views instead of separate mini-interfaces.
 - Keep the existing Salsa-like DB shape for now.
 
+Status: closed.
+
+- The query view type definitions now live in `src/compiler_query.zig`.
+  The old stage aliases (`sema.ImportQuery`, comptime `TypeQuery`, and HIR
+  `ModuleQuery`) were removed; stage code uses the shared restricted view types
+  directly.
+- Query views expose methods (`astFile`, `itemIndex`, `moduleTypeCheck`,
+  `lookupItem`, etc.), so stage code no longer reaches through
+  `query.context` at call sites.
+- `CompilerDb` owns construction of the three restricted views through helper
+  constructors. Callback fields remain flat internally, but the DB wiring is now
+  centralized instead of repeated at each query handoff.
+- `zig build check-query-view-ownership` guards the ownership rule: no stage
+  local query structs, no raw `query.context` calls outside `src/compiler_query.zig`,
+  and DB callback wiring only inside the three view constructors.
+
 ### P2.2: Canonical Type/Value Model
 
-`types.OraType`, `sema.Type`, comptime `TypeId`, sema `ConstValue`, and
-comptime `ConstValue` encode overlapping facts.
+`types.OraType`, `sema.Type`, comptime `TypeId`, and semantic `ConstValue`
+encode overlapping facts.
 
-The integer-resolution portion has a dedicated, ratify-before-coding spec:
+The integer-resolution portion has a dedicated ratified spec:
 **[docs/compiler/integer-type-model.md](docs/compiler/integer-type-model.md)** —
 the `ComptimeInt` vs `ResolvedInt` split, the single resolution gate, coercion
 rules, fit checks, fail-closed boundary, enforcement, and a test matrix. The
-implementor works from that spec; architect must first ratify its D1–D3.
+integer-resolution enforcement stack is implemented: non-optional resolved
+integer facts, `comptime_integer` for unresolved literals, the single
+`resolveIntegerExpression` gate, the `check-no-width-defaults` tripwire, and the
+pinned diagnostics matrix.
 
 Plan:
 
 - Let P1.1 establish type metadata ownership.
-- Then migrate semantic type ownership into `src/types`.
-- Resolve integer width and signedness exactly once. Downstream semantic types
-  should carry non-null integer width/signedness, or use a distinct unresolved
-  type state before resolution. The current nullable `IntegerType.bits` and
-  `IntegerType.signed` force every consumer to answer "what if null?" and have
-  produced repeated local `orelse false` / `orelse 256` defaults across ABI,
-  HIR, and comptime.
-- Sweep and remove silent integer defaults in ABI/HIR/comptime after the
-  resolved type model exists. Null at a lowering/encoding boundary should mean
-  an upstream bug, not "assume unsigned 256".
+- Semantic type ownership now lives in `src/types/semantic.zig`; `sema.model`
+  re-exports the type model as a compatibility facade for existing callers.
+- Refinement semantic facts now live in `src/types/refinement_semantics.zig`;
+  `sema/refinements.zig` is a compatibility facade, and ABI/comptime consume the
+  neutral type-owned helpers instead of importing sema refinement logic.
+- Keep integer width and signedness resolved exactly once through the sema gate.
+  Downstream semantic types carry concrete width/signedness, while unresolved
+  literal state is represented separately as `comptime_integer`.
+- Keep the `check-no-width-defaults` tripwire active so ABI/HIR/comptime cannot
+  reintroduce local `orelse false` / `orelse 256` defaults.
 - Introduce interning/handles where comptime needs stable IDs. This is gated on
   the Comptime TypeId Stability Audit (see P1.1 Migration Plan). Do not
   renumber comptime IDs; preserve existing numeric assignments and generate only
   lookup/conversion code around them.
 - Avoid parallel unions that need conversion glue.
+
+Status:
+
+- Integer/type model: done and verified. Resolved runtime integers are concrete
+  by construction; unresolved literals are represented as `comptime_integer` and
+  must pass through `resolveIntegerExpression`.
+- Semantic value model: done and verified. The cross-stage semantic constant
+  representation lives in `src/types/value.zig`; `sema.model` only re-exports it
+  as a compatibility facade.
+- Dead comptime persistence prototype: removed. The unused persistence layer is
+  no longer public surface and cannot be confused with the semantic
+  `ora_types.ConstValue`.
+- ABI neutrality tail: done at the ABI import boundary. ABI policy receives
+  named-type shape facts through provider methods instead of importing sema
+  query/index records. `LayoutContext` receives type-expression resolution and
+  layout shape facts through a neutral provider vtable; the sema-owned adapter
+  implements that provider outside the ABI layer.
+
+Value-model scoping note:
+
+- Audit before code changes: enumerate all `sema_model.ConstValue`,
+  `comptime.CtValue`, the dead comptime persistence prototype, bridge,
+  debug-format, and ABI encoder consumers. Classify each as
+  semantic/persistent/evaluator-local before moving anything.
+- Keep evaluator-local and persistent concerns separate. `CtValue` may carry
+  heap references and belongs to the comptime evaluator. A persistent const value
+  must be stable outside one evaluator heap and must not depend on live heap IDs.
+- Decide the canonical persistent/semantic value representation first. Either
+  move the sema const value shape into a neutral owner under `src/types`, or
+  replace sema consumers with the existing comptime persistent value model plus
+  explicit handles. Do not add another parallel union.
+- Make conversion boundaries explicit and narrow: evaluator value -> persistent
+  value at the comptime bridge, persistent/semantic value -> ABI encoding at the
+  ABI boundary, and debug formatting from the canonical representation. No local
+  ad-hoc conversions.
+- Preserve numeric and aggregate semantics. Big integer range/fit information,
+  aggregate ordering, struct/enum identity, error-union payload shape, and
+  `TypeId` stability must not change as a side effect of unification.
+- Acceptance: no behavior change for existing constants, no silent truncation or
+  defaulting, full compiler and MLIR suites green, and a sweep proving no
+  duplicate public semantic `ConstValue` model remains outside the chosen owner.
+
+Value-model audit result:
+
+- `sema_model.ConstValue` is the active cross-stage semantic constant value. It
+  is stored in `ConstEvalResult.values`, read by sema fit/enum checks, HIR
+  constant lowering, debug output, tests, and ABI comptime encoding. Its integer
+  payload is `std.math.big.int.Managed`, which preserves arbitrary precision and
+  negative intermediate constants before type-resolution fit checks.
+- `comptime.CtValue` is evaluator-local and may contain `HeapId` references.
+  It remains owned by the comptime evaluator and must not become the semantic
+  persistent value exposed to sema/HIR/ABI.
+- The comptime persistence prototype was not wired into the live compiler DB
+  and was removed. It was not a safe drop-in replacement for semantic
+  `ConstValue` because its integer and aggregate representation did not preserve
+  the full semantic constant shape.
+- `src/comptime/compiler_const_bridge.zig` is the current conversion boundary:
+  semantic constants <-> evaluator values for the cases that can cross that
+  boundary. `src/abi/comptime_encoder.zig` is a second boundary that currently
+  accepts either `CtValue` or semantic `ConstValue`.
+
+Value-model decision:
+
+- The canonical semantic constant representation should move to a neutral owner,
+  likely `src/types/value.zig`, preserving the current `sema_model.ConstValue`
+  shape and `BigInt` integer semantics. `sema.model` should re-export it as a
+  compatibility facade during migration.
+- `ConstEvalResult` remains a query/result container for now because it owns a
+  `diagnostics.DiagnosticList`; the standalone `ora_types` package cannot import
+  diagnostics without breaking its module boundary. Its `values` field should use
+  the neutral semantic `ConstValue`, but moving the result container itself
+  belongs with the query/result-interface cleanup, not the pure type package.
+- `comptime.CtValue` stays evaluator-local. Do not move heap-backed evaluator
+  values into `src/types`.
+- Do not reintroduce a public comptime-side semantic constant alias; there must
+  not be two public `ConstValue` meanings that look interchangeable.
+- Implementation order:
+  1. Move semantic `ConstValue` to the neutral type/value owner while keeping
+     `sema.ConstValue` as a temporary re-export. Keep `ConstEvalResult` as a
+     sema/query result container whose `values` use neutral `ConstValue`.
+  2. Retarget HIR lowering, debug formatting, the const bridge, ABI comptime
+     encoder, and DB const-eval storage to import the neutral semantic value
+     directly.
+  3. Remove or quarantine the unused comptime persistence prototype so no public
+     API exposes it as the semantic constant model. Done: removed.
+  4. Sweep for duplicate `ConstValue` definitions/re-exports and remove stale
+     compatibility aliases once call sites are migrated. Production users now
+     import `ora_types.ConstValue`; the remaining sema facade is compatibility
+     surface, not a second owner.
+
+Tracked follow-up debt:
+
+- Investigate the intermittent native OraToSIR abort observed once during a full
+  `test-compiler` run after all Zig tests reported passed. The isolated
+  OraToSIR test and a second full run passed, so it is not a blocker for the
+  P2.2 ownership slice, but it remains a flaky native reliability issue until
+  triaged.
+- ABI type-shape-only helpers (`layout`, runtime encode/decode, comptime
+  decode/test support) now import `ora_types.SemanticType` directly instead of
+  reaching through the sema compatibility facade. ABI policy and layout context
+  are sema-neutral at the import boundary: policy receives named-type shape
+  facts through provider methods, and layout context receives type-expression
+  resolution plus layout shape facts through a neutral provider vtable. The
+  sema-owned adapter implements that provider in `src/sema/abi_layout_provider.zig`.
 
 ### P2.3: Syntax ID Boilerplate (Optional / Low Priority)
 
