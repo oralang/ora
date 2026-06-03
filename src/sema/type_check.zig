@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const diag_messages = diagnostics.messages;
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 const descriptors = @import("type_descriptors.zig");
@@ -1009,17 +1010,9 @@ const TypeChecker = struct {
                         const actual_located = self.exprLocatedType(expr_id);
                         const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                         if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
-                                field.name,
-                                diagnosticTypeDisplayName(self, expected_type),
-                                diagnosticTypeDisplayName(self, actual_type),
-                            });
+                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, actual_type);
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                            try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
-                                field.name,
-                                region_rules.regionDisplayName(expected.region),
-                                region_rules.regionDisplayName(actual.region),
-                            });
+                            try self.emitNamedSubjectExpectedRegionFoundRange(field.range, "field", field.name, expected.region, actual.region);
                         }
                     }
                 }
@@ -1035,11 +1028,7 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(constant.range, constant.value, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
-                        try self.emitRangeError(constant.range, "constant '{s}' expects type '{s}', found '{s}'", .{
-                            constant.name,
-                            diagnosticTypeDisplayName(self, expected_type),
-                            diagnosticTypeDisplayName(self, actual_type),
-                        });
+                        try self.emitNamedSubjectExpectedTypeFoundRange(constant.range, "constant", constant.name, expected_type, actual_type);
                     }
                 }
             },
@@ -1957,15 +1946,9 @@ const TypeChecker = struct {
                         } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                             const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                             if (!typesFlowCompatible(expected_type, actual_type)) {
-                                try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                    diagnosticTypeDisplayName(self, expected_type),
-                                    diagnosticTypeDisplayName(self, actual_type),
-                                });
+                                try self.emitExpectedTypeFoundRange(decl.range, "declaration", expected_type, actual_type);
                             } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                                try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
-                                    region_rules.regionDisplayName(expected.region),
-                                    region_rules.regionDisplayName(actual.region),
-                                });
+                                try self.emitExpectedRegionFoundRange(decl.range, "declaration", expected.region, actual.region);
                             }
                         }
                     }
@@ -1981,10 +1964,7 @@ const TypeChecker = struct {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                         if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitRangeError(ret.range, "return expects type '{s}', found '{s}'", .{
-                                diagnosticTypeDisplayName(self, expected_type),
-                                diagnosticTypeDisplayName(self, actual_type),
-                            });
+                            try self.emitExpectedTypeFoundRange(ret.range, "return", expected_type, actual_type);
                         }
                         // No region check — return values are loaded to stack,
                         // so all source regions are valid regardless of return type region.
@@ -2062,15 +2042,9 @@ const TypeChecker = struct {
                     const actual_located = self.exprLocatedType(assign.value);
                     const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                     if (!typesFlowCompatible(expected_type, actual_type)) {
-                        try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, expected_type),
-                            diagnosticTypeDisplayName(self, actual_type),
-                        });
+                        try self.emitExpectedTypeFoundRange(assign.range, "assignment", expected_type, actual_type);
                     } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                        try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
-                            region_rules.regionDisplayName(expected.region),
-                            region_rules.regionDisplayName(actual.region),
-                        });
+                        try self.emitExpectedRegionFoundRange(assign.range, "assignment", expected.region, actual.region);
                     }
                 }
             },
@@ -2475,11 +2449,8 @@ const TypeChecker = struct {
                 continue;
             }
             if (actual_type.kind() != .unknown and expected_type.kind() != .unknown and !typesFlowCompatible(expected_type, actual_type)) {
-                try self.emitRangeError(self.exprRange(arg), "log field '{s}' expects type '{s}', found '{s}'", .{
-                    field.name,
-                    diagnosticTypeDisplayName(self, expected_type),
-                    diagnosticTypeDisplayName(self, actual_type),
-                });
+                const subject = try std.fmt.allocPrint(self.arena, "log field '{s}'", .{field.name});
+                try self.emitExpectedTypeFoundRange(self.exprRange(arg), subject, expected_type, actual_type);
             }
         }
     }
@@ -2560,10 +2531,7 @@ const TypeChecker = struct {
                     try self.contextualizeLiteral(arg, expected);
                     const actual = self.expr_types[arg.index()];
                     if (!typesFlowCompatible(expected, actual) and actual.kind() != .unknown) {
-                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, expected),
-                            diagnosticTypeDisplayName(self, actual),
-                        });
+                        try self.emitExpectedTypeFoundExpr(arg, expected, actual);
                     }
                 }
             },
@@ -2576,10 +2544,7 @@ const TypeChecker = struct {
                     try self.contextualizeLiteral(arg, field.ty);
                     const actual = self.expr_types[arg.index()];
                     if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
-                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, field.ty),
-                            diagnosticTypeDisplayName(self, actual),
-                        });
+                        try self.emitExpectedTypeFoundExpr(arg, field.ty, actual);
                     }
                 }
             },
@@ -2591,10 +2556,7 @@ const TypeChecker = struct {
                 try self.contextualizeLiteral(call.args[0], payload_type);
                 const actual = self.expr_types[call.args[0].index()];
                 if (!typesFlowCompatible(payload_type, actual) and actual.kind() != .unknown) {
-                    try self.emitExprError(call.args[0], "expected type '{s}', found '{s}'", .{
-                        diagnosticTypeDisplayName(self, payload_type),
-                        diagnosticTypeDisplayName(self, actual),
-                    });
+                    try self.emitExpectedTypeFoundExpr(call.args[0], payload_type, actual);
                 }
             },
         }
@@ -3031,7 +2993,8 @@ const TypeChecker = struct {
             if (write_slot.region != .storage) continue;
             if (self.modifiesDeclaresSlot(declared_slots, write_slot)) continue;
             const display = try self.effectSlotDisplayName(write_slot);
-            try self.emitRangeError(range, "storage write to '{s}' is not covered by this function's `modifies` clause", .{display});
+            const message = try diag_messages.modifiesMissingWrite(self.arena, display);
+            try self.emitRangeMessage(range, message);
         }
     }
 
@@ -3278,9 +3241,7 @@ const TypeChecker = struct {
                 if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                     !typesFlowCompatible(param_type, arg_type))
                 {
-                    try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                        diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                    });
+                    try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
                 }
             }
             return;
@@ -3297,9 +3258,7 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
@@ -3315,9 +3274,7 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
@@ -3787,9 +3744,7 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
@@ -4672,7 +4627,7 @@ const TypeChecker = struct {
         for (struct_literal.fields) |init| {
             const existing = try seen_fields.fetchPut(init.name, {});
             if (existing != null) {
-                try self.emitRangeError(init.range, "duplicate field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+                try self.emitAdtVariantFieldRange(init.range, .duplicate, init.name, info.variant_name);
             }
         }
 
@@ -4680,22 +4635,19 @@ const TypeChecker = struct {
         const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.arena, struct_literal.fields, "name");
         for (payload_fields) |field| {
             const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field.name) orelse {
-                try self.emitExprError(expr_id, "missing field '{s}' for ADT variant '{s}'", .{ field.name, info.variant_name });
+                try self.emitAdtVariantFieldExpr(expr_id, .missing, field.name, info.variant_name);
                 continue;
             };
             try self.contextualizeLiteral(init.value, field.ty);
             const actual = self.expr_types[init.value.index()];
             if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
-                try self.emitExprError(init.value, "expected type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, field.ty),
-                    diagnosticTypeDisplayName(self, actual),
-                });
+                try self.emitExpectedTypeFoundExpr(init.value, field.ty, actual);
             }
         }
 
         for (struct_literal.fields) |init| {
             if (model.anonymousStructFieldByName(payload_fields, init.name) == null) {
-                try self.emitRangeError(init.range, "unknown field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+                try self.emitAdtVariantFieldRange(init.range, .unknown, init.name, info.variant_name);
             }
         }
     }
@@ -5796,10 +5748,12 @@ const TypeChecker = struct {
         for (writes) |write_slot| {
             for (locked_slots) |locked_slot| {
                 if (!self.effectSlotsMayAlias(write_slot, locked_slot)) continue;
-                try self.emitRangeError(range, "cannot write locked {s} slot '{s}'", .{
+                const message = try diag_messages.lockedWrite(
+                    self.arena,
                     region_rules.regionDisplayName(write_slot.region),
                     write_slot.name,
-                });
+                );
+                try self.emitRangeMessage(range, message);
                 break;
             }
         }
@@ -5810,9 +5764,8 @@ const TypeChecker = struct {
             if (write_slot.region != .storage) continue;
             for (frozen_pre_call_writes) |frozen_slot| {
                 if (!self.effectSlotsMayAlias(write_slot, frozen_slot)) continue;
-                try self.emitRangeError(range, "cannot write storage slot '{s}' after external call because it was written before the call", .{
-                    write_slot.name,
-                });
+                const message = try diag_messages.externalCallWriteAfterPreWrite(self.arena, write_slot.name);
+                try self.emitRangeMessage(range, message);
                 break;
             }
         }
@@ -7090,10 +7043,7 @@ const TypeChecker = struct {
             value.integer;
         if (integerValueFitsType(checked_value, expected_type.integer)) return false;
         const value_text = try self.integerValueText(checked_value);
-        try self.emitRangeError(range, "constant value {s} does not fit in type '{s}'", .{
-            value_text,
-            diagnosticTypeDisplayName(self, expected_type),
-        });
+        try self.emitConstantValueDoesNotFitRange(range, value_text, diagnosticTypeDisplayName(self, expected_type));
         return true;
     }
 
@@ -7121,10 +7071,7 @@ const TypeChecker = struct {
         if (value != .integer or result_type.kind() != .integer) return false;
         if (integerValueFitsType(value.integer, result_type.integer)) return false;
         const value_text = try self.integerValueText(value.integer);
-        try self.emitExprError(expr_id, "constant value {s} does not fit in cast target type '{s}'", .{
-            value_text,
-            diagnosticTypeDisplayName(self, result_type),
-        });
+        try self.emitConstantValueDoesNotFitCastTargetExpr(expr_id, value_text, diagnosticTypeDisplayName(self, result_type));
         return true;
     }
 
@@ -7155,12 +7102,8 @@ const TypeChecker = struct {
             if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) continue;
             if (!typesAssignable(expected_type, actual_type)) {
                 const parameter_name = self.patternName(parameter.pattern) orelse "<error payload>";
-                try self.emitExprError(expr_id, "error '{s}' argument '{s}' expects type '{s}', found '{s}'", .{
-                    error_decl.name,
-                    parameter_name,
-                    diagnosticTypeDisplayName(self, expected_type),
-                    diagnosticTypeDisplayName(self, actual_type),
-                });
+                const subject = try std.fmt.allocPrint(self.arena, "error '{s}' argument '{s}'", .{ error_decl.name, parameter_name });
+                try self.emitSubjectExpectedTypeFoundExpr(expr_id, subject, expected_type, actual_type);
             }
         }
 
@@ -7810,34 +7753,124 @@ const TypeChecker = struct {
         expected: usize,
         found: usize,
     ) !void {
-        try self.emitRangeError(range, "generic {s} '{s}' expects {d} arguments, found {d}", .{
-            kind,
-            name,
-            expected,
-            found,
-        });
+        const message = try diag_messages.genericArity(self.arena, kind, name, expected, found);
+        try self.emitRangeMessage(range, message);
     }
 
     fn emitInvalidIntegerTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
-        try self.emitRangeError(range, "invalid integer type '{s}'; supported integer types are {s}", .{ name, descriptors.supported_integer_type_names_text });
+        const message = try diag_messages.invalidIntegerTypeName(self.arena, name, descriptors.supported_integer_type_names_text);
+        try self.emitRangeMessage(range, message);
     }
 
     fn emitExprError(self: *TypeChecker, expr_id: ast.ExprId, comptime fmt: []const u8, args: anytype) !void {
         var buffer: [256]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, fmt, args);
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitRangeError(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, fmt, args);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitExprMessage(self: *TypeChecker, expr_id: ast.ExprId, message: []const u8) !void {
         try self.diagnostics.appendError(message, .{
             .file_id = self.file_id,
             .range = source.rangeOf(self.file.expression(expr_id).*),
         });
     }
 
-    fn emitRangeError(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
-        var buffer: [256]u8 = undefined;
-        const message = try std.fmt.bufPrint(&buffer, fmt, args);
+    fn emitRangeMessage(self: *TypeChecker, range: source.TextRange, message: []const u8) !void {
         try self.diagnostics.appendError(message, .{
             .file_id = self.file_id,
             .range = range,
         });
+    }
+
+    fn emitExpectedTypeFoundRange(self: *TypeChecker, range: source.TextRange, subject: []const u8, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitExpectedRegionFoundRange(self: *TypeChecker, range: source.TextRange, subject: []const u8, expected_region: Region, actual_region: Region) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "region",
+            region_rules.regionDisplayName(expected_region),
+            region_rules.regionDisplayName(actual_region),
+        );
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitNamedSubjectExpectedTypeFoundRange(self: *TypeChecker, range: source.TextRange, subject_kind: []const u8, subject_name: []const u8, expected_type: Type, actual_type: Type) !void {
+        const subject = try std.fmt.allocPrint(self.arena, "{s} '{s}'", .{ subject_kind, subject_name });
+        try self.emitExpectedTypeFoundRange(range, subject, expected_type, actual_type);
+    }
+
+    fn emitNamedSubjectExpectedRegionFoundRange(self: *TypeChecker, range: source.TextRange, subject_kind: []const u8, subject_name: []const u8, expected_region: Region, actual_region: Region) !void {
+        const subject = try std.fmt.allocPrint(self.arena, "{s} '{s}'", .{ subject_kind, subject_name });
+        try self.emitExpectedRegionFoundRange(range, subject, expected_region, actual_region);
+    }
+
+    fn emitExpectedTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            null,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitSubjectExpectedTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, subject: []const u8, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitExpectedArgumentTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            null,
+            "argument type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitConstantValueDoesNotFitRange(self: *TypeChecker, range: source.TextRange, value_text: []const u8, type_name: []const u8) !void {
+        const message = try diag_messages.constantValueDoesNotFit(self.arena, value_text, type_name);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitConstantValueDoesNotFitCastTargetExpr(self: *TypeChecker, expr_id: ast.ExprId, value_text: []const u8, type_name: []const u8) !void {
+        const message = try diag_messages.constantValueDoesNotFitCastTarget(self.arena, value_text, type_name);
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitAdtVariantFieldRange(self: *TypeChecker, range: source.TextRange, issue: diag_messages.FieldIssue, field_name: []const u8, variant_name: []const u8) !void {
+        const message = try diag_messages.adtVariantField(self.arena, issue, field_name, variant_name);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitAdtVariantFieldExpr(self: *TypeChecker, expr_id: ast.ExprId, issue: diag_messages.FieldIssue, field_name: []const u8, variant_name: []const u8) !void {
+        const message = try diag_messages.adtVariantField(self.arena, issue, field_name, variant_name);
+        try self.emitExprMessage(expr_id, message);
     }
 
     fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) Type {

@@ -1,12 +1,18 @@
 const std = @import("std");
 const source = @import("../source/mod.zig");
 
+pub const messages = @import("messages.zig");
+
 pub const Severity = enum {
     Error,
     Warning,
     Note,
     Help,
 };
+
+test {
+    _ = messages;
+}
 
 pub const Label = struct {
     location: source.SourceLocation,

@@ -1645,12 +1645,12 @@ Value-model decision:
      import `ora_types.ConstValue`; the remaining sema facade is compatibility
      surface, not a second owner.
 
-Separate tracked reliability debt:
+Separate reliability close-out:
 
-- Investigate the intermittent native OraToSIR abort observed once during a full
-  `test-compiler` run after all Zig tests reported passed. The isolated
-  OraToSIR test and a second full run passed, so it is outside P2.2 ownership
-  closure, but it remains a native reliability issue until triaged.
+- The intermittent native OraToSIR abort was root-caused to pass-invocation
+  cache lifetime. It is closed by replacing the `thread_local` map/memref
+  caches and manual clear guard with invocation-owned cache objects passed into
+  the relevant lowering patterns (`789cc762`).
 - ABI type-shape-only helpers (`layout`, runtime encode/decode, comptime
   decode/test support) now import `ora_types.SemanticType` directly instead of
   reaching through the sema compatibility facade. ABI policy and layout context
@@ -1680,10 +1680,20 @@ Closure:
 
 ### P2.4: Diagnostic Builders
 
+Status: closed.
+
 Local diagnostic helpers repeat shape: locked writes, external-call writes,
 overflow, generic arity, and field/method diagnostics.
 
-Plan:
+Closure:
 
-- Add reusable diagnostic builders for common categories.
-- Keep domain-specific wording close to the domain logic.
+- `src/diagnostics/messages.zig` owns repeated message text for generic arity,
+  expected/found type or region, integer fit, ADT named-payload field shape,
+  locked writes, external-call write ordering, and missing `modifies` coverage.
+- `src/sema/type_check.zig` keeps the source range, severity, and recovery
+  decisions local, but routes the repeated wording through narrow emit helpers.
+- Domain-specific context remains local as subject text, so messages such as
+  `log field 'x' expects type ...` and `error 'E' argument 'code' expects type
+  ...` keep their local meaning without duplicating the expected/found format.
+- A duplicate-string sweep confirms the migrated repeated sema format strings
+  now only exist in the shared diagnostics message builder.
