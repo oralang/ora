@@ -932,21 +932,6 @@ public:
 
 namespace
 {
-    struct PerInvocationCacheGuard
-    {
-        PerInvocationCacheGuard()
-        {
-            clearMapHashCache();
-            clearMemRefHelperMap();
-        }
-
-        ~PerInvocationCacheGuard()
-        {
-            clearMapHashCache();
-            clearMemRefHelperMap();
-        }
-    };
-
     class EraseOpByName final : public ConversionPattern
     {
     public:
@@ -966,7 +951,6 @@ class OraToSIRPass : public PassWrapper<OraToSIRPass, OperationPass<ModuleOp>>
 public:
     void runOnOperation() override
     {
-        PerInvocationCacheGuard cacheGuard;
         ModuleOp module = getOperation();
         MLIRContext *ctx = module.getContext();
         if (ctx)
@@ -998,6 +982,8 @@ public:
         const bool enable_storage = true;
         const bool enable_control_flow = true;
 
+        MapHashCache mapHashCache;
+        MemRefNamingCache memRefNamingCache;
         RewritePatternSet patterns(ctx);
 
         if (enable_contract)
@@ -1094,8 +1080,8 @@ public:
             patterns.add<ConvertSStoreOp>(typeConverter, ctx);
             patterns.add<ConvertTLoadOp>(typeConverter, ctx);
             patterns.add<ConvertTStoreOp>(typeConverter, ctx);
-            patterns.add<ConvertMapGetOp>(typeConverter, ctx, PatternBenefit(5));
-            patterns.add<ConvertMapStoreOp>(typeConverter, ctx, PatternBenefit(5));
+            patterns.add<ConvertMapGetOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
+            patterns.add<ConvertMapStoreOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
             patterns.add<ConvertTensorInsertOp>(typeConverter, ctx);
             patterns.add<ConvertTensorExtractOp>(typeConverter, ctx);
             patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
@@ -1626,9 +1612,9 @@ public:
             phase3Patterns.add<ConvertErrorReturnOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertErrorOkOp>(typeConverter, ctx);
             phase3Patterns.add<ConvertErrorErrOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx);
-            phase3Patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx);
+            phase3Patterns.add<ConvertMemRefAllocOp>(typeConverter, ctx, memRefNamingCache);
+            phase3Patterns.add<ConvertMemRefLoadOp>(typeConverter, ctx, memRefNamingCache);
+            phase3Patterns.add<ConvertMemRefStoreOp>(typeConverter, ctx, memRefNamingCache);
             phase3Patterns.add<ConvertMemRefDimOp>(typeConverter, ctx);
 
             ConversionTarget phase3Target(*ctx);

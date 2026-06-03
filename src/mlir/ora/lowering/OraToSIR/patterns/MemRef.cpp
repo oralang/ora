@@ -29,9 +29,6 @@ static constexpr llvm::StringLiteral kStorageMemRefViewKind{"storage_memref_view
 static constexpr llvm::StringLiteral kStorageStructCarrierKind{"storage_struct_carrier"};
 static constexpr llvm::StringLiteral kStorageStructViewFieldsAttr{"ora.storage_struct_view_fields"};
 
-static thread_local std::map<Operation *, SIRNamingHelper> memrefHelperMap;
-static thread_local SIRNamingHelper memrefFallbackHelper;
-
 static bool storageStructCarrierPreservesField(Value carrier, size_t fieldIndex)
 {
     bool changed = true;
@@ -1018,29 +1015,6 @@ static mlir::IntegerAttr findErrorIdByName(Operation *anchor, StringRef name)
     return {};
 }
 
-static SIRNamingHelper &getNamingHelper(Operation *op)
-{
-    Operation *parentFunc = op->getParentOfType<mlir::func::FuncOp>();
-    if (!parentFunc)
-        return memrefFallbackHelper;
-
-    auto it = memrefHelperMap.find(parentFunc);
-    if (it == memrefHelperMap.end())
-    {
-        SIRNamingHelper newHelper;
-        newHelper.reset();
-        memrefHelperMap[parentFunc] = newHelper;
-        return memrefHelperMap[parentFunc];
-    }
-    return it->second;
-}
-
-void clearMemRefHelperMap()
-{
-    memrefHelperMap.clear();
-    memrefFallbackHelper.reset();
-}
-
 LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     mlir::memref::LoadOp op,
     PatternRewriter &rewriter) const
@@ -1265,7 +1239,7 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
     Value sizeConst = rewriter.create<sir::ConstOp>(allocLoc, u256Type, sizeAttr);
 
     // Name size constant
-    auto &naming = getNamingHelper(op);
+    auto &naming = namingCache->get(op);
     naming.nameConst(sizeConst.getDefiningOp(), 0, totalSize, "alloc_size");
 
     // Create malloc - detect if this is an array allocation (multiple elements)
@@ -1462,7 +1436,7 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
     // Get indices (if any)
     Value basePtr = memref;
 
-    auto &naming = getNamingHelper(op);
+    auto &naming = namingCache->get(op);
 
     if (!indices.empty())
     {
@@ -1946,7 +1920,7 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
         memref = rewriter.create<sir::BitcastOp>(loc, ptrType, memref);
     }
 
-    auto &naming = getNamingHelper(op);
+    auto &naming = namingCache->get(op);
 
     // Get indices (if any)
     Value storePtr = memref;

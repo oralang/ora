@@ -29,48 +29,6 @@ namespace {
     static constexpr llvm::StringLiteral kStorageStructCarrierKind{"storage_struct_carrier"};
     static constexpr llvm::StringLiteral kStorageStructViewFieldsAttr{"ora.storage_struct_view_fields"};
 
-    struct MapHashKey
-    {
-        void *func = nullptr;
-        const void *keyVal = nullptr;
-        const void *mapVal = nullptr;
-        uint64_t mapConst = 0;
-        bool mapIsConst = false;
-    };
-
-    struct MapHashKeyInfo
-    {
-        static inline MapHashKey getEmptyKey()
-        {
-            return MapHashKey{reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), 0, false};
-        }
-        static inline MapHashKey getTombstoneKey()
-        {
-            return MapHashKey{reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), 0, false};
-        }
-        static unsigned getHashValue(const MapHashKey &k)
-        {
-            uintptr_t h1 = reinterpret_cast<uintptr_t>(k.func);
-            uintptr_t h2 = reinterpret_cast<uintptr_t>(k.keyVal);
-            uintptr_t h3 = k.mapIsConst ? static_cast<uintptr_t>(k.mapConst) : reinterpret_cast<uintptr_t>(k.mapVal);
-            return static_cast<unsigned>(llvm::hash_combine(h1, h2, h3, k.mapIsConst));
-        }
-        static bool isEqual(const MapHashKey &a, const MapHashKey &b)
-        {
-            if (a.func != b.func)
-                return false;
-            if (a.keyVal != b.keyVal)
-                return false;
-            if (a.mapIsConst != b.mapIsConst)
-                return false;
-            if (a.mapIsConst)
-                return a.mapConst == b.mapConst;
-            return a.mapVal == b.mapVal;
-        }
-    };
-
-    static thread_local llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
-
     static ora::StructDeclOp findStructDeclForName(Operation *op, StringRef structName)
     {
         ModuleOp module = op->getParentOfType<ModuleOp>();
@@ -90,8 +48,6 @@ namespace {
         return structDecl;
     }
 } // namespace
-
-void clearMapHashCache() { mapHashCache.clear(); }
 
 namespace {
     static bool getConstU64(Value v, uint64_t &out)
@@ -126,11 +82,11 @@ namespace {
         return k;
     }
 
-    static Value lookupCachedMapHash(Operation *funcOp, Operation *anchor, Value mapSlot, Value key)
+    static Value lookupCachedMapHash(MapHashCache &cache, Operation *funcOp, Operation *anchor, Value mapSlot, Value key)
     {
         MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
-        auto it = mapHashCache.find(k);
-        if (it == mapHashCache.end())
+        auto it = cache.hashes.find(k);
+        if (it == cache.hashes.end())
             return Value();
         Value hash = it->second;
         if (!anchor || !hash)
@@ -148,10 +104,10 @@ namespace {
         return Value();
     }
 
-    static void storeCachedMapHash(Operation *funcOp, Value mapSlot, Value key, Value hash)
+    static void storeCachedMapHash(MapHashCache &cache, Operation *funcOp, Value mapSlot, Value key, Value hash)
     {
         MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
-        mapHashCache[k] = hash;
+        cache.hashes[k] = hash;
     }
 } // namespace
 
@@ -1863,7 +1819,7 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     }
 
     auto funcOp = op->getParentOfType<func::FuncOp>();
-    Value hash = lookupCachedMapHash(funcOp, op.getOperation(), mapSlot, keyForCache);
+    Value hash = lookupCachedMapHash(*mapHashCache, funcOp, op.getOperation(), mapSlot, keyForCache);
     if (hash)
     {
         DBG("ConvertMapGetOp: reused cached keccak256 hash");
@@ -1892,7 +1848,7 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         {
             setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
         }
-        storeCachedMapHash(funcOp, mapSlot, keyForCache, hash);
+        storeCachedMapHash(*mapHashCache, funcOp, mapSlot, keyForCache, hash);
     }
 
     // Get the expected result type from ora.map_get and convert it
@@ -2126,7 +2082,7 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     }
 
     auto funcOp = op->getParentOfType<func::FuncOp>();
-    Value hash = lookupCachedMapHash(funcOp, op.getOperation(), mapSlot, keyForCache);
+    Value hash = lookupCachedMapHash(*mapHashCache, funcOp, op.getOperation(), mapSlot, keyForCache);
     if (hash)
     {
         DBG("ConvertMapStoreOp: reused cached keccak256 hash");
@@ -2155,7 +2111,7 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         {
             setResultName(hash.getDefiningOp(), 0, ("hash_" + globalName).str());
         }
-        storeCachedMapHash(funcOp, mapSlot, keyForCache, hash);
+        storeCachedMapHash(*mapHashCache, funcOp, mapSlot, keyForCache, hash);
     }
 
     if (auto valueMemRefType = llvm::dyn_cast<mlir::MemRefType>(originalValueType);
