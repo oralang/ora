@@ -29,8 +29,8 @@ static constexpr llvm::StringLiteral kStorageMemRefViewKind{"storage_memref_view
 static constexpr llvm::StringLiteral kStorageStructCarrierKind{"storage_struct_carrier"};
 static constexpr llvm::StringLiteral kStorageStructViewFieldsAttr{"ora.storage_struct_view_fields"};
 
-static std::map<Operation *, SIRNamingHelper> memrefHelperMap;
-static SIRNamingHelper memrefFallbackHelper;
+static thread_local std::map<Operation *, SIRNamingHelper> memrefHelperMap;
+static thread_local SIRNamingHelper memrefFallbackHelper;
 
 static bool storageStructCarrierPreservesField(Value carrier, size_t fieldIndex)
 {

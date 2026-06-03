@@ -932,6 +932,21 @@ public:
 
 namespace
 {
+    struct PerInvocationCacheGuard
+    {
+        PerInvocationCacheGuard()
+        {
+            clearMapHashCache();
+            clearMemRefHelperMap();
+        }
+
+        ~PerInvocationCacheGuard()
+        {
+            clearMapHashCache();
+            clearMemRefHelperMap();
+        }
+    };
+
     class EraseOpByName final : public ConversionPattern
     {
     public:
@@ -951,6 +966,7 @@ class OraToSIRPass : public PassWrapper<OraToSIRPass, OperationPass<ModuleOp>>
 public:
     void runOnOperation() override
     {
+        PerInvocationCacheGuard cacheGuard;
         ModuleOp module = getOperation();
         MLIRContext *ctx = module.getContext();
         if (ctx)

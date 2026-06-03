@@ -69,7 +69,7 @@ namespace {
         }
     };
 
-    static llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
+    static thread_local llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> mapHashCache;
 
     static ora::StructDeclOp findStructDeclForName(Operation *op, StringRef structName)
     {
