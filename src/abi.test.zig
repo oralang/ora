@@ -12,6 +12,7 @@ const abi_policy = ora_root.abi_policy;
 const abi_comptime_decoder = ora_root.abi_comptime_decoder;
 const abi_comptime_encoder = ora_root.abi_comptime_encoder;
 const compiler = ora_root.compiler;
+const ora_types = @import("ora_types");
 const hir_module_lowering = compiler.hir.abi_layout_test_support;
 const mlir = @import("mlir_c_api").c;
 
@@ -405,7 +406,7 @@ test "abi comptime decoder has malformed corpus fixture for every DecodeError va
     const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
     const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
     const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
-    const refinement_args = [_]compiler.sema.RefinementArg{
+    const refinement_args = [_]ora_types.RefinementArg{
         .Type,
         .{ .Integer = .{ .text = "1" } },
     };
@@ -483,7 +484,7 @@ test "abi comptime decoder fails closed for refinement base with unresolved comp
     const resolver = noopAbiDecodeResolver();
 
     const unresolved_u256: sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
-    const refinement_args = [_]compiler.sema.RefinementArg{
+    const refinement_args = [_]ora_types.RefinementArg{
         .Type,
         .{ .Integer = .{ .text = "1" } },
     };
@@ -559,7 +560,7 @@ test "abi N5 permissive comptime decoder masks canonicality but preserves hard e
     const word_64 = "0000000000000000000000000000000000000000000000000000000000000040";
     const word_one = "0000000000000000000000000000000000000000000000000000000000000001";
     const word_2_64 = "0000000000000000000000000000000000000000000000010000000000000000";
-    const refinement_args = [_]compiler.sema.RefinementArg{
+    const refinement_args = [_]ora_types.RefinementArg{
         .Type,
         .{ .Integer = .{ .text = "1" } },
     };

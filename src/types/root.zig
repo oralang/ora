@@ -24,6 +24,7 @@ pub const FixedBytesType = semantic.FixedBytesType;
 pub const RefinementArg = semantic.RefinementArg;
 pub const RefinementIntegerArg = semantic.RefinementIntegerArg;
 pub const RefinementType = semantic.RefinementType;
+pub const AnonymousStructField = semantic.AnonymousStructField;
 pub const SemanticType = semantic.Type;
 pub const LocatedType = semantic.LocatedType;
 pub const ConstValue = value.ConstValue;

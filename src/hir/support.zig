@@ -1,12 +1,15 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
-const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const ora_types = @import("ora_types");
 const type_builtin = ora_types.builtin;
 const refinements = ora_types.refinement_semantics;
 const hir_locals = @import("locals.zig");
+const Type = ora_types.SemanticType;
+const IntegerType = ora_types.IntegerType;
+const RefinementType = ora_types.RefinementType;
+const RefinementArg = ora_types.RefinementArg;
 
 pub const LoopContext = struct {
     parent: ?*const LoopContext,
@@ -100,7 +103,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     return mlir.oraStructTypeGet(ctx, strRef(trimmed));
 }
 
-pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
+pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     return switch (descriptor) {
         .bool => boolType(ctx),
         .integer => |integer| lowerIntegerType(ctx, integer),
@@ -140,7 +143,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocat
     };
 }
 
-pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
+pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: RefinementType, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     const base_type = try lowerTypeDescriptor(ctx, refinement.base_type.*, allocator);
     return buildRefinementType(ctx, refinement.name, base_type, refinement.args) orelse base_type;
 }
@@ -149,7 +152,7 @@ pub fn isRefinementTypeName(name: []const u8) bool {
     return refinements.hasNativeMlirTypeName(name);
 }
 
-pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const sema.RefinementArg) ?mlir.MlirType {
+pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const RefinementArg) ?mlir.MlirType {
     const entry = refinements.entryForName(name) orelse return null;
     if (!entry.has_native_mlir_type) return null;
 
@@ -181,7 +184,7 @@ pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: m
     };
 }
 
-fn parseRefinementIntArg(args: []const sema.RefinementArg, index: usize) ?u256 {
+fn parseRefinementIntArg(args: []const RefinementArg, index: usize) ?u256 {
     if (index >= args.len) return null;
     return switch (args[index]) {
         .Integer => |literal| parseRefinementIntLiteral(literal.text),
@@ -211,8 +214,8 @@ test "HIR refinement type builder follows registry native type classification" {
     defer mlir.oraContextDestroy(ctx);
 
     const base_type = defaultIntegerType(ctx);
-    const type_arg: sema.RefinementArg = .{ .Type = {} };
-    const min_arg: sema.RefinementArg = .{ .Integer = .{ .text = "1" } };
+    const type_arg: RefinementArg = .{ .Type = {} };
+    const min_arg: RefinementArg = .{ .Integer = .{ .text = "1" } };
 
     try std.testing.expect(buildRefinementType(ctx, "NonZero", base_type, &.{type_arg}) == null);
 
@@ -225,8 +228,8 @@ test "HIR refinement type builder preserves negative bounds as u256 two's-comple
     defer mlir.oraContextDestroy(ctx);
 
     const base_type = mlir.oraIntegerTypeCreate(ctx, 8);
-    const type_arg: sema.RefinementArg = .{ .Type = {} };
-    const min_arg: sema.RefinementArg = .{ .Integer = .{ .text = "-5" } };
+    const type_arg: RefinementArg = .{ .Type = {} };
+    const min_arg: RefinementArg = .{ .Integer = .{ .text = "-5" } };
 
     const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));
@@ -252,11 +255,11 @@ test "HIR integer type parsing uses canonical builtin widths" {
 }
 
 test "HIR integer signedness helper fails closed on unresolved integer facts" {
-    const i8_type: sema.Type = .{ .integer = .{ .bits = 8, .signed = true, .spelling = "i8" } };
+    const i8_type: Type = .{ .integer = .{ .bits = 8, .signed = true, .spelling = "i8" } };
     const signed = try resolvedIntegerSignedness(i8_type);
     try std.testing.expectEqual(true, signed orelse return error.TestUnexpectedResult);
 
-    const refinement_type: sema.Type = .{ .refinement = .{ .name = "SignedByte", .base_type = &i8_type } };
+    const refinement_type: Type = .{ .refinement = .{ .name = "SignedByte", .base_type = &i8_type } };
     const refinement_signed = try resolvedIntegerSignedness(refinement_type);
     try std.testing.expectEqual(true, refinement_signed orelse return error.TestUnexpectedResult);
 
@@ -354,7 +357,7 @@ pub fn defaultIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, 256);
 }
 
-pub fn lowerIntegerType(ctx: mlir.MlirContext, integer: sema.IntegerType) mlir.MlirType {
+pub fn lowerIntegerType(ctx: mlir.MlirContext, integer: IntegerType) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, integer.bits);
 }
 
@@ -407,11 +410,11 @@ pub fn parseBitfieldIntegerType(name: []const u8) ?struct { bits: u32, signed: b
     return .{ .bits = bits, .signed = signed };
 }
 
-pub fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
+pub fn unwrapRefinementSemaType(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
 }
 
-pub fn resolvedIntegerSignedness(ty: sema.Type) anyerror!?bool {
+pub fn resolvedIntegerSignedness(ty: Type) anyerror!?bool {
     return switch (unwrapRefinementSemaType(ty)) {
         .integer => |integer| integer.signed,
         .comptime_integer => error.MlirOperationCreationFailed,

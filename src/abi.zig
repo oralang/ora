@@ -11,6 +11,7 @@ const compiler_type_descriptors = @import("sema/type_descriptors.zig");
 const ora_types = @import("ora_types");
 const refinements = ora_types.refinement_semantics;
 const type_builtin = ora_types.builtin;
+const RefinementType = ora_types.RefinementType;
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
@@ -1527,7 +1528,7 @@ const CompilerAbiGenerator = struct {
     fn resolveRefinementType(
         self: *CompilerAbiGenerator,
         ctx: CompilerModuleContext,
-        refinement: compiler.sema.RefinementType,
+        refinement: RefinementType,
     ) anyerror!ResolvedType {
         const base = try self.resolveSemaType(ctx, refinement.base_type.*, &.{});
 

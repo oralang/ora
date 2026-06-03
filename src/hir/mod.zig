@@ -4,7 +4,8 @@ const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
 const ConstEvalResult = sema.ConstEvalResult;
-const refinements = @import("ora_types").refinement_semantics;
+const ora_types = @import("ora_types");
+const refinements = ora_types.refinement_semantics;
 const compiler_query = @import("../compiler_query.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
@@ -17,6 +18,7 @@ const refinement_guards = @import("../mlir/refinement_guards.zig");
 const support = @import("support.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
+const RefinementArg = ora_types.RefinementArg;
 
 pub const abi = @import("abi.zig");
 
@@ -1472,8 +1474,8 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
     return support.lowerPathType(lowerer.context, generic.name);
 }
 
-fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const sema.RefinementArg {
-    const resolved = lowerer.allocator.alloc(sema.RefinementArg, args.len) catch return null;
+fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const RefinementArg {
+    const resolved = lowerer.allocator.alloc(RefinementArg, args.len) catch return null;
     for (args, 0..) |arg, index| {
         resolved[index] = switch (arg) {
             .Integer => |literal| .{ .Integer = .{ .text = literal.text } },

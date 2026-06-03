@@ -422,12 +422,14 @@ Sema-owned helpers, not `src/types` APIs:
 
 ### Canonical Semantic Type
 
-The real semantic type model should live in `src/types`, not `src/sema`.
+The real semantic type model now lives in `src/types`, not `src/sema`.
 
-Proposed direction:
+Implemented direction:
 
-- Move or mirror `sema.model.Type` into `src/types/semantic.zig`.
-- Let `src/sema/model.zig` re-export it during migration.
+- `src/types/semantic.zig` owns the semantic type union and related neutral
+  type facts.
+- `src/sema/model.zig` re-exports those neutral types for sema-owned result
+  containers and compatibility callers.
 - Retire or shrink `TypeInfo`/`OraType` so there is not a second semantic type
   universe.
 
@@ -1527,10 +1529,13 @@ Plan:
 
 - Let P1.1 establish type metadata ownership.
 - Semantic type ownership now lives in `src/types/semantic.zig`; `sema.model`
-  re-exports the type model as a compatibility facade for existing callers.
+  re-exports the type model for sema-facing result containers and compatibility
+  callers. Non-sema consumers that only need semantic type facts import
+  `ora_types` directly.
 - Refinement semantic facts now live in `src/types/refinement_semantics.zig`;
-  `sema/refinements.zig` is a compatibility facade, and ABI/comptime consume the
-  neutral type-owned helpers instead of importing sema refinement logic.
+  the old `sema/refinements.zig` facade was removed, and ABI/comptime/HIR
+  consume the neutral type-owned helpers instead of importing sema refinement
+  logic.
 - Keep integer width and signedness resolved exactly once through the sema gate.
   Downstream semantic types carry concrete width/signedness, while unresolved
   literal state is represented separately as `comptime_integer`.
@@ -1542,7 +1547,7 @@ Plan:
   lookup/conversion code around them.
 - Avoid parallel unions that need conversion glue.
 
-Status:
+Status: closed.
 
 - Integer/type model: done and verified. Resolved runtime integers are concrete
   by construction; unresolved literals are represented as `comptime_integer` and
@@ -1558,6 +1563,16 @@ Status:
   query/index records. `LayoutContext` receives type-expression resolution and
   layout shape facts through a neutral provider vtable; the sema-owned adapter
   implements that provider outside the ABI layer.
+- Cosmetic facade tail: done for the P2.2 boundary. `src/hir/support.zig`
+  imports neutral semantic type/refinement facts directly from `ora_types`, and
+  `src/comptime/compiler_ast_eval.zig` spells semantic `Type`,
+  `IntegerType`, `TypeKind`, and anonymous-struct fields through `ora_types`
+  while retaining `sema.model` only for real sema result/key containers.
+  Remaining non-sema imports of `sema/mod.zig` or `sema/model.zig` are
+  classified as result/query/lowering boundaries (`TypeCheckResult`,
+  `ItemIndexResult`, `NameResolutionResult`, `VerificationFact`,
+  `ResolvedCall`, `TypeCheckKey`, or DB/driver/compiler public facade wiring),
+  not neutral-type ownership leaks.
 
 Value-model scoping note:
 
@@ -1604,10 +1619,9 @@ Value-model audit result:
 
 Value-model decision:
 
-- The canonical semantic constant representation should move to a neutral owner,
-  likely `src/types/value.zig`, preserving the current `sema_model.ConstValue`
-  shape and `BigInt` integer semantics. `sema.model` should re-export it as a
-  compatibility facade during migration.
+- The canonical semantic constant representation moved to the neutral owner
+  `src/types/value.zig`, preserving the previous `sema_model.ConstValue` shape
+  and `BigInt` integer semantics. `sema.model` re-exports it for compatibility.
 - `ConstEvalResult` remains a query/result container for now because it owns a
   `diagnostics.DiagnosticList`; the standalone `ora_types` package cannot import
   diagnostics without breaking its module boundary. Its `values` field should use
@@ -1631,13 +1645,12 @@ Value-model decision:
      import `ora_types.ConstValue`; the remaining sema facade is compatibility
      surface, not a second owner.
 
-Tracked follow-up debt:
+Separate tracked reliability debt:
 
 - Investigate the intermittent native OraToSIR abort observed once during a full
   `test-compiler` run after all Zig tests reported passed. The isolated
-  OraToSIR test and a second full run passed, so it is not a blocker for the
-  P2.2 ownership slice, but it remains a flaky native reliability issue until
-  triaged.
+  OraToSIR test and a second full run passed, so it is outside P2.2 ownership
+  closure, but it remains a native reliability issue until triaged.
 - ABI type-shape-only helpers (`layout`, runtime encode/decode, comptime
   decode/test support) now import `ora_types.SemanticType` directly instead of
   reaching through the sema compatibility facade. ABI policy and layout context
@@ -1646,26 +1659,24 @@ Tracked follow-up debt:
   resolution plus layout shape facts through a neutral provider vtable. The
   sema-owned adapter implements that provider in `src/sema/abi_layout_provider.zig`.
 
-### P2.3: Syntax ID Boilerplate (Optional / Low Priority)
+### P2.3: Syntax ID Boilerplate
 
-This finding was overstated in the original draft and is now narrowed. AST IDs
+Status: closed.
+
+This finding was overstated in the original draft and was narrowed. AST IDs
 already reuse `source.defineId` (`src/ast/ids.zig:6`), and AST builder/accessor
 helpers are already centralized through `support.mixin`
-(`src/ast/support.zig:18`). That part is the clean state we want — no work
-needed there.
+(`src/ast/support.zig:18`). That part was already the clean state we wanted.
 
-What genuinely remains: syntax green IDs still hand-roll the enum shape
-(`src/syntax/green.zig:9`) instead of reusing the shared `defineId` generator.
+The genuine remaining issue was syntax green IDs hand-rolling the same enum
+shape. `GreenNodeId` and `GreenTokenId` now use `source.defineId`, so source,
+syntax, and AST IDs share one ID generator.
 
-Plan (optional, low priority):
+Closure:
 
-- Migrate syntax green IDs onto the shared `defineId` generator so source,
-  syntax, and AST IDs use one mechanism.
-- If any truly repetitive accessor boilerplate remains after that, fold it into
-  the existing mixin pattern.
-
-This is the lowest-value item in the plan. Treat it as optional cleanup, not a
-required phase.
+- `src/syntax/green.zig` uses `source.defineId` for green node/token IDs.
+- Existing syntax accessors continue to use `.fromIndex()` and `.index()`;
+  the shared formatter is additive and does not change ID values.
 
 ### P2.4: Diagnostic Builders
 

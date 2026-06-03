@@ -24,7 +24,10 @@ const module_graph = @import("../sema/module_graph.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
-const TypeKind = model.TypeKind;
+const Type = ora_types.SemanticType;
+const TypeKind = ora_types.TypeKind;
+const IntegerType = ora_types.IntegerType;
+const AnonymousStructField = ora_types.AnonymousStructField;
 const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
 const CtErrorUnion = comptime_mod.CtErrorUnion;
@@ -1167,7 +1170,7 @@ const ConstEvaluator = struct {
         return item_index.lookupStructFieldIndex(item_id, field_name);
     }
 
-    fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?model.Type {
+    fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const typecheck = (try self.currentTypeCheckResult()) orelse return null;
         const expr_type = typecheck.exprType(expr_id);
         if (expr_type != .struct_) return null;
@@ -1183,7 +1186,7 @@ const ConstEvaluator = struct {
         return try self.modelTypeFromTypeExpr(field.type_expr);
     }
 
-    fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const model.AnonymousStructField {
+    fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const AnonymousStructField {
         if (try self.currentTypeCheckResult()) |typecheck| {
             const expr_type = typecheck.exprType(expr_id);
             if (expr_type == .enum_) {
@@ -1203,10 +1206,10 @@ const ConstEvaluator = struct {
         return try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(variant_ref.variant_id)].payload);
     }
 
-    fn enumNamedPayloadFieldsFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload) !?[]const model.AnonymousStructField {
+    fn enumNamedPayloadFieldsFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload) !?[]const AnonymousStructField {
         return switch (payload) {
             .named => |fields| blk: {
-                const result = try self.allocator.alloc(model.AnonymousStructField, fields.len);
+                const result = try self.allocator.alloc(AnonymousStructField, fields.len);
                 for (fields, 0..) |field, index| {
                     result[index] = .{
                         .name = field.name,
@@ -1219,7 +1222,7 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?model.Type {
+    fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?Type {
         const typecheck = (try self.currentTypeCheckResult()) orelse return null;
         const expr_type = typecheck.exprType(expr_id);
         if (expr_type == .enum_) {
@@ -1234,7 +1237,7 @@ const ConstEvaluator = struct {
         return try self.enumPayloadArgTypeFromAst(item.Enum.variants[variant_ref.variant_id].payload, arg_index);
     }
 
-    fn enumPayloadArgTypeFromModel(payload_type: ?model.Type, arg_index: usize) ?model.Type {
+    fn enumPayloadArgTypeFromModel(payload_type: ?Type, arg_index: usize) ?Type {
         const payload = payload_type orelse return null;
         return switch (payload) {
             .tuple => |elements| if (arg_index < elements.len) elements[arg_index] else null,
@@ -1243,7 +1246,7 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn enumPayloadArgTypeFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload, arg_index: usize) !?model.Type {
+    fn enumPayloadArgTypeFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload, arg_index: usize) !?Type {
         return switch (payload) {
             .none => null,
             .positional => |types| if (arg_index < types.len) try self.modelTypeFromTypeExpr(types[arg_index]) else null,
@@ -1251,12 +1254,12 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn modelTypeFromTypeExpr(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !?model.Type {
+    fn modelTypeFromTypeExpr(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !?Type {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
-                if (integerTypeFromName(path.name)) |integer| break :blk model.Type{ .integer = integer };
-                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "address")) break :blk model.Type{ .address = {} };
-                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "bool")) break :blk model.Type{ .bool = {} };
+                if (integerTypeFromName(path.name)) |integer| break :blk Type{ .integer = integer };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "address")) break :blk Type{ .address = {} };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "bool")) break :blk Type{ .bool = {} };
                 break :blk null;
             },
             .Generic => |generic| blk: {
@@ -1269,7 +1272,7 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: model.Type, range: source.TextRange) !bool {
+    fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: Type, range: source.TextRange) !bool {
         return switch (ty) {
             .refinement => |refinement| try self.validateCtValueForRefinement(value, refinement, range),
             else => true,
@@ -1401,7 +1404,7 @@ const ConstEvaluator = struct {
 
     const AbiFunctionReference = struct {
         name: []const u8,
-        param_types: []const model.Type,
+        param_types: []const Type,
         has_self: bool = false,
         signature: ?[]const u8 = null,
     };
@@ -1843,14 +1846,14 @@ const ConstEvaluator = struct {
     fn functionReferenceFromItemType(
         self: *ConstEvaluator,
         name: []const u8,
-        ty: model.Type,
+        ty: Type,
         self_param_index: ?usize,
     ) !?AbiFunctionReference {
         if (ty.kind() != .function) return null;
         const params = ty.function.param_types;
         const filtered = if (self_param_index) |skip_index| blk: {
             if (skip_index >= params.len) break :blk params;
-            var out = try self.allocator.alloc(model.Type, params.len - 1);
+            var out = try self.allocator.alloc(Type, params.len - 1);
             var out_index: usize = 0;
             for (params, 0..) |param, index| {
                 if (index == skip_index) continue;
@@ -2100,7 +2103,7 @@ const ConstEvaluator = struct {
         return model.anonymousStructFieldIndex(fields, field_name);
     }
 
-    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?[]const model.AnonymousStructField {
+    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?[]const AnonymousStructField {
         if (try self.currentTypeCheckResult()) |typecheck| {
             const ty = typecheck.exprType(expr_id);
             if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
@@ -2112,7 +2115,7 @@ const ConstEvaluator = struct {
         return null;
     }
 
-    fn typeIdForModelType(self: *ConstEvaluator, ty: model.Type) ?u32 {
+    fn typeIdForModelType(self: *ConstEvaluator, ty: Type) ?u32 {
         return switch (ty) {
             .integer => |integer| blk: {
                 const spec = integer.builtinSpec() orelse break :blk null;
@@ -2429,13 +2432,13 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn abiDecodeTypeFromTypeArg(self: *ConstEvaluator, type_arg: ast.TypeExprId) !model.Type {
+    fn abiDecodeTypeFromTypeArg(self: *ConstEvaluator, type_arg: ast.TypeExprId) !Type {
         const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
         const raw = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, type_arg);
         return try self.resolveAbiDecodeTypeAliases(raw);
     }
 
-    fn resolveAbiDecodeTypeAliases(self: *ConstEvaluator, ty: model.Type) !model.Type {
+    fn resolveAbiDecodeTypeAliases(self: *ConstEvaluator, ty: Type) !Type {
         return switch (ty) {
             .named => |named| blk: {
                 const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
@@ -2448,7 +2451,7 @@ const ConstEvaluator = struct {
             .refinement => |refinement| blk: {
                 var copy = refinement;
                 copy.base_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(refinement.base_type.*));
-                break :blk model.Type{ .refinement = copy };
+                break :blk Type{ .refinement = copy };
             },
             .array => |array| .{ .array = .{
                 .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(array.element_type.*)),
@@ -2458,28 +2461,28 @@ const ConstEvaluator = struct {
                 .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(slice.element_type.*)),
             } },
             .tuple => |elements| blk: {
-                const resolved = try self.allocator.alloc(model.Type, elements.len);
+                const resolved = try self.allocator.alloc(Type, elements.len);
                 for (elements, 0..) |element, index| {
                     resolved[index] = try self.resolveAbiDecodeTypeAliases(element);
                 }
-                break :blk model.Type{ .tuple = resolved };
+                break :blk Type{ .tuple = resolved };
             },
             .anonymous_struct => |struct_type| blk: {
-                const fields = try self.allocator.alloc(model.AnonymousStructField, struct_type.fields.len);
+                const fields = try self.allocator.alloc(AnonymousStructField, struct_type.fields.len);
                 for (struct_type.fields, 0..) |field, index| {
                     fields[index] = .{
                         .name = field.name,
                         .ty = try self.resolveAbiDecodeTypeAliases(field.ty),
                     };
                 }
-                break :blk model.Type{ .anonymous_struct = .{ .fields = fields } };
+                break :blk Type{ .anonymous_struct = .{ .fields = fields } };
             },
             .error_union => |error_union| blk: {
-                const errors = try self.allocator.alloc(model.Type, error_union.error_types.len);
+                const errors = try self.allocator.alloc(Type, error_union.error_types.len);
                 for (error_union.error_types, 0..) |err, index| {
                     errors[index] = try self.resolveAbiDecodeTypeAliases(err);
                 }
-                break :blk model.Type{ .error_union = .{
+                break :blk Type{ .error_union = .{
                     .payload_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(error_union.payload_type.*)),
                     .error_types = errors,
                 } };
@@ -2488,8 +2491,8 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn storeAbiDecodeType(self: *ConstEvaluator, ty: model.Type) !*model.Type {
-        const ptr = try self.allocator.create(model.Type);
+    fn storeAbiDecodeType(self: *ConstEvaluator, ty: Type) !*Type {
+        const ptr = try self.allocator.create(Type);
         ptr.* = ty;
         return ptr;
     }
@@ -2524,16 +2527,16 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn abiDecodeTypeIdForType(context: *anyopaque, ty: model.Type) anyerror!?u32 {
+    fn abiDecodeTypeIdForType(context: *anyopaque, ty: Type) anyerror!?u32 {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
         return self.typeIdForModelType(ty);
     }
 
-    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) anyerror!?[]const model.AnonymousStructField {
+    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) anyerror!?[]const AnonymousStructField {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
         const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         if (typecheck.instantiatedStructByName(name)) |instantiated| {
-            const fields = try self.allocator.alloc(model.AnonymousStructField, instantiated.fields.len);
+            const fields = try self.allocator.alloc(AnonymousStructField, instantiated.fields.len);
             for (instantiated.fields, 0..) |field, index| {
                 fields[index] = .{ .name = field.name, .ty = field.ty };
             }
@@ -2545,7 +2548,7 @@ const ConstEvaluator = struct {
             else => return null,
         };
         const item_index = (try self.currentItemIndex()) orelse return null;
-        const fields = try self.allocator.alloc(model.AnonymousStructField, struct_item.fields.len);
+        const fields = try self.allocator.alloc(AnonymousStructField, struct_item.fields.len);
         for (struct_item.fields, 0..) |field, index| {
             fields[index] = .{
                 .name = field.name,
@@ -4288,14 +4291,14 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn typeExprIntegerType(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?model.IntegerType {
+    fn typeExprIntegerType(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?IntegerType {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| integerTypeFromName(path.name),
             else => null,
         };
     }
 
-    fn integerTypeFromName(name: []const u8) ?model.IntegerType {
+    fn integerTypeFromName(name: []const u8) ?IntegerType {
         const trimmed = std.mem.trim(u8, name, " \t\n\r");
         return type_descriptors.integerTypeFromName(trimmed);
     }

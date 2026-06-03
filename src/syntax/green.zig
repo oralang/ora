@@ -6,33 +6,8 @@ const SyntaxKind = @import("kinds.zig").SyntaxKind;
 pub const TokenKind = lexer.TokenType;
 pub const TriviaKind = lexer.TriviaKind;
 
-pub const GreenNodeId = enum(u32) {
-    _,
-
-    const Self = @This();
-
-    pub fn fromIndex(idx: usize) Self {
-        return @enumFromInt(idx);
-    }
-
-    pub fn index(self: Self) usize {
-        return @intFromEnum(self);
-    }
-};
-
-pub const GreenTokenId = enum(u32) {
-    _,
-
-    const Self = @This();
-
-    pub fn fromIndex(idx: usize) Self {
-        return @enumFromInt(idx);
-    }
-
-    pub fn index(self: Self) usize {
-        return @intFromEnum(self);
-    }
-};
+pub const GreenNodeId = source.defineId("GreenNodeId");
+pub const GreenTokenId = source.defineId("GreenTokenId");
 
 pub const GreenTrivia = struct {
     kind: TriviaKind,
