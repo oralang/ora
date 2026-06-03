@@ -775,10 +775,27 @@ test "compiler lowers bitfield construction through packed bit ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.struct.create\""));
 }
 
+test "compiler rejects bitfield fields without inferrable integer width" {
+    const source_text =
+        \\contract Bits {
+        \\    bitfield Flags: u256 {
+        \\        label: string,
+        \\    }
+        \\
+        \\    storage packed: Flags;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    try testing.expectError(error.InvalidBitfieldFieldType, compilation.db.lowerToHir(compilation.root_module_id));
+}
+
 test "compiler lowers tuple locals without tuple fallback" {
     const source_text =
         \\pub fn probe() -> u256 {
-        \\    let coords = (1, 2);
+        \\    let coords: (u256, u256) = (1, 2);
         \\    return 1;
         \\}
     ;
@@ -796,7 +813,7 @@ test "compiler lowers tuple locals without tuple fallback" {
 test "compiler lowers tuple HIR types without tuple fallback" {
     const source_text =
         \\pub fn pair() -> (u256, bool) {
-        \\    let coords = (1, true);
+        \\    let coords: (u256, bool) = (1, true);
         \\    return coords;
         \\}
     ;
@@ -819,7 +836,7 @@ test "compiler lowers tuple HIR types without tuple fallback" {
 test "compiler lowers tuple expressions through real tuple ops" {
     const source_text =
         \\pub fn pair() -> u256 {
-        \\    let coords = (1, true);
+        \\    let coords: (u256, bool) = (1, true);
         \\    return coords[0];
         \\}
     ;
@@ -889,7 +906,7 @@ test "compiler lowers builtin, quantified, and verification expressions" {
         \\{
         \\    assert(forall i: u256 where i < 4 => values[i] >= 0);
         \\    let casted = @cast(address, next);
-        \\    let quotient = @divTrunc(10, 3);
+        \\    let quotient = @divTrunc(@cast(u256, 10), @cast(u256, 3));
         \\    let snapshot = old(quotient);
         \\    let addr = 0x1234567890abcdef1234567890abcdef12345678;
         \\    let data = hex"deadbeef";
@@ -1003,10 +1020,10 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let coords = (items[0], items[1]);
         \\    let pair = Pair { first: items[0], second: items[1] };
-        \\    let value = switch (true) {
+        \\    let value: u256 = switch (true) {
         \\        true => 1,
         \\        false => 2,
         \\        else => 3,
@@ -1620,7 +1637,7 @@ test "compiler lowers checked arithmetic compound assignment" {
 test "compiler lowers array literals through memref allocation and stores" {
     const source_text =
         \\pub fn read_first() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    return items[0];
         \\}
     ;
@@ -1672,8 +1689,8 @@ test "compiler lowers destructuring assignment through struct field extracts" {
         \\}
         \\
         \\pub fn sum() -> u256 {
-        \\    let left = 0;
-        \\    let right = 0;
+        \\    let left: u256 = 0;
+        \\    let right: u256 = 0;
         \\    .{ left, right } = Pair { left: 4, right: 5 };
         \\    return left + right;
         \\}
@@ -1715,7 +1732,7 @@ test "compiler lowers fallback break and continue through real ops" {
 test "compiler types and lowers all-constant switch expressions without else" {
     const source_text =
         \\pub fn choose(tag: u256) -> u256 {
-        \\    let value = switch (tag) {
+        \\    let value: u256 = switch (tag) {
         \\        0 => 1,
         \\        1 => 2,
         \\    };

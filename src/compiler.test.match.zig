@@ -1273,7 +1273,7 @@ test "compiler marks payload-bearing narrow error unions for wide lowering in HI
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
 
-test "compiler infers operator result types from operand compatibility" {
+test "compiler infers operator result types from strict operand compatibility" {
     const source_text =
         \\error Failure(code: u256);
         \\
@@ -1307,14 +1307,17 @@ test "compiler infers operator result types from operand compatibility" {
     const unwrapped_stmt = ast_file.statement(body.statements[6]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[7]).Return;
 
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[logic_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[negated_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[failed_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[unwrapped_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '&' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u256' and 'u8'"));
 }
 
 test "compiler emits user diagnostics for generic arity mismatches" {
@@ -1416,16 +1419,18 @@ test "compiler reports sema diagnostics for declaration assignment and return mi
     try testing.expectEqualStrings("field 'total' expects type 'u256', found 'bool'", type_diags.items.items[0].message);
     try testing.expectEqualStrings("constant 'LIMIT' expects type 'u256', found 'bool'", type_diags.items.items[1].message);
     try testing.expectEqualStrings("declaration expects type 'u256', found 'bool'", type_diags.items.items[2].message);
-    try testing.expectEqualStrings("assignment expects type 'integer', found 'bool'", type_diags.items.items[3].message);
+    try testing.expectEqualStrings("ambiguous integer type; annotate or suffix the integer literal", type_diags.items.items[3].message);
     try testing.expectEqualStrings("return expects type 'u256', found 'bool'", type_diags.items.items[4].message);
 
     const function = ast_file.item(ast_file.root_items[2]).Function;
     const full_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
     const body = ast_file.body(function.body);
     const a_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+    const b_stmt = ast_file.statement(body.statements[1]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[3]).Return;
 
     try testing.expectEqual(compiler.sema.TypeKind.integer, full_typecheck.pattern_types[a_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, full_typecheck.pattern_types[b_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, full_typecheck.exprType(ret_stmt.value.?).kind());
 }
 
@@ -1433,7 +1438,7 @@ test "compiler reports sema diagnostics for control flow conditions and switch b
     const source_text =
         \\pub fn broken(flag: u256) -> u256 {
         \\    if (1) {
-        \\        let a = 1;
+        \\        let a: u256 = 1;
         \\    }
         \\    while (2) {
         \\        break;

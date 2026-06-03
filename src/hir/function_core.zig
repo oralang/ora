@@ -43,10 +43,6 @@ const statementMayReturn = analysis.statementMayReturn;
 
 const EnsureExitKind = enum { ok, err };
 
-fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
-    return if (ty.refinementBaseType()) |base| base.* else ty;
-}
-
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     return struct {
         pub fn init(parent: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, op: mlir.MlirOperation, return_type: ?mlir.MlirType) FunctionLowerer {
@@ -423,7 +419,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), min_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const predicate = comparePredicateForBase(refinement.base_type.*, true);
+            const predicate = comparePredicateForValue(value, true);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
@@ -433,7 +429,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), max_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const predicate = comparePredicateForBase(refinement.base_type.*, false);
+            const predicate = comparePredicateForValue(value, false);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
@@ -446,8 +442,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const ty = mlir.oraValueGetType(value);
             const min_constant = try @This().createTypedIntegerConstant(self, ty, min_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const max_constant = try @This().createTypedIntegerConstant(self, ty, max_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const ge_predicate = comparePredicateForBase(refinement.base_type.*, true);
-            const le_predicate = comparePredicateForBase(refinement.base_type.*, false);
+            const ge_predicate = comparePredicateForValue(value, true);
+            const le_predicate = comparePredicateForValue(value, false);
             const ge_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), ge_predicate, value, min_constant);
             if (mlir.oraOperationIsNull(ge_op)) return error.MlirOperationCreationFailed;
             const le_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), le_predicate, value, max_constant);
@@ -463,7 +459,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = sema.refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
-            return @This().buildRangeBoundsCheck(self, value, refinement, min_value, max_value);
+            return @This().buildRangeBoundsCheck(self, value, min_value, max_value);
         }
 
         fn buildNonZeroCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType) anyerror!mlir.MlirValue {
@@ -475,12 +471,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, cmp_op);
         }
 
-        fn buildRangeBoundsCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: sema.RefinementType, min_value: u256, max_value: u256) anyerror!mlir.MlirValue {
+        fn buildRangeBoundsCheck(self: *FunctionLowerer, value: mlir.MlirValue, min_value: u256, max_value: u256) anyerror!mlir.MlirValue {
             const ty = mlir.oraValueGetType(value);
             const min_constant = try @This().createTypedIntegerConstant(self, ty, min_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const max_constant = try @This().createTypedIntegerConstant(self, ty, max_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const ge_predicate = comparePredicateForBase(refinement.base_type.*, true);
-            const le_predicate = comparePredicateForBase(refinement.base_type.*, false);
+            const ge_predicate = comparePredicateForValue(value, true);
+            const le_predicate = comparePredicateForValue(value, false);
             const ge_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), ge_predicate, value, min_constant);
             if (mlir.oraOperationIsNull(ge_op)) return error.MlirOperationCreationFailed;
             const le_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), le_predicate, value, max_constant);
@@ -537,21 +533,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return std.fmt.parseInt(u256, digits, base) catch null;
         }
 
-        fn comparePredicateForBase(base_type: sema.Type, lower_bound: bool) i64 {
-            const is_signed = switch (unwrapRefinementSemaType(base_type)) {
-                .integer => |integer| integer.signed orelse false,
-                else => false,
-            };
+        fn comparePredicateForValue(value: mlir.MlirValue, lower_bound: bool) i64 {
+            const is_signed = support.mlirIntegerValueIsSigned(value);
             if (lower_bound) return if (is_signed) cmpPredicate("sge") else 9;
             return if (is_signed) cmpPredicate("sle") else 7;
-        }
-
-        fn patternIntegerIsSigned(self: *FunctionLowerer, pattern_id: ast.PatternId) bool {
-            const ty = unwrapRefinementSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type);
-            return switch (ty) {
-                .integer => |integer| integer.signed orelse false,
-                else => false,
-            };
         }
 
         fn patternName(file: *const ast.AstFile, pattern_id: ast.PatternId) ?[]const u8 {
@@ -1147,7 +1132,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, support.mlirIntegerValueIsSigned(lhs), assign.range);
                             break :blk value;
                         },
                         .wrapping_add_assign => blk: {
@@ -1170,7 +1155,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, support.mlirIntegerValueIsSigned(lhs), assign.range);
                             break :blk value;
                         },
                         .wrapping_sub_assign => blk: {
@@ -1193,7 +1178,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, @This().patternIntegerIsSigned(self, assign.target), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, support.mlirIntegerValueIsSigned(lhs), assign.range);
                             break :blk value;
                         },
                         .wrapping_mul_assign => blk: {
@@ -1220,7 +1205,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .shr_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                            const op = if (support.mlirIntegerValueIsSigned(lhs))
                                 mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithShrUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
@@ -1235,7 +1220,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                            const op = if (support.mlirIntegerValueIsSigned(lhs))
                                 mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithDivUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
@@ -1245,7 +1230,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValue(self, assign.target, locals);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerIsSigned(self, assign.target))
+                            const op = if (support.mlirIntegerValueIsSigned(lhs))
                                 mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithRemUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
@@ -2211,7 +2196,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
             range: source.TextRange,
         ) anyerror!mlir.MlirValue {
-            const resolved = @This().bitfieldField(self, base_type, field_name) orelse return error.UnknownAssignmentTarget;
+            const resolved = (try @This().bitfieldField(self, base_type, field_name)) orelse return error.UnknownAssignmentTarget;
             const loc = self.parent.location(range);
             const word_type = mlir.oraValueGetType(base_value);
             const offset = resolved.offset;
@@ -2257,7 +2242,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             new_value: mlir.MlirValue,
             range: source.TextRange,
         ) anyerror!mlir.MlirValue {
-            const resolved = @This().bitfieldField(self, base_type, field_name) orelse return error.UnknownAssignmentTarget;
+            const resolved = (try @This().bitfieldField(self, base_type, field_name)) orelse return error.UnknownAssignmentTarget;
             const loc = self.parent.location(range);
             const word_type = mlir.oraValueGetType(base_value);
             const offset = resolved.offset;
@@ -2391,9 +2376,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
-        fn bitfieldField(self: *FunctionLowerer, base_type: sema.Type, field_name: []const u8) ?Lowerer.ResolvedBitfieldField {
+        fn bitfieldField(self: *FunctionLowerer, base_type: sema.Type, field_name: []const u8) anyerror!?Lowerer.ResolvedBitfieldField {
             if (base_type.kind() != .bitfield) return null;
-            return self.parent.resolveBitfieldField(base_type.name() orelse return null, field_name);
+            return try self.parent.resolveBitfieldField(base_type.name() orelse return null, field_name);
         }
 
         fn bitfieldMask(width: u32) u256 {

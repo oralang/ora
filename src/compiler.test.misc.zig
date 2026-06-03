@@ -803,7 +803,7 @@ test "compiler render ladder step 3 add array literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: 1, second: 2 };
         \\    return pair.first;
         \\}
@@ -826,7 +826,7 @@ test "compiler render ladder step 4 add array indexing into struct literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: items[0], second: items[1] };
         \\    return pair.first;
         \\}
@@ -1371,7 +1371,7 @@ test "compiler contextualizes nested array literals to their declared element ty
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
-        \\    let pair = (flag, 7);
+        \\    let pair: (bool, u256) = (flag, 7);
         \\    return pair[1 - 1];
         \\}
     ;

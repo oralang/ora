@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const lib = @import("ora_lib");
+const ora_types = @import("ora_types");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const compiler = lib.compiler;
@@ -2336,7 +2337,7 @@ const ExtraScopeBinding = struct {
     is_folded: bool = false,
 };
 
-fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
+fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstValue) ![]const u8 {
     return switch (value) {
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
@@ -3469,7 +3470,11 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .bytes => try writer.writeAll("bytes"),
         .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
-        .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
+        .integer => |integer| if (integer.spelling) |spelling|
+            try writer.writeAll(spelling)
+        else
+            try writer.print("{c}{d}", .{ if (integer.signed) @as(u8, 'i') else @as(u8, 'u'), integer.bits }),
+        .comptime_integer => try writer.writeAll("integer"),
         .named => |named| try writer.writeAll(named.name),
         .contract => |named| try writer.writeAll(named.name),
         .struct_ => |named| try writer.writeAll(named.name),

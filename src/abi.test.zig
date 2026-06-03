@@ -66,10 +66,6 @@ fn serializeAbiLayoutForType(ty: compiler.sema.Type) ![]const u8 {
 }
 
 const PublicPolicyTestProvider = struct {
-    pub fn patternType(_: @This(), _: compiler.ast.PatternId) compiler.sema.Type {
-        return .unknown;
-    }
-
     pub fn enumHasPayload(_: @This(), _: []const u8) bool {
         return false;
     }
@@ -82,48 +78,15 @@ const PublicPolicyTestProvider = struct {
 const PublicPolicyTest = abi_policy.Policy(PublicPolicyTestProvider);
 
 const PublicPolicyTestContext = struct {
-    file: compiler.ast.AstFile,
-    item_index: compiler.sema.ItemIndexResult,
-
     fn init() PublicPolicyTestContext {
-        return .{
-            .file = .{
-                .arena = std.heap.ArenaAllocator.init(testing.allocator),
-                .file_id = compiler.ast.AstFileId.fromIndex(0),
-                .root_items = &.{},
-                .items = &.{},
-                .bodies = &.{},
-                .statements = &.{},
-                .expressions = &.{},
-                .type_exprs = &.{},
-                .patterns = &.{},
-            },
-            .item_index = .{
-                .arena = std.heap.ArenaAllocator.init(testing.allocator),
-                .entries = &.{},
-                .impl_entries = &.{},
-                .impl_lookup = &.{},
-                .trait_method_lookup = &.{},
-                .impl_method_lookup = &.{},
-                .impl_method_owner_lookup = &.{},
-                .struct_field_lookup = &.{},
-                .bitfield_field_lookup = &.{},
-                .enum_variant_lookup = &.{},
-                .contract_member_lookup = &.{},
-            },
-        };
+        return .{};
     }
 
-    fn deinit(self: *PublicPolicyTestContext) void {
-        self.item_index.deinit();
-        self.file.deinit();
-    }
+    fn deinit(_: *PublicPolicyTestContext) void {}
 
     fn policy(self: *PublicPolicyTestContext) PublicPolicyTest {
+        _ = self;
         return .{
-            .allocator = testing.allocator,
-            .file = &self.file,
-            .item_index = &self.item_index,
             .provider = .{},
         };
     }
@@ -138,8 +101,8 @@ test "public ABI policy static word count fails closed for non-builtin integers"
     try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } }));
     try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }));
     try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } }));
-    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{ .spelling = "u500" } }));
-    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{} }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .comptime_integer = .{ .spelling = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .comptime_integer = .{} }));
 
     try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u8" } }));
     try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u256" } }));
@@ -171,7 +134,7 @@ test "public ABI policy encode and decode fail closed for non-builtin integers" 
     const u8_type: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
     const u256_type: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
     const u500_type: compiler.sema.Type = .{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } };
-    const unresolved_integer: compiler.sema.Type = .{ .integer = .{} };
+    const unresolved_integer: compiler.sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
 
     try testing.expect(policy.supportsAbiEncode(u8_type));
     try testing.expect(policy.supportsAbiDecode(u256_type));
@@ -201,7 +164,7 @@ test "public ABI policy runtime decode fails closed for non-builtin integers" {
     try testing.expect(policy.supportsRuntimeAbiDecode(u8_type, .strict));
     try testing.expect(policy.supportsRuntimeAbiDecode(u256_type, .strict));
     try testing.expect(!policy.supportsRuntimeAbiDecode(u500_type, .strict));
-    try testing.expect(!policy.supportsRuntimeAbiDecode(.{ .integer = .{} }, .strict));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(.{ .comptime_integer = .{} }, .strict));
     try testing.expect(policy.supportsRuntimeAbiDecode(.{ .named = .{ .name = "u256" } }, .strict));
     try testing.expect(!policy.supportsRuntimeAbiDecode(.{ .named = .{ .name = "u500" } }, .strict));
 
@@ -442,9 +405,9 @@ test "abi comptime decoder has malformed corpus fixture for every DecodeError va
     const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
     const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
     const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
-    const refinement_args = [_]compiler.ast.TypeArg{
-        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
-        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    const refinement_args = [_]compiler.sema.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
     };
     const non_zero_ty: sema.Type = .{ .refinement = .{
         .name = "MinValue",
@@ -515,6 +478,40 @@ test "abi comptime decoder has malformed corpus fixture for every DecodeError va
     try expectComptimeDecodeErrorHex(string_layout, string_ty, word_32 ++ word_1048577, resolver, .string_length_exceeded);
 }
 
+test "abi comptime decoder fails closed for refinement base with unresolved comptime integer" {
+    const sema = compiler.sema;
+    const resolver = noopAbiDecodeResolver();
+
+    const unresolved_u256: sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
+    const refinement_args = [_]compiler.sema.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
+    };
+    const refined_ty: sema.Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = &unresolved_u256,
+        .args = &refinement_args,
+    } };
+    const u256_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 256 } } };
+    const bytes = try decodeHexBytes(testing.allocator, "0000000000000000000000000000000000000000000000000000000000000001");
+    defer testing.allocator.free(bytes);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    try testing.expectError(error.AbiDecoderInternalShapeMismatch, abi_comptime_decoder.decodeComptimeValue(
+        allocator,
+        &heap,
+        resolver,
+        u256_layout,
+        refined_ty,
+        bytes,
+    ));
+}
+
 test "abi N5 permissive comptime decoder masks canonicality but preserves hard errors" {
     const sema = compiler.sema;
     const resolver = n4aAbiDecodeResolver();
@@ -562,9 +559,9 @@ test "abi N5 permissive comptime decoder masks canonicality but preserves hard e
     const word_64 = "0000000000000000000000000000000000000000000000000000000000000040";
     const word_one = "0000000000000000000000000000000000000000000000000000000000000001";
     const word_2_64 = "0000000000000000000000000000000000000000000000010000000000000000";
-    const refinement_args = [_]compiler.ast.TypeArg{
-        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
-        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    const refinement_args = [_]compiler.sema.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
     };
     const positive_u8_ty: sema.Type = .{ .refinement = .{
         .name = "MinValue",
@@ -1239,9 +1236,7 @@ fn testLayoutContext(
 ) abi_layout_context.LayoutContext {
     return .{
         .allocator = allocator,
-        .file = ast_file,
-        .item_index = item_index,
-        .typecheck = typecheck,
+        .provider = compiler.sema.abiLayoutProvider(ast_file, item_index, typecheck),
     };
 }
 
@@ -1359,13 +1354,9 @@ test "abi layout derives primitive family checks from builtin types" {
     try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, i96_ty));
     try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(i96_ty));
 
-    const missing_bits_ty: sema.Type = .{ .integer = .{ .signed = false, .spelling = "u256" } };
-    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, missing_bits_ty));
-    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(missing_bits_ty));
-
-    const missing_signedness_ty: sema.Type = .{ .integer = .{ .bits = 256, .spelling = "u256" } };
-    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, missing_signedness_ty));
-    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(missing_signedness_ty));
+    const unresolved_integer_ty: sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
+    try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, unresolved_integer_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(unresolved_integer_ty));
 
     const bytes33_ty: sema.Type = .{ .fixed_bytes = .{ .len = 33, .spelling = "bytes33" } };
     try testing.expectError(error.InvalidFixedBytesWidth, abi_layout.canonicalAbiTypeFromType(allocator, bytes33_ty));

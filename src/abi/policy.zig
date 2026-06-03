@@ -1,12 +1,10 @@
 const std = @import("std");
-const ast = @import("../ast/mod.zig");
-const sema_model = @import("../sema/model.zig");
-const refinements = @import("../sema/refinements.zig");
-const type_descriptors = @import("../sema/type_descriptors.zig");
-const type_builtin = @import("ora_types").builtin;
+const ora_types = @import("ora_types");
+const refinement_semantics = ora_types.refinement_semantics;
+const type_builtin = ora_types.builtin;
 const abi_type_names = @import("type_names.zig");
 
-const Type = sema_model.Type;
+const Type = ora_types.SemanticType;
 
 pub const Position = enum {
     input,
@@ -31,6 +29,16 @@ pub const ResultCarrierPlan = struct {
     err: ?Type = null,
 };
 
+pub const NamedTypeKind = enum {
+    none,
+    enum_,
+    bitfield,
+    struct_,
+    contract,
+    error_decl,
+    type_alias,
+};
+
 pub fn publicReturnAbiTypeName(ty: Type) ?[]const u8 {
     return switch (ty) {
         .void => abi_type_names.builtinAbiName(.void),
@@ -44,9 +52,6 @@ pub fn publicReturnAbiTypeName(ty: Type) ?[]const u8 {
 
 pub fn Policy(comptime Provider: type) type {
     return struct {
-        allocator: std.mem.Allocator,
-        file: *const ast.AstFile,
-        item_index: *const sema_model.ItemIndexResult,
         provider: Provider,
 
         const Self = @This();
@@ -149,7 +154,7 @@ pub fn Policy(comptime Provider: type) type {
 
         pub fn supportsAbiDecode(self: *const Self, ty: Type) bool {
             return switch (ty) {
-                .refinement => |refinement| !refinements.isCompileTimeOnly(refinement) and self.supportsAbiDecode(refinement.base_type.*),
+                .refinement => |refinement| !refinement_semantics.isCompileTimeOnly(refinement) and self.supportsAbiDecode(refinement.base_type.*),
                 .slice => |slice| self.supportsAbiDecode(slice.element_type.*),
                 .array => |array| self.supportsAbiDecode(array.element_type.*),
                 .tuple => |elements| blk: {
@@ -203,16 +208,16 @@ pub fn Policy(comptime Provider: type) type {
                 .contract => |named| self.staticWordCountForNamedStruct(named.name),
                 .named => |named| blk: {
                     if (staticWordCountForBuiltinName(named.name)) |words| break :blk words;
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk null;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .Enum => if (self.provider.enumHasPayload(named.name)) null else 1,
-                        .Bitfield => 1,
-                        .Struct => self.staticWordCountForStructDecl(named.name),
-                        .Contract => self.staticWordCountForContractDecl(named.name),
-                        .ErrorDecl => |error_decl| blk2: {
+                    break :blk switch (self.namedTypeKind(named.name)) {
+                        .enum_ => if (self.provider.enumHasPayload(named.name)) null else 1,
+                        .bitfield => 1,
+                        .struct_ => self.staticWordCountForStructDecl(named.name),
+                        .contract => self.staticWordCountForContractDecl(named.name),
+                        .error_decl => blk2: {
+                            const payloads = self.errorPayloadTypes(named.name) orelse break :blk2 null;
                             var total: usize = 0;
-                            for (error_decl.parameters) |parameter| {
-                                total += self.staticWordCount(self.provider.patternType(parameter.pattern)) orelse break :blk2 null;
+                            for (payloads) |payload| {
+                                total += self.staticWordCount(payload) orelse break :blk2 null;
                             }
                             break :blk2 total;
                         },
@@ -225,26 +230,18 @@ pub fn Policy(comptime Provider: type) type {
 
         fn defaultErrorTypeHasPayload(self: *const Self, ty: Type) bool {
             const name = ty.name() orelse return true;
-            const item_id = self.item_index.lookup(name) orelse return true;
-            return switch (self.file.item(item_id).*) {
-                .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-                else => true,
-            };
+            const payloads = self.errorPayloadTypes(name) orelse return true;
+            return payloads.len != 0;
         }
 
         fn supportsAbiEncodeNamed(self: *const Self, name: []const u8) bool {
             if (abiNamedScalarSupported(name)) return true;
-            if (self.hasInstantiatedEnum(name)) return !self.provider.enumHasPayload(name);
-            if (self.hasInstantiatedBitfield(name)) return true;
-            if (self.instantiatedStructFields(name)) |fields| return self.supportsAbiEncodeStructFields(fields);
-
-            const item_id = self.item_index.lookup(name) orelse return false;
-            return switch (self.file.item(item_id).*) {
-                .Enum => !self.provider.enumHasPayload(name),
-                .Bitfield => true,
-                .Struct => self.supportsAbiEncodeStruct(name),
-                .TypeAlias => |type_alias| blk: {
-                    const target = self.typeAliasTarget(type_alias) orelse break :blk false;
+            return switch (self.namedTypeKind(name)) {
+                .enum_ => !self.provider.enumHasPayload(name),
+                .bitfield => true,
+                .struct_ => self.supportsAbiEncodeStruct(name),
+                .type_alias => blk: {
+                    const target = self.typeAliasTarget(name) orelse break :blk false;
                     break :blk self.supportsAbiEncode(target);
                 },
                 else => false,
@@ -252,40 +249,21 @@ pub fn Policy(comptime Provider: type) type {
         }
 
         fn supportsAbiEncodeStruct(self: *const Self, name: []const u8) bool {
-            if (self.instantiatedStructFields(name)) |fields| return self.supportsAbiEncodeStructFields(fields);
-
-            const item_id = self.item_index.lookup(name) orelse return false;
-            const struct_item = switch (self.file.item(item_id).*) {
-                .Struct => |struct_item| struct_item,
-                else => return false,
-            };
-            for (struct_item.fields) |field| {
-                const field_type = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch return false;
+            const fields = self.structFieldTypes(name) orelse return false;
+            for (fields) |field_type| {
                 if (!self.supportsAbiEncode(field_type)) return false;
-            }
-            return true;
-        }
-
-        fn supportsAbiEncodeStructFields(self: *const Self, fields: []const sema_model.InstantiatedStructField) bool {
-            for (fields) |field| {
-                if (!self.supportsAbiEncode(field.ty)) return false;
             }
             return true;
         }
 
         fn supportsAbiDecodeNamed(self: *const Self, name: []const u8) bool {
             if (abiNamedScalarSupported(name)) return true;
-            if (self.hasInstantiatedEnum(name)) return !self.provider.enumHasPayload(name);
-            if (self.hasInstantiatedBitfield(name)) return true;
-            if (self.instantiatedStructFields(name)) |fields| return self.supportsAbiDecodeStructFields(fields);
-
-            const item_id = self.item_index.lookup(name) orelse return false;
-            return switch (self.file.item(item_id).*) {
-                .Enum => !self.provider.enumHasPayload(name),
-                .Bitfield => true,
-                .Struct => self.supportsAbiDecodeStruct(name),
-                .TypeAlias => |type_alias| blk: {
-                    const target = self.typeAliasTarget(type_alias) orelse break :blk false;
+            return switch (self.namedTypeKind(name)) {
+                .enum_ => !self.provider.enumHasPayload(name),
+                .bitfield => true,
+                .struct_ => self.supportsAbiDecodeStruct(name),
+                .type_alias => blk: {
+                    const target = self.typeAliasTarget(name) orelse break :blk false;
                     break :blk self.supportsAbiDecode(target);
                 },
                 else => false,
@@ -293,23 +271,9 @@ pub fn Policy(comptime Provider: type) type {
         }
 
         fn supportsAbiDecodeStruct(self: *const Self, name: []const u8) bool {
-            if (self.instantiatedStructFields(name)) |fields| return self.supportsAbiDecodeStructFields(fields);
-
-            const item_id = self.item_index.lookup(name) orelse return false;
-            const struct_item = switch (self.file.item(item_id).*) {
-                .Struct => |struct_item| struct_item,
-                else => return false,
-            };
-            for (struct_item.fields) |field| {
-                const field_type = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch return false;
+            const fields = self.structFieldTypes(name) orelse return false;
+            for (fields) |field_type| {
                 if (!self.supportsAbiDecode(field_type)) return false;
-            }
-            return true;
-        }
-
-        fn supportsAbiDecodeStructFields(self: *const Self, fields: []const sema_model.InstantiatedStructField) bool {
-            for (fields) |field| {
-                if (!self.supportsAbiDecode(field.ty)) return false;
             }
             return true;
         }
@@ -320,8 +284,8 @@ pub fn Policy(comptime Provider: type) type {
                 .integer => |integer| integerSpec(integer) != null,
                 .string, .bytes => allow_top_level_dynamic,
                 .slice => |slice| allow_top_level_dynamic and self.supportsRuntimeAbiDecodeSliceElement(slice.element_type.*, mode),
-                .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
-                    refinements.hasNativeMlirTypeName(refinement.name) and
+                .refinement => |refinement| refinement_semantics.supportsRuntimeGuard(refinement) and
+                    refinement_semantics.hasNativeMlirTypeName(refinement.name) and
                     self.supportsRuntimeAbiDecodeInContext(refinement.base_type.*, mode, allow_top_level_dynamic),
                 .tuple => |elements| blk: {
                     if (elements.len <= 1) break :blk false;
@@ -338,15 +302,11 @@ pub fn Policy(comptime Provider: type) type {
 
         fn supportsRuntimeAbiDecodeNamed(self: *const Self, name: []const u8, mode: DecodeMode, allow_top_level_dynamic: bool) bool {
             if (runtimeDecodeBuiltinNameSupported(name, allow_top_level_dynamic)) return true;
-            if (self.hasInstantiatedEnum(name)) return !self.provider.enumHasPayload(name);
-            if (self.hasInstantiatedBitfield(name)) return true;
-
-            const item_id = self.item_index.lookup(name) orelse return false;
-            return switch (self.file.item(item_id).*) {
-                .Enum => !self.provider.enumHasPayload(name),
-                .Bitfield => true,
-                .TypeAlias => |type_alias| blk: {
-                    const target = self.typeAliasTarget(type_alias) orelse break :blk false;
+            return switch (self.namedTypeKind(name)) {
+                .enum_ => !self.provider.enumHasPayload(name),
+                .bitfield => true,
+                .type_alias => blk: {
+                    const target = self.typeAliasTarget(name) orelse break :blk false;
                     break :blk self.supportsRuntimeAbiDecodeInContext(target, mode, allow_top_level_dynamic);
                 },
                 else => false,
@@ -381,14 +341,8 @@ pub fn Policy(comptime Provider: type) type {
                 .string, .bytes => true,
                 .named => |named| blk: {
                     if (dynamicBytesBuiltinName(named.name)) break :blk true;
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeDynamicBytesLike(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeDynamicBytesLike(target);
                 },
                 else => false,
             };
@@ -398,14 +352,8 @@ pub fn Policy(comptime Provider: type) type {
             return switch (ty) {
                 .slice => |slice| self.isRuntimeAbiDecodeU256(slice.element_type.*),
                 .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeU256Slice(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeU256Slice(target);
                 },
                 else => false,
             };
@@ -415,14 +363,8 @@ pub fn Policy(comptime Provider: type) type {
             return switch (ty) {
                 .slice => |slice| self.isRuntimeAbiDecodeAddress(slice.element_type.*),
                 .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeAddressSlice(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeAddressSlice(target);
                 },
                 else => false,
             };
@@ -432,14 +374,8 @@ pub fn Policy(comptime Provider: type) type {
             return switch (ty) {
                 .slice => |slice| self.isRuntimeAbiDecodeBool(slice.element_type.*),
                 .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeBoolSlice(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeBoolSlice(target);
                 },
                 else => false,
             };
@@ -449,14 +385,8 @@ pub fn Policy(comptime Provider: type) type {
             return switch (ty) {
                 .slice => |slice| self.isRuntimeAbiDecodeFixedBytes(slice.element_type.*),
                 .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeFixedBytesSlice(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeFixedBytesSlice(target);
                 },
                 else => false,
             };
@@ -467,14 +397,8 @@ pub fn Policy(comptime Provider: type) type {
                 .fixed_bytes => |fixed_bytes| fixed_bytes.len >= 1 and fixed_bytes.len <= 32,
                 .named => |named| blk: {
                     if (type_builtin.parseFixedBytesName(named.name) != null) break :blk true;
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = self.typeAliasTarget(type_alias) orelse break :blk false;
-                            break :blk self.isRuntimeAbiDecodeFixedBytes(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.isRuntimeAbiDecodeFixedBytes(target);
                 },
                 else => false,
             };
@@ -516,23 +440,29 @@ pub fn Policy(comptime Provider: type) type {
             };
         }
 
-        fn instantiatedStructFields(self: *const Self, name: []const u8) ?[]const sema_model.InstantiatedStructField {
-            if (@hasDecl(Provider, "instantiatedStructFields")) return self.provider.instantiatedStructFields(name);
+        fn namedTypeKind(self: *const Self, name: []const u8) NamedTypeKind {
+            if (@hasDecl(Provider, "namedTypeKind")) return self.provider.namedTypeKind(name);
+            return .none;
+        }
+
+        fn typeAliasTarget(self: *const Self, name: []const u8) ?Type {
+            if (@hasDecl(Provider, "typeAliasTarget")) return self.provider.typeAliasTarget(name);
             return null;
         }
 
-        fn hasInstantiatedEnum(self: *const Self, name: []const u8) bool {
-            if (@hasDecl(Provider, "hasInstantiatedEnum")) return self.provider.hasInstantiatedEnum(name);
-            return false;
+        fn structFieldTypes(self: *const Self, name: []const u8) ?[]const Type {
+            if (@hasDecl(Provider, "structFieldTypes")) return self.provider.structFieldTypes(name);
+            return null;
         }
 
-        fn hasInstantiatedBitfield(self: *const Self, name: []const u8) bool {
-            if (@hasDecl(Provider, "hasInstantiatedBitfield")) return self.provider.hasInstantiatedBitfield(name);
-            return false;
+        fn contractFieldTypes(self: *const Self, name: []const u8) ?[]const Type {
+            if (@hasDecl(Provider, "contractFieldTypes")) return self.provider.contractFieldTypes(name);
+            return null;
         }
 
-        fn typeAliasTarget(self: *const Self, type_alias: ast.TypeAliasItem) ?Type {
-            return type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_alias.target_type) catch null;
+        fn errorPayloadTypes(self: *const Self, name: []const u8) ?[]const Type {
+            if (@hasDecl(Provider, "errorPayloadTypes")) return self.provider.errorPayloadTypes(name);
+            return null;
         }
 
         fn resultInputCarrierShapeSupported(self: *const Self, ty: Type) bool {
@@ -555,16 +485,11 @@ pub fn Policy(comptime Provider: type) type {
                 },
                 .refinement => |refinement| self.resultInputCarrierShapeSupported(refinement.base_type.*),
                 .named => |named| blk: {
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .ErrorDecl => |error_decl| error_blk: {
-                            for (error_decl.parameters) |parameter| {
-                                if (!self.resultInputCarrierShapeSupported(self.provider.patternType(parameter.pattern))) break :error_blk false;
-                            }
-                            break :error_blk true;
-                        },
-                        else => false,
-                    };
+                    const payloads = self.errorPayloadTypes(named.name) orelse break :blk false;
+                    for (payloads) |payload| {
+                        if (!self.resultInputCarrierShapeSupported(payload)) break :blk false;
+                    }
+                    break :blk true;
                 },
                 else => false,
             };
@@ -580,14 +505,8 @@ pub fn Policy(comptime Provider: type) type {
                 .refinement => |refinement| self.resultInputDynamicArrayElementSupported(refinement.base_type.*),
                 .named => |named| blk: {
                     if (resultDynamicArrayBuiltinNameSupported(named.name)) break :blk true;
-                    const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                    break :blk switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| {
-                            const target = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_alias.target_type) catch break :blk false;
-                            break :blk self.resultInputDynamicArrayElementSupported(target);
-                        },
-                        else => false,
-                    };
+                    const target = self.typeAliasTarget(named.name) orelse break :blk false;
+                    break :blk self.resultInputDynamicArrayElementSupported(target);
                 },
                 else => false,
             };
@@ -608,51 +527,31 @@ pub fn Policy(comptime Provider: type) type {
 
         fn payloadlessErrorHasRuntimeId(self: *const Self, ty: Type) bool {
             const error_name = ty.name() orelse return false;
-            if (self.item_index.lookup(error_name)) |item_id| {
-                return self.file.item(item_id).* == .ErrorDecl;
-            }
-            return false;
+            return self.errorPayloadTypes(error_name) != null;
         }
 
         fn staticWordCountForNamedStruct(self: *const Self, name: []const u8) ?usize {
-            const item_id = self.item_index.lookup(name) orelse return null;
-            return switch (self.file.item(item_id).*) {
-                .Struct => self.staticWordCountForStructDecl(name),
-                .Contract => self.staticWordCountForContractDecl(name),
+            return switch (self.namedTypeKind(name)) {
+                .struct_ => self.staticWordCountForStructDecl(name),
+                .contract => self.staticWordCountForContractDecl(name),
                 else => null,
             };
         }
 
         fn staticWordCountForStructDecl(self: *const Self, name: []const u8) ?usize {
-            const item_id = self.item_index.lookup(name) orelse return null;
-            const struct_item = switch (self.file.item(item_id).*) {
-                .Struct => |struct_item| struct_item,
-                else => return null,
-            };
+            const fields = self.structFieldTypes(name) orelse return null;
             var total: usize = 0;
-            for (struct_item.fields) |field| {
-                const field_type = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch return null;
+            for (fields) |field_type| {
                 total += self.staticWordCount(field_type) orelse return null;
             }
             return total;
         }
 
         fn staticWordCountForContractDecl(self: *const Self, name: []const u8) ?usize {
-            const item_id = self.item_index.lookup(name) orelse return null;
-            const contract_item = switch (self.file.item(item_id).*) {
-                .Contract => |contract_item| contract_item,
-                else => return null,
-            };
+            const fields = self.contractFieldTypes(name) orelse return null;
             var total: usize = 0;
-            for (contract_item.members) |member_id| {
-                switch (self.file.item(member_id).*) {
-                    .Field => |field| {
-                        const type_expr = field.type_expr orelse return null;
-                        const field_type = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr) catch return null;
-                        total += self.staticWordCount(field_type) orelse return null;
-                    },
-                    else => {},
-                }
+            for (fields) |field_type| {
+                total += self.staticWordCount(field_type) orelse return null;
             }
             return total;
         }
@@ -702,21 +601,15 @@ fn dynamicBytesBuiltinName(name: []const u8) bool {
     return spec.id == .string or spec.id == .bytes;
 }
 
-fn integerSpec(integer: sema_model.IntegerType) ?type_builtin.BuiltinTypeSpec {
-    if (integer.signed) |signed| {
-        if (integer.bits) |bits| {
-            return type_builtin.lookupIntegerBuiltin(signed, bits);
-        }
-    }
-    const spelling = integer.spelling orelse return null;
-    return type_builtin.parseIntegerBuiltin(spelling);
+fn integerSpec(integer: ora_types.IntegerType) ?type_builtin.BuiltinTypeSpec {
+    return integer.builtinSpec();
 }
 
 test "ABI policy owns public return ABI marker names" {
     const u256_ty: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
     const tuple_elems = [_]Type{u256_ty};
     const tuple_ty: Type = .{ .tuple = &tuple_elems };
-    const empty_struct_fields = [_]sema_model.AnonymousStructField{};
+    const empty_struct_fields = [_]ora_types.semantic.AnonymousStructField{};
     const anonymous_struct_ty: Type = .{ .anonymous_struct = .{ .fields = &empty_struct_fields } };
 
     try std.testing.expectEqualStrings("void", publicReturnAbiTypeName(.void) orelse return error.TestUnexpectedResult);

@@ -701,6 +701,24 @@ pub fn build(b: *std.Build) void {
     check_no_duplicate_fixed_bytes_parsers_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
     test_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
 
+    // zig build check-no-width-defaults
+    const no_width_defaults_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-width-defaults.sh",
+    });
+    const check_no_width_defaults_step = b.step("check-no-width-defaults", "Run integer width/signedness default static checks");
+    check_no_width_defaults_step.dependOn(&no_width_defaults_cmd.step);
+    test_step.dependOn(&no_width_defaults_cmd.step);
+
+    // zig build check-query-view-ownership
+    const query_view_ownership_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-query-view-ownership.sh",
+    });
+    const check_query_view_ownership_step = b.step("check-query-view-ownership", "Run compiler query-view ownership static checks");
+    check_query_view_ownership_step.dependOn(&query_view_ownership_cmd.step);
+    test_step.dependOn(&query_view_ownership_cmd.step);
+
     // zig build check-sir-shift-operand-order
     const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",

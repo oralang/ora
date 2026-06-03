@@ -119,7 +119,7 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
                 .Type => |type_expr_id| .{ .refinement = .{
                     .name = generic.name,
                     .base_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, type_expr_id)),
-                    .args = generic.args,
+                    .args = try refinementArgsFromAst(allocator, generic.args),
                 } },
                 else => .{ .unknown = {} },
             };
@@ -189,7 +189,7 @@ pub fn mergeExprType(current: Type, next: Type) Type {
 pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
-        .unknown, .never, .void, .bool, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -277,6 +277,7 @@ pub fn typesAssignable(expected_type: Type, actual_type: Type) bool {
     const expected_unwrapped = unwrapRefinement(expected_type);
     const actual_unwrapped = unwrapRefinement(actual_type);
     if (isIntegerType(expected_unwrapped) and isIntegerType(actual_unwrapped)) {
+        if (expected_unwrapped.kind() == .comptime_integer or actual_unwrapped.kind() == .comptime_integer) return true;
         return integerAssignable(expected_unwrapped.integer, actual_unwrapped.integer);
     }
     if (expected_unwrapped.kind() == .tuple and actual_unwrapped.kind() == .tuple) {
@@ -372,7 +373,10 @@ fn anonymousStructAssignableToTuple(elements: []const Type, fields: []const mode
 }
 
 fn isIntegerType(ty: Type) bool {
-    return unwrapRefinement(ty).kind() == .integer;
+    return switch (unwrapRefinement(ty).kind()) {
+        .integer, .comptime_integer => true,
+        else => false,
+    };
 }
 
 fn unwrapRefinement(ty: Type) Type {
@@ -401,13 +405,23 @@ fn errorSetContainsAll(expected_errors: []const Type, actual_errors: []const Typ
     return true;
 }
 
-fn refinementArgSliceEql(lhs: []const ast.TypeArg, rhs: []const ast.TypeArg) bool {
+pub fn refinementArgsFromAst(allocator: std.mem.Allocator, args: []const ast.TypeArg) ![]const model.RefinementArg {
+    if (args.len == 0) return &.{};
+    const semantic_args = try allocator.alloc(model.RefinementArg, args.len);
+    for (args, 0..) |arg, index| {
+        semantic_args[index] = switch (arg) {
+            .Type => .Type,
+            .Integer => |literal| .{ .Integer = .{ .text = literal.text } },
+        };
+    }
+    return semantic_args;
+}
+
+fn refinementArgSliceEql(lhs: []const model.RefinementArg, rhs: []const model.RefinementArg) bool {
     if (lhs.len != rhs.len) return false;
     for (lhs, rhs) |left, right| {
         switch (left) {
-            .Type => |left_type| {
-                if (right != .Type or left_type != right.Type) return false;
-            },
+            .Type => if (right != .Type) return false,
             .Integer => |left_integer| {
                 if (right != .Integer) return false;
                 if (!std.mem.eql(u8, left_integer.text, right.Integer.text)) return false;
@@ -424,9 +438,8 @@ fn storeType(allocator: std.mem.Allocator, ty: Type) anyerror!*const Type {
 }
 
 fn integerAssignable(expected: model.IntegerType, actual: model.IntegerType) bool {
-    if (expected.signed != null and actual.signed != null and expected.signed.? != actual.signed.?) return false;
-    if (expected.bits == null or actual.bits == null) return true;
-    return actual.bits.? <= expected.bits.?;
+    if (expected.signed != actual.signed) return false;
+    return actual.bits <= expected.bits;
 }
 
 fn refinementSubtypeAssignable(expected: model.RefinementType, actual: model.RefinementType) bool {
@@ -506,21 +519,20 @@ fn trimLeadingZeros(text: []const u8) []const u8 {
 }
 
 fn commonIntegerType(lhs: Type, rhs: Type) ?Type {
-    if (lhs.kind() != .integer or rhs.kind() != .integer) return null;
+    const left_unwrapped = unwrapRefinement(lhs);
+    const right_unwrapped = unwrapRefinement(rhs);
+    if (!isIntegerType(left_unwrapped) or !isIntegerType(right_unwrapped)) return null;
+    if (left_unwrapped.kind() == .comptime_integer and right_unwrapped.kind() == .comptime_integer) return left_unwrapped;
+    if (left_unwrapped.kind() == .comptime_integer) return right_unwrapped;
+    if (right_unwrapped.kind() == .comptime_integer) return left_unwrapped;
 
-    const left = lhs.integer;
-    const right = rhs.integer;
+    const left = left_unwrapped.integer;
+    const right = right_unwrapped.integer;
 
-    if (left.signed != null and right.signed != null and left.signed.? != right.signed.?) return null;
+    if (left.signed != right.signed) return null;
 
-    if (left.bits == null) return rhs;
-    if (right.bits == null) return lhs;
-
-    if (left.bits.? > right.bits.?) return lhs;
-    if (right.bits.? > left.bits.?) return rhs;
-
-    if (left.signed == null and right.signed != null) return rhs;
-    if (right.signed == null and left.signed != null) return lhs;
+    if (left.bits > right.bits) return lhs;
+    if (right.bits > left.bits) return rhs;
     return lhs;
 }
 
@@ -533,17 +545,17 @@ fn parseArrayLen(size: ast.TypeArraySize) ?u32 {
 
 test "descriptor integer types use closed builtin width set" {
     const u256_integer = integerTypeFromName("u256") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 256), u256_integer.bits);
-    try std.testing.expectEqual(@as(?bool, false), u256_integer.signed);
+    try std.testing.expectEqual(@as(u16, 256), u256_integer.bits);
+    try std.testing.expectEqual(false, u256_integer.signed);
     try std.testing.expectEqualStrings("u256", u256_integer.spelling.?);
 
     const i8_integer = integerTypeFromName("i8") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 8), i8_integer.bits);
-    try std.testing.expectEqual(@as(?bool, true), i8_integer.signed);
+    try std.testing.expectEqual(@as(u16, 8), i8_integer.bits);
+    try std.testing.expectEqual(true, i8_integer.signed);
 
     const u160_integer = integerTypeFromName("u160") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 160), u160_integer.bits);
-    try std.testing.expectEqual(@as(?bool, false), u160_integer.signed);
+    try std.testing.expectEqual(@as(u16, 160), u160_integer.bits);
+    try std.testing.expectEqual(false, u160_integer.signed);
 
     try std.testing.expect(integerTypeFromName("u24") == null);
     try std.testing.expect(integerTypeFromName("i96") == null);

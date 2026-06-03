@@ -1117,9 +1117,7 @@ const CompilerAbiGenerator = struct {
     fn layoutContext(self: *CompilerAbiGenerator, ctx: CompilerModuleContext) compiler_abi_layout_context.LayoutContext {
         return .{
             .allocator = self.allocator,
-            .file = ctx.file,
-            .item_index = ctx.item_index,
-            .typecheck = ctx.typecheck,
+            .provider = compiler.sema.abiLayoutProvider(ctx.file, ctx.item_index, ctx.typecheck),
         };
     }
 

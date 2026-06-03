@@ -1,8 +1,11 @@
 const std = @import("std");
-const builtin = @import("ora_types").builtin;
-const sema = @import("../sema/mod.zig");
-const sema_model = @import("../sema/model.zig");
+const ora_types = @import("ora_types");
+const builtin = ora_types.builtin;
 const abi_type_names = @import("type_names.zig");
+
+const Type = ora_types.SemanticType;
+const FixedBytesType = ora_types.FixedBytesType;
+const IntegerType = ora_types.IntegerType;
 
 pub const LayoutError = error{
     UnsupportedAbiType,
@@ -124,11 +127,11 @@ pub const LayoutNode = union(enum) {
     }
 };
 
-pub fn fromType(allocator: std.mem.Allocator, ty: sema.Type) anyerror!LayoutNode {
+pub fn fromType(allocator: std.mem.Allocator, ty: Type) anyerror!LayoutNode {
     return fromTypeAtPath(allocator, ty, &.{});
 }
 
-fn fromTypeAtPath(allocator: std.mem.Allocator, ty: sema.Type, path: []const ValuePathSegment) anyerror!LayoutNode {
+fn fromTypeAtPath(allocator: std.mem.Allocator, ty: Type, path: []const ValuePathSegment) anyerror!LayoutNode {
     return switch (ty) {
         .void => .{ .tuple = .{ .path = try clonePath(allocator, path), .elements = try allocator.alloc(LayoutNode, 0) } },
         .bool => staticWordNode(allocator, path, .bool),
@@ -228,19 +231,19 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, node: LayoutNode) ![]const
     };
 }
 
-pub fn canonicalAbiTypeFromType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
+pub fn canonicalAbiTypeFromType(allocator: std.mem.Allocator, ty: Type) ![]const u8 {
     const layout = try fromType(allocator, ty);
     defer layout.deinit(allocator);
     return canonicalAbiType(allocator, layout);
 }
 
-pub fn staticWordCountFromType(allocator: std.mem.Allocator, ty: sema.Type) !?usize {
+pub fn staticWordCountFromType(allocator: std.mem.Allocator, ty: Type) !?usize {
     const layout = try fromType(allocator, ty);
     defer layout.deinit(allocator);
     return layout.staticWordCount();
 }
 
-pub fn staticWordCountForType(ty: sema.Type) ?usize {
+pub fn staticWordCountForType(ty: Type) ?usize {
     return switch (ty) {
         .bool, .address, .enum_, .bitfield => 1,
         .fixed_bytes => |fixed_bytes| if (fixedBytesLen(fixed_bytes)) |_| 1 else |_| null,
@@ -303,7 +306,7 @@ pub fn parseFixedBytesSpelling(name: []const u8) ?u8 {
     return builtin.parseFixedBytesName(name);
 }
 
-fn fixedBytesLen(fixed_bytes: sema.FixedBytesType) !u8 {
+fn fixedBytesLen(fixed_bytes: FixedBytesType) !u8 {
     if (fixed_bytes.len < builtin.fixed_bytes_min_len or fixed_bytes.len > builtin.fixed_bytes_max_len) {
         return error.InvalidFixedBytesWidth;
     }
@@ -342,12 +345,12 @@ fn childPath(allocator: std.mem.Allocator, parent: []const ValuePathSegment, seg
     return path;
 }
 
-fn integerEncoding(integer: sema_model.IntegerType) !StaticEncoding {
-    const signed = integer.signed orelse return error.InvalidIntegerWidth;
-    const bits = integer.bits orelse return error.InvalidIntegerWidth;
+fn integerEncoding(integer: IntegerType) !StaticEncoding {
+    const signed = integer.signed;
+    const bits = integer.bits;
     const spec = builtin.lookupIntegerBuiltin(signed, bits) orelse return error.InvalidIntegerWidth;
     const width = spec.bit_width orelse return error.InvalidIntegerWidth;
-    return if (spec.signed orelse return error.InvalidIntegerWidth)
+    return if (signed)
         .{ .int = width }
     else
         .{ .uint = width };

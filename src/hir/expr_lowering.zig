@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const ConstValue = @import("ora_types").ConstValue;
 const abi_runtime_encoder = @import("../abi/runtime_encoder.zig");
 const abi_runtime_decoder = @import("../abi/runtime_decoder.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
@@ -31,47 +32,27 @@ const strRef = support.strRef;
 const stringType = support.stringType;
 const LocalEnv = hir_locals.LocalEnv;
 
-fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
-    return if (ty.refinementBaseType()) |base| base.* else ty;
-}
-
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
     return struct {
         // Methods in this returned type are mixed into the parent lowerer. When
         // one helper calls another, use @This().helper(self): `self` is the
         // parent FunctionLowerer, not an instance of the anonymous mixin type.
-        fn isSignedIntegerExpr(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
-            const ty = unwrapRefinementSemaType(self.parent.typecheck.expr_types[expr_id.index()]);
-            return switch (ty) {
-                .integer => |integer| integer.signed orelse false,
-                else => false,
-            };
-        }
-
-        fn signednessForBinaryIntegerOp(self: *FunctionLowerer, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) bool {
-            const lhs_node = self.parent.file.expression(lhs_expr).*;
-            const rhs_node = self.parent.file.expression(rhs_expr).*;
-            if (lhs_node == .IntegerLiteral and rhs_node != .IntegerLiteral) {
-                return @This().isSignedIntegerExpr(self, rhs_expr);
-            }
-            if (rhs_node == .IntegerLiteral and lhs_node != .IntegerLiteral) {
-                return @This().isSignedIntegerExpr(self, lhs_expr);
-            }
-            return @This().isSignedIntegerExpr(self, lhs_expr);
+        fn binaryIntegerValueIsSigned(lhs: mlir.MlirValue, rhs: mlir.MlirValue) bool {
+            const lhs_type = mlir.oraValueGetType(lhs);
+            if (mlir.oraTypeIsAInteger(lhs_type)) return mlir.oraIntegerTypeIsSigned(lhs_type);
+            return support.mlirIntegerValueIsSigned(rhs);
         }
 
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.parent.allocator,
-                .file = self.parent.file,
-                .item_index = self.parent.item_index,
-                .typecheck = self.parent.typecheck,
+                .provider = sema.abiLayoutProvider(self.parent.file, self.parent.item_index, self.parent.typecheck),
             };
         }
 
-        fn predicateForBinaryCompare(self: *FunctionLowerer, op: ast.BinaryOp, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) []const u8 {
-            const is_signed = @This().signednessForBinaryIntegerOp(self, lhs_expr, rhs_expr);
+        fn predicateForBinaryCompare(op: ast.BinaryOp, lhs: mlir.MlirValue, rhs: mlir.MlirValue) []const u8 {
+            const is_signed = @This().binaryIntegerValueIsSigned(lhs, rhs);
             return switch (op) {
                 .lt => if (is_signed) "slt" else "ult",
                 .le => if (is_signed) "sle" else "ule",
@@ -118,7 +99,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerPersistedConstValue(
             self: *FunctionLowerer,
-            value: sema.ConstValue,
+            value: ConstValue,
             sema_type: sema.Type,
             result_type: mlir.MlirType,
             loc: mlir.MlirLocation,
@@ -757,7 +738,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var rhs = try self.lowerExpr(binary.rhs, locals);
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
-            const is_signed_int_op = @This().signednessForBinaryIntegerOp(self, binary.lhs, binary.rhs);
 
             lhs = try @This().unwrapRefinementForCast(self, lhs, binary.range);
             rhs = try @This().unwrapRefinementForCast(self, rhs, binary.range);
@@ -851,6 +831,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => {},
             }
 
+            const is_signed_int_op = switch (binary.op) {
+                .add, .sub, .mul, .div, .mod, .shr => @This().binaryIntegerValueIsSigned(lhs, rhs),
+                else => false,
+            };
+
             const op = switch (binary.op) {
                 .add => mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_add => mlir.oraAddWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
@@ -870,7 +855,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .wrapping_shr => mlir.oraShrWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .eq => self.createCompareOp(loc, "eq", lhs, rhs),
                 .ne => self.createCompareOp(loc, "ne", lhs, rhs),
-                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(self, binary.op, binary.lhs, binary.rhs), lhs, rhs),
+                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(binary.op, lhs, rhs), lhs, rhs),
                 .pow => unreachable,
             };
 
@@ -1576,7 +1561,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn externReturndataStrictSupportsSliceElement(ty: sema.Type) bool {
             return switch (ty) {
                 .bool, .address, .fixed_bytes => true,
-                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .integer => |integer| integer.isUnsignedBits(256),
                 .refinement => |refinement| externReturndataStrictSupportsSliceElement(refinement.base_type.*),
                 else => false,
             };
@@ -1584,7 +1569,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn externReturndataStrictSupportsU256(ty: sema.Type) bool {
             return switch (ty) {
-                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .integer => |integer| integer.isUnsignedBits(256),
                 .refinement => |refinement| externReturndataStrictSupportsU256(refinement.base_type.*),
                 else => false,
             };
@@ -2431,7 +2416,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             resolved: sema.ResolvedCall,
         ) anyerror!?ImportedFunctionTarget {
             const query = self.parent.module_query orelse return null;
-            const target_file = try query.ast_file(query.context, resolved.module_id);
+            const target_file = try query.astFile(resolved.module_id);
             return switch (target_file.item(resolved.item_id).*) {
                 .Function => |function| .{
                     .module_id = resolved.module_id,
@@ -2485,8 +2470,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Group => |group| try @This().calleeImportedFunctionTarget(self, group.expr),
                 .Field => |field| blk: {
                     const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
-                    const target_item_id = (try query.lookup_item(query.context, target_module_id, field.name)) orelse break :blk null;
-                    const target_file = try query.ast_file(query.context, target_module_id);
+                    const target_item_id = (try query.lookupItem(target_module_id, field.name)) orelse break :blk null;
+                    const target_file = try query.astFile(target_module_id);
                     break :blk switch (target_file.item(target_item_id).*) {
                         .Function => |function| .{
                             .module_id = target_module_id,
@@ -2700,8 +2685,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const value_ty = mlir.oraValueGetType(lhs);
-            const is_signed = @This().isSignedIntegerExpr(self, builtin.args[0]) or
-                (self.parent.file.expression(builtin.args[0]).* == .IntegerLiteral and @This().isSignedIntegerExpr(self, builtin.args[1]));
+            const is_signed = support.mlirIntegerValueIsSigned(lhs);
             const div_op = if (is_signed)
                 mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
@@ -3934,10 +3918,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn importedModuleForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) !?source.ModuleId {
             const query = self.parent.module_query orelse return null;
             return switch (self.parent.file.expression(expr_id).*) {
-                .Name => |name| try query.resolve_import_alias(query.context, self.parent.module_id, name.name),
+                .Name => |name| try query.resolveImportAlias(self.parent.module_id, name.name),
                 .Field => |field| blk: {
                     const base_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
-                    break :blk try query.resolve_import_alias(query.context, base_module_id, field.name);
+                    break :blk try query.resolveImportAlias(base_module_id, field.name);
                 },
                 .Group => |group| try @This().importedModuleForExpr(self, group.expr),
                 else => null,
@@ -3951,10 +3935,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?mlir.MlirValue {
             const query = self.parent.module_query orelse return null;
             const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse return null;
-            const target_item_id = (try query.lookup_item(query.context, target_module_id, field.name)) orelse return null;
-            const target_file = try query.ast_file(query.context, target_module_id);
-            const target_typecheck = try query.module_typecheck(query.context, target_module_id);
-            const target_const_eval = try query.const_eval(query.context, target_module_id);
+            const target_item_id = (try query.lookupItem(target_module_id, field.name)) orelse return null;
+            const target_file = try query.astFile(target_module_id);
+            const target_typecheck = try query.moduleTypeCheck(target_module_id);
+            const target_const_eval = try query.constEval(target_module_id);
 
             const value_expr = switch (target_file.item(target_item_id).*) {
                 .Constant => |constant| constant.value,

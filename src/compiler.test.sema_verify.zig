@@ -1028,8 +1028,8 @@ test "compiler lowers ghost declarations into verification HIR" {
 test "compiler preserves nested while continue by guarding later statements" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {
-        \\    let sum = 0;
-        \\    let i = 0;
+        \\    let sum: u256 = 0;
+        \\    let i: u256 = 0;
         \\    while (i < limit) {
         \\        i = i + 1;
         \\        if (i == 2) {

@@ -3,6 +3,8 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
+const ConstEvalResult = sema.ConstEvalResult;
+const compiler_query = @import("../compiler_query.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -40,17 +42,7 @@ pub const abi_layout_test_support = struct {
     }
 };
 
-pub const ModuleQuery = struct {
-    context: *anyopaque,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult,
-    resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult,
-    module_verification_facts: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ModuleVerificationFactsResult,
-    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
-};
+pub const ModuleQuery = compiler_query.HirView;
 
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
@@ -223,7 +215,7 @@ pub fn lowerModule(
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
-    const_eval: *const sema.ConstEvalResult,
+    const_eval: *const ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
     verification_facts: *const sema.ModuleVerificationFactsResult,
     module_query: ?ModuleQuery,
@@ -326,7 +318,7 @@ const Lowerer = struct {
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
-    const_eval: *const sema.ConstEvalResult,
+    const_eval: *const ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
     verification_facts: *const sema.ModuleVerificationFactsResult,
     verification_fact_lookup: []const VerificationFactEntry,
@@ -627,9 +619,7 @@ const Lowerer = struct {
     pub fn errorTypeHasPayload(self: *const Lowerer, ty: sema.Type) bool {
         const ctx = abi_layout_context.LayoutContext{
             .allocator = self.allocator,
-            .file = self.file,
-            .item_index = self.item_index,
-            .typecheck = self.typecheck,
+            .provider = sema.abiLayoutProvider(self.file, self.item_index, self.typecheck),
         };
         return ctx.errorTypeHasPayload(ty);
     }
@@ -650,7 +640,8 @@ const Lowerer = struct {
         return switch (ty) {
             .never => support.defaultIntegerType(self.context),
             .bool => support.boolType(self.context),
-            .integer => |integer| if (integer.spelling) |name| support.lowerPathType(self.context, name) else support.defaultIntegerType(self.context),
+            .integer => |integer| support.lowerIntegerType(self.context, integer),
+            .comptime_integer => self.recordTypeFallback(.unsupported_syntax_type, range),
             .address => support.addressType(self.context),
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
@@ -904,26 +895,26 @@ const Lowerer = struct {
         return self.typecheck.instantiatedBitfieldByName(name);
     }
 
-    pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) u32 {
+    pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) ?u32 {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
                 const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
                 if (std.mem.eql(u8, trimmed, "bool")) break :blk 1;
                 if (std.mem.eql(u8, trimmed, "address")) break :blk 160;
-                if (support.parseSignedIntegerType(trimmed)) |int_info| break :blk int_info.bits;
-                break :blk 256;
+                if (support.parseBitfieldIntegerType(trimmed)) |int_info| break :blk int_info.bits;
+                break :blk null;
             },
-            else => 256,
+            else => null,
         };
     }
 
-    pub fn bitfieldFieldWidthFromType(self: *const Lowerer, ty: sema.Type) u32 {
+    pub fn bitfieldFieldWidthFromType(self: *const Lowerer, ty: sema.Type) ?u32 {
         _ = self;
         return switch (ty) {
             .bool => 1,
             .address => 160,
-            .integer => |integer| integer.bits orelse 256,
-            else => 256,
+            .integer => |integer| integer.bits,
+            else => null,
         };
     }
 
@@ -935,19 +926,19 @@ const Lowerer = struct {
         };
     }
 
-    pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) ?ResolvedBitfieldField {
+    pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) anyerror!?ResolvedBitfieldField {
         if (self.instantiatedBitfieldByName(bitfield_name)) |bitfield| {
             const template = self.file.item(bitfield.template_item_id).Bitfield;
             const field_index = bitfield.fieldIndex(field_name) orelse return null;
             if (field_index >= bitfield.fields.len or field_index >= template.fields.len) return null;
             var next_offset: u32 = 0;
             for (bitfield.fields[0..field_index]) |field| {
-                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
                 next_offset = offset + width;
             }
             const field = bitfield.fields[field_index];
-            const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+            const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
             const offset = field.offset orelse next_offset;
             return .{
                 .field = template.fields[field_index],
@@ -966,12 +957,12 @@ const Lowerer = struct {
         if (field_index >= bitfield.fields.len) return null;
         var next_offset: u32 = 0;
         for (bitfield.fields[0..field_index]) |field| {
-            const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
+            const width = field.width orelse self.bitfieldFieldWidth(field.type_expr) orelse return error.InvalidBitfieldFieldType;
             const offset = field.offset orelse next_offset;
             next_offset = offset + width;
         }
         const field = bitfield.fields[field_index];
-        const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
+        const width = field.width orelse self.bitfieldFieldWidth(field.type_expr) orelse return error.InvalidBitfieldFieldType;
         const offset = field.offset orelse next_offset;
         return .{
             .field = field,
@@ -1283,8 +1274,15 @@ const Lowerer = struct {
     }
 
     fn shouldDeferLiteralMangleBinding(existing: sema.Type, candidate: sema.Type) bool {
-        if (existing.kind() != .integer or candidate.kind() != .integer) return false;
-        return candidate.integer.spelling == null;
+        if (!hirTypeIsInteger(existing) or !hirTypeIsInteger(candidate)) return false;
+        return candidate.kind() == .comptime_integer;
+    }
+
+    fn hirTypeIsInteger(ty: sema.Type) bool {
+        return switch (ty.kind()) {
+            .integer, .comptime_integer => true,
+            else => false,
+        };
     }
 
     pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
@@ -1455,7 +1453,7 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         return mlir.oraErrorUnionTypeGetWithErrors(lowerer.context, payload_type, error_types.len, &error_types);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
-        const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;
+        const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range);
         const base_type = switch (generic.args[0]) {
             .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
             else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
@@ -1475,22 +1473,16 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
     return support.lowerPathType(lowerer.context, generic.name);
 }
 
-fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const ast.TypeArg {
-    var changed = false;
-    const resolved = lowerer.allocator.alloc(ast.TypeArg, args.len) catch return null;
+fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const sema.RefinementArg {
+    const resolved = lowerer.allocator.alloc(sema.RefinementArg, args.len) catch return null;
     for (args, 0..) |arg, index| {
         resolved[index] = switch (arg) {
-            .Integer => arg,
+            .Integer => |literal| .{ .Integer = .{ .text = literal.text } },
             .Type => |type_expr| if (typeExprIntegerBinding(lowerer, type_expr)) |integer| blk: {
-                changed = true;
-                break :blk .{ .Integer = .{
-                    .range = lowerer.typeExprRange(type_expr),
-                    .text = integer,
-                } };
-            } else arg,
+                break :blk .{ .Integer = .{ .text = integer } };
+            } else .{ .Type = {} },
         };
     }
-    if (!changed) return null;
     return resolved;
 }
 

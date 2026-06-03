@@ -8,7 +8,9 @@ const descriptors = @import("type_descriptors.zig");
 const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
-const type_builtin = @import("ora_types").builtin;
+const compiler_query = @import("../compiler_query.zig");
+const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
 const abi_policy = @import("../abi/policy.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
@@ -38,11 +40,13 @@ const TraitInterface = model.TraitInterface;
 const ImplInterface = model.ImplInterface;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
-const ConstValue = model.ConstValue;
+const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
+const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const descriptorFromGenericType = descriptors.descriptorFromGenericType;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
+const refinementArgsFromAst = descriptors.refinementArgsFromAst;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
@@ -53,14 +57,7 @@ fn isAbiDecodeBuiltinName(name: []const u8) bool {
     return std.mem.eql(u8, name, "abiDecode") or std.mem.eql(u8, name, "abiDecodePermissive");
 }
 
-pub const ImportQuery = struct {
-    context: *anyopaque,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ItemIndexResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const TypeCheckResult,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
-};
+pub const ImportQuery = compiler_query.SemaView;
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
@@ -73,6 +70,10 @@ fn declarationRegion(storage_class: ast.StorageClass) Region {
 
 fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) LocatedType {
     return LocatedType.withRegionAndProvenance(expr_type, expr_region, provenance);
+}
+
+fn u256Type() Type {
+    return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
 }
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
@@ -615,10 +616,10 @@ const TypeChecker = struct {
     fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?source.ModuleId {
         const query = self.import_query orelse return null;
         return switch (self.file.expression(expr_id).*) {
-            .Name => |name| try query.resolve_import_alias(query.context, self.module_id, name.name),
+            .Name => |name| try query.resolveImportAlias(self.module_id, name.name),
             .Field => |field| blk: {
                 const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
-                break :blk try query.resolve_import_alias(query.context, base_module_id, field.name);
+                break :blk try query.resolveImportAlias(base_module_id, field.name);
             },
             .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
@@ -627,8 +628,8 @@ const TypeChecker = struct {
 
     fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) !?Type {
         const query = self.import_query orelse return null;
-        const item_id = (try query.lookup_item(query.context, module_id, name)) orelse return null;
-        const typecheck = try query.module_typecheck(query.context, module_id);
+        const item_id = (try query.lookupItem(module_id, name)) orelse return null;
+        const typecheck = try query.moduleTypeCheck(module_id);
         return typecheck.item_types[item_id.index()];
     }
 
@@ -636,14 +637,14 @@ const TypeChecker = struct {
         const query = self.import_query orelse return null;
         var parts = std.mem.splitScalar(u8, path, '.');
         const first = parts.next() orelse return null;
-        var module_id = (try query.resolve_import_alias(query.context, self.module_id, first)) orelse return null;
+        var module_id = (try query.resolveImportAlias(self.module_id, first)) orelse return null;
         while (parts.next()) |part| {
             if (parts.peek() == null) {
-                const item_id = (try query.lookup_item(query.context, module_id, part)) orelse return null;
-                const typecheck = try query.module_typecheck(query.context, module_id);
+                const item_id = (try query.lookupItem(module_id, part)) orelse return null;
+                const typecheck = try query.moduleTypeCheck(module_id);
                 return typecheck.item_types[item_id.index()];
             }
-            module_id = (try query.resolve_import_alias(query.context, module_id, part)) orelse return null;
+            module_id = (try query.resolveImportAlias(module_id, part)) orelse return null;
         }
         return null;
     }
@@ -659,8 +660,8 @@ const TypeChecker = struct {
             else => return null,
         };
         const target_module_id = (try self.importedModuleForExpr(callee_field.base)) orelse return null;
-        const target_item_id = (try query.lookup_item(query.context, target_module_id, callee_field.name)) orelse return null;
-        const target_file = try query.ast_file(query.context, target_module_id);
+        const target_item_id = (try query.lookupItem(target_module_id, callee_field.name)) orelse return null;
+        const target_file = try query.astFile(target_module_id);
         const target_item = target_file.item(target_item_id).*;
         const function = switch (target_item) {
             .Function => |function| function,
@@ -696,8 +697,8 @@ const TypeChecker = struct {
         if (runtime_params.len == 0) return &.{};
 
         const query = self.import_query orelse return null;
-        const target_item_index = try query.item_index(query.context, target_module_id);
-        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -736,8 +737,8 @@ const TypeChecker = struct {
         bindings: []const GenericTypeBinding,
     ) !?Type {
         const query = self.import_query orelse return null;
-        const target_item_index = try query.item_index(query.context, target_module_id);
-        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         if (!function.is_generic) {
             const item_type = target_typecheck.item_types[target_item_id.index()];
@@ -997,6 +998,7 @@ const TypeChecker = struct {
             },
             .Field => |field| if (field.value) |expr_id| {
                 try self.visitExpr(expr_id);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(field.range, expr_id);
                 if (field.type_expr == null) {
                     self.item_types[item_id.index()] = self.expr_types[expr_id.index()];
                 } else {
@@ -1026,6 +1028,7 @@ const TypeChecker = struct {
             },
             .Constant => |constant| {
                 try self.visitExpr(constant.value);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(constant.range, constant.value);
                 if (constant.type_expr == null) {
                     self.item_types[item_id.index()] = self.expr_types[constant.value.index()];
                 } else {
@@ -1145,7 +1148,7 @@ const TypeChecker = struct {
     fn validateEnumVariantValues(self: *TypeChecker, enum_item: ast.EnumItem) anyerror!void {
         if (enum_item.is_generic) return;
 
-        var repr_type: Type = .{ .integer = .{} };
+        var repr_type: Type = u256Type();
         if (enum_item.base_type) |type_expr| {
             repr_type = try self.resolveTypeExpr(type_expr);
         }
@@ -1436,25 +1439,84 @@ const TypeChecker = struct {
             return self.checker.enumHasPayload(name);
         }
 
-        pub fn instantiatedStructFields(self: @This(), name: []const u8) ?[]const InstantiatedStructField {
-            const instantiated = self.checker.instantiatedStructByName(name) orelse return null;
-            return instantiated.fields;
+        pub fn namedTypeKind(self: @This(), name: []const u8) abi_policy.NamedTypeKind {
+            if (self.checker.instantiatedEnumByName(name) != null) return .enum_;
+            if (self.checker.instantiatedBitfieldByName(name) != null) return .bitfield;
+            if (self.checker.instantiatedStructByName(name) != null) return .struct_;
+            const item_id = self.checker.item_index.lookup(name) orelse return .none;
+            return switch (self.checker.file.item(item_id).*) {
+                .Enum => .enum_,
+                .Bitfield => .bitfield,
+                .Struct => .struct_,
+                .Contract => .contract,
+                .ErrorDecl => .error_decl,
+                .TypeAlias => .type_alias,
+                else => .none,
+            };
         }
 
-        pub fn hasInstantiatedEnum(self: @This(), name: []const u8) bool {
-            return self.checker.instantiatedEnumByName(name) != null;
+        pub fn typeAliasTarget(self: @This(), name: []const u8) ?Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            return switch (self.checker.file.item(item_id).*) {
+                .TypeAlias => |type_alias| descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, type_alias.target_type) catch null,
+                else => null,
+            };
         }
 
-        pub fn hasInstantiatedBitfield(self: @This(), name: []const u8) bool {
-            return self.checker.instantiatedBitfieldByName(name) != null;
+        pub fn structFieldTypes(self: @This(), name: []const u8) ?[]const Type {
+            if (self.checker.instantiatedStructByName(name)) |instantiated| {
+                const fields = self.checker.arena.alloc(Type, instantiated.fields.len) catch return null;
+                for (instantiated.fields, 0..) |field, index| fields[index] = field.ty;
+                return fields;
+            }
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const struct_item = switch (self.checker.file.item(item_id).*) {
+                .Struct => |struct_item| struct_item,
+                else => return null,
+            };
+            const fields = self.checker.arena.alloc(Type, struct_item.fields.len) catch return null;
+            for (struct_item.fields, 0..) |field, index| {
+                fields[index] = descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, field.type_expr) catch return null;
+            }
+            return fields;
+        }
+
+        pub fn contractFieldTypes(self: @This(), name: []const u8) ?[]const Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const contract_item = switch (self.checker.file.item(item_id).*) {
+                .Contract => |contract_item| contract_item,
+                else => return null,
+            };
+            var fields: std.ArrayList(Type) = .{};
+            for (contract_item.members) |member_id| {
+                switch (self.checker.file.item(member_id).*) {
+                    .Field => |field| {
+                        const type_expr = field.type_expr orelse return null;
+                        const field_type = descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, type_expr) catch return null;
+                        fields.append(self.checker.arena, field_type) catch return null;
+                    },
+                    else => {},
+                }
+            }
+            return fields.toOwnedSlice(self.checker.arena) catch null;
+        }
+
+        pub fn errorPayloadTypes(self: @This(), name: []const u8) ?[]const Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const error_decl = switch (self.checker.file.item(item_id).*) {
+                .ErrorDecl => |error_decl| error_decl,
+                else => return null,
+            };
+            const payloads = self.checker.arena.alloc(Type, error_decl.parameters.len) catch return null;
+            for (error_decl.parameters, 0..) |parameter, index| {
+                payloads[index] = self.checker.pattern_types[parameter.pattern.index()].type;
+            }
+            return payloads;
         }
     };
 
     fn abiPolicy(self: *const TypeChecker) abi_policy.Policy(PublicAbiPolicyProvider) {
         return .{
-            .allocator = self.arena,
-            .file = self.file,
-            .item_index = self.item_index,
             .provider = .{ .checker = self },
         };
     }
@@ -1760,11 +1822,11 @@ const TypeChecker = struct {
             const item = self.file.item(item_id).*;
             if (item != .Import) continue;
             const alias = item.Import.alias orelse continue;
-            const module_id = (try query.resolve_import_alias(query.context, self.module_id, alias)) orelse continue;
+            const module_id = (try query.resolveImportAlias(self.module_id, alias)) orelse continue;
             if (imported_modules.contains(module_id)) continue;
             try imported_modules.put(module_id, {});
 
-            const imported_typecheck = try query.module_typecheck(query.context, module_id);
+            const imported_typecheck = try query.moduleTypeCheck(module_id);
             for (imported_typecheck.impl_interfaces) |impl_interface| {
                 try self.recordVisibleImplKey(&seen, &reported, impl_interface.trait_name, impl_interface.target_name, item.Import.range);
             }
@@ -1873,8 +1935,13 @@ const TypeChecker = struct {
                 }
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
+                    _ = try self.emitResolvedIntegerOverflowIfNeeded(decl.range, expr_id);
                     if (decl.type_expr != null) {
                         try self.contextualizeLiteral(expr_id, self.pattern_types[decl.pattern.index()].type);
+                    }
+                    if (decl.type_expr == null and self.comptime_depth == 0 and typeHasUnresolvedInteger(self.expr_types[expr_id.index()])) {
+                        try self.emitRangeError(decl.range, "ambiguous integer type; annotate or suffix the integer literal", .{});
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     }
                     const actual_type = self.expr_types[expr_id.index()];
                     const actual_located = self.exprLocatedType(expr_id);
@@ -1908,6 +1975,7 @@ const TypeChecker = struct {
             },
             .Return => |ret| if (ret.value) |expr_id| {
                 try self.visitExpr(expr_id);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(ret.range, expr_id);
                 if (self.current_return_type) |expected_type| {
                     try self.contextualizeLiteral(expr_id, expected_type);
                     const actual_type = self.expr_types[expr_id.index()];
@@ -2086,7 +2154,7 @@ const TypeChecker = struct {
                         diagnosticTypeDisplayName(self, address_type),
                     });
                 }
-                if (gas_type.kind() != .unknown and gas_type.kind() != .integer) {
+                if (gas_type.kind() != .unknown and !isIntegerType(gas_type)) {
                     try self.emitExprError(expr_id, "external proxy gas must be integer, found '{s}'", .{
                         diagnosticTypeDisplayName(self, gas_type),
                     });
@@ -2209,6 +2277,13 @@ const TypeChecker = struct {
                         rhs_type,
                     );
                 var final_type = result_type;
+                if (binaryComptimeIntegerOperandResolutionType(binary.op, lhs_type, rhs_type)) |operand_type| {
+                    const lhs_resolution = try self.resolveIntegerExpression(self.exprRange(binary.lhs), binary.lhs, operand_type);
+                    const rhs_resolution = try self.resolveIntegerExpression(self.exprRange(binary.rhs), binary.rhs, operand_type);
+                    if (lhs_resolution == .overflow or rhs_resolution == .overflow) {
+                        final_type = .{ .unknown = {} };
+                    }
+                }
                 if (result_type.kind() != .unknown and try self.hasInvalidConstantShiftAmount(expr_id, binary.op, lhs_type, binary.rhs)) {
                     final_type = .{ .unknown = {} };
                 }
@@ -3773,8 +3848,8 @@ const TypeChecker = struct {
         bindings: []GenericTypeBinding,
     ) !void {
         const query = self.import_query orelse return;
-        const target_item_index = try query.item_index(query.context, target_module_id);
-        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -4068,7 +4143,7 @@ const TypeChecker = struct {
         bindings: []const GenericTypeBinding,
     ) anyerror!void {
         const query = self.import_query orelse return;
-        const target_item_index = try query.item_index(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
         try self.validateGenericTraitBoundsInIndex(function, call_range, bindings, target_item_index);
     }
 
@@ -4434,14 +4509,15 @@ const TypeChecker = struct {
         if (refinements.isKnownName(generic.name)) {
             if (generic.args.len > 0 and generic.args[0] == .Type) {
                 const resolved_args = try self.substituteGenericArgs(generic.args, bindings);
+                const semantic_args = try refinementArgsFromAst(self.arena, resolved_args);
                 const base_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
-                if (!try self.validateRefinementGenericBounds(generic.range, generic.name, base_type, resolved_args)) {
+                if (!try self.validateRefinementGenericBounds(generic.range, generic.name, base_type, semantic_args)) {
                     return .{ .unknown = {} };
                 }
                 return .{ .refinement = .{
                     .name = generic.name,
                     .base_type = try self.storeType(base_type),
-                    .args = resolved_args,
+                    .args = semantic_args,
                 } };
             }
         }
@@ -4458,7 +4534,7 @@ const TypeChecker = struct {
         range: source.TextRange,
         name: []const u8,
         base_type: Type,
-        args: []const ast.TypeArg,
+        args: []const model.RefinementArg,
     ) !bool {
         var local_base = base_type;
         const refinement: model.RefinementType = .{
@@ -4484,7 +4560,7 @@ const TypeChecker = struct {
     fn refinementIntegerBaseSignedness(ty: Type) ?bool {
         return switch (ty) {
             .refinement => |refinement| refinementIntegerBaseSignedness(refinement.base_type.*),
-            .integer => |integer| integer.signed orelse signedFromIntegerSpelling(integer.spelling),
+            .integer => |integer| integer.signed,
             else => null,
         };
     }
@@ -4495,13 +4571,6 @@ const TypeChecker = struct {
             .integer => |integer| integer.spelling orelse "unsigned integer",
             else => "unsigned integer",
         };
-    }
-
-    fn signedFromIntegerSpelling(spelling: ?[]const u8) ?bool {
-        const text = spelling orelse return null;
-        if (std.mem.startsWith(u8, text, "u")) return false;
-        if (std.mem.startsWith(u8, text, "i")) return true;
-        return null;
     }
 
     fn negativeIntegerText(text: ?[]const u8) ?[]const u8 {
@@ -4634,9 +4703,28 @@ const TypeChecker = struct {
     }
 
     fn contextualizeLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
+        switch (try self.resolveIntegerExpression(self.exprRange(expr_id), expr_id, expected_type)) {
+            .not_applicable => {},
+            .resolved, .overflow => return,
+        }
+
         const expr = self.file.expression(expr_id).*;
         switch (expr) {
             .Group => |group| return self.contextualizeLiteral(group.expr, expected_type),
+            .Comptime => |comptime_expr| {
+                const body = self.file.body(comptime_expr.body).*;
+                if (body.statements.len == 0) return;
+                const value_expr = switch (self.file.statement(body.statements[body.statements.len - 1]).*) {
+                    .Expr => |expr_stmt| expr_stmt.expr,
+                    .Return => |ret| ret.value orelse return,
+                    else => return,
+                };
+                try self.contextualizeLiteral(value_expr, expected_type);
+                const actual_type = self.expr_types[value_expr.index()];
+                if (actual_type.kind() != .unknown and !typesFlowCompatible(expected_type, actual_type)) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
+            .IntegerLiteral => {},
             .Call => |call| {
                 if (!self.isResultConstructorCall(call, "Ok")) {
                     if (!self.isResultConstructorCall(call, "Err")) return;
@@ -5219,7 +5307,7 @@ const TypeChecker = struct {
         const rhs = self.expr_types[builtin.args[1].index()];
         const lhs_expr = self.file.expression(builtin.args[0]).*;
         const rhs_expr = self.file.expression(builtin.args[1]).*;
-        if (lhs_expr == .IntegerLiteral and rhs_expr != .IntegerLiteral and rhs.kind() == .integer) return rhs;
+        if (lhs_expr == .IntegerLiteral and rhs_expr != .IntegerLiteral and isIntegerType(rhs)) return rhs;
         return lhs;
     }
 
@@ -6227,7 +6315,8 @@ const TypeChecker = struct {
             else
                 arithmeticResultType(lhs_type, rhs_type),
             .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .pow, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),
-            .bit_and, .bit_or, .bit_xor, .shl, .wrapping_shl, .shr, .wrapping_shr => bitwiseResultType(lhs_type, rhs_type),
+            .bit_and, .bit_or, .bit_xor => bitwiseResultType(lhs_type, rhs_type),
+            .shl, .wrapping_shl, .shr, .wrapping_shr => shiftResultType(lhs_type, rhs_type),
             .and_and, .or_or => if (lhs_type.kind() == .bool and rhs_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
             .lt, .le, .gt, .ge => if (orderedTypesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
@@ -6270,9 +6359,9 @@ const TypeChecker = struct {
         const stored_base = self.arena.create(Type) catch return .{ .unknown = {} };
         stored_base.* = base_type;
 
-        const args = self.arena.alloc(ast.TypeArg, 2) catch return .{ .unknown = {} };
-        args[0] = ast.TypeArg{ .Type = ast.TypeExprId.fromIndex(0) };
-        args[1] = ast.TypeArg{ .Integer = .{ .range = undefined, .text = total_text } };
+        const args = self.arena.alloc(model.RefinementArg, 2) catch return .{ .unknown = {} };
+        args[0] = .Type;
+        args[1] = .{ .Integer = .{ .text = total_text } };
         return .{ .refinement = .{
             .name = refinements.nameForKind(.scaled),
             .base_type = stored_base,
@@ -6411,7 +6500,7 @@ const TypeChecker = struct {
         if (try self.importedModuleForExpr(base_expr_id)) |module_id| {
             if (try self.importedItemType(module_id, field_name)) |ty| return ty;
             if (self.import_query) |query| {
-                if ((try query.resolve_import_alias(query.context, module_id, field_name)) != null) {
+                if ((try query.resolveImportAlias(module_id, field_name)) != null) {
                     return .{ .unknown = {} };
                 }
             }
@@ -6931,7 +7020,7 @@ const TypeChecker = struct {
             else => return false,
         }
         if (lhs_type.kind() != .integer) return false;
-        const bits = lhs_type.integer.bits orelse return false;
+        const bits = lhs_type.integer.bits;
         const value = self.const_eval.values[rhs_expr_id.index()] orelse return false;
         const amount = switch (value) {
             .integer => |integer| integer,
@@ -6956,7 +7045,45 @@ const TypeChecker = struct {
         return false;
     }
 
-    fn emitIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+    fn resolveIntegerExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !IntegerResolutionResult {
+        const expected = unwrapRefinement(expected_type);
+        if (expected.kind() != .integer) return .not_applicable;
+
+        const actual = unwrapRefinement(self.expr_types[expr_id.index()]);
+        switch (actual.kind()) {
+            .comptime_integer => {
+                const value = self.const_eval.values[expr_id.index()] orelse return .not_applicable;
+                if (value != .integer) return .not_applicable;
+            },
+            .integer => {
+                if (self.expr_types[expr_id.index()].kind() != .integer and self.expr_types[expr_id.index()].kind() != .comptime_integer) return .not_applicable;
+                if (!typesAssignable(expected, actual)) return .not_applicable;
+                if (!sameIntegerShape(expected.integer, actual.integer)) {
+                    if (!self.exprCanAdoptIntegerContext(expr_id)) return .not_applicable;
+                    const value = self.const_eval.values[expr_id.index()] orelse return .not_applicable;
+                    if (value != .integer) return .not_applicable;
+                }
+            },
+            else => return .not_applicable,
+        }
+
+        if (try self.emitIntegerOverflowAgainst(range, expr_id, expected)) {
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return .overflow;
+        }
+
+        self.expr_types[expr_id.index()] = expected;
+        return .resolved;
+    }
+
+    fn exprCanAdoptIntegerContext(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral, .Group, .Comptime, .Unary, .Binary => true,
+            else => false,
+        };
+    }
+
+    fn emitIntegerOverflowAgainst(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
         const value = self.const_eval.values[expr_id.index()] orelse return false;
         if (value != .integer or expected_type.kind() != .integer) return false;
         const checked_value = if (exprUsesWrappedIntegerValue(self, expr_id))
@@ -6970,6 +7097,23 @@ const TypeChecker = struct {
             diagnosticTypeDisplayName(self, expected_type),
         });
         return true;
+    }
+
+    fn emitResolvedIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId) !bool {
+        const actual = self.expr_types[expr_id.index()];
+        if (actual.kind() != .integer) return false;
+        return switch (try self.resolveIntegerExpression(range, expr_id, actual)) {
+            .overflow => true,
+            .not_applicable, .resolved => false,
+        };
+    }
+
+    fn emitIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (try self.emitResolvedIntegerOverflowIfNeeded(range, expr_id)) return true;
+        return switch (try self.resolveIntegerExpression(range, expr_id, expected_type)) {
+            .overflow => true,
+            .not_applicable, .resolved => false,
+        };
     }
 
     fn emitBuiltinIntegerOverflowIfNeeded(self: *TypeChecker, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, result_type: Type) !bool {
@@ -7853,8 +7997,11 @@ fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
-    if (sameConcreteType(lhs, rhs)) return lhs;
-    return lhs;
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .comptime_integer) return .{ .comptime_integer = .{} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (lhs.kind() == .integer and rhs.kind() == .comptime_integer) return lhs;
+    if (sameIntegerShape(lhs.integer, rhs.integer)) return lhs;
+    return .{ .unknown = {} };
 }
 
 fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
@@ -7865,6 +8012,18 @@ fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
     if (lhs.kind() == .fixed_bytes and rhs.kind() == .fixed_bytes and sameConcreteType(lhs, rhs)) return lhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .comptime_integer) return .{ .comptime_integer = .{} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (lhs.kind() == .integer and rhs.kind() == .comptime_integer) return lhs;
+    if (sameIntegerShape(lhs.integer, rhs.integer)) return lhs;
+    return .{ .unknown = {} };
+}
+
+fn shiftResultType(lhs_type: Type, rhs_type: Type) Type {
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
     return lhs;
 }
 
@@ -7872,7 +8031,7 @@ fn integerLiteralType(text: []const u8) Type {
     if (integerTypeSuffix(text)) |integer| {
         return .{ .integer = integer };
     }
-    return .{ .integer = .{} };
+    return .{ .comptime_integer = .{} };
 }
 
 fn invalidIntegerLiteralSuffix(text: []const u8) ?[]const u8 {
@@ -7916,7 +8075,7 @@ fn typesComparable(lhs_type: Type, rhs_type: Type) bool {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
     if (sameConcreteType(lhs, rhs)) return true;
-    if (isIntegerType(lhs) and isIntegerType(rhs)) return true;
+    if (integerOperandsHaveResolutionTarget(lhs, rhs)) return true;
     return false;
 }
 
@@ -7929,7 +8088,91 @@ fn orderedTypesComparable(lhs_type: Type, rhs_type: Type) bool {
 }
 
 fn isIntegerType(ty: Type) bool {
-    return unwrapRefinement(ty).kind() == .integer;
+    return switch (unwrapRefinement(ty).kind()) {
+        .integer, .comptime_integer => true,
+        else => false,
+    };
+}
+
+fn binaryComptimeIntegerOperandResolutionType(op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) ?Type {
+    switch (op) {
+        .add,
+        .wrapping_add,
+        .sub,
+        .wrapping_sub,
+        .mul,
+        .wrapping_mul,
+        .div,
+        .mod,
+        .pow,
+        .wrapping_pow,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .eq,
+        .ne,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        => {},
+        .shl, .wrapping_shl, .shr, .wrapping_shr, .and_and, .or_or => return null,
+    }
+
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (rhs.kind() == .comptime_integer and lhs.kind() == .integer) return lhs;
+    return null;
+}
+
+fn integerOperandsHaveResolutionTarget(lhs: Type, rhs: Type) bool {
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return false;
+    if (lhs.kind() == .comptime_integer or rhs.kind() == .comptime_integer) return true;
+    return sameIntegerShape(lhs.integer, rhs.integer);
+}
+
+fn sameIntegerShape(lhs: model.IntegerType, rhs: model.IntegerType) bool {
+    return lhs.bits == rhs.bits and lhs.signed == rhs.signed;
+}
+
+fn typeHasUnresolvedInteger(ty: Type) bool {
+    return switch (ty) {
+        .comptime_integer => true,
+        .integer => false,
+        .tuple => |elements| {
+            for (elements) |element| {
+                if (typeHasUnresolvedInteger(element)) return true;
+            }
+            return false;
+        },
+        .anonymous_struct => |struct_type| {
+            for (struct_type.fields) |field| {
+                if (typeHasUnresolvedInteger(field.ty)) return true;
+            }
+            return false;
+        },
+        .array => |array| typeHasUnresolvedInteger(array.element_type.*),
+        .slice => |slice| typeHasUnresolvedInteger(slice.element_type.*),
+        .map => |map| {
+            if (map.key_type) |key| {
+                if (typeHasUnresolvedInteger(key.*)) return true;
+            }
+            if (map.value_type) |value| {
+                if (typeHasUnresolvedInteger(value.*)) return true;
+            }
+            return false;
+        },
+        .error_union => |error_union| {
+            if (typeHasUnresolvedInteger(error_union.payload_type.*)) return true;
+            for (error_union.error_types) |error_type| {
+                if (typeHasUnresolvedInteger(error_type)) return true;
+            }
+            return false;
+        },
+        .refinement => |refinement| typeHasUnresolvedInteger(refinement.base_type.*),
+        else => false,
+    };
 }
 
 fn unwrapRefinement(ty: Type) Type {
@@ -7967,8 +8210,8 @@ fn exprUsesWrappedIntegerValue(self: *const TypeChecker, expr_id: ast.ExprId) bo
 }
 
 fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
-    const bits = integer.bits orelse return true;
-    const signed = integer.signed orelse return true;
+    const bits = integer.bits;
+    const signed = integer.signed;
     if (bits == 0) return value.eqlZero();
     return value.fitsInTwosComp(if (signed) .signed else .unsigned, bits);
 }
@@ -7976,7 +8219,7 @@ fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
 fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
     if (lhs_type.kind() != rhs_type.kind()) return false;
     return switch (lhs_type) {
-        .unknown, .never, .void, .bool, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -7997,8 +8240,9 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
 }
 
 fn shouldDeferGenericLiteralBinding(existing: Type, candidate: Type) bool {
-    if (existing.kind() != .integer or candidate.kind() != .integer) return false;
-    return candidate.integer.spelling == null;
+    if (!isIntegerType(existing) or !isIntegerType(candidate)) return false;
+    if (candidate.kind() == .comptime_integer) return true;
+    return false;
 }
 
 fn unaryOpName(op: ast.UnaryOp) []const u8 {
@@ -8047,6 +8291,7 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .void => try buffer.appendSlice(allocator, "void"),
         .bool => try buffer.appendSlice(allocator, "bool"),
         .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "integer"),
+        .comptime_integer => try buffer.appendSlice(allocator, "integer"),
         .string => try buffer.appendSlice(allocator, "string"),
         .address => try buffer.appendSlice(allocator, "address"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
@@ -8130,6 +8375,7 @@ fn typeDisplayName(ty: Type) []const u8 {
         .void => "void",
         .bool => "bool",
         .integer => |integer| integer.spelling orelse "integer",
+        .comptime_integer => "integer",
         .string => "string",
         .address => "address",
         .bytes => "bytes",
@@ -8232,34 +8478,34 @@ test "typesFlowCompatible accepts guardable refinement strengthening" {
         .name = "MinValue",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "100" } },
         },
     } };
     const min200: Type = .{ .refinement = .{
         .name = "MinValue",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "200" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "200" } },
         },
     } };
     const range_wide: Type = .{ .refinement = .{
         .name = "InRange",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "0" } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "10000" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "0" } },
+            model.RefinementArg{ .Integer = .{ .text = "10000" } },
         },
     } };
     const range_narrow: Type = .{ .refinement = .{
         .name = "InRange",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "5000" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "100" } },
+            model.RefinementArg{ .Integer = .{ .text = "5000" } },
         },
     } };
 
@@ -8289,16 +8535,16 @@ test "typesAssignable accepts semantically identical refinements from distinct s
         .name = "MinValue",
         .base_type = base_a,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 1 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "1" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "1" } },
         },
     } };
     const rhs: Type = .{ .refinement = .{
         .name = "MinValue",
         .base_type = base_b,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 2 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "1" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "1" } },
         },
     } };
 
@@ -8321,16 +8567,16 @@ test "typesFlowCompatible rejects non-guardable refinement mismatches" {
         .name = "Scaled",
         .base_type = base_a,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 1 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "18" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "18" } },
         },
     } };
     const scaled6: Type = .{ .refinement = .{
         .name = "Scaled",
         .base_type = base_b,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 2 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "6" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "6" } },
         },
     } };
     const plain_u256: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
@@ -8342,17 +8588,17 @@ test "typesFlowCompatible rejects non-guardable refinement mismatches" {
 
 test "integer literal suffixes use closed builtin width set" {
     const u256_integer = integerTypeSuffix("1 u256") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 256), u256_integer.bits);
-    try std.testing.expectEqual(@as(?bool, false), u256_integer.signed);
+    try std.testing.expectEqual(@as(u16, 256), u256_integer.bits);
+    try std.testing.expectEqual(false, u256_integer.signed);
     try std.testing.expectEqualStrings("u256", u256_integer.spelling.?);
 
     const i8_integer = integerTypeSuffix("1 i8") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 8), i8_integer.bits);
-    try std.testing.expectEqual(@as(?bool, true), i8_integer.signed);
+    try std.testing.expectEqual(@as(u16, 8), i8_integer.bits);
+    try std.testing.expectEqual(true, i8_integer.signed);
 
     const u160_integer = integerTypeSuffix("1 u160") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(?u16, 160), u160_integer.bits);
-    try std.testing.expectEqual(@as(?bool, false), u160_integer.signed);
+    try std.testing.expectEqual(@as(u16, 160), u160_integer.bits);
+    try std.testing.expectEqual(false, u160_integer.signed);
 
     try std.testing.expect(integerTypeSuffix("1 u24") == null);
     try std.testing.expectEqualStrings("u24", invalidIntegerLiteralSuffix("1 u24") orelse return error.TestUnexpectedResult);

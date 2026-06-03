@@ -3,13 +3,16 @@ const ast = @import("../ast/mod.zig");
 const abi_type_names = @import("../abi/type_names.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
-const type_builtin = @import("ora_types").builtin;
+const ora_types = @import("ora_types");
+const compiler_query = @import("../compiler_query.zig");
+const type_builtin = ora_types.builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
 const lookup_index = @import("../sema/lookup.zig");
+const abi_layout_provider = @import("../sema/abi_layout_provider.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
-const refinements = @import("../sema/refinements.zig");
+const refinements = @import("ora_types").refinement_semantics;
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 const hir_abi = @import("../hir/abi.zig");
@@ -20,7 +23,7 @@ const compile_options = @import("../compile_options.zig");
 const module_graph = @import("../sema/module_graph.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
-const ConstValue = model.ConstValue;
+const ConstValue = ora_types.ConstValue;
 const TypeKind = model.TypeKind;
 const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
@@ -52,16 +55,7 @@ fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8
     return hash;
 }
 
-pub const TypeQuery = struct {
-    context: *anyopaque,
-    ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.TypeCheckResult,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ItemIndexResult,
-    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ConstEvalResult,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
-};
+pub const TypeQuery = compiler_query.ComptimeView;
 
 pub const ConstEvalOptions = struct {
     module_id: ?source.ModuleId = null,
@@ -1270,7 +1264,8 @@ const ConstEvaluator = struct {
             .Generic => |generic| blk: {
                 if (!refinements.isKnownName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
                 const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
-                break :blk try refinements.refinementType(self.allocator, generic.name, base_type, generic.args);
+                const args = try type_descriptors.refinementArgsFromAst(self.allocator, generic.args);
+                break :blk try refinements.refinementType(self.allocator, generic.name, base_type, args);
             },
             else => null,
         };
@@ -1486,26 +1481,26 @@ const ConstEvaluator = struct {
     fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
         const module_id = self.module_id orelse return;
         const type_query = self.type_query orelse return;
-        _ = try type_query.ensure_typecheck(type_query.context, module_id, key);
+        _ = try type_query.ensureTypeCheck(module_id, key);
     }
 
     fn currentTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
         const key = self.current_typecheck_key orelse return null;
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.ensure_typecheck(type_query.context, module_id, key);
+        return try type_query.ensureTypeCheck(module_id, key);
     }
 
     fn currentModuleTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.module_typecheck(type_query.context, module_id);
+        return try type_query.moduleTypeCheck(module_id);
     }
 
     fn currentItemIndex(self: *ConstEvaluator) !?*const model.ItemIndexResult {
         const type_query = self.type_query orelse return self.fallback_item_index;
         const module_id = self.module_id orelse return self.fallback_item_index;
-        return try type_query.item_index(type_query.context, module_id);
+        return try type_query.itemIndex(module_id);
     }
 
     fn currentLayoutContext(self: *ConstEvaluator) !?abi_layout_context.LayoutContext {
@@ -1513,15 +1508,13 @@ const ConstEvaluator = struct {
         const item_index = (try self.currentItemIndex()) orelse return null;
         return .{
             .allocator = self.allocator,
-            .file = self.file,
-            .item_index = item_index,
-            .typecheck = typecheck,
+            .provider = abi_layout_provider.abiLayoutProvider(self.file, item_index, typecheck),
         };
     }
 
-    fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const model.ConstEvalResult {
+    fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const ConstEvalResult {
         const type_query = self.type_query orelse return null;
-        return try type_query.const_eval(type_query.context, module_id);
+        return try type_query.constEval(module_id);
     }
 
     fn callableFunctionIsPure(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
@@ -1536,18 +1529,18 @@ const ConstEvaluator = struct {
 
     fn astFileForModule(self: *ConstEvaluator, module_id: source.ModuleId) !*const ast.AstFile {
         const type_query = self.type_query orelse return error.MissingTypeQuery;
-        return try type_query.ast_file(type_query.context, module_id);
+        return try type_query.astFile(module_id);
     }
 
     fn lookupNamedItemInModule(self: *ConstEvaluator, module_id: source.ModuleId, name: []const u8) !?ast.ItemId {
         const type_query = self.type_query orelse return null;
-        return try type_query.lookup_item(type_query.context, module_id, name);
+        return try type_query.lookupItem(module_id, name);
     }
 
     fn resolveImportAlias(self: *ConstEvaluator, alias: []const u8) !?source.ModuleId {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.resolve_import_alias(type_query.context, module_id, alias);
+        return try type_query.resolveImportAlias(module_id, alias);
     }
 
     fn importedModuleForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?source.ModuleId {
@@ -1556,7 +1549,7 @@ const ConstEvaluator = struct {
             .Field => |field| blk: {
                 const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
                 const type_query = self.type_query orelse break :blk null;
-                break :blk try type_query.resolve_import_alias(type_query.context, base_module_id, field.name);
+                break :blk try type_query.resolveImportAlias(base_module_id, field.name);
             },
             .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
@@ -1898,7 +1891,7 @@ const ConstEvaluator = struct {
                     if (try self.resolveImportAlias(base_name)) |target_module_id| {
                         const target_file = try self.astFileForModule(target_module_id);
                         const target_typecheck = if (self.type_query) |query|
-                            try query.module_typecheck(query.context, target_module_id)
+                            try query.moduleTypeCheck(target_module_id)
                         else
                             break :blk null;
                         const item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse break :blk null;
@@ -2058,13 +2051,11 @@ const ConstEvaluator = struct {
 
     fn buildTraitMethodsCtValue(self: *ConstEvaluator, trait_ref: ReflectionTraitReference) !CtValue {
         const type_query = self.type_query orelse return error.NotComptime;
-        const typecheck = try type_query.module_typecheck(type_query.context, trait_ref.module_id);
-        const item_index = try type_query.item_index(type_query.context, trait_ref.module_id);
+        const typecheck = try type_query.moduleTypeCheck(trait_ref.module_id);
+        const item_index = try type_query.itemIndex(trait_ref.module_id);
         const layout_ctx = abi_layout_context.LayoutContext{
             .allocator = self.allocator,
-            .file = trait_ref.file,
-            .item_index = item_index,
-            .typecheck = typecheck,
+            .provider = abi_layout_provider.abiLayoutProvider(trait_ref.file, item_index, typecheck),
         };
         const trait_interface = typecheck.traitInterfaceByName(trait_ref.item.name) orelse return error.NotComptime;
         const elems = try self.allocator.alloc(CtValue, trait_interface.methods.len);
@@ -2126,8 +2117,7 @@ const ConstEvaluator = struct {
     fn typeIdForModelType(self: *ConstEvaluator, ty: model.Type) ?u32 {
         return switch (ty) {
             .integer => |integer| blk: {
-                const bits = integer.bits orelse 256;
-                const spec = type_builtin.lookupIntegerBuiltin(integer.signed orelse false, bits) orelse break :blk null;
+                const spec = integer.builtinSpec() orelse break :blk null;
                 break :blk spec.comptime_type_id;
             },
             .bool => type_builtin.lookupBuiltinById(.bool).comptime_type_id,
@@ -4309,14 +4299,7 @@ const ConstEvaluator = struct {
 
     fn integerTypeFromName(name: []const u8) ?model.IntegerType {
         const trimmed = std.mem.trim(u8, name, " \t\n\r");
-        if (trimmed.len < 2) return null;
-        const signed = switch (trimmed[0]) {
-            'u' => false,
-            'i' => true,
-            else => return null,
-        };
-        const bits = std.fmt.parseInt(u16, trimmed[1..], 10) catch return null;
-        return .{ .bits = bits, .signed = signed, .spelling = trimmed };
+        return type_descriptors.integerTypeFromName(trimmed);
     }
 
     fn constConditionTruthy(self: *ConstEvaluator, value: ConstValue) ?bool {

@@ -1,12 +1,15 @@
 const std = @import("std");
 const abi_layout = @import("layout.zig");
 const comptime_mod = @import("../comptime/mod.zig");
-const sema = @import("../sema/mod.zig");
-const refinements = @import("../sema/refinements.zig");
+const ora_types = @import("ora_types");
+const refinements = ora_types.refinement_semantics;
 
 const CtAggregate = comptime_mod.CtAggregate;
 const CtHeap = comptime_mod.CtHeap;
 const CtValue = comptime_mod.CtValue;
+const AnonymousStructField = ora_types.semantic.AnonymousStructField;
+const RefinementType = ora_types.RefinementType;
+const Type = ora_types.SemanticType;
 
 pub const MAX_DECODE_DEPTH: usize = 16;
 pub const MAX_BUFFER_SIZE: usize = 1024 * 1024;
@@ -43,8 +46,8 @@ pub const DecodeMode = enum {
 
 pub const TypeResolver = struct {
     context: *anyopaque,
-    typeIdForType: *const fn (*anyopaque, sema.Type) anyerror!?u32,
-    structFields: *const fn (*anyopaque, []const u8) anyerror!?[]const sema.AnonymousStructField,
+    typeIdForType: *const fn (*anyopaque, Type) anyerror!?u32,
+    structFields: *const fn (*anyopaque, []const u8) anyerror!?[]const AnonymousStructField,
     enumVariantCount: *const fn (*anyopaque, []const u8) anyerror!?usize,
 };
 
@@ -53,7 +56,7 @@ pub fn decodeComptimeValue(
     heap: *CtHeap,
     resolver: TypeResolver,
     layout: abi_layout.LayoutNode,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
 ) !DecodeResult {
     return decodeComptimeValueWithMode(allocator, heap, resolver, layout, target_type, bytes, .strict);
@@ -64,7 +67,7 @@ pub fn decodeComptimeValuePermissive(
     heap: *CtHeap,
     resolver: TypeResolver,
     layout: abi_layout.LayoutNode,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
 ) !DecodeResult {
     return decodeComptimeValueWithMode(allocator, heap, resolver, layout, target_type, bytes, .permissive);
@@ -75,7 +78,7 @@ pub fn decodeComptimeValueWithMode(
     heap: *CtHeap,
     resolver: TypeResolver,
     layout: abi_layout.LayoutNode,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     mode: DecodeMode,
 ) !DecodeResult {
@@ -109,7 +112,7 @@ const DecodeValue = struct {
     size: usize,
 };
 
-fn topLevelWrapsSingleArgument(target_type: sema.Type) bool {
+fn topLevelWrapsSingleArgument(target_type: Type) bool {
     // ABI encodes a single non-tuple argument as a one-element argument list:
     // bare `string` and `(string,)` both start with a 32-byte offset frame.
     return switch (unwrapRefinement(target_type)) {
@@ -123,7 +126,7 @@ fn decodeSingleTopLevelArgument(
     heap: *CtHeap,
     resolver: TypeResolver,
     layout: abi_layout.LayoutNode,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     mode: DecodeMode,
 ) anyerror!DecodeStep(DecodeValue) {
@@ -152,7 +155,7 @@ fn decodeNodeAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     layout: abi_layout.LayoutNode,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     depth: usize,
@@ -186,7 +189,7 @@ fn decodeStaticWordAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     encoding: abi_layout.StaticEncoding,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     mode: DecodeMode,
@@ -204,7 +207,7 @@ fn decodeStaticWordAt(
 fn decodeDynamicBytesAt(
     heap: *CtHeap,
     kind: abi_layout.DynamicBytesKind,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     mode: DecodeMode,
@@ -242,7 +245,7 @@ fn decodeDynamicBytesAt(
     } };
 }
 
-fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *const [32]u8, bits: u16, mode: DecodeMode) anyerror!DecodeStep(CtValue) {
+fn decodeUnsignedWord(resolver: TypeResolver, target_type: Type, word: *const [32]u8, bits: u16, mode: DecodeMode) anyerror!DecodeStep(CtValue) {
     var value = std.mem.readInt(u256, word, .big);
     if (bits < 256) {
         const mask = (@as(u256, 1) << @intCast(bits)) - 1;
@@ -264,7 +267,7 @@ fn decodeUnsignedWord(resolver: TypeResolver, target_type: sema.Type, word: *con
     return .{ .value = .{ .integer = value } };
 }
 
-fn decodeSignedWord(target_type: sema.Type, word: *const [32]u8, bits: u16, mode: DecodeMode) DecodeStep(CtValue) {
+fn decodeSignedWord(target_type: Type, word: *const [32]u8, bits: u16, mode: DecodeMode) DecodeStep(CtValue) {
     _ = target_type;
     var value = std.mem.readInt(u256, word, .big);
     if (bits < 256) {
@@ -309,7 +312,7 @@ fn decodeDynamicArrayAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     array: abi_layout.DynamicArrayLayout,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     depth: usize,
@@ -340,7 +343,7 @@ fn decodeFixedArrayAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     array: abi_layout.FixedArrayLayout,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     depth: usize,
@@ -371,7 +374,7 @@ fn decodeArrayElementsAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     element_layout: abi_layout.LayoutNode,
-    element_type: sema.Type,
+    element_type: Type,
     len: usize,
     bytes: []const u8,
     offset: usize,
@@ -452,7 +455,7 @@ fn decodeTupleAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     tuple: abi_layout.TupleLayout,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     offset: usize,
     depth: usize,
@@ -473,7 +476,7 @@ fn decodeTupleAt(
         },
         .anonymous_struct => |struct_type| {
             if (struct_type.fields.len != tuple.elements.len) return error.AbiDecoderInternalShapeMismatch;
-            const types = try allocator.alloc(sema.Type, struct_type.fields.len);
+            const types = try allocator.alloc(Type, struct_type.fields.len);
             for (struct_type.fields, 0..) |field, index| {
                 types[index] = field.ty;
             }
@@ -490,7 +493,7 @@ fn decodeTupleAt(
             const fields = (try resolver.structFields(resolver.context, named.name)) orelse return error.AbiDecoderInternalShapeMismatch;
             if (fields.len != tuple.elements.len) return error.AbiDecoderInternalShapeMismatch;
             const type_id = (try resolver.typeIdForType(resolver.context, target_type)) orelse return error.AbiDecoderInternalShapeMismatch;
-            const types = try allocator.alloc(sema.Type, fields.len);
+            const types = try allocator.alloc(Type, fields.len);
             for (fields, 0..) |field, index| {
                 types[index] = field.ty;
             }
@@ -516,7 +519,7 @@ fn decodeTupleElementsAt(
     heap: *CtHeap,
     resolver: TypeResolver,
     layouts: []const abi_layout.LayoutNode,
-    types: []const sema.Type,
+    types: []const Type,
     bytes: []const u8,
     offset: usize,
     depth: usize,
@@ -597,14 +600,14 @@ fn paddedByteLen(len: usize) ?usize {
     return padded;
 }
 
-fn unwrapRefinement(ty: sema.Type) sema.Type {
+fn unwrapRefinement(ty: Type) Type {
     return switch (ty) {
         .refinement => |refinement| unwrapRefinement(refinement.base_type.*),
         else => ty,
     };
 }
 
-fn validateDecodedValue(target_type: sema.Type, decoded: DecodeStep(DecodeValue)) anyerror!DecodeStep(DecodeValue) {
+fn validateDecodedValue(target_type: Type, decoded: DecodeStep(DecodeValue)) anyerror!DecodeStep(DecodeValue) {
     return switch (decoded) {
         .err => |err| .{ .err = err },
         .value => |value| if (try decodedValueSatisfiesType(target_type, value.value))
@@ -614,20 +617,21 @@ fn validateDecodedValue(target_type: sema.Type, decoded: DecodeStep(DecodeValue)
     };
 }
 
-fn decodedValueSatisfiesType(ty: sema.Type, value: CtValue) anyerror!bool {
+fn decodedValueSatisfiesType(ty: Type, value: CtValue) anyerror!bool {
     return switch (ty) {
         .refinement => |refinement| (try refinementSatisfied(refinement, value)) and (try decodedValueSatisfiesType(refinement.base_type.*, value)),
+        .comptime_integer => error.AbiDecoderInternalShapeMismatch,
         else => true,
     };
 }
 
-fn refinementSatisfied(refinement: sema.RefinementType, value: CtValue) anyerror!bool {
+fn refinementSatisfied(refinement: RefinementType, value: CtValue) anyerror!bool {
     if (refinements.bounds(refinement)) |info| {
         const integer = switch (value) {
             .integer => |integer| integer,
             else => return error.AbiDecoderInternalShapeMismatch,
         };
-        if (refinementBaseIsSignedInteger(info.base_type)) {
+        if (try refinementBaseIsSignedInteger(info.base_type)) {
             const signed_integer: i256 = @bitCast(integer);
             if (try parseI256Text(info.min_text)) |min| {
                 if (signed_integer < min) return false;
@@ -655,19 +659,12 @@ fn refinementSatisfied(refinement: sema.RefinementType, value: CtValue) anyerror
     return error.AbiDecoderInternalShapeMismatch;
 }
 
-fn refinementBaseIsSignedInteger(ty: sema.Type) bool {
+fn refinementBaseIsSignedInteger(ty: Type) anyerror!bool {
     return switch (ty) {
         .refinement => |refinement| refinementBaseIsSignedInteger(refinement.base_type.*),
-        .integer => |integer| integer.signed orelse signedFromIntegerSpelling(integer.spelling) orelse false,
+        .integer => |integer| integer.signed,
         else => false,
     };
-}
-
-fn signedFromIntegerSpelling(spelling: ?[]const u8) ?bool {
-    const text = spelling orelse return null;
-    if (std.mem.startsWith(u8, text, "u")) return false;
-    if (std.mem.startsWith(u8, text, "i")) return true;
-    return null;
 }
 
 fn parseU256Text(text: ?[]const u8) anyerror!?u256 {

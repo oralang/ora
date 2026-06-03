@@ -1700,9 +1700,7 @@ test "compiler computes extern trait ABI signatures" {
     const item_index = try compilation.db.itemIndex(compilation.root_module_id);
     const layout_ctx = abi_layout_context.LayoutContext{
         .allocator = testing.allocator,
-        .file = ast_file,
-        .item_index = item_index,
-        .typecheck = typecheck,
+        .provider = compiler.sema.abiLayoutProvider(ast_file, item_index, typecheck),
     };
     const trait_interface = typecheck.traitInterfaceByName("ERC20").?;
 

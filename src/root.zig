@@ -23,6 +23,7 @@ pub const abi_comptime_encoder = @import("abi/comptime_encoder.zig");
 pub const abi_comptime_decoder_test_support = @import("abi/comptime_decoder_test_support.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler.zig");
+pub const compiler_query = @import("compiler_query.zig");
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.

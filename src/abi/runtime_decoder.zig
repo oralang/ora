@@ -1,18 +1,20 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const mlir_helpers = @import("mlir_helpers");
-const sema = @import("../sema/mod.zig");
+const ora_types = @import("ora_types");
 const abi_layout = @import("layout.zig");
 const abi_layout_context = @import("layout_context.zig");
 
 const strRef = mlir_helpers.strRef;
+const Type = ora_types.SemanticType;
+const TypeKind = ora_types.TypeKind;
 
 pub fn createAbiDecodeOp(
     allocator: std.mem.Allocator,
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
     returndata: mlir.MlirValue,
     result_type: mlir.MlirType,
 ) !mlir.MlirOperation {
@@ -34,7 +36,7 @@ pub fn createExternalReturnAbiDecodeOp(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
     returndata: mlir.MlirValue,
     result_type: mlir.MlirType,
     failure_error: []const u8,
@@ -59,7 +61,7 @@ pub fn createMemoryResultAbiDecodeOp(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: mlir.MlirValue,
     result_type: mlir.MlirType,
 ) !mlir.MlirOperation {
@@ -81,7 +83,7 @@ pub fn createMemoryResultAbiDecodeOpPermissive(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: mlir.MlirValue,
     result_type: mlir.MlirType,
 ) !mlir.MlirOperation {
@@ -104,7 +106,7 @@ fn createAbiDecodeOpWithMode(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
     bytes: mlir.MlirValue,
     result_type: mlir.MlirType,
     source: []const u8,
@@ -130,7 +132,7 @@ fn createAbiDecodeOpWithModeAndDecodeMode(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
     bytes: mlir.MlirValue,
     result_type: mlir.MlirType,
     source: []const u8,
@@ -157,7 +159,7 @@ fn createAbiDecodeOpWithModeAndFailureError(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
     bytes: mlir.MlirValue,
     result_type: mlir.MlirType,
     source: []const u8,
@@ -166,7 +168,7 @@ fn createAbiDecodeOpWithModeAndFailureError(
     failure_error: ?[]const u8,
 ) !mlir.MlirOperation {
     const attrs = try attrsForReturnType(allocator, mlir_context, layout_context, return_type);
-    const enum_variant_count = enumVariantCount(layout_context, return_type);
+    const enum_variant_count = layout_context.enumVariantCount(return_type);
     var op_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
     defer op_attrs.deinit(allocator);
     try op_attrs.append(allocator, mlir_helpers.namedAttr(mlir_context, "return_types", attrs.return_types));
@@ -218,7 +220,7 @@ fn attrsForReturnType(
     allocator: std.mem.Allocator,
     mlir_context: mlir.MlirContext,
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
 ) !struct { return_types: mlir.MlirAttribute, layout: mlir.MlirAttribute } {
     const return_abi_type = try decodeReturnAbiType(layout_context, return_type);
     defer allocator.free(return_abi_type);
@@ -227,7 +229,7 @@ fn attrsForReturnType(
     };
     const return_types_attr = mlir.oraArrayAttrCreate(mlir_context, return_type_attrs.len, &return_type_attrs);
 
-    var single_return_storage: [1]sema.Type = undefined;
+    var single_return_storage: [1]Type = undefined;
     const layout_type = layoutTypeForReturn(return_type, &single_return_storage);
     var layout = try layout_context.layoutForType(layout_type);
     defer layout.deinit(allocator);
@@ -239,36 +241,19 @@ fn attrsForReturnType(
     };
 }
 
-fn enumVariantCount(layout_context: abi_layout_context.LayoutContext, ty: sema.Type) ?usize {
-    const unwrapped = unwrapRefinement(ty);
-    const name = switch (unwrapped) {
-        .enum_ => |named| named.name,
-        .named => |named| named.name,
-        else => return null,
-    };
-    if (layout_context.typecheck.instantiatedEnumByName(name)) |instantiated| {
-        return instantiated.variants.len;
-    }
-    const item_id = layout_context.item_index.lookup(name) orelse return null;
-    return switch (layout_context.file.item(item_id).*) {
-        .Enum => |enum_item| enum_item.variants.len,
-        else => null,
-    };
-}
-
-fn unwrapRefinement(ty: sema.Type) sema.Type {
+fn unwrapRefinement(ty: Type) Type {
     return switch (ty) {
         .refinement => |refinement| unwrapRefinement(refinement.base_type.*),
         else => ty,
     };
 }
 
-// Returns the tuple-shaped sema.Type to feed into layoutForType. A tuple
+// Returns the tuple-shaped Type to feed into layoutForType. A tuple
 // return uses its argument-list shape directly; any other return is wrapped
 // in a 1-tuple so the layout matches Solidity's single-arg convention.
 // `single_storage` backs the wrap case; the returned slice must outlive
 // the caller's use of the result (layoutForType copies before returning).
-fn layoutTypeForReturn(return_type: sema.Type, single_storage: *[1]sema.Type) sema.Type {
+fn layoutTypeForReturn(return_type: Type, single_storage: *[1]Type) Type {
     return switch (unwrapRefinement(return_type)) {
         .tuple, .void => return_type,
         else => blk: {
@@ -280,37 +265,37 @@ fn layoutTypeForReturn(return_type: sema.Type, single_storage: *[1]sema.Type) se
 
 fn decodeReturnAbiType(
     layout_context: abi_layout_context.LayoutContext,
-    return_type: sema.Type,
+    return_type: Type,
 ) ![]const u8 {
     const unwrapped = unwrapRefinement(return_type);
     return layout_context.publicReturnAbiTypeForType(unwrapped);
 }
 
 test "runtime decoder recursively unwraps refined tuple returns" {
-    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
-    const tuple_elems = [_]sema.Type{ u256_ty, .bool };
-    const tuple_ty: sema.Type = .{ .tuple = &tuple_elems };
-    const inner_refined: sema.Type = .{ .refinement = .{
+    const u256_ty: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const tuple_elems = [_]Type{ u256_ty, .bool };
+    const tuple_ty: Type = .{ .tuple = &tuple_elems };
+    const inner_refined: Type = .{ .refinement = .{
         .name = "InnerTupleRefinement",
         .base_type = &tuple_ty,
     } };
-    const outer_refined: sema.Type = .{ .refinement = .{
+    const outer_refined: Type = .{ .refinement = .{
         .name = "OuterTupleRefinement",
         .base_type = &inner_refined,
     } };
 
-    try std.testing.expectEqual(sema.TypeKind.tuple, unwrapRefinement(outer_refined).kind());
+    try std.testing.expectEqual(TypeKind.tuple, unwrapRefinement(outer_refined).kind());
 }
 
 test "runtime decoder doubly-refined tuple serializes flat layout (no double wrap)" {
-    const u256_ty: sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
-    const tuple_elems = [_]sema.Type{ u256_ty, .bool };
-    const tuple_ty: sema.Type = .{ .tuple = &tuple_elems };
-    const inner_refined: sema.Type = .{ .refinement = .{
+    const u256_ty: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const tuple_elems = [_]Type{ u256_ty, .bool };
+    const tuple_ty: Type = .{ .tuple = &tuple_elems };
+    const inner_refined: Type = .{ .refinement = .{
         .name = "InnerTupleRefinement",
         .base_type = &tuple_ty,
     } };
-    const outer_refined: sema.Type = .{ .refinement = .{
+    const outer_refined: Type = .{ .refinement = .{
         .name = "OuterTupleRefinement",
         .base_type = &inner_refined,
     } };
@@ -318,8 +303,8 @@ test "runtime decoder doubly-refined tuple serializes flat layout (no double wra
     // Drive the same dispatch helper production uses, then run the layout
     // and serialization chain directly. Payload is primitive-only so we
     // can bypass LayoutContext (fromType recurses through refinements
-    // without needing typecheck/file context).
-    var single_storage: [1]sema.Type = undefined;
+    // without needing provider context).
+    var single_storage: [1]Type = undefined;
     const layout_type = layoutTypeForReturn(outer_refined, &single_storage);
 
     var layout = try abi_layout.fromType(std.testing.allocator, layout_type);

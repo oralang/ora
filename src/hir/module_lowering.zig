@@ -2,6 +2,7 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const ConstValue = @import("ora_types").ConstValue;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
@@ -252,15 +253,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         ) anyerror!?[]const u8 {
             if (function.parent_contract != null or function.is_comptime) return null;
 
-            const target_file = try self.module_query.?.ast_file(self.module_query.?.context, target_module_id);
-            const target_item_index = try self.module_query.?.item_index(self.module_query.?.context, target_module_id);
-            const target_resolution = try self.module_query.?.resolution(self.module_query.?.context, target_module_id);
-            const target_typecheck = try self.module_query.?.module_typecheck(self.module_query.?.context, target_module_id);
-            const target_verification_facts = try self.module_query.?.module_verification_facts(self.module_query.?.context, target_module_id);
+            const query = self.module_query.?;
+            const target_file = try query.astFile(target_module_id);
+            const target_item_index = try query.itemIndex(target_module_id);
+            const target_resolution = try query.nameResolution(target_module_id);
+            const target_typecheck = try query.moduleTypeCheck(target_module_id);
+            const target_verification_facts = try query.moduleVerificationFacts(target_module_id);
             const target_verification_fact_lookup = try self.makeVerificationFactLookup(target_verification_facts.facts);
             const target_verification_trait_method_fact_lookup = try self.makeVerificationTraitMethodFactLookup(target_verification_facts.facts);
             const target_verification_statement_fact_lookup = try self.makeVerificationStatementFactLookup(target_verification_facts.facts);
-            const target_const_eval = try self.module_query.?.const_eval(self.module_query.?.context, target_module_id);
+            const target_const_eval = try query.constEval(target_module_id);
 
             const module_name = try self.allocator.dupe(u8, self.sources.module(target_module_id).name);
             for (module_name) |*ch| {
@@ -1049,7 +1051,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
         }
 
-        fn constValueAttr(self: *Lowerer, value: sema.ConstValue, sema_type: sema.Type, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
+        fn constValueAttr(self: *Lowerer, value: ConstValue, sema_type: sema.Type, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
             return switch (value) {
                 .integer => |integer| blk: {
                     if (integer.toInt(i64)) |small| {
@@ -1392,7 +1394,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn attachBitfieldParamMetadata(self: *Lowerer, func_op: mlir.MlirOperation, type_expr_id: ast.TypeExprId, index: c_uint) !void {
-            const metadata = self.bitfieldMetadataForTypeExpr(type_expr_id) orelse return;
+            const metadata = (try self.bitfieldMetadataForTypeExpr(type_expr_id)) orelse return;
             _ = mlir.oraFuncSetArgAttr(func_op, index, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
         }
 
@@ -1402,7 +1404,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn attachBitfieldOpMetadata(self: *Lowerer, op: mlir.MlirOperation, type_expr_id: ast.TypeExprId) !void {
-            const metadata = self.bitfieldMetadataForTypeExpr(type_expr_id) orelse return;
+            const metadata = (try self.bitfieldMetadataForTypeExpr(type_expr_id)) orelse return;
             mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
             if (metadata.layout.len > 0) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield_layout"), mlir.oraStringAttrCreate(self.context, strRef(metadata.layout)));
@@ -1422,14 +1424,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             layout: []const u8,
         };
 
-        pub fn bitfieldMetadataForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) ?BitfieldMetadata {
+        pub fn bitfieldMetadataForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) !?BitfieldMetadata {
             const type_expr = self.file.typeExpr(type_expr_id).*;
             const name = switch (type_expr) {
                 .Path => |path| path.name,
                 else => return null,
             };
             const bitfield = self.bitfieldItemByName(name) orelse return null;
-            const layout = self.buildBitfieldLayout(bitfield) catch return null;
+            const layout = try self.buildBitfieldLayout(bitfield);
             return .{
                 .name = bitfield.name,
                 .layout = layout,
@@ -1457,7 +1459,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
             var buffer: std.ArrayList(u8) = .{};
             for (bitfield.fields) |field| {
-                const resolved = self.resolveBitfieldField(bitfield.name, field.name) orelse continue;
+                const resolved = (try self.resolveBitfieldField(bitfield.name, field.name)) orelse continue;
                 try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
             }
             return buffer.toOwnedSlice(self.allocator);
@@ -1467,7 +1469,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var buffer: std.ArrayList(u8) = .{};
             var next_offset: u32 = 0;
             for (bitfield.fields) |field| {
-                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
                 const sign = self.bitfieldFieldSignFromType(field.ty);
                 try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
@@ -1479,9 +1481,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         fn abiLayoutContext(self: *Lowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.allocator,
-                .file = self.file,
-                .item_index = self.item_index,
-                .typecheck = self.typecheck,
+                .provider = sema.abiLayoutProvider(self.file, self.item_index, self.typecheck),
             };
         }
 
@@ -1561,7 +1561,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         return;
                     }
                     if (sema.refinements.bounds(refinement)) |bounds| {
-                        const signed = @This().refinementBaseIsSignedInteger(bounds.base_type);
+                        const signed = try @This().refinementBaseIsSignedInteger(bounds.base_type);
                         if (bounds.min_text) |min_text| {
                             const min_value = try @This().parseAbiRefinementBound(min_text, signed);
                             try @This().appendAbiRefinementBound(self, parts, "min", signed, min_value);
@@ -1596,12 +1596,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return std.fmt.parseInt(u256, text, 10) catch error.MlirOperationCreationFailed;
         }
 
-        fn refinementBaseIsSignedInteger(ty: sema.Type) bool {
-            return switch (ty) {
-                .integer => |integer| integer.signed orelse false,
-                .refinement => |refinement| @This().refinementBaseIsSignedInteger(refinement.base_type.*),
-                else => false,
-            };
+        fn refinementBaseIsSignedInteger(ty: sema.Type) anyerror!bool {
+            return (try support.resolvedIntegerSignedness(ty)) orelse error.MlirOperationCreationFailed;
         }
 
         pub fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
@@ -1618,7 +1614,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (self.file.typeExpr(type_expr_id).*) {
                 .Path => |path| blk: {
                     const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                    if (trimmed.len > 1 and trimmed[0] == 'i' and support.parseSignedIntegerType(trimmed) != null) break :blk 's';
+                    if (support.parseBitfieldIntegerType(trimmed)) |int_info| {
+                        if (int_info.signed) break :blk 's';
+                    }
                     break :blk 'u';
                 },
                 else => 'u',

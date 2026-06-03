@@ -476,10 +476,10 @@ test "compiler reports sema diagnostics for unresolved names and invalid operati
 test "compiler reports heterogeneous array literals and keeps tuple element types" {
     const source_text =
         \\pub fn build(flag: bool, small: u8, big: u256) -> bool {
-        \\    let ok = [1, 2, 3];
-        \\    let widened = [small, big, 3];
-        \\    let bad = [1, false];
-        \\    let pair = (flag, 7);
+        \\    let ok: [u256; 3] = [1, 2, 3];
+        \\    let widened: [u256; 3] = [small, big, 3];
+        \\    let bad = [big, false];
+        \\    let pair: (bool, u256) = (flag, 7);
         \\    return pair[0];
         \\}
     ;
@@ -491,7 +491,7 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
     try testing.expectEqual(@as(usize, 1), type_diags.len());
-    try testing.expectEqualStrings("array literal elements have incompatible types 'integer' and 'bool'", type_diags.items.items[0].message);
+    try testing.expectEqualStrings("array literal elements have incompatible types 'u256' and 'bool'", type_diags.items.items[0].message);
 
     const function = ast_file.item(ast_file.root_items[0]).Function;
     const body = ast_file.body(function.body);
@@ -687,6 +687,79 @@ test "compiler reports constant cast overflow against target integer widths" {
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[ok_pattern.index()].kind());
     try testing.expectEqualStrings("u8", typecheck.pattern_types[ok_pattern.index()].name().?);
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bad_pattern.index()].kind());
+}
+
+test "compiler resolves comptime integer operands through concrete integer contexts" {
+    const source_text =
+        \\pub fn narrow(x: u8) -> u8 {
+        \\    let a: u8 = 1 + 2;
+        \\    let b = x + 3;
+        \\    let c = 4 + x;
+        \\    return a + b + c;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(@as(usize, 0), type_diags.len());
+
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const a_pattern = findVariablePatternByName(ast_file, body.statements, "a").?;
+    const b_pattern = findVariablePatternByName(ast_file, body.statements, "b").?;
+    const c_pattern = findVariablePatternByName(ast_file, body.statements, "c").?;
+
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[a_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[a_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[b_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[b_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[c_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[c_pattern.index()].name().?);
+}
+
+test "compiler pins integer coercion and error matrix" {
+    const source_text =
+        \\pub fn declaredOverflow() {
+        \\    let x: u8 = 300;
+        \\    _ = x;
+        \\}
+        \\
+        \\pub fn contextOverflow() -> u8 {
+        \\    return 256;
+        \\}
+        \\
+        \\pub fn negativeToUnsigned() -> u8 {
+        \\    return -1;
+        \\}
+        \\
+        \\pub fn mixedArithmetic(a: u32, b: u64) -> u64 {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn mixedComparison(a: u32, b: i32) -> bool {
+        \\    return a < b;
+        \\}
+        \\
+        \\pub fn peerOverflow(x: u8) -> u8 {
+        \\    return 1231231231 + x;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 256 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value -1 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u32' and 'u64'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u32' and 'i32'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 1231231231 does not fit in type 'u8'"));
 }
 
 test "compiler rejects directly recursive runtime structs" {

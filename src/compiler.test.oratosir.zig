@@ -333,7 +333,7 @@ test "compiler converts runtime abiDecodePermissive mixed dynamic hex literal th
         \\    pub fn decode() -> u256 {
         \\        let decoded = @abiDecodePermissive((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -1780,7 +1780,7 @@ test "compiler converts runtime abiDecode dynamic string and bytes memory result
         \\    pub fn decode_pair_bytes(payload: bytes) -> u256 {
         \\        let decoded = @abiDecode((u256, bytes), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -1788,7 +1788,7 @@ test "compiler converts runtime abiDecode dynamic string and bytes memory result
         \\    pub fn decode_pair_values(payload: bytes) -> u256 {
         \\        let decoded = @abiDecode((u256, slice[u256]), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0] + value.1[1],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]) + value.1[1],
         \\            Err(_) => 0,
         \\        };
         \\    }

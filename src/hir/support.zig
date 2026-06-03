@@ -92,7 +92,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     if (std.mem.eql(u8, trimmed, "bytes")) return bytesType(ctx);
     if (std.mem.eql(u8, trimmed, "void")) return mlir.oraNoneTypeCreate(ctx);
     if (type_builtin.parseFixedBytesName(trimmed) != null) return defaultIntegerType(ctx);
-    if (parseSignedIntegerType(trimmed)) |int_info| {
+    if (parseBuiltinIntegerType(trimmed)) |int_info| {
         return mlir.oraIntegerTypeCreate(ctx, int_info.bits);
     }
     return mlir.oraStructTypeGet(ctx, strRef(trimmed));
@@ -101,7 +101,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
 pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     return switch (descriptor) {
         .bool => boolType(ctx),
-        .integer => |integer| if (integer.spelling) |name| lowerPathType(ctx, name) else defaultIntegerType(ctx),
+        .integer => |integer| lowerIntegerType(ctx, integer),
         .address => addressType(ctx),
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
@@ -147,7 +147,7 @@ pub fn isRefinementTypeName(name: []const u8) bool {
     return sema.refinements.hasNativeMlirTypeName(name);
 }
 
-pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg) ?mlir.MlirType {
+pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const sema.RefinementArg) ?mlir.MlirType {
     const entry = sema.refinements.entryForName(name) orelse return null;
     if (!entry.has_native_mlir_type) return null;
 
@@ -179,7 +179,7 @@ pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: m
     };
 }
 
-fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
+fn parseRefinementIntArg(args: []const sema.RefinementArg, index: usize) ?u256 {
     if (index >= args.len) return null;
     return switch (args[index]) {
         .Integer => |literal| parseRefinementIntLiteral(literal.text),
@@ -209,8 +209,8 @@ test "HIR refinement type builder follows registry native type classification" {
     defer mlir.oraContextDestroy(ctx);
 
     const base_type = defaultIntegerType(ctx);
-    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
-    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } };
+    const type_arg: sema.RefinementArg = .{ .Type = {} };
+    const min_arg: sema.RefinementArg = .{ .Integer = .{ .text = "1" } };
 
     try std.testing.expect(buildRefinementType(ctx, "NonZero", base_type, &.{type_arg}) == null);
 
@@ -223,11 +223,43 @@ test "HIR refinement type builder preserves negative bounds as u256 two's-comple
     defer mlir.oraContextDestroy(ctx);
 
     const base_type = mlir.oraIntegerTypeCreate(ctx, 8);
-    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
-    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 2 }, .text = "-5" } };
+    const type_arg: sema.RefinementArg = .{ .Type = {} };
+    const min_arg: sema.RefinementArg = .{ .Integer = .{ .text = "-5" } };
 
     const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));
+}
+
+test "HIR integer type parsing uses canonical builtin widths" {
+    const u160_info = parseBuiltinIntegerType("u160") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 160), u160_info.bits);
+    try std.testing.expect(!u160_info.signed);
+
+    const i256_info = parseBuiltinIntegerType("i256") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), i256_info.bits);
+    try std.testing.expect(i256_info.signed);
+
+    try std.testing.expect(parseBuiltinIntegerType("u24") == null);
+    try std.testing.expect(parseBuiltinIntegerType("i96") == null);
+    try std.testing.expect(parseBuiltinIntegerType("u1_6") == null);
+    try std.testing.expect(parseBuiltinIntegerType("u+8") == null);
+
+    const bitfield_u1 = parseBitfieldIntegerType("u1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), bitfield_u1.bits);
+    try std.testing.expect(!bitfield_u1.signed);
+}
+
+test "HIR integer signedness helper fails closed on unresolved integer facts" {
+    const i8_type: sema.Type = .{ .integer = .{ .bits = 8, .signed = true, .spelling = "i8" } };
+    const signed = try resolvedIntegerSignedness(i8_type);
+    try std.testing.expectEqual(true, signed orelse return error.TestUnexpectedResult);
+
+    const refinement_type: sema.Type = .{ .refinement = .{ .name = "SignedByte", .base_type = &i8_type } };
+    const refinement_signed = try resolvedIntegerSignedness(refinement_type);
+    try std.testing.expectEqual(true, refinement_signed orelse return error.TestUnexpectedResult);
+
+    try std.testing.expect((try resolvedIntegerSignedness(.{ .bool = {} })) == null);
+    try std.testing.expectError(error.MlirOperationCreationFailed, resolvedIntegerSignedness(.{ .comptime_integer = .{} }));
 }
 
 fn splitU256IntoU64Words(x: u256) struct {
@@ -320,6 +352,10 @@ pub fn defaultIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, 256);
 }
 
+pub fn lowerIntegerType(ctx: mlir.MlirContext, integer: sema.IntegerType) mlir.MlirType {
+    return mlir.oraIntegerTypeCreate(ctx, integer.bits);
+}
+
 pub fn boolType(ctx: mlir.MlirContext) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, 1);
 }
@@ -350,7 +386,15 @@ pub fn sliceMemRefType(ctx: mlir.MlirContext, element_type: mlir.MlirType) mlir.
     return mlir.oraMemRefTypeCreate(ctx, element_type, shape.len, &shape, mlir.oraNullAttrCreate(), mlir.oraNullAttrCreate());
 }
 
-pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: bool } {
+pub fn parseBuiltinIntegerType(name: []const u8) ?struct { bits: u16, signed: bool } {
+    const spec = type_builtin.parseIntegerBuiltin(name) orelse return null;
+    return .{
+        .bits = spec.bit_width orelse return null,
+        .signed = spec.signed orelse return null,
+    };
+}
+
+pub fn parseBitfieldIntegerType(name: []const u8) ?struct { bits: u32, signed: bool } {
     if (name.len < 2) return null;
     const signed = switch (name[0]) {
         'u' => false,
@@ -359,6 +403,26 @@ pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: boo
     };
     const bits = std.fmt.parseInt(u32, name[1..], 10) catch return null;
     return .{ .bits = bits, .signed = signed };
+}
+
+pub fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
+pub fn resolvedIntegerSignedness(ty: sema.Type) anyerror!?bool {
+    return switch (unwrapRefinementSemaType(ty)) {
+        .integer => |integer| integer.signed,
+        .comptime_integer => error.MlirOperationCreationFailed,
+        else => null,
+    };
+}
+
+pub fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
+    return mlir.oraTypeIsAInteger(ty) and mlir.oraIntegerTypeIsSigned(ty);
+}
+
+pub fn mlirIntegerValueIsSigned(value: mlir.MlirValue) bool {
+    return mlirIntegerTypeIsSigned(mlir.oraValueGetType(value));
 }
 
 pub fn parseArrayLen(text: []const u8) ?u32 {
