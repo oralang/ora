@@ -1748,6 +1748,14 @@ test "compiler const eval supports typeName and string concat for ABI signatures
     try testing.expect(std.mem.eql(u8, "transfer(address,uint256)", consteval.values[ret_stmt.value.?.index()].?.string));
 }
 
+test "compiler ABI keccak selector known answer stays byte-identical" {
+    try testing.expectEqual(@as(u32, 0xa9059cbb), compiler.hir.abi.keccakSelectorValue("transfer(address,uint256)"));
+
+    const selector = try compiler.hir.abi.keccakSelectorHex(testing.allocator, "transfer(address,uint256)");
+    defer testing.allocator.free(selector);
+    try testing.expectEqualStrings("0xa9059cbb", selector);
+}
+
 test "compiler const eval supports keccak256 for ABI selector hashes" {
     const source_text =
         \\pub fn run() -> u256 {

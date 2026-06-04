@@ -94,7 +94,6 @@ const TypeNodeKind = enum {
     tuple,
     struct_,
     enum_,
-    alias,
     refinement,
 };
 
@@ -437,7 +436,6 @@ pub const ContractAbi = struct {
             .array, .slice, .tuple, .struct_ => {
                 return .{ .widget = "json" };
             },
-            else => return .{},
         }
     }
 
@@ -1622,6 +1620,9 @@ const CompilerAbiGenerator = struct {
         errdefer self.allocator.free(type_id);
         if (self.type_lookup.get(type_id)) |idx| {
             const existing = &self.types.items[idx];
+            // Type identity is the canonical payload, not the hash. Keep this
+            // full-payload compare so any type-id hash collision fails closed
+            // instead of silently merging distinct ABI types.
             if (!std.mem.eql(u8, existing.canonical_payload.?, payload)) {
                 node.deinit();
                 return error.TypeHashCollision;
@@ -1804,20 +1805,6 @@ fn sortStringSlices(values: [][]const u8) void {
     }
 }
 
-fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
-    var hash: [32]u8 = undefined;
-    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
-    const selector = hash[0..4];
-
-    var hex: [8]u8 = undefined;
-    for (selector, 0..) |byte, i| {
-        hex[i * 2] = std.fmt.hex_charset[byte >> 4];
-        hex[i * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-    }
-
-    return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
-}
-
 fn hashedTypeId(allocator: std.mem.Allocator, canonical_payload: []const u8) ![]const u8 {
     var digest: [crypto.hash.Blake3.digest_length]u8 = undefined;
     crypto.hash.Blake3.hash(canonical_payload, digest[0..], .{});
@@ -1925,11 +1912,6 @@ fn writeTypeNodeObject(writer: anytype, node: *const AbiTypeNode, include_type_i
             try writeObjectKey(writer, &first, "wire");
             try writeWireType(writer, node.wire_type.?);
         },
-        .alias => {
-            if (node.name) |name| {
-                try writeObjectStringField(writer, &first, "name", name);
-            }
-        },
         .refinement => {
             try writeObjectStringField(writer, &first, "base", node.base.?);
 
@@ -1973,7 +1955,6 @@ fn typeKindString(kind: TypeNodeKind) []const u8 {
         .tuple => "tuple",
         .struct_ => "struct",
         .enum_ => "enum",
-        .alias => "alias",
         .refinement => "refinement",
     };
 }

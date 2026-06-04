@@ -53,9 +53,8 @@ fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]const u8 {
 }
 
 fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
-    const hash = try allocator.alloc(u8, 32);
-    std.crypto.hash.sha3.Keccak256.hash(bytes, hash[0..32], .{});
-    return hash;
+    const hash = hir_abi.keccak256(bytes);
+    return allocator.dupe(u8, hash[0..]);
 }
 
 pub const ConstEvalOptions = struct {

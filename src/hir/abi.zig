@@ -68,9 +68,15 @@ pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![
     return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
 }
 
-pub fn keccakSelectorValue(signature: []const u8) u32 {
+/// EVM keccak-256 (original Keccak, 0x01 padding) - single source of truth.
+pub fn keccak256(bytes: []const u8) [32]u8 {
     var hash: [32]u8 = undefined;
-    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
+    crypto.hash.sha3.Keccak256.hash(bytes, &hash, .{});
+    return hash;
+}
+
+pub fn keccakSelectorValue(signature: []const u8) u32 {
+    const hash = keccak256(signature);
     const selector = hash[0..4];
     return (@as(u32, selector[0]) << 24) |
         (@as(u32, selector[1]) << 16) |
