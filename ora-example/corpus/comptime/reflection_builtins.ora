@@ -30,6 +30,18 @@ contract ReflectionBuiltinCorpus {
         };
     }
 
+    pub fn address_type_name() -> string {
+        return comptime {
+            @typeName(address);
+        };
+    }
+
+    pub fn address_size() -> u256 {
+        return comptime {
+            @sizeOf(address);
+        };
+    }
+
     pub fn method_count() -> u256 {
         return comptime {
             @traitMethods(ReflectionErc20).len;

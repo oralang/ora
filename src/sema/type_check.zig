@@ -54,8 +54,112 @@ const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
 const refinements = ora_types.refinement_semantics;
 
-fn isAbiDecodeBuiltinName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "abiDecode") or std.mem.eql(u8, name, "abiDecodePermissive");
+const BuiltinKind = enum {
+    abi_decode,
+    abi_decode_permissive,
+    abi_encode,
+    abi_signature,
+    add_with_overflow,
+    bit_cast,
+    cast,
+    chain_id,
+    compile_error,
+    concat,
+    div_ceil,
+    div_exact,
+    div_floor,
+    div_trunc,
+    div_with_overflow,
+    divmod,
+    eip712_type_hash,
+    event_topic,
+    keccak256,
+    lock,
+    mod_with_overflow,
+    mul_with_overflow,
+    neg_with_overflow,
+    power_with_overflow,
+    selector,
+    shl_with_overflow,
+    shr_with_overflow,
+    size_of,
+    slice,
+    struct_fields,
+    sub_with_overflow,
+    trait_methods,
+    truncate,
+    type_name,
+    unlock,
+};
+
+const BuiltinNameEntry = struct { []const u8, BuiltinKind };
+
+const builtin_name_entries = [_]BuiltinNameEntry{
+    .{ "abiDecode", .abi_decode },
+    .{ "abiDecodePermissive", .abi_decode_permissive },
+    .{ "abiEncode", .abi_encode },
+    .{ "abiSignature", .abi_signature },
+    .{ "addWithOverflow", .add_with_overflow },
+    .{ "bitCast", .bit_cast },
+    .{ "cast", .cast },
+    .{ "chainId", .chain_id },
+    .{ "compileError", .compile_error },
+    .{ "concat", .concat },
+    .{ "divCeil", .div_ceil },
+    .{ "divExact", .div_exact },
+    .{ "divFloor", .div_floor },
+    .{ "divTrunc", .div_trunc },
+    .{ "divWithOverflow", .div_with_overflow },
+    .{ "divmod", .divmod },
+    .{ "eip712TypeHash", .eip712_type_hash },
+    .{ "eventTopic", .event_topic },
+    .{ "keccak256", .keccak256 },
+    .{ "lock", .lock },
+    .{ "modWithOverflow", .mod_with_overflow },
+    .{ "mulWithOverflow", .mul_with_overflow },
+    .{ "negWithOverflow", .neg_with_overflow },
+    .{ "powerWithOverflow", .power_with_overflow },
+    .{ "selector", .selector },
+    .{ "shlWithOverflow", .shl_with_overflow },
+    .{ "shrWithOverflow", .shr_with_overflow },
+    .{ "sizeOf", .size_of },
+    .{ "slice", .slice },
+    .{ "structFields", .struct_fields },
+    .{ "subWithOverflow", .sub_with_overflow },
+    .{ "traitMethods", .trait_methods },
+    .{ "truncate", .truncate },
+    .{ "typeName", .type_name },
+    .{ "unlock", .unlock },
+};
+
+comptime {
+    @setEvalBranchQuota(3000);
+    if (builtin_name_entries.len != @typeInfo(BuiltinKind).@"enum".fields.len) {
+        @compileError("builtin function registry must cover every BuiltinKind");
+    }
+    for (builtin_name_entries, 0..) |entry, index| {
+        for (builtin_name_entries[index + 1 ..]) |other| {
+            if (std.mem.eql(u8, entry[0], other[0])) {
+                @compileError("duplicate builtin function name");
+            }
+            if (entry[1] == other[1]) {
+                @compileError("duplicate builtin function kind");
+            }
+        }
+    }
+}
+
+const builtin_name_map = std.StaticStringMap(BuiltinKind).initComptime(builtin_name_entries);
+
+fn builtinKind(name: []const u8) ?BuiltinKind {
+    return builtin_name_map.get(name);
+}
+
+fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .selector, .abi_signature, .event_topic, .eip712_type_hash, .struct_fields, .trait_methods => true,
+        else => false,
+    };
 }
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
@@ -2326,32 +2430,33 @@ const TypeChecker = struct {
                 }
             },
             .Builtin => |builtin| {
-                if (std.mem.eql(u8, builtin.name, "selector") or
-                    std.mem.eql(u8, builtin.name, "abiSignature") or
-                    std.mem.eql(u8, builtin.name, "eventTopic") or
-                    std.mem.eql(u8, builtin.name, "eip712TypeHash") or
-                    std.mem.eql(u8, builtin.name, "structFields") or
-                    std.mem.eql(u8, builtin.name, "traitMethods"))
-                {
-                    self.expr_types[expr_id.index()] = self.builtinReturnType(builtin);
-                    try self.checkBuiltinArguments(expr_id, builtin);
+                const kind = builtinKind(builtin.name) orelse {
+                    for (builtin.args) |arg| try self.visitExpr(arg);
+                    try self.emitExprError(expr_id, "unknown built-in function '@{s}'", .{builtin.name});
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return;
+                };
+
+                if (isReferenceConstevalBuiltin(kind)) {
+                    self.expr_types[expr_id.index()] = self.builtinReturnType(kind, builtin);
+                    try self.checkBuiltinArguments(kind, builtin);
                     return;
                 }
 
                 for (builtin.args) |arg| try self.visitExpr(arg);
-                if (std.mem.eql(u8, builtin.name, "lock") or std.mem.eql(u8, builtin.name, "unlock")) {
+                if (kind == .lock or kind == .unlock) {
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
                         builtin.name,
                     });
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     return;
                 }
-                const result_type = self.builtinReturnType(builtin);
+                const result_type = self.builtinReturnType(kind, builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                 }
-                try self.checkBuiltinArguments(expr_id, builtin);
+                try self.checkBuiltinArguments(kind, builtin);
             },
             .Field => |field| {
                 try self.visitExpr(field.base);
@@ -3279,51 +3384,22 @@ const TypeChecker = struct {
         }
     }
 
-    fn checkBuiltinArguments(self: *TypeChecker, expr_id: ast.ExprId, builtin: ast.BuiltinExpr) !void {
-        _ = expr_id;
-        if (std.mem.eql(u8, builtin.name, "divTrunc") or
-            std.mem.eql(u8, builtin.name, "divFloor") or
-            std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact") or
-            std.mem.eql(u8, builtin.name, "divmod"))
-        {
-            try self.checkDivisionBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "keccak256")) {
-            try self.checkKeccak256BuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "abiEncode")) {
-            try self.checkAbiEncodeBuiltinArguments(builtin);
-        }
-        if (isAbiDecodeBuiltinName(builtin.name)) {
-            try self.checkAbiDecodeBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "chainId")) {
-            try self.checkChainIdBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "compileError")) {
-            try self.checkCompileErrorBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
-            try self.checkAbiFunctionReferenceBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "eventTopic")) {
-            try self.checkEventReferenceBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
-            try self.checkEip712TypeHashArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "structFields")) {
-            try self.checkReflectionBuiltinArguments(builtin, "structFields", "struct", TypeChecker.resolveBuiltinStructReference);
-        }
-        if (std.mem.eql(u8, builtin.name, "traitMethods")) {
-            try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference);
-        }
-        if (std.mem.eql(u8, builtin.name, "concat")) {
-            try self.checkConcatBuiltinArguments(builtin);
-        }
-        if (std.mem.eql(u8, builtin.name, "slice")) {
-            try self.checkSliceBuiltinArguments(builtin);
+    fn checkBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        switch (kind) {
+            .div_trunc, .div_floor, .div_ceil, .div_exact, .divmod => try self.checkDivisionBuiltinArguments(builtin),
+            .keccak256 => try self.checkKeccak256BuiltinArguments(builtin),
+            .abi_encode => try self.checkAbiEncodeBuiltinArguments(builtin),
+            .abi_decode, .abi_decode_permissive => try self.checkAbiDecodeBuiltinArguments(kind, builtin),
+            .chain_id => try self.checkChainIdBuiltinArguments(builtin),
+            .compile_error => try self.checkCompileErrorBuiltinArguments(builtin),
+            .selector, .abi_signature => try self.checkAbiFunctionReferenceBuiltinArguments(builtin),
+            .event_topic => try self.checkEventReferenceBuiltinArguments(builtin),
+            .eip712_type_hash => try self.checkEip712TypeHashArguments(builtin),
+            .struct_fields => try self.checkReflectionBuiltinArguments(builtin, "structFields", "struct", TypeChecker.resolveBuiltinStructReference),
+            .trait_methods => try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference),
+            .concat => try self.checkConcatBuiltinArguments(builtin),
+            .slice => try self.checkSliceBuiltinArguments(builtin),
+            else => {},
         }
     }
 
@@ -3357,7 +3433,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn checkAbiDecodeBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+    fn checkAbiDecodeBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
         const logical_arg_count = builtin.args.len + @as(usize, if (builtin.type_arg != null) 1 else 0);
         const expected_value_args: usize = if (builtin.type_arg != null) 1 else 2;
         if (builtin.args.len != expected_value_args) {
@@ -3385,7 +3461,7 @@ const TypeChecker = struct {
             try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
                 builtin.name, diagnosticTypeDisplayName(self, target_type),
             });
-        } else if (std.mem.eql(u8, builtin.name, "abiDecodePermissive") and self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .permissive)) {
+        } else if (kind == .abi_decode_permissive and self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .permissive)) {
             try self.emitRangeError(builtin.range, "runtime @abiDecodePermissive does not yet support target type '{s}'", .{
                 diagnosticTypeDisplayName(self, target_type),
             });
@@ -5100,117 +5176,97 @@ const TypeChecker = struct {
         try self.instantiated_bitfield_lookup.put(instantiated.mangled_name, index);
     }
 
-    fn builtinReturnType(self: *TypeChecker, builtin: ast.BuiltinExpr) Type {
-        if (std.mem.eql(u8, builtin.name, "cast") or
-            std.mem.eql(u8, builtin.name, "bitCast") or
-            std.mem.eql(u8, builtin.name, "truncate"))
-        {
-            if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
-            if (std.mem.eql(u8, builtin.name, "truncate") and builtin.args.len > 0) {
-                return self.expr_types[builtin.args[0].index()];
-            }
-            return .{ .unknown = {} };
-        }
+    fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) Type {
+        return switch (kind) {
+            .cast, .bit_cast, .truncate => {
+                if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
+                if (kind == .truncate and builtin.args.len > 0) {
+                    return self.expr_types[builtin.args[0].index()];
+                }
+                return .{ .unknown = {} };
+            },
 
-        if (builtin.args.len > 0 and (std.mem.eql(u8, builtin.name, "divTrunc") or
-            std.mem.eql(u8, builtin.name, "divFloor") or
-            std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact")))
-        {
-            return self.builtinDivisionOperandType(builtin);
-        }
+            .div_trunc, .div_floor, .div_ceil, .div_exact => {
+                if (builtin.args.len > 0) return self.builtinDivisionOperandType(builtin);
+                return .{ .unknown = {} };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "divmod")) {
-            const value_type = self.builtinDivisionOperandType(builtin);
-            if (value_type.kind() != .unknown) {
-                const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
-                tuple_types[0] = value_type;
-                tuple_types[1] = value_type;
-                return .{ .tuple = tuple_types };
-            }
-            return .{ .unknown = {} };
-        }
+            .divmod => {
+                const value_type = self.builtinDivisionOperandType(builtin);
+                if (value_type.kind() != .unknown) {
+                    const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
+                    tuple_types[0] = value_type;
+                    tuple_types[1] = value_type;
+                    return .{ .tuple = tuple_types };
+                }
+                return .{ .unknown = {} };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "addWithOverflow") or
-            std.mem.eql(u8, builtin.name, "subWithOverflow") or
-            std.mem.eql(u8, builtin.name, "mulWithOverflow") or
-            std.mem.eql(u8, builtin.name, "divWithOverflow") or
-            std.mem.eql(u8, builtin.name, "modWithOverflow") or
-            std.mem.eql(u8, builtin.name, "negWithOverflow") or
-            std.mem.eql(u8, builtin.name, "shlWithOverflow") or
-            std.mem.eql(u8, builtin.name, "shrWithOverflow") or
-            std.mem.eql(u8, builtin.name, "powerWithOverflow"))
-        {
-            if (builtin.args.len > 0) {
-                const value_type = self.expr_types[builtin.args[0].index()];
-                const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
-                tuple_types[0] = value_type;
-                tuple_types[1] = .{ .bool = {} };
-                return .{ .tuple = tuple_types };
-            }
-            return .{ .unknown = {} };
-        }
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .div_with_overflow,
+            .mod_with_overflow,
+            .neg_with_overflow,
+            .shl_with_overflow,
+            .shr_with_overflow,
+            .power_with_overflow,
+            => {
+                if (builtin.args.len > 0) {
+                    const value_type = self.expr_types[builtin.args[0].index()];
+                    const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
+                    tuple_types[0] = value_type;
+                    tuple_types[1] = .{ .bool = {} };
+                    return .{ .tuple = tuple_types };
+                }
+                return .{ .unknown = {} };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256") or std.mem.eql(u8, builtin.name, "chainId")) {
-            return descriptorFromPathName(self.file, self.item_index, "u256");
-        }
+            .size_of, .keccak256, .chain_id => descriptorFromPathName(self.file, self.item_index, "u256"),
 
-        if (std.mem.eql(u8, builtin.name, "abiEncode")) {
-            return .{ .bytes = {} };
-        }
+            .abi_encode => .{ .bytes = {} },
 
-        if (isAbiDecodeBuiltinName(builtin.name)) {
-            const target_type = if (builtin.type_arg) |type_arg|
-                self.resolveTypeExprInCurrentContext(type_arg) catch Type{ .unknown = {} }
-            else blk: {
+            .abi_decode, .abi_decode_permissive => {
+                const target_type = if (builtin.type_arg) |type_arg|
+                    self.resolveTypeExprInCurrentContext(type_arg) catch Type{ .unknown = {} }
+                else blk: {
+                    if (builtin.args.len == 0) return .{ .unknown = {} };
+                    break :blk self.expr_types[builtin.args[0].index()];
+                };
+                const payload_type = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+                payload_type[0] = target_type;
+                const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+                error_types[0] = .{ .named = .{ .name = "AbiDecodeError" } };
+                return .{ .error_union = .{
+                    .payload_type = &payload_type[0],
+                    .error_types = error_types,
+                } };
+            },
+
+            .selector => .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } },
+
+            .event_topic, .eip712_type_hash => .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } },
+
+            .compile_error => .{ .never = {} },
+
+            .struct_fields => self.reflectionSliceType(self.structFieldReflectionType()),
+
+            .trait_methods => self.reflectionSliceType(self.traitMethodReflectionType()),
+
+            .concat, .slice => {
                 if (builtin.args.len == 0) return .{ .unknown = {} };
-                break :blk self.expr_types[builtin.args[0].index()];
-            };
-            const payload_type = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
-            payload_type[0] = target_type;
-            const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
-            error_types[0] = .{ .named = .{ .name = "AbiDecodeError" } };
-            return .{ .error_union = .{
-                .payload_type = &payload_type[0],
-                .error_types = error_types,
-            } };
-        }
+                const value_type = self.expr_types[builtin.args[0].index()];
+                return switch (value_type.kind()) {
+                    .string => .{ .string = {} },
+                    .bytes => .{ .bytes = {} },
+                    else => .{ .unknown = {} },
+                };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "selector")) {
-            return .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
-        }
+            .type_name, .abi_signature => .{ .string = {} },
 
-        if (std.mem.eql(u8, builtin.name, "eventTopic") or std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
-            return .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } };
-        }
-
-        if (std.mem.eql(u8, builtin.name, "compileError")) {
-            return .{ .never = {} };
-        }
-
-        if (std.mem.eql(u8, builtin.name, "structFields")) {
-            return self.reflectionSliceType(self.structFieldReflectionType());
-        }
-
-        if (std.mem.eql(u8, builtin.name, "traitMethods")) {
-            return self.reflectionSliceType(self.traitMethodReflectionType());
-        }
-
-        if (std.mem.eql(u8, builtin.name, "concat") or std.mem.eql(u8, builtin.name, "slice")) {
-            if (builtin.args.len == 0) return .{ .unknown = {} };
-            const value_type = self.expr_types[builtin.args[0].index()];
-            return switch (value_type.kind()) {
-                .string => .{ .string = {} },
-                .bytes => .{ .bytes = {} },
-                else => .{ .unknown = {} },
-            };
-        }
-
-        if (std.mem.eql(u8, builtin.name, "typeName") or std.mem.eql(u8, builtin.name, "abiSignature")) {
-            return .{ .string = {} };
-        }
-
-        return .{ .unknown = {} };
+            .lock, .unlock => .{ .unknown = {} },
+        };
     }
 
     fn reflectionTypeType(self: *const TypeChecker) Type {

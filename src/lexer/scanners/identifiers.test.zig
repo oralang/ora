@@ -83,18 +83,18 @@ test "identifiers: @import directive" {
     try testing.expect(tokens.len >= 1);
 }
 
-test "identifiers: invalid @ directive" {
+test "identifiers: unknown @ name tokenizes for later semantic validation" {
     const allocator = testing.allocator;
     const source = "@someDirective";
 
     var lex = lexer.Lexer.init(allocator, source);
     defer lex.deinit();
 
-    const tokens = lex.scanTokens() catch |err| {
-        try testing.expectEqual(lexer.LexerError.InvalidBuiltinFunction, err);
-        return;
-    };
+    const tokens = try lex.scanTokens();
+    defer allocator.free(tokens);
 
-    // if lexer is lenient and produces tokens, free them
-    allocator.free(tokens);
+    try testing.expect(tokens.len >= 2);
+    try testing.expectEqual(lexer.TokenType.At, tokens[0].type);
+    try testing.expectEqual(lexer.TokenType.Identifier, tokens[1].type);
+    try testing.expectEqualStrings("someDirective", tokens[1].lexeme);
 }

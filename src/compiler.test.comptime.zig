@@ -4185,6 +4185,20 @@ test "compiler @chainId rejects arguments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@chainId expects 0 arguments"));
 }
 
+test "compiler rejects unknown builtin functions during typecheck" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return @totallyBogusBuiltin(5);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown built-in function '@totallyBogusBuiltin'"));
+}
+
 test "compiler @structFields returns ordered fields" {
     const source_text =
         \\struct Point {
@@ -4395,6 +4409,36 @@ test "compiler corpus covers reflection builtins" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.diagnostics.isEmpty());
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const contract_id = item_index.lookup("ReflectionBuiltinCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var type_name_index: ?usize = null;
+    var size_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const function = item.Function;
+        const body = ast_file.body(function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, function.name, "address_type_name")) {
+            type_name_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, function.name, "address_size")) {
+            size_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(type_name_index != null);
+    try testing.expect(size_index != null);
+    try testing.expectEqualStrings("address", consteval.values[type_name_index.?].?.string);
+
+    var expected_size = try std.math.big.int.Managed.initSet(testing.allocator, 20);
+    defer expected_size.deinit();
+    try testing.expect(consteval.values[size_index.?].?.integer.eql(expected_size));
 }
 
 test "compiler reflection corpus lowers without ora.default_value escaping HIR" {

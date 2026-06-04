@@ -57,7 +57,6 @@ pub const LexerError = error{
     NumberTooLarge,
     InvalidAddressFormat,
     TooManyErrors,
-    InvalidBuiltinFunction,
     InvalidRangePattern,
     InvalidSwitchSyntax,
 };
