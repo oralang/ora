@@ -38,21 +38,38 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         // Methods in this returned type are mixed into the parent lowerer. When
         // one helper calls another, use @This().helper(self): `self` is the
         // parent FunctionLowerer, not an instance of the anonymous mixin type.
-        fn semaIntegerTypeIsSigned(ty: sema.Type) ?bool {
-            return switch (support.unwrapRefinementSemaType(ty)) {
-                .integer => |integer| integer.signed,
-                else => null,
+        fn semaIntegerTypeIsSigned(self: *FunctionLowerer, ty: sema.Type) anyerror!?bool {
+            const unwrapped = support.unwrapRefinementSemaType(ty);
+            if (unwrapped == .named) {
+                if (self.parent.substitutedType(unwrapped.named.name)) |substituted| {
+                    return try @This().semaIntegerTypeIsSigned(self, substituted);
+                }
+            }
+            return support.resolvedIntegerSignedness(ty) catch |err| switch (err) {
+                error.MlirOperationCreationFailed => null,
+                else => return err,
             };
         }
 
-        fn exprIntegerSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) ?bool {
-            return @This().semaIntegerTypeIsSigned(self.parent.typecheck.exprType(expr_id));
+        fn exprIntegerSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?bool {
+            return try @This().semaIntegerTypeIsSigned(self, self.parent.typecheck.exprType(expr_id));
         }
 
-        fn binaryIntegerExprIsSigned(self: *FunctionLowerer, expr_id: ast.ExprId, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) bool {
-            if (@This().exprIntegerSignedness(self, lhs_expr)) |signed| return signed;
-            if (@This().exprIntegerSignedness(self, rhs_expr)) |signed| return signed;
-            return @This().exprIntegerSignedness(self, expr_id) orelse false;
+        fn reportIndeterminateIntegerSignedness(self: *FunctionLowerer, range: source.TextRange) anyerror!bool {
+            try self.parent.emitLoweringError(range, "cannot determine signedness for integer expression", .{});
+            return false;
+        }
+
+        fn binaryIntegerExprIsSigned(self: *FunctionLowerer, expr_id: ast.ExprId, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) anyerror!bool {
+            if (try @This().exprIntegerSignedness(self, lhs_expr)) |signed| return signed;
+            if (try @This().exprIntegerSignedness(self, rhs_expr)) |signed| return signed;
+            return (try @This().exprIntegerSignedness(self, expr_id)) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
+        }
+
+        fn integerExprSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!bool {
+            return (try @This().exprIntegerSignedness(self, expr_id)) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
         }
 
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
@@ -794,7 +811,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             if (binary.op == .pow) {
-                return self.lowerCheckedPower(lhs, rhs, result_type, @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range);
+                return self.lowerCheckedPower(lhs, rhs, result_type, try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range);
             }
 
             if (binary.op == .add) {
@@ -842,7 +859,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const is_signed_int_op = switch (binary.op) {
-                .add, .sub, .mul, .div, .mod, .shr, .lt, .le, .gt, .ge => @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
+                .add, .sub, .mul, .div, .mod, .shr => try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
+                .lt, .le, .gt, .ge => if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(lhs)) and mlir.oraTypeIsAInteger(mlir.oraValueGetType(rhs)))
+                    try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs)
+                else
+                    false,
                 else => false,
             };
 
@@ -2696,9 +2717,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const value_ty = mlir.oraValueGetType(lhs);
             const is_signed = blk: {
-                if (@This().exprIntegerSignedness(self, builtin.args[0])) |signed| break :blk signed;
-                if (@This().exprIntegerSignedness(self, builtin.args[1])) |signed| break :blk signed;
-                break :blk false;
+                if (try @This().exprIntegerSignedness(self, builtin.args[0])) |signed| break :blk signed;
+                if (try @This().exprIntegerSignedness(self, builtin.args[1])) |signed| break :blk signed;
+                break :blk try @This().reportIndeterminateIntegerSignedness(self, builtin.range);
             };
             const div_op = if (is_signed)
                 mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs)
@@ -2801,8 +2822,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     self,
                     value,
                     concrete_target,
-                    @This().exprIntegerSignedness(self, builtin.args[0]) orelse false,
-                    @This().exprIntegerSignedness(self, expr_id) orelse false,
+                    if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(value))) try @This().integerExprSignedness(self, builtin.args[0]) else false,
+                    if (mlir.oraTypeIsAInteger(concrete_target)) try @This().integerExprSignedness(self, expr_id) else false,
                     builtin.range,
                     checked,
                 );
@@ -3113,7 +3134,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             const lhs_type = mlir.oraValueGetType(lhs);
-            const is_signed = @This().exprIntegerSignedness(self, builtin.args[0]) orelse false;
+            const is_signed = try @This().integerExprSignedness(self, builtin.args[0]);
 
             var value: mlir.MlirValue = lhs;
             var overflow_flag: mlir.MlirValue = undefined;

@@ -7,6 +7,7 @@ const ConstEvalResult = sema.ConstEvalResult;
 const ora_types = @import("ora_types");
 const refinements = ora_types.refinement_semantics;
 const compiler_query = @import("../compiler_query.zig");
+const diagnostics = @import("../diagnostics/mod.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -182,6 +183,7 @@ pub const LoweringResult = struct {
     items: []HirItemHandle,
     type_fallback_count: usize = 0,
     type_fallbacks: []const TypeFallbackRecord = &.{},
+    diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *LoweringResult) void {
         if (!mlir.oraModuleIsNull(self.module.raw_module)) {
@@ -190,6 +192,7 @@ pub const LoweringResult = struct {
         if (self.context.ptr != null) {
             mlir.oraContextDestroy(self.context);
         }
+        self.diagnostics.deinit();
         self.arena.deinit();
     }
 
@@ -229,6 +232,7 @@ pub fn lowerModule(
         },
         .items = &[_]HirItemHandle{},
         .type_fallbacks = &.{},
+        .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
 
@@ -264,6 +268,7 @@ pub fn lowerModule(
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
+        .diagnostics = &result.diagnostics,
         .contract_body_blocks = try arena.alloc(mlir.MlirBlock, file.items.len),
         .monomorphized_function_names = std.StringHashMap(void).init(arena),
     };
@@ -329,6 +334,7 @@ const Lowerer = struct {
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
+    diagnostics: *diagnostics.DiagnosticList,
     guarded_storage_roots: ?*const std.StringHashMap(void) = null,
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
@@ -1301,6 +1307,15 @@ const Lowerer = struct {
             },
         }) catch {};
         return support.defaultIntegerType(self.context);
+    }
+
+    pub fn emitLoweringError(self: *Lowerer, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
+        const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(message);
+        try self.diagnostics.appendError(message, .{
+            .file_id = self.file.file_id,
+            .range = range,
+        });
     }
 
     fn typeExprRange(self: *const Lowerer, type_expr_id: ast.TypeExprId) source.TextRange {

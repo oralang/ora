@@ -99,8 +99,11 @@ fn finishCompilation(compilation: *Compilation) !void {
         compilerPhaseLog("module {s} verification-facts", .{module.name});
     }
     compilerPhaseLog("root lower-to-hir begin", .{});
-    _ = try compilation.db.lowerToHir(compilation.root_module_id);
+    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     compilerPhaseLog("root lower-to-hir done", .{});
+    if (diagnosticsHaveErrors(&lowering.diagnostics)) {
+        return;
+    }
 }
 
 pub fn compileSource(allocator: std.mem.Allocator, path: []const u8, text: []const u8) !Compilation {

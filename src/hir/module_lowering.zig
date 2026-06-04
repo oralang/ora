@@ -293,6 +293,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .module_body = self.module_body,
                 .items = self.items,
                 .type_fallbacks = self.type_fallbacks,
+                .diagnostics = self.diagnostics,
                 .contract_body_blocks = imported_contract_body_blocks,
                 .monomorphized_function_names = std.StringHashMap(void).init(self.allocator),
             };

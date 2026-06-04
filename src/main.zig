@@ -3749,6 +3749,7 @@ fn runCompilerMlirEmit(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -3833,6 +3834,7 @@ fn runMlirEmitAdvanced(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try exitOnCompilerErrors(stdout, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
 
