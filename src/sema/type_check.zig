@@ -1,4 +1,5 @@
 const std = @import("std");
+const zig_builtin = @import("builtin");
 const ast = @import("../ast/mod.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
@@ -687,7 +688,15 @@ pub fn typeCheck(
         try typechecker.visitItem(item_id);
     }
     try typechecker.checkDuplicateImplsAcrossVisibleModules();
-    try typechecker.checkNoSilentUnknownExplicitTypeAnnotations();
+    // Debug/test-only by-construction invariant. The real fail-closed behavior is
+    // the `undefined type 'X'` diagnostic emitted during resolution; this guard only
+    // asserts that no `.unknown` survived type-checking with zero diagnostics, i.e.
+    // it catches a *future* regression that re-introduces a silent `.unknown`. It
+    // re-resolves every explicit type expression, so it is compiled out of release
+    // builds and runs only under debug/test (CI exercises the whole corpus there).
+    if (comptime zig_builtin.mode == .Debug or zig_builtin.is_test) {
+        try typechecker.checkNoSilentUnknownExplicitTypeAnnotations();
+    }
 
     result.item_types = item_types;
     result.item_regions = item_regions;
