@@ -4500,6 +4500,33 @@ const TypeChecker = struct {
         };
     }
 
+    fn namedTypeExprName(self: *const TypeChecker, type_expr: ast.TypeExprId) ?[]const u8 {
+        return switch (self.file.typeExpr(type_expr).*) {
+            .Path => |path| std.mem.trim(u8, path.name, " \t\n\r"),
+            else => null,
+        };
+    }
+
+    fn checkErrorUnionErrorName(self: *TypeChecker, error_type: ast.TypeExprId) !bool {
+        const range = self.typeExprRange(error_type);
+        const name = self.namedTypeExprName(error_type) orelse {
+            try self.emitInvalidErrorUnionErrorName(range);
+            return false;
+        };
+        const error_item_id = self.item_index.lookup(name);
+        if (error_item_id == null or self.file.item(error_item_id.?).* != .ErrorDecl) {
+            try self.emitUndefinedErrorName(range, name);
+            return false;
+        }
+        return true;
+    }
+
+    fn checkErrorUnionErrorNames(self: *TypeChecker, eu: ast.ErrorUnionTypeExpr, valid_errors: []bool) !void {
+        for (eu.errors, 0..) |error_type, index| {
+            valid_errors[index] = try self.checkErrorUnionErrorName(error_type);
+        }
+    }
+
     fn substituteGenericArgs(self: *TypeChecker, args: []const ast.TypeArg, bindings: []const GenericTypeBinding) ![]const ast.TypeArg {
         const resolved = try self.arena.alloc(ast.TypeArg, args.len);
         for (args, 0..) |arg, index| {
@@ -4613,8 +4640,14 @@ const TypeChecker = struct {
                 .element_type = try self.storeType(try self.resolveTypeExprWithBindings(slice.element, bindings)),
             } },
             .ErrorUnion => |error_union| blk: {
+                const valid_errors = try self.arena.alloc(bool, error_union.errors.len);
+                try self.checkErrorUnionErrorNames(error_union, valid_errors);
                 const errors = try self.arena.alloc(Type, error_union.errors.len);
                 for (error_union.errors, 0..) |error_type, index| {
+                    if (!valid_errors[index]) {
+                        errors[index] = .{ .unknown = {} };
+                        continue;
+                    }
                     errors[index] = try self.resolveTypeExprWithBindings(error_type, bindings);
                 }
                 break :blk .{ .error_union = .{
@@ -8004,6 +8037,19 @@ const TypeChecker = struct {
     fn emitUndefinedTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
         var buffer: [256]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, "undefined type '{s}'", .{name});
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitUndefinedErrorName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "undefined error '{s}'", .{name});
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitInvalidErrorUnionErrorName(self: *TypeChecker, range: source.TextRange) !void {
+        const message = "error-union error must be a declared error name";
         if (self.hasDiagnosticAtRange(range, message)) return;
         try self.emitRangeMessage(range, message);
     }

@@ -46,6 +46,27 @@ fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
     try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "undefined type 'Bogus'"));
 }
 
+fn expectSingleUndefinedErrorDiagnostic(source_text: []const u8, name: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const message = try std.fmt.allocPrint(testing.allocator, "undefined error '{s}'", .{name});
+    defer testing.allocator.free(message);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, message));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, message));
+}
+
+fn expectSingleBarePipeTypeDiagnostic(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(syntax_diags, "error-union types must start with '!'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(syntax_diags, "error-union types must start with '!'"));
+}
+
 test "compiler diagnostic release matrix stays readable" {
     try expectDiagnosticProbeContains(
         \\trait Plain {
@@ -207,6 +228,167 @@ test "compiler reports undefined type names in every annotation position" {
     }
 }
 
+test "compiler reports undefined error-union errors once" {
+    const cases = [_]struct {
+        name: []const u8,
+        error_name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .error_name = "BadErr",
+            .source =
+            \\pub fn run() -> !u256 | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "function parameter",
+            .error_name = "BadErr",
+            .source =
+            \\pub fn run(value: !u256 | BadErr) -> u256 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "one of several",
+            .error_name = "BadErr",
+            .source =
+            \\error Good;
+            \\
+            \\pub fn run() -> !u256 | Good | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "non-error symbol",
+            .error_name = "S",
+            .source =
+            \\struct S {}
+            \\
+            \\pub fn run() -> !u256 | S {
+            \\    return 0;
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined error-union error case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedErrorDiagnostic(case.source, case.error_name);
+    }
+}
+
+test "compiler rejects error-union pipes without bang" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .source =
+            \\pub fn run() -> u256 | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "function parameter",
+            .source =
+            \\pub fn run(value: u256 | BadErr) -> u256 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "defined error still requires bang",
+            .source =
+            \\error MyErr;
+            \\
+            \\pub fn run() -> u256 | MyErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "non-error symbol",
+            .source =
+            \\struct S {}
+            \\
+            \\pub fn run() -> u256 | S {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "numeric suffix",
+            .source =
+            \\pub fn run() -> u256 | 123 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "empty suffix",
+            .source =
+            \\pub fn run() -> u256 | {
+            \\    return 0;
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("bare pipe type case failed: {s}\n", .{case.name});
+        try expectSingleBarePipeTypeDiagnostic(case.source);
+    }
+}
+
+test "compiler rejects non-name error-union error members" {
+    const source_text =
+        \\pub fn run() -> !u256 | (u8, u8) {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error-union error must be a declared error name"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "error-union error must be a declared error name"));
+}
+
+test "compiler accepts defined error-union errors and preserves lowering" {
+    const source_text =
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance {
+        \\        return error InsufficientBalance(amount, amount);
+        \\    }
+        \\}
+    ;
+
+    {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+        try testing.expect(typecheck.diagnostics.isEmpty());
+    }
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @withdraw"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.returns_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.error_selector"));
+}
+
 test "compiler abi emit barrier rejects undefined types without artifacts" {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -256,6 +438,114 @@ test "compiler abi emit barrier rejects undefined types without artifacts" {
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined type 'Bogus'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "undefined type 'Bogus'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler abi emit barrier rejects undefined error-union errors without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    pub fn run() -> !u256 | BadErr {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined error 'BadErr'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "undefined error 'BadErr'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler abi emit barrier rejects error-union pipes without bang without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    pub fn run() -> u256 | BadErr {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "error-union types must start with '!'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "error-union types must start with '!'"));
 
     var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
     defer out_dir.close();

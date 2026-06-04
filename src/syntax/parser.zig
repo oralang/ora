@@ -2187,7 +2187,28 @@ const Parser = struct {
             }
             return self.finishNode(SyntaxKind.ErrorUnionType, children.items);
         }
-        return self.parseTypePrimaryNode(stops);
+        const primary = try self.parseTypePrimaryNode(stops);
+        if (self.at(.Pipe)) {
+            return self.parseBarePipeTypeErrorNode(primary, stops);
+        }
+        return primary;
+    }
+
+    fn parseBarePipeTypeErrorNode(
+        self: *Parser,
+        primary: green.GreenNodeId,
+        stops: []const green.TokenKind,
+    ) anyerror!green.GreenNodeId {
+        try self.reportHere("error-union types must start with '!'");
+
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .node = primary });
+        while (!self.at(.Eof) and !self.atAny(stops) and !self.typeAtGreaterToken()) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+        return self.finishNode(SyntaxKind.Error, children.items);
     }
 
     fn parseTypePrimaryNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
