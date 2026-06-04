@@ -180,6 +180,102 @@ test "compiler lowers signed integer operations through signed SIR ops" {
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_checked_add"), 1, "slt"));
 }
 
+test "OraToSIR folds redundant integer/u256 bitcast round trips" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u256;
+        \\
+        \\    pub fn increment() {
+        \\        counter = counter + 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const increment_fn = try functionSlice(rendered, "increment");
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, increment_fn, "sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, increment_fn, 1, "bitcast"));
+}
+
+test "OraToSIR keeps width-changing bitcast round trips" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @guard(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : i1
+        \\    %1 = sir.bitcast %0 : i1 : !sir.u256
+        \\    sir.iret %1
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": !sir.u256 : i1"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": i1 : !sir.u256"));
+}
+
+test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
+    const source_text =
+        \\pub fn div_i128(a: i128, b: i128) -> i128 {
+        \\    return a / b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sdiv"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+}
+
+test "OraToSIR preserves explicit narrow integer truncation mask" {
+    const source_text =
+        \\pub fn narrow(big: i256) -> i8 {
+        \\    return @cast(i8, big);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const narrow_fn = try functionSlice(rendered, "narrow");
+
+    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "const 255"));
+    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "and"));
+    try testing.expect(!std.mem.containsAtLeast(u8, narrow_fn, 1, "bitcast"));
+}
+
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {
     const source_text =
         \\pub fn join(a: bytes, b: bytes) -> bytes {

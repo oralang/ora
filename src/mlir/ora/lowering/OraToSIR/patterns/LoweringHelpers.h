@@ -2,6 +2,7 @@
 
 #include "SIR/SIRDialect.h"
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "llvm/Support/Casting.h"
 
@@ -139,6 +140,21 @@ namespace mlir::ora::lowering
         auto u256Type = sir::U256Type::get(rewriter.getContext());
         if (llvm::isa<sir::U256Type>(value.getType()))
             return value;
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            Value input = bitcast.getInput();
+            if (llvm::isa<sir::U256Type>(input.getType()))
+                return input;
+        }
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() == 1)
+            {
+                Value input = cast.getOperand(0);
+                if (llvm::isa<sir::U256Type>(input.getType()))
+                    return input;
+            }
+        }
         return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
     }
 

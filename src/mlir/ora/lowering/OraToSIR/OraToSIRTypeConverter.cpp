@@ -573,13 +573,16 @@ namespace mlir
             addConversion([](sir::U256Type type) -> Type { return type; });
             addConversion([](sir::PtrType type) -> Type { return type; });
 
-            // Builtin integer types (used for indices/booleans in lowering).
+            // Builtin integer values are runtime EVM words at the SIR boundary.
+            // Width-specific Ora semantics have already been selected in HIR
+            // or are lowered by the conversion pattern that consumes the op
+            // (trunc masks, signed extension sign-extends, signed ops choose
+            // signed SIR opcodes). Keeping i256 here forces per-use
+            // i256<->!sir.u256 materializations around every SIR op.
             addConversion([](mlir::IntegerType type) -> Type
                           {
-                if (type.getWidth() == 1)
-                    return sir::U256Type::get(type.getContext());
                 if (type.getWidth() <= 256)
-                    return type;
+                    return sir::U256Type::get(type.getContext());
                 return Type(); });
 
             // Builtin types allowed to pass through.
@@ -1058,6 +1061,10 @@ namespace mlir
                                          if (inputs.size() != 1)
                                              return Value();
                                          Value input = inputs[0];
+                                         auto materializeInteger = [&](Value value) -> Value {
+                                             return builder.create<mlir::UnrealizedConversionCastOp>(
+                                                 loc, TypeRange{type}, ValueRange{value}).getResult(0);
+                                         };
 
                                          if (auto intType = dyn_cast<mlir::IntegerType>(type))
                                          {
@@ -1070,7 +1077,7 @@ namespace mlir
                                                      auto bAttr = mlir::IntegerAttr::get(ui64, intType.getWidth() / 8);
                                                      Value bConst = builder.create<sir::ConstOp>(loc, u256, bAttr);
                                                      Value extended = builder.create<sir::SignExtendOp>(loc, u256, bConst, input);
-                                                     return builder.create<sir::BitcastOp>(loc, type, extended);
+                                                     return materializeInteger(extended);
                                                  }
                                                  if (intType.getWidth() < 256)
                                                  {
@@ -1078,10 +1085,10 @@ namespace mlir
                                                      {
                                                          auto u256 = sir::U256Type::get(builder.getContext());
                                                          Value masked = builder.create<sir::AndOp>(loc, u256, input, mask);
-                                                         return builder.create<sir::BitcastOp>(loc, type, masked);
+                                                         return materializeInteger(masked);
                                                      }
                                                  }
-                                                 return builder.create<sir::BitcastOp>(loc, type, input);
+                                                 return materializeInteger(input);
                                              }
                                          }
 

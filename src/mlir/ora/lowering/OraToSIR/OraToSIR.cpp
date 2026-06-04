@@ -40,6 +40,8 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <optional>
+
 #define DEBUG_TYPE "ora-to-sir"
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -49,6 +51,102 @@ using namespace ora;
 
 namespace
 {
+    static std::optional<unsigned> bitcastPayloadWidth(Type type)
+    {
+        if (!type)
+            return std::nullopt;
+        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+            return intType.getWidth();
+        if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
+            return intType.getWidth();
+        if (llvm::isa<ora::BoolType>(type))
+            return 1u;
+        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
+            return 160u;
+        if (llvm::isa<sir::U256Type, sir::PtrType>(type))
+            return 256u;
+        return std::nullopt;
+    }
+
+    static bool hasSameKnownBitcastPayloadWidth(Type lhs, Type rhs)
+    {
+        auto lhsWidth = bitcastPayloadWidth(lhs);
+        auto rhsWidth = bitcastPayloadWidth(rhs);
+        return lhsWidth && rhsWidth && *lhsWidth == *rhsWidth;
+    }
+
+    static bool isExplicitSirWordProducer(Operation *op)
+    {
+        return llvm::isa<sir::AddOp, sir::SubOp, sir::MulOp, sir::DivOp, sir::SDivOp,
+                         sir::ModOp, sir::SModOp, sir::AddModOp, sir::MulModOp,
+                         sir::ExpOp, sir::SignExtendOp, sir::AndOp, sir::OrOp,
+                         sir::XorOp, sir::NotOp, sir::ShlOp, sir::ShrOp, sir::SarOp>(op);
+    }
+
+    static bool canDropExplicitIntegerCarrierRoundTrip(sir::BitcastOp inner, sir::BitcastOp outer)
+    {
+        if (!llvm::isa<sir::U256Type>(inner.getInput().getType()) ||
+            !llvm::isa<sir::U256Type>(outer.getResult().getType()))
+            return false;
+        auto middleInt = llvm::dyn_cast<mlir::IntegerType>(inner.getResult().getType());
+        if (!middleInt || middleInt.getWidth() <= 1 || middleInt.getWidth() > 256)
+            return false;
+        if (!inner.getResult().hasOneUse())
+            return false;
+        Operation *producer = inner.getInput().getDefiningOp();
+        return producer && isExplicitSirWordProducer(producer);
+    }
+
+    static void foldRedundantSirBitcasts(ModuleOp module)
+    {
+        // Keep this local and deterministic. The broad final greedy peephole
+        // pass is disabled below because it crashed on converted loop CFGs.
+        bool localChanged = true;
+        while (localChanged)
+        {
+            localChanged = false;
+
+            SmallVector<sir::BitcastOp, 32> bitcasts;
+            module.walk([&](sir::BitcastOp op) { bitcasts.push_back(op); });
+            for (sir::BitcastOp op : bitcasts)
+            {
+                Value input = op.getInput();
+                Value replacement;
+                if (input.getType() == op.getType())
+                {
+                    replacement = input;
+                }
+                else if (auto inner = input.getDefiningOp<sir::BitcastOp>())
+                {
+                    Type startType = inner.getInput().getType();
+                    Type middleType = input.getType();
+                    Type endType = op.getType();
+                    if (startType == endType && hasSameKnownBitcastPayloadWidth(startType, middleType))
+                        replacement = inner.getInput();
+                    else if (canDropExplicitIntegerCarrierRoundTrip(inner, op))
+                        replacement = inner.getInput();
+                }
+                if (!replacement)
+                    continue;
+
+                op.getResult().replaceAllUsesWith(replacement);
+                op.erase();
+                localChanged = true;
+            }
+
+            SmallVector<sir::BitcastOp, 32> deadBitcasts;
+            module.walk([&](sir::BitcastOp op)
+                        {
+                if (op.getResult().use_empty())
+                    deadBitcasts.push_back(op); });
+            for (sir::BitcastOp op : deadBitcasts)
+            {
+                op.erase();
+                localChanged = true;
+            }
+        }
+    }
+
     class RefinementErasureTypeConverter final : public TypeConverter
     {
     public:
@@ -1827,7 +1925,22 @@ public:
                 auto asU256 = [&](Value value) -> Value {
                     if (llvm::isa<sir::U256Type>(value.getType()))
                         return value;
+                    if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+                    {
+                        Value input = bitcast.getInput();
+                        if (llvm::isa<sir::U256Type>(input.getType()))
+                            return input;
+                    }
                     return b.create<sir::BitcastOp>(loc, u256Ty, value);
+                };
+                auto asInteger = [&](Type resultType, Value input) -> Value {
+                    if (auto bitcast = input.getDefiningOp<sir::BitcastOp>())
+                    {
+                        Value original = bitcast.getInput();
+                        if (original.getType() == resultType)
+                            return original;
+                    }
+                    return b.create<sir::BitcastOp>(loc, resultType, input);
                 };
 
                 if (llvm::all_of(castOp.getResults(), [](Value result) { return result.use_empty(); }))
@@ -1848,6 +1961,34 @@ public:
                         continue;
                     }
 
+                    if (llvm::isa<mlir::IntegerType>(resultType) && llvm::isa<sir::U256Type>(input.getType()))
+                    {
+                        SmallVector<mlir::UnrealizedConversionCastOp, 4> backCasts;
+                        bool allUsersAreBackCasts = !castOp.getResult(0).use_empty();
+                        for (Operation *user : castOp.getResult(0).getUsers())
+                        {
+                            auto backCast = dyn_cast<mlir::UnrealizedConversionCastOp>(user);
+                            if (!backCast || backCast.getNumOperands() != 1 || backCast.getNumResults() != 1 ||
+                                backCast.getOperand(0) != castOp.getResult(0) ||
+                                !llvm::isa<sir::U256Type>(backCast.getResult(0).getType()))
+                            {
+                                allUsersAreBackCasts = false;
+                                break;
+                            }
+                            backCasts.push_back(backCast);
+                        }
+                        if (allUsersAreBackCasts && !backCasts.empty())
+                        {
+                            for (auto backCast : backCasts)
+                            {
+                                backCast.getResult(0).replaceAllUsesWith(input);
+                                b.eraseOp(backCast);
+                            }
+                            b.eraseOp(castOp);
+                            continue;
+                        }
+                    }
+
                     if (llvm::isa<sir::U256Type>(resultType) && llvm::isa<mlir::IntegerType>(input.getType()))
                     {
                         Value repl = asU256(input);
@@ -1858,7 +1999,7 @@ public:
 
                     if (llvm::isa<mlir::IntegerType>(resultType) && llvm::isa<sir::U256Type>(input.getType()))
                     {
-                        Value repl = b.create<sir::BitcastOp>(loc, resultType, input);
+                        Value repl = asInteger(resultType, input);
                         castOp.getResult(0).replaceAllUsesWith(repl);
                         b.eraseOp(castOp);
                         continue;
@@ -2228,6 +2369,8 @@ public:
             for (auto op : deadFinalCasts)
                 op.erase();
         }
+
+        foldRedundantSirBitcasts(module);
 
         // Guard: fail if any lowering-phase dialect ops remain after all lowering phases.
         if (mlir::ora::isDebugEnabled())

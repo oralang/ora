@@ -3643,16 +3643,6 @@ namespace
                 c.retVal = toCondU256(c.rewriter, c.loc, c.retVal);
         }
 
-        if (!llvm::isa<sir::U256Type>(c.retVal.getType()))
-        {
-            if (!c.tc)
-                return c.rewriter.notifyMatchFailure(c.op, "missing type converter");
-            Type convertedType = c.tc->convertType(c.retVal.getType());
-            if (convertedType && convertedType != c.retVal.getType())
-                c.retVal = c.rewriter.create<sir::BitcastOp>(c.loc, convertedType, c.retVal);
-            else
-                c.retVal = c.rewriter.create<sir::BitcastOp>(c.loc, c.u256Type, c.retVal);
-        }
         c.retVal = ensureU256(c.rewriter, c.loc, c.retVal);
 
         Value sizeConst = c.rewriter.create<sir::ConstOp>(
