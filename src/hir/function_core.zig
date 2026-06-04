@@ -48,6 +48,34 @@ const EnsureExitKind = enum { ok, err };
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     return struct {
+        const PatternValueCache = struct {
+            const Entry = struct {
+                pattern_id: ast.PatternId,
+                value: mlir.MlirValue,
+            };
+
+            entries: std.ArrayList(Entry) = .{},
+
+            fn deinit(self: *PatternValueCache, allocator: std.mem.Allocator) void {
+                self.entries.deinit(allocator);
+            }
+
+            fn get(self: *const PatternValueCache, pattern_id: ast.PatternId) ?mlir.MlirValue {
+                for (self.entries.items) |entry| {
+                    if (entry.pattern_id.index() == pattern_id.index()) return entry.value;
+                }
+                return null;
+            }
+
+            fn put(self: *PatternValueCache, allocator: std.mem.Allocator, pattern_id: ast.PatternId, value: mlir.MlirValue) !void {
+                if (self.get(pattern_id) != null) return;
+                try self.entries.append(allocator, .{
+                    .pattern_id = pattern_id,
+                    .value = value,
+                });
+            }
+        };
+
         pub fn init(parent: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, op: mlir.MlirOperation, return_type: ?mlir.MlirType) FunctionLowerer {
             const block = mlir.oraFuncOpGetBodyBlock(op);
             var self = FunctionLowerer{
@@ -1142,10 +1170,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         else => null,
                     };
                     const known_bool = if (assign.op == .assign) @This().evalKnownBoolExpr(self, assign.value, locals) else null;
+                    var pattern_value_cache = PatternValueCache{};
+                    defer pattern_value_cache.deinit(self.parent.allocator);
+                    const assignment_cache: ?*PatternValueCache = if (assign.op == .assign) null else &pattern_value_cache;
                     const value = switch (assign.op) {
                         .assign => try self.lowerExpr(assign.value, locals),
                         .add_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -1154,21 +1185,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk value;
                         },
                         .wrapping_add_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraAddWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_and_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .sub_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -1177,21 +1208,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk value;
                         },
                         .wrapping_sub_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraSubWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_or_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithOrIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .mul_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -1200,28 +1231,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk value;
                         },
                         .wrapping_mul_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraMulWrappingOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs, mlir.oraValueGetType(lhs));
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .bit_xor_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithXorIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .shl_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = mlir.oraArithShlIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, op);
                         },
                         .shr_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
                                 mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
@@ -1231,12 +1262,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk appendValueOp(self.block, op);
                         },
                         .pow_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             break :blk try @This().lowerCheckedPower(self, lhs, rhs, mlir.oraValueGetType(lhs), @This().patternIntegerSignedness(self, assign.target, locals), assign.range);
                         },
                         .div_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
                                 mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
@@ -1246,7 +1277,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk appendValueOp(self.block, op);
                         },
                         .mod_assign => blk: {
-                            const lhs = try @This().lowerPatternValue(self, assign.target, locals);
+                            const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
                             const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
                                 mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
@@ -1256,7 +1287,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             break :blk appendValueOp(self.block, op);
                         },
                     };
-                    try self.storePattern(assign.target, value, locals);
+                    try @This().storePatternWithCache(self, assign.target, value, locals, assignment_cache);
                     if (target_local_id) |local_id| {
                         if (known_int) |integer| {
                             try locals.setKnownInt(local_id, integer);
@@ -2044,6 +2075,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn storePattern(self: *FunctionLowerer, pattern_id: ast.PatternId, value: mlir.MlirValue, locals: *LocalEnv) anyerror!void {
+            return try @This().storePatternWithCache(self, pattern_id, value, locals, null);
+        }
+
+        fn storePatternWithCache(
+            self: *FunctionLowerer,
+            pattern_id: ast.PatternId,
+            value: mlir.MlirValue,
+            locals: *LocalEnv,
+            cache: ?*PatternValueCache,
+        ) anyerror!void {
             switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| {
                     if (locals.lookupName(name.name)) |local_id| {
@@ -2087,18 +2128,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         );
                         if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                         const field_value = appendValueOp(self.block, op);
-                        try self.storePattern(field.binding, field_value, locals);
+                        try @This().storePatternWithCache(self, field.binding, field_value, locals, cache);
                     }
                     return;
                 },
                 .Field => |field| {
                     const base_type = @This().patternType(self, field.base, locals);
                     if (@This().isBitfieldLikeType(self, base_type)) {
-                        const updated_bitfield = try @This().createBitfieldFieldUpdate(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, value, field.range);
-                        try self.storePattern(field.base, updated_bitfield, locals);
+                        const updated_bitfield = try @This().createBitfieldFieldUpdate(self, try @This().lowerPatternValueWithCache(self, field.base, locals, cache), base_type, field.name, value, field.range);
+                        try @This().storePatternWithCache(self, field.base, updated_bitfield, locals, cache);
                         return;
                     }
-                    const base_value = try @This().lowerPatternValue(self, field.base, locals);
+                    const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, field.range);
                     const op = mlir.oraStructFieldUpdateOpCreate(
@@ -2110,11 +2151,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     );
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     const updated_struct = appendValueOp(self.block, op);
-                    try self.storePattern(field.base, updated_struct, locals);
+                    try @This().storePatternWithCache(self, field.base, updated_struct, locals, cache);
                     return;
                 },
                 .Index => |index| {
-                    const base_value = try @This().lowerPatternValue(self, index.base, locals);
+                    const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const base_type = mlir.oraValueGetType(base_value);
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
@@ -2144,7 +2185,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         }
                         try @This().appendMapStore(self, index.range, base_value, key_value, converted);
                         if (self.parent.file.pattern(index.base).* == .Index) {
-                            try self.storePattern(index.base, base_value, locals);
+                            try @This().storePatternWithCache(self, index.base, base_value, locals, cache);
                         }
                         return;
                     }
@@ -2418,7 +2459,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerPatternValue(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            return switch (self.parent.file.pattern(pattern_id).*) {
+            return try @This().lowerPatternValueWithCache(self, pattern_id, locals, null);
+        }
+
+        fn lowerPatternValueWithCache(
+            self: *FunctionLowerer,
+            pattern_id: ast.PatternId,
+            locals: *LocalEnv,
+            cache: ?*PatternValueCache,
+        ) anyerror!mlir.MlirValue {
+            if (cache) |pattern_cache| {
+                if (pattern_cache.get(pattern_id)) |value| return value;
+            }
+
+            const value = switch (self.parent.file.pattern(pattern_id).*) {
                 .Name => |name| blk: {
                     if (locals.lookupName(name.name)) |local_id| {
                         if (locals.getValue(local_id)) |value| break :blk value;
@@ -2440,7 +2494,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return error.UnknownAssignmentTarget;
                 },
                 .Index => |index| blk: {
-                    const base_value = try @This().lowerPatternValue(self, index.base, locals);
+                    const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     const key_value = try self.lowerExpr(index.index, locals);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
@@ -2474,9 +2528,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_type = @This().patternType(self, field.base, locals);
                     if (@This().isBitfieldLikeType(self, base_type)) {
                         const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, field.range);
-                        break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValue(self, field.base, locals), base_type, field.name, result_type, field.range);
+                        break :blk try @This().createBitfieldFieldExtract(self, try @This().lowerPatternValueWithCache(self, field.base, locals, cache), base_type, field.name, result_type, field.range);
                     }
-                    const base_value = try @This().lowerPatternValue(self, field.base, locals);
+                    const base_value = try @This().lowerPatternValueWithCache(self, field.base, locals, cache);
                     const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), field.range);
                     const op = mlir.oraStructFieldExtractOpCreate(
                         self.parent.context,
@@ -2490,6 +2544,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => return error.UnknownAssignmentTarget,
             };
+            if (cache) |pattern_cache| {
+                try pattern_cache.put(self.parent.allocator, pattern_id, value);
+            }
+            return value;
         }
 
         fn patternType(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) sema.Type {

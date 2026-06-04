@@ -276,6 +276,30 @@ test "OraToSIR preserves explicit narrow integer truncation mask" {
     try testing.expect(!std.mem.containsAtLeast(u8, narrow_fn, 1, "bitcast"));
 }
 
+test "frontend reuses storage roots for compound map assignments" {
+    const source_text =
+        \\contract MapCounter {
+        \\    storage var balances: map<address, u256>;
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn add_balance(owner: address, amount: u256) {
+        \\        balances[owner] += amount;
+        \\    }
+        \\
+        \\    pub fn add_allowance(owner: address, spender: address, amount: u256) {
+        \\        allowances[owner][spender] += amount;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"balances\""));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"allowances\""));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, rendered, "ora.map_store"));
+}
+
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {
     const source_text =
         \\pub fn join(a: bytes, b: bytes) -> bytes {
