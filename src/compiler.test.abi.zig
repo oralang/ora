@@ -1774,16 +1774,10 @@ test "compiler const eval supports keccak256 for ABI selector hashes" {
     const body = ast_file.body(function.body);
     const ret_stmt = ast_file.statement(body.statements[0]).Return;
 
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("transfer(address,uint256)", &hash, .{});
-    var hex: [64]u8 = undefined;
-    for (hash, 0..) |byte, index| {
-        hex[index * 2] = std.fmt.hex_charset[byte >> 4];
-        hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-    }
-    var expected = try std.math.big.int.Managed.init(testing.allocator);
+    const expected_value: u256 = 0xa9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b;
+    try testing.expectEqual(@as(u32, 0xa9059cbb), @as(u32, @intCast(expected_value >> 224)));
+    var expected = try std.math.big.int.Managed.initSet(testing.allocator, expected_value);
     defer expected.deinit();
-    try expected.setString(16, hex[0..]);
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
@@ -8016,6 +8010,7 @@ test "compiler corpus covers ABI selector and signature builtins" {
 
     var selector_index: ?usize = null;
     var signature_index: ?usize = null;
+    var hash_index: ?usize = null;
     for (contract.members) |member_id| {
         const item = ast_file.item(member_id).*;
         if (item != .Function) continue;
@@ -8027,15 +8022,23 @@ test "compiler corpus covers ABI selector and signature builtins" {
             selector_index = ret_stmt.value.?.index();
         } else if (std.mem.eql(u8, function.name, "transfer_signature")) {
             signature_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, function.name, "transfer_hash")) {
+            hash_index = ret_stmt.value.?.index();
         }
     }
 
     try testing.expect(selector_index != null);
     try testing.expect(signature_index != null);
+    try testing.expect(hash_index != null);
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqualSlices(u8, &.{ 0xa9, 0x05, 0x9c, 0xbb }, consteval.values[selector_index.?].?.fixed_bytes);
     try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[signature_index.?].?.string);
+
+    const transfer_hash_value: u256 = 0xa9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b;
+    var expected_hash = try std.math.big.int.Managed.initSet(testing.allocator, transfer_hash_value);
+    defer expected_hash.deinit();
+    try testing.expect(consteval.values[hash_index.?].?.integer.eql(expected_hash));
 }
 
 test "compiler corpus covers ABI eventTopic builtin" {

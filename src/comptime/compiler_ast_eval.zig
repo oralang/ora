@@ -2746,16 +2746,9 @@ const ConstEvaluator = struct {
                 }
             else
                 return null;
-            var hash: [32]u8 = undefined;
-            std.crypto.hash.sha3.Keccak256.hash(bytes, &hash, .{});
-            var text: [64]u8 = undefined;
-            for (hash, 0..) |byte, index| {
-                text[index * 2] = std.fmt.hex_charset[byte >> 4];
-                text[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-            }
-            var integer = try std.math.big.int.Managed.init(self.allocator);
-            try integer.setString(16, text[0..]);
-            return .{ .integer = integer };
+            const hash = hir_abi.keccak256(bytes);
+            const value = std.mem.readInt(u256, &hash, .big);
+            return .{ .integer = try std.math.big.int.Managed.initSet(self.allocator, value) };
         }
 
         if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
