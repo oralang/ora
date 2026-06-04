@@ -31,6 +31,21 @@ const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
 
+const ORA_BINARY_REL = "zig-out/bin/ora";
+
+fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
+}
+
+fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "undefined type 'Bogus'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "undefined type 'Bogus'"));
+}
+
 test "compiler diagnostic release matrix stays readable" {
     try expectDiagnosticProbeContains(
         \\trait Plain {
@@ -97,6 +112,193 @@ test "compiler diagnostic release matrix stays readable" {
         .typecheck,
         "cannot write storage slot 'balance' after external call because it was written before the call",
     );
+}
+
+test "compiler reports undefined type names in every annotation position" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "function parameter",
+            .source =
+            \\pub fn run(value: Bogus) {
+            \\    _ = value;
+            \\}
+            ,
+        },
+        .{
+            .name = "struct field",
+            .source =
+            \\struct Holder {
+            \\    value: Bogus,
+            \\}
+            ,
+        },
+        .{
+            .name = "nested struct field",
+            .source =
+            \\struct Holder {
+            \\    value: struct { child: Bogus },
+            \\}
+            ,
+        },
+        .{
+            .name = "storage var",
+            .source =
+            \\contract Vault {
+            \\    storage var value: Bogus;
+            \\}
+            ,
+        },
+        .{
+            .name = "map key",
+            .source =
+            \\contract Vault {
+            \\    storage var values: map<Bogus, u256>;
+            \\}
+            ,
+        },
+        .{
+            .name = "map value",
+            .source =
+            \\contract Vault {
+            \\    storage var values: map<u256, Bogus>;
+            \\}
+            ,
+        },
+        .{
+            .name = "array element",
+            .source =
+            \\contract Vault {
+            \\    storage var values: [Bogus; 4];
+            \\}
+            ,
+        },
+        .{
+            .name = "slice element",
+            .source =
+            \\contract Vault {
+            \\    storage var values: slice[Bogus];
+            \\}
+            ,
+        },
+        .{
+            .name = "tuple member",
+            .source =
+            \\contract Vault {
+            \\    storage var values: (u256, Bogus);
+            \\}
+            ,
+        },
+        .{
+            .name = "log field",
+            .source =
+            \\contract Vault {
+            \\    log Transfer(value: Bogus);
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined type matrix case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedBogusTypeDiagnostic(case.source);
+    }
+}
+
+test "compiler abi emit barrier rejects undefined types without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    storage var value: Bogus;
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi:extras",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined type 'Bogus'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "undefined type 'Bogus'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler reports undefined type names at value resolution positions once" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .source =
+            \\pub fn run() -> Bogus {
+            \\    return 1;
+            \\}
+            ,
+        },
+        .{
+            .name = "typed local initializer",
+            .source =
+            \\pub fn run() {
+            \\    let value: Bogus = 1;
+            \\    _ = value;
+            \\}
+            ,
+        },
+        .{
+            .name = "cast target",
+            .source =
+            \\pub fn run(value: u256) -> u256 {
+            \\    return @cast(Bogus, value);
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined type value-position case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedBogusTypeDiagnostic(case.source);
+    }
 }
 
 test "compiler treats result as an ensures-only reserved pseudo variable" {

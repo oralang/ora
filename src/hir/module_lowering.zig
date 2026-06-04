@@ -1118,7 +1118,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     field_names[index] = mlir.oraStringAttrCreate(self.context, strRef(field.name));
                     field_types[index] = mlir.oraTypeAttrCreateFromType(
                         self.lowerSemaType(
-                            type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch .{ .unknown = {} },
+                            try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr),
                             field.range,
                         ),
                     );

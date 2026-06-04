@@ -45,7 +45,6 @@ const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
-const descriptorFromGenericType = descriptors.descriptorFromGenericType;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const refinementArgsFromAst = descriptors.refinementArgsFromAst;
 const inferItemType = descriptors.inferItemType;
@@ -177,6 +176,45 @@ fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) Lo
 
 fn u256Type() Type {
     return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+}
+
+fn metatypeMarkerType() Type {
+    return .{ .named = .{ .name = "type" } };
+}
+
+fn abiDecodeErrorType() Type {
+    return .{ .named = .{ .name = "AbiDecodeError" } };
+}
+
+fn typeContainsUnknown(ty: Type) bool {
+    return switch (ty) {
+        .unknown => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsUnknown(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsUnknown(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsUnknown(array.element_type.*),
+        .slice => |slice| typeContainsUnknown(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsUnknown(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsUnknown(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsUnknown(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsUnknown(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
+        else => false,
+    };
 }
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
@@ -601,10 +639,7 @@ pub fn typeCheck(
                 const function_bindings = try typechecker.genericBindingsForFunctionTemplate(function);
                 const resolved_params = try arena.alloc(Type, function.parameters.len);
                 for (function.parameters, 0..) |parameter, param_index| {
-                    const resolved_type = if (typechecker.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter)) |ty|
-                        ty
-                    else
-                        try typechecker.resolveTypeExprWithBindings(parameter.type_expr, function_bindings);
+                    const resolved_type = try typechecker.declaredParameterType(ast.ItemId.fromIndex(index), parameter, function_bindings);
                     resolved_params[param_index] = resolved_type;
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(resolved_type, .memory, .calldata);
                 }
@@ -652,6 +687,7 @@ pub fn typeCheck(
         try typechecker.visitItem(item_id);
     }
     try typechecker.checkDuplicateImplsAcrossVisibleModules();
+    try typechecker.checkNoSilentUnknownExplicitTypeAnnotations();
 
     result.item_types = item_types;
     result.item_regions = item_regions;
@@ -1778,13 +1814,24 @@ const TypeChecker = struct {
         return self.nominalItemSelfType(target_item_id);
     }
 
+    fn declaredParameterType(
+        self: *TypeChecker,
+        function_item_id: ast.ItemId,
+        parameter: ast.Parameter,
+        bindings: []const GenericTypeBinding,
+    ) !Type {
+        if (self.parameterTypeForFunctionItem(function_item_id, parameter)) |ty| return ty;
+        if (self.isGenericTypeParameter(parameter)) return metatypeMarkerType();
+        return try self.resolveTypeExprWithBindings(parameter.type_expr, bindings);
+    }
+
     fn genericBindingsForFunctionTemplate(self: *TypeChecker, function: ast.FunctionItem) ![]const GenericTypeBinding {
         if (!function.is_generic) return &.{};
 
         var count: usize = 0;
         for (function.parameters) |parameter| {
             if (!parameter.is_comptime) continue;
-            if (!self.isGenericTypeParameter(parameter) and !self.comptimeIntegerParameter(parameter)) continue;
+            if (!self.isGenericTypeParameter(parameter) and !(try self.comptimeIntegerParameter(parameter))) continue;
             count += 1;
         }
 
@@ -1801,7 +1848,7 @@ const TypeChecker = struct {
                 index += 1;
                 continue;
             }
-            if (self.comptimeIntegerParameter(parameter)) {
+            if (try self.comptimeIntegerParameter(parameter)) {
                 bindings[index] = .{
                     .name = name,
                     .value = .{ .integer = name },
@@ -1821,6 +1868,100 @@ const TypeChecker = struct {
 
     fn resolveTypeExprInCurrentContext(self: *TypeChecker, type_expr: ast.TypeExprId) !Type {
         return self.resolveTypeExprWithBindings(type_expr, try self.currentFunctionGenericBindings());
+    }
+
+    fn checkExplicitTypeExprResolved(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) !void {
+        if (!self.diagnostics.isEmpty()) return;
+        const range = self.typeExprRange(type_expr);
+        const before = self.diagnostics.len();
+        const ty = try self.resolveTypeExprWithBindings(type_expr, bindings);
+        if (self.diagnostics.len() != before) return;
+        if (!typeContainsUnknown(ty)) return;
+        try self.emitRangeError(range, "internal: unresolved type survived type-checking with no diagnostic", .{});
+    }
+
+    fn checkEnumVariantPayloadTypeExprs(self: *TypeChecker, variant: ast.EnumVariant, bindings: []const GenericTypeBinding) !void {
+        switch (variant.payload) {
+            .none => {},
+            .positional => |payloads| for (payloads) |type_expr| {
+                try self.checkExplicitTypeExprResolved(type_expr, bindings);
+            },
+            .named => |fields| for (fields) |field| {
+                try self.checkExplicitTypeExprResolved(field.type_expr, bindings);
+            },
+        }
+    }
+
+    fn checkNoSilentUnknownExplicitTypeAnnotations(self: *TypeChecker) !void {
+        if (!self.diagnostics.isEmpty()) return;
+
+        for (self.file.items, 0..) |item, index| {
+            if (!self.diagnostics.isEmpty()) return;
+            switch (item) {
+                .Function => |function| {
+                    const bindings = try self.genericBindingsForFunctionTemplate(function);
+                    for (function.parameters) |parameter| {
+                        if (self.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter) != null) continue;
+                        if (self.isGenericTypeParameter(parameter)) continue;
+                        try self.checkExplicitTypeExprResolved(parameter.type_expr, bindings);
+                    }
+                    if (function.return_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, bindings);
+                    }
+                },
+                .Struct => |struct_item| {
+                    if (struct_item.is_generic) continue;
+                    for (struct_item.fields) |field| {
+                        try self.checkExplicitTypeExprResolved(field.type_expr, &.{});
+                    }
+                },
+                .Bitfield => |bitfield_item| {
+                    if (bitfield_item.is_generic) continue;
+                    if (bitfield_item.base_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                    }
+                },
+                .Enum => |enum_item| {
+                    if (enum_item.is_generic) continue;
+                    if (enum_item.base_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                    }
+                    for (enum_item.variants) |variant| {
+                        try self.checkEnumVariantPayloadTypeExprs(variant, &.{});
+                    }
+                },
+                .LogDecl => |log_decl| {
+                    for (log_decl.fields) |field| {
+                        try self.checkExplicitTypeExprResolved(field.type_expr, &.{});
+                    }
+                },
+                .ErrorDecl => |error_decl| {
+                    for (error_decl.parameters) |parameter| {
+                        try self.checkExplicitTypeExprResolved(parameter.type_expr, &.{});
+                    }
+                },
+                .Field => |field| if (field.type_expr) |type_expr| {
+                    try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                },
+                .Constant => |constant| if (constant.type_expr) |type_expr| {
+                    try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                },
+                .TypeAlias => |type_alias| {
+                    if (!type_alias.is_generic) {
+                        try self.checkExplicitTypeExprResolved(type_alias.target_type, &.{});
+                    }
+                },
+                else => {},
+            }
+        }
+
+        for (self.file.statements) |statement| {
+            if (!self.diagnostics.isEmpty()) return;
+            if (statement != .VariableDecl) continue;
+            if (statement.VariableDecl.type_expr) |type_expr| {
+                try self.checkExplicitTypeExprResolved(type_expr, &.{});
+            }
+        }
     }
 
     fn parameterIsBareSelf(self: *TypeChecker, parameter: ast.Parameter) bool {
@@ -2137,7 +2278,7 @@ const TypeChecker = struct {
             .Havoc => {},
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
-                const expected = self.patternLocatedType(assign.target);
+                const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
@@ -2347,7 +2488,7 @@ const TypeChecker = struct {
                 const result_type = if ((binary.op == .eq or binary.op == .ne) and self.exprIsTypeValue(binary.lhs) and self.exprIsTypeValue(binary.rhs))
                     Type{ .bool = {} }
                 else
-                    self.binaryResultType(
+                    try self.binaryResultType(
                         binary.op,
                         lhs_type,
                         rhs_type,
@@ -2438,7 +2579,7 @@ const TypeChecker = struct {
                 };
 
                 if (isReferenceConstevalBuiltin(kind)) {
-                    self.expr_types[expr_id.index()] = self.builtinReturnType(kind, builtin);
+                    self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
                     try self.checkBuiltinArguments(kind, builtin);
                     return;
                 }
@@ -2451,7 +2592,7 @@ const TypeChecker = struct {
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     return;
                 }
-                const result_type = self.builtinReturnType(kind, builtin);
+                const result_type = try self.builtinReturnType(kind, builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
@@ -2492,7 +2633,7 @@ const TypeChecker = struct {
             },
             .Quantified => |quantified| {
                 self.pattern_types[quantified.pattern.index()] = LocatedType.unlocated(
-                    try descriptorFromTypeExpr(self.arena, self.file, self.item_index, quantified.type_expr),
+                    try self.resolveTypeExprInCurrentContext(quantified.type_expr),
                 );
                 if (quantified.condition) |condition| try self.visitExpr(condition);
                 try self.visitExpr(quantified.body);
@@ -2571,7 +2712,7 @@ const TypeChecker = struct {
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) !Type {
         if (try self.importedCallReturnType(call)) |result| return result;
         if (try self.genericCallReturnType(call)) |result| return result;
-        if (self.externProxyCallReturnType(call)) |result| return result;
+        if (try self.externProxyCallReturnType(call)) |result| return result;
         if (self.enumVariantConstructorInfo(call.callee)) |info| return info.enum_type;
         if (self.calleeErrorDeclItem(call.callee)) |item_id| {
             return self.item_types[item_id.index()];
@@ -2735,15 +2876,15 @@ const TypeChecker = struct {
         return .{ .void = {} };
     }
 
-    fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+    fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
         const method = self.externProxyMethodSignature(call.callee) orelse return null;
-        const error_types = self.arena.alloc(Type, method.errors.len + 1) catch return .{ .unknown = {} };
+        const error_types = try self.arena.alloc(Type, method.errors.len + 1);
         error_types[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
         for (method.errors, 0..) |error_name, index| {
             error_types[index + 1] = .{ .named = .{ .name = error_name } };
         }
         return .{ .error_union = .{
-            .payload_type = self.storeType(method.return_type) catch return .{ .unknown = {} },
+            .payload_type = try self.storeType(method.return_type),
             .error_types = error_types,
         } };
     }
@@ -3200,9 +3341,9 @@ const TypeChecker = struct {
                 try self.validateGenericExprInstantiation(binary.lhs, bindings);
                 try self.validateGenericExprInstantiation(binary.rhs, bindings);
 
-                const lhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.lhs, bindings), bindings);
-                const rhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.rhs, bindings), bindings);
-                const instantiated_result = self.binaryResultType(binary.op, lhs_type, rhs_type);
+                const lhs_type = try self.substituteGenericType(try self.templateExprTypeForInstantiation(binary.lhs, bindings), bindings);
+                const rhs_type = try self.substituteGenericType(try self.templateExprTypeForInstantiation(binary.rhs, bindings), bindings);
+                const instantiated_result = try self.binaryResultType(binary.op, lhs_type, rhs_type);
                 if (instantiated_result.kind() == .unknown and lhs_type.kind() != .unknown and rhs_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "invalid binary operator '{s}' for types '{s}' and '{s}'", .{
                         binaryOpName(binary.op),
@@ -3214,28 +3355,28 @@ const TypeChecker = struct {
         }
     }
 
-    fn templateExprTypeForInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) Type {
+    fn templateExprTypeForInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) !Type {
         return switch (self.file.expression(expr_id).*) {
-            .Name => self.instantiatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()], bindings),
-            .Group => |group| self.templateExprTypeForInstantiation(group.expr, bindings),
+            .Name => try self.instantiatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()], bindings),
+            .Group => |group| try self.templateExprTypeForInstantiation(group.expr, bindings),
             else => self.expr_types[expr_id.index()],
         };
     }
 
-    fn instantiatedTypeForBinding(self: *TypeChecker, binding: ?ResolvedBinding, bindings: []const GenericTypeBinding) Type {
+    fn instantiatedTypeForBinding(self: *TypeChecker, binding: ?ResolvedBinding, bindings: []const GenericTypeBinding) !Type {
         const template_type = self.typeForBinding(binding);
         if (template_type.kind() != .unknown) {
-            return self.substituteGenericType(template_type, bindings) catch template_type;
+            return try self.substituteGenericType(template_type, bindings);
         }
         const resolved = binding orelse return .{ .unknown = {} };
         return switch (resolved) {
             .item => |item_id| blk: {
                 const item_type = self.item_types[item_id.index()];
-                break :blk self.substituteGenericType(item_type, bindings) catch item_type;
+                break :blk try self.substituteGenericType(item_type, bindings);
             },
             .pattern => |pattern_id| blk: {
                 if (self.parameterTypeExprForPattern(pattern_id)) |type_expr_id| {
-                    break :blk self.resolveTypeExprWithBindings(type_expr_id, bindings) catch .{ .unknown = {} };
+                    break :blk try self.resolveTypeExprWithBindings(type_expr_id, bindings);
                 }
                 break :blk .{ .unknown = {} };
             },
@@ -3337,7 +3478,7 @@ const TypeChecker = struct {
             if (runtime_parameters.len != runtime_args.len) return;
             for (runtime_args, runtime_parameters) |arg, parameter| {
                 const param_type = if (function.is_generic)
-                    self.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch Type{ .unknown = {} }
+                    try self.resolveTypeExprWithBindings(parameter.type_expr, bindings)
                 else
                     self.pattern_types[parameter.pattern.index()].type;
                 try self.contextualizeLiteral(arg, param_type);
@@ -3425,6 +3566,7 @@ const TypeChecker = struct {
         }
 
         const arg_type = self.expr_types[builtin.args[0].index()];
+        if (arg_type.kind() == .unknown) return;
         const policy = self.abiPolicy();
         if (!policy.supportsAbiEncode(arg_type)) {
             try self.emitRangeError(builtin.range, "@abiEncode: type '{s}' has no ABI representation", .{
@@ -3456,6 +3598,7 @@ const TypeChecker = struct {
             break :blk self.expr_types[builtin.args[0].index()];
         };
 
+        if (target_type.kind() == .unknown) return;
         const policy = self.abiPolicy();
         if (!policy.supportsAbiDecode(target_type)) {
             try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
@@ -3505,7 +3648,7 @@ const TypeChecker = struct {
             return;
         }
 
-        if (self.resolveBuiltinFunctionReferenceType(builtin.args[0]) == null) {
+        if ((try self.resolveBuiltinFunctionReferenceType(builtin.args[0])) == null) {
             try self.emitRangeError(builtin.range, "@{s} requires a function reference", .{builtin.name});
         }
     }
@@ -3684,9 +3827,9 @@ const TypeChecker = struct {
         };
     }
 
-    fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
+    fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) !?Type {
         return switch (self.file.expression(expr_id).*) {
-            .Group => |group| self.resolveBuiltinFunctionReferenceType(group.expr),
+            .Group => |group| try self.resolveBuiltinFunctionReferenceType(group.expr),
             .Name => blk: {
                 const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
                 const item_id = switch (binding) {
@@ -3712,7 +3855,7 @@ const TypeChecker = struct {
                             .Trait => |trait_item| {
                                 const trait_interface = self.traitInterfaceByName(trait_item.name) orelse break :blk null;
                                 const method = self.findTraitMethodSignature(trait_interface, field.name) orelse break :blk null;
-                                break :blk self.functionTypeFromTraitSignature(method);
+                                break :blk try self.functionTypeFromTraitSignature(method);
                             },
                             .Contract => {
                                 const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field.name, .{ .function = true }) orelse break :blk null;
@@ -3857,7 +4000,7 @@ const TypeChecker = struct {
         bindings: []GenericTypeBinding,
     ) !void {
         for (args, runtime_params) |arg, param| {
-            const expected_type: Type = self.resolveTypeExprWithBindings(param.type_expr, bindings) catch .{ .unknown = {} };
+            const expected_type: Type = try self.resolveTypeExprWithBindings(param.type_expr, bindings);
             if (expected_type.kind() == .unknown) continue;
             try self.contextualizeLiteral(arg, expected_type);
             const arg_type = self.expr_types[arg.index()];
@@ -3899,7 +4042,7 @@ const TypeChecker = struct {
         imported_checker.current_function_item = null;
 
         for (args, runtime_params) |arg, param| {
-            const expected_type: Type = imported_checker.resolveTypeExprWithBindings(param.type_expr, bindings) catch .{ .unknown = {} };
+            const expected_type: Type = try imported_checker.resolveTypeExprWithBindings(param.type_expr, bindings);
             if (expected_type.kind() == .unknown) continue;
             try self.contextualizeLiteral(arg, expected_type);
             const arg_type = self.expr_types[arg.index()];
@@ -4217,9 +4360,9 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn comptimeIntegerParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {
+    fn comptimeIntegerParameter(self: *const TypeChecker, parameter: ast.Parameter) !bool {
         if (!parameter.is_comptime) return false;
-        const ty = descriptorFromTypeExpr(self.arena, self.file, self.item_index, parameter.type_expr) catch Type{ .unknown = {} };
+        const ty = try descriptorFromTypeExpr(self.arena, self.file, self.item_index, parameter.type_expr);
         return ty.kind() == .integer;
     }
 
@@ -4383,36 +4526,58 @@ const TypeChecker = struct {
         };
     }
 
+    fn descriptorFromTypeItem(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        name: []const u8,
+        bindings: []const GenericTypeBinding,
+    ) !?Type {
+        return switch (self.file.item(item_id).*) {
+            .Contract => .{ .contract = .{ .name = name } },
+            .Struct => .{ .struct_ = .{ .name = name } },
+            .Bitfield => .{ .bitfield = .{ .name = name } },
+            .Enum => .{ .enum_ = .{ .name = name } },
+            .ErrorDecl => .{ .named = .{ .name = name } },
+            .TypeAlias => |type_alias| try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
+            else => null,
+        };
+    }
+
+    fn resolvePathTypeName(
+        self: *TypeChecker,
+        range: source.TextRange,
+        raw_name: []const u8,
+        bindings: []const GenericTypeBinding,
+    ) !Type {
+        const trimmed = std.mem.trim(u8, raw_name, " \t\n\r");
+        if (refinements.isPathFormName(trimmed)) {
+            return .{ .refinement = .{
+                .name = refinements.nameForKind(.non_zero_address),
+                .base_type = try self.storeType(.{ .address = {} }),
+                .args = &.{},
+            } };
+        }
+        for (bindings) |binding| {
+            if (!std.mem.eql(u8, trimmed, binding.name)) continue;
+            if (genericBindingType(binding)) |bound_type| return bound_type;
+        }
+        if (descriptors.invalidIntegerTypeName(trimmed)) {
+            try self.emitInvalidIntegerTypeName(range, trimmed);
+            return .{ .unknown = {} };
+        }
+        if (descriptors.descriptorFromBuiltinName(trimmed)) |ty| return ty;
+        if (descriptors.parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
+        if (try self.importedTypeForPath(trimmed)) |imported_type| return imported_type;
+        if (self.lookupTypeItemInScope(trimmed)) |item_id| {
+            if (try self.descriptorFromTypeItem(item_id, trimmed, bindings)) |ty| return ty;
+        }
+        try self.emitUndefinedTypeName(range, trimmed);
+        return .{ .unknown = {} };
+    }
+
     fn resolveTypeExprWithBindings(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) anyerror!Type {
         return switch (self.file.typeExpr(type_expr).*) {
-            .Path => |path| blk: {
-                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                if (refinements.isPathFormName(trimmed)) {
-                    break :blk .{ .refinement = .{
-                        .name = refinements.nameForKind(.non_zero_address),
-                        .base_type = try self.storeType(.{ .address = {} }),
-                        .args = &.{},
-                    } };
-                }
-                for (bindings) |binding| {
-                    if (!std.mem.eql(u8, trimmed, binding.name)) continue;
-                    if (genericBindingType(binding)) |bound_type| break :blk bound_type;
-                }
-                if (descriptors.invalidIntegerTypeName(trimmed)) {
-                    try self.emitInvalidIntegerTypeName(path.range, trimmed);
-                    break :blk .{ .unknown = {} };
-                }
-                if (try self.importedTypeForPath(trimmed)) |imported_type| {
-                    break :blk imported_type;
-                }
-                if (self.item_index.lookup(trimmed)) |item_id| {
-                    switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| break :blk try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
-                        else => {},
-                    }
-                }
-                break :blk descriptorFromPathName(self.file, self.item_index, trimmed);
-            },
+            .Path => |path| try self.resolvePathTypeName(path.range, path.name, bindings),
             .Generic => |generic| self.resolveGenericTypeWithBindings(generic, bindings),
             .Tuple => |tuple| blk: {
                 const elements = try self.arena.alloc(Type, tuple.elements.len);
@@ -4521,7 +4686,7 @@ const TypeChecker = struct {
             }
 
             const payload_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
-            const error_type = try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings);
+            const error_type = try self.resolveResultErrorTypeExpr(generic.args[1].Type, bindings);
             if (error_type.kind() != .unknown and error_type.kind() != .named) {
                 try self.emitRangeError(generic.range, "Result<T, E> currently requires a named error type for E", .{});
                 return .{ .unknown = {} };
@@ -4552,10 +4717,19 @@ const TypeChecker = struct {
         }
 
         if (bindings.len == 0) {
-            return descriptorFromGenericType(self.arena, self.file, self.item_index, generic);
+            return self.resolvePathTypeName(generic.range, generic.name, bindings);
         }
 
-        return descriptorFromPathName(self.file, self.item_index, generic.name);
+        return self.resolvePathTypeName(generic.range, generic.name, bindings);
+    }
+
+    fn resolveResultErrorTypeExpr(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) !Type {
+        if (self.file.typeExpr(type_expr).* == .Path) {
+            const path = self.file.typeExpr(type_expr).Path;
+            const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+            if (std.mem.eql(u8, trimmed, "AbiDecodeError")) return abiDecodeErrorType();
+        }
+        return self.resolveTypeExprWithBindings(type_expr, bindings);
     }
 
     fn validateRefinementGenericBounds(
@@ -5157,7 +5331,7 @@ const TypeChecker = struct {
             };
             return .{ .ty = ty };
         }
-        if (self.comptimeIntegerParameter(parameter)) {
+        if (try self.comptimeIntegerParameter(parameter)) {
             const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return invalid_instantiation;
             return .{ .integer = integer };
         }
@@ -5176,10 +5350,10 @@ const TypeChecker = struct {
         try self.instantiated_bitfield_lookup.put(instantiated.mangled_name, index);
     }
 
-    fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) Type {
+    fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !Type {
         return switch (kind) {
             .cast, .bit_cast, .truncate => {
-                if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
+                if (builtin.type_arg) |type_expr| return try self.resolveTypeExprInCurrentContext(type_expr);
                 if (kind == .truncate and builtin.args.len > 0) {
                     return self.expr_types[builtin.args[0].index()];
                 }
@@ -5194,7 +5368,7 @@ const TypeChecker = struct {
             .divmod => {
                 const value_type = self.builtinDivisionOperandType(builtin);
                 if (value_type.kind() != .unknown) {
-                    const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
+                    const tuple_types = try self.arena.alloc(Type, 2);
                     tuple_types[0] = value_type;
                     tuple_types[1] = value_type;
                     return .{ .tuple = tuple_types };
@@ -5214,7 +5388,7 @@ const TypeChecker = struct {
             => {
                 if (builtin.args.len > 0) {
                     const value_type = self.expr_types[builtin.args[0].index()];
-                    const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
+                    const tuple_types = try self.arena.alloc(Type, 2);
                     tuple_types[0] = value_type;
                     tuple_types[1] = .{ .bool = {} };
                     return .{ .tuple = tuple_types };
@@ -5228,14 +5402,14 @@ const TypeChecker = struct {
 
             .abi_decode, .abi_decode_permissive => {
                 const target_type = if (builtin.type_arg) |type_arg|
-                    self.resolveTypeExprInCurrentContext(type_arg) catch Type{ .unknown = {} }
+                    try self.resolveTypeExprInCurrentContext(type_arg)
                 else blk: {
                     if (builtin.args.len == 0) return .{ .unknown = {} };
                     break :blk self.expr_types[builtin.args[0].index()];
                 };
-                const payload_type = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+                const payload_type = try self.arena.alloc(Type, 1);
                 payload_type[0] = target_type;
-                const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+                const error_types = try self.arena.alloc(Type, 1);
                 error_types[0] = .{ .named = .{ .name = "AbiDecodeError" } };
                 return .{ .error_union = .{
                     .payload_type = &payload_type[0],
@@ -5249,9 +5423,9 @@ const TypeChecker = struct {
 
             .compile_error => .{ .never = {} },
 
-            .struct_fields => self.reflectionSliceType(self.structFieldReflectionType()),
+            .struct_fields => try self.reflectionSliceType(try self.structFieldReflectionType()),
 
-            .trait_methods => self.reflectionSliceType(self.traitMethodReflectionType()),
+            .trait_methods => try self.reflectionSliceType(try self.traitMethodReflectionType()),
 
             .concat, .slice => {
                 if (builtin.args.len == 0) return .{ .unknown = {} };
@@ -5274,28 +5448,28 @@ const TypeChecker = struct {
         return .{ .named = .{ .name = "type" } };
     }
 
-    fn reflectionSliceType(self: *const TypeChecker, element: Type) Type {
-        const stored = self.arena.create(Type) catch return .{ .unknown = {} };
+    fn reflectionSliceType(self: *const TypeChecker, element: Type) !Type {
+        const stored = try self.arena.create(Type);
         stored.* = element;
         return .{ .slice = .{ .element_type = stored } };
     }
 
-    fn structFieldReflectionType(self: *const TypeChecker) Type {
-        const fields = self.arena.alloc(model.AnonymousStructField, 2) catch return .{ .unknown = {} };
+    fn structFieldReflectionType(self: *const TypeChecker) !Type {
+        const fields = try self.arena.alloc(model.AnonymousStructField, 2);
         fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
         fields[1] = .{ .name = "type", .ty = self.reflectionTypeType() };
         return .{ .anonymous_struct = .{ .fields = fields } };
     }
 
-    fn traitMethodReflectionType(self: *const TypeChecker) Type {
-        const type_element = self.arena.create(Type) catch return .{ .unknown = {} };
+    fn traitMethodReflectionType(self: *const TypeChecker) !Type {
+        const type_element = try self.arena.create(Type);
         type_element.* = self.reflectionTypeType();
 
-        const string_element = self.arena.create(Type) catch return .{ .unknown = {} };
+        const string_element = try self.arena.create(Type);
         string_element.* = .{ .string = {} };
 
         // Keep this field order in sync with buildTraitMethodsCtValue.
-        const fields = self.arena.alloc(model.AnonymousStructField, 7) catch return .{ .unknown = {} };
+        const fields = try self.arena.alloc(model.AnonymousStructField, 7);
         fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
         fields[1] = .{ .name = "params", .ty = .{ .slice = .{ .element_type = type_element } } };
         fields[2] = .{ .name = "return_type", .ty = self.reflectionTypeType() };
@@ -6312,8 +6486,8 @@ const TypeChecker = struct {
         };
     }
 
-    fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
-        if (scaledArithmeticResultType(self, op, lhs_type, rhs_type)) |ty| return ty;
+    fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) !Type {
+        if (try scaledArithmeticResultType(self, op, lhs_type, rhs_type)) |ty| return ty;
         return switch (op) {
             .add => if (lhs_type.kind() == .string and rhs_type.kind() == .string)
                 .{ .string = {} }
@@ -6330,7 +6504,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn scaledArithmeticResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) ?Type {
+    fn scaledArithmeticResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) !?Type {
         if (lhs_type.kind() != .refinement or rhs_type.kind() != .refinement) return null;
         const lhs = lhs_type.refinement;
         const rhs = rhs_type.refinement;
@@ -6344,7 +6518,7 @@ const TypeChecker = struct {
                 lhs_type
             else
                 .{ .unknown = {} },
-            .mul, .wrapping_mul => self.makeScaledRefinementType(lhs.base_type.*, lhs_decimals, rhs_decimals),
+            .mul, .wrapping_mul => try self.makeScaledRefinementType(lhs.base_type.*, lhs_decimals, rhs_decimals),
             else => null,
         };
     }
@@ -6357,16 +6531,16 @@ const TypeChecker = struct {
         };
     }
 
-    fn makeScaledRefinementType(self: *const TypeChecker, base_type: Type, lhs_decimals: []const u8, rhs_decimals: []const u8) Type {
+    fn makeScaledRefinementType(self: *const TypeChecker, base_type: Type, lhs_decimals: []const u8, rhs_decimals: []const u8) !Type {
         const lhs = std.fmt.parseInt(u32, lhs_decimals, 10) catch return .{ .unknown = {} };
         const rhs = std.fmt.parseInt(u32, rhs_decimals, 10) catch return .{ .unknown = {} };
         const total = lhs + rhs;
-        const total_text = std.fmt.allocPrint(self.arena, "{d}", .{total}) catch return .{ .unknown = {} };
+        const total_text = try std.fmt.allocPrint(self.arena, "{d}", .{total});
 
-        const stored_base = self.arena.create(Type) catch return .{ .unknown = {} };
+        const stored_base = try self.arena.create(Type);
         stored_base.* = base_type;
 
-        const args = self.arena.alloc(model.RefinementArg, 2) catch return .{ .unknown = {} };
+        const args = try self.arena.alloc(model.RefinementArg, 2);
         args[0] = .Type;
         args[1] = .{ .Integer = .{ .text = total_text } };
         return .{ .refinement = .{
@@ -6439,9 +6613,9 @@ const TypeChecker = struct {
         }
         if (overflowTupleFieldType(base_type, field_name)) |field_type| return field_type;
         if (anonymousStructFieldType(base_type, field_name)) |field_type| return field_type;
-        if (self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
-        if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
-        if (self.concreteImplMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.concreteImplMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
             if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
                 if (instantiated.fieldByName(field_name)) |field| return field.ty;
@@ -6512,16 +6686,16 @@ const TypeChecker = struct {
                 }
             }
         }
-        if (self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
+        if (try self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
         const base_type = self.expr_types[base_expr_id.index()];
         return self.fieldAccessType(base_type, field_name);
     }
 
-    fn externalProxyMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn externalProxyMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         if (base_type.kind() != .external_proxy) return null;
         const trait_interface = self.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
         const method = self.findTraitMethodSignature(trait_interface, field_name) orelse return null;
-        return self.functionTypeFromTraitSignature(method);
+        return try self.functionTypeFromTraitSignature(method);
     }
 
     fn externProxyMethodSignature(self: *const TypeChecker, expr_id: ast.ExprId) ?TraitMethodSignature {
@@ -6736,10 +6910,10 @@ const TypeChecker = struct {
         return false;
     }
 
-    fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         if (!self.exprRepresentsType(base_expr_id)) return null;
-        if (self.traitBoundAssociatedMethodType(base_expr_id, field_name)) |method_type| return method_type;
-        return self.concreteAssociatedMethodType(base_expr_id, field_name);
+        if (try self.traitBoundAssociatedMethodType(base_expr_id, field_name)) |method_type| return method_type;
+        return try self.concreteAssociatedMethodType(base_expr_id, field_name);
     }
 
     fn exprRepresentsType(self: *const TypeChecker, expr_id: ast.ExprId) bool {
@@ -6760,7 +6934,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn traitBoundAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn traitBoundAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const parameter_name = self.genericTypeParameterNameForExpr(base_expr_id) orelse return null;
         const function_item_id = self.current_function_item orelse return null;
         const function = switch (self.file.item(function_item_id).*) {
@@ -6777,10 +6951,10 @@ const TypeChecker = struct {
             if (matched != null) return null;
             matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
-    fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const target_name = self.concreteTypeNameForExpr(base_expr_id) orelse return null;
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
@@ -6791,7 +6965,7 @@ const TypeChecker = struct {
             const method = impl_interface.methodByNameAndReceiver(field_name, .none) orelse continue;
             matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
     fn genericTypeParameterNameForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
@@ -6833,8 +7007,8 @@ const TypeChecker = struct {
         };
     }
 
-    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) Type {
-        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) !Type {
+        const returns = try self.arena.alloc(Type, 1);
         returns[0] = method_signature.return_type;
         return .{ .function = .{
             .name = method_signature.name,
@@ -6843,7 +7017,7 @@ const TypeChecker = struct {
         } };
     }
 
-    fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const type_name = base_type.name() orelse return null;
         const function_item_id = self.current_function_item orelse return null;
         const function = switch (self.file.item(function_item_id).*) {
@@ -6862,7 +7036,7 @@ const TypeChecker = struct {
         }
 
         const method_signature = matched orelse return null;
-        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        const returns = try self.arena.alloc(Type, 1);
         returns[0] = method_signature.return_type;
         return .{ .function = .{
             .name = method_signature.name,
@@ -6871,7 +7045,7 @@ const TypeChecker = struct {
         } };
     }
 
-    fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const target_name = base_type.name() orelse return null;
         if (self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
         var matched: ?TraitMethodSignature = null;
@@ -6883,7 +7057,7 @@ const TypeChecker = struct {
             const method = impl_interface.methodByNameAndReceiver(field_name, .value_self) orelse continue;
             matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
     fn currentImplMethodType(self: *const TypeChecker, target_name: []const u8, field_name: []const u8) ?Type {
@@ -7818,6 +7992,13 @@ const TypeChecker = struct {
         try self.emitRangeMessage(range, message);
     }
 
+    fn emitUndefinedTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "undefined type '{s}'", .{name});
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
+    }
+
     fn emitExprError(self: *TypeChecker, expr_id: ast.ExprId, comptime fmt: []const u8, args: anytype) !void {
         var buffer: [256]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, fmt, args);
@@ -7835,6 +8016,17 @@ const TypeChecker = struct {
             .file_id = self.file_id,
             .range = source.rangeOf(self.file.expression(expr_id).*),
         });
+    }
+
+    fn hasDiagnosticAtRange(self: *const TypeChecker, range: source.TextRange, message: []const u8) bool {
+        for (self.diagnostics.items.items) |diag| {
+            if (!std.mem.eql(u8, diag.message, message)) continue;
+            if (diag.labels.len == 0) continue;
+            const location = diag.labels[0].location;
+            if (location.file_id != self.file_id) continue;
+            if (location.range.start == range.start and location.range.end == range.end) return true;
+        }
+        return false;
     }
 
     fn emitRangeMessage(self: *TypeChecker, range: source.TextRange, message: []const u8) !void {
@@ -7929,21 +8121,21 @@ const TypeChecker = struct {
         try self.emitExprMessage(expr_id, message);
     }
 
-    fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) Type {
+    fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) anyerror!Type {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()].type;
                 if (direct.kind() != .unknown) break :blk direct;
                 break :blk self.lookupNamedPatternType(name.name);
             },
-            .Field => |field| self.fieldPatternType(field),
-            .Index => |index| self.indexPatternType(index),
+            .Field => |field| try self.fieldPatternType(field),
+            .Index => |index| try self.indexPatternType(index),
             .StructDestructure => self.pattern_types[pattern_id.index()].type,
             .Error => .{ .unknown = {} },
         };
     }
 
-    fn patternLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) LocatedType {
+    fn patternLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) anyerror!LocatedType {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()];
@@ -7952,8 +8144,8 @@ const TypeChecker = struct {
             },
             .StructDestructure => self.pattern_types[pattern_id.index()],
             .Field => |field| blk: {
-                const base = self.patternLocatedType(field.base);
-                const field_type = self.fieldPatternType(field);
+                const base = try self.patternLocatedType(field.base);
+                const field_type = try self.fieldPatternType(field);
                 break :blk .{
                     .type = field_type,
                     .region = base.region,
@@ -7961,8 +8153,8 @@ const TypeChecker = struct {
                 };
             },
             .Index => |index| blk: {
-                const base = self.patternLocatedType(index.base);
-                const index_type = self.indexPatternType(index);
+                const base = try self.patternLocatedType(index.base);
+                const index_type = try self.indexPatternType(index);
                 break :blk .{
                     .type = index_type,
                     .region = base.region,
@@ -8016,13 +8208,13 @@ const TypeChecker = struct {
         };
     }
 
-    fn fieldPatternType(self: *const TypeChecker, field: ast.FieldPattern) Type {
-        const base_type = self.patternType(field.base);
-        return self.fieldAccessType(base_type, field.name) catch .{ .unknown = {} };
+    fn fieldPatternType(self: *const TypeChecker, field: ast.FieldPattern) anyerror!Type {
+        const base_type = try self.patternType(field.base);
+        return try self.fieldAccessType(base_type, field.name);
     }
 
-    fn indexPatternType(self: *const TypeChecker, index: ast.IndexPattern) Type {
-        const base_type = self.patternType(index.base);
+    fn indexPatternType(self: *const TypeChecker, index: ast.IndexPattern) anyerror!Type {
+        const base_type = try self.patternType(index.base);
         return self.indexAccessType(base_type, index.index);
     }
 

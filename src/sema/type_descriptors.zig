@@ -76,7 +76,7 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
     return .{ .named = .{ .name = trimmed } };
 }
 
-fn descriptorFromBuiltinName(name: []const u8) ?Type {
+pub fn descriptorFromBuiltinName(name: []const u8) ?Type {
     const spec = builtin.lookupBuiltinByName(name) orelse return null;
     return switch (spec.category) {
         .Void => .{ .void = {} },
