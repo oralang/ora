@@ -139,6 +139,47 @@ test "compiler lowers runtime keccak256 through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
 }
 
+test "compiler lowers signed integer operations through signed SIR ops" {
+    const source_text =
+        \\contract SignedOps {
+        \\    pub fn signed_div(a: i256, b: i256) -> i256 {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn signed_mod(a: i256, b: i256) -> i256 {
+        \\        return a % b;
+        \\    }
+        \\
+        \\    pub fn signed_shr(a: i256, b: i8) -> i256 {
+        \\        return a >> b;
+        \\    }
+        \\
+        \\    pub fn signed_gt(a: i256, b: i256) -> bool {
+        \\        return a > b;
+        \\    }
+        \\
+        \\    pub fn signed_checked_add(a: i256, b: i256) -> i256 {
+        \\        return a + b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_div"), 1, "sdiv"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_mod"), 1, "smod"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_shr"), 1, "sar"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_gt"), 1, "sgt"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_checked_add"), 1, "slt"));
+}
+
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {
     const source_text =
         \\pub fn join(a: bytes, b: bytes) -> bytes {

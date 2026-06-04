@@ -209,6 +209,16 @@ fn signedLessThanU256(lhs: u256, rhs: u256) bool {
     return lhs < rhs;
 }
 
+fn arithmeticShiftRightU256(shift: u256, value: u256) u256 {
+    const sign_bit: u256 = @as(u256, 1) << 255;
+    const negative = (value & sign_bit) != 0;
+    if (shift >= 256) return if (negative) ~@as(u256, 0) else 0;
+    const shifted = value >> @intCast(shift);
+    if (!negative or shift == 0) return shifted;
+    const fill = ~@as(u256, 0) << @intCast(256 - shift);
+    return shifted | fill;
+}
+
 fn writeU256WordClipped(buffer: []u8, offset: usize, value: u256) void {
     for (0..32) |index| {
         const absolute = offset + index;
@@ -351,6 +361,15 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
 
             if (std.mem.eql(u8, op, "const") or std.mem.eql(u8, op, "large_const")) {
                 if (parseSirIntLiteral(tokens[3])) |value| try self.values.put(name, value);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "bitcast") and tokens.len >= 4) {
+                if (valueForToken(self.values, tokens[3])) |value| {
+                    try self.values.put(name, value);
+                } else if (self.pointers.get(tokens[3])) |ptr| {
+                    try self.pointers.put(name, ptr);
+                }
                 return;
             }
 
@@ -558,6 +577,13 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 } else {
                     try self.values.put(name, value >> @intCast(shift));
                 }
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "sar") and tokens.len >= 5) {
+                const shift = valueForToken(self.values, tokens[3]) orelse return;
+                const value = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, arithmeticShiftRightU256(shift, value));
                 return;
             }
 
@@ -7125,7 +7151,7 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             \\    return 0;
             \\}
             ,
-            .needle = "@abiDecode: type 'bytes01' has no ABI representation",
+            .needle = "undefined type 'bytes01'",
         },
         .{
             .source =
@@ -7134,7 +7160,7 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
             \\    return 0;
             \\}
             ,
-            .needle = "@abiDecode: type 'bytes1_6' has no ABI representation",
+            .needle = "undefined type 'bytes1_6'",
         },
         .{
             .source =

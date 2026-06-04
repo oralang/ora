@@ -38,10 +38,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         // Methods in this returned type are mixed into the parent lowerer. When
         // one helper calls another, use @This().helper(self): `self` is the
         // parent FunctionLowerer, not an instance of the anonymous mixin type.
-        fn binaryIntegerValueIsSigned(lhs: mlir.MlirValue, rhs: mlir.MlirValue) bool {
-            const lhs_type = mlir.oraValueGetType(lhs);
-            if (mlir.oraTypeIsAInteger(lhs_type)) return mlir.oraIntegerTypeIsSigned(lhs_type);
-            return support.mlirIntegerValueIsSigned(rhs);
+        fn semaIntegerTypeIsSigned(ty: sema.Type) ?bool {
+            return switch (support.unwrapRefinementSemaType(ty)) {
+                .integer => |integer| integer.signed,
+                else => null,
+            };
+        }
+
+        fn exprIntegerSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) ?bool {
+            return @This().semaIntegerTypeIsSigned(self.parent.typecheck.exprType(expr_id));
+        }
+
+        fn binaryIntegerExprIsSigned(self: *FunctionLowerer, expr_id: ast.ExprId, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) bool {
+            if (@This().exprIntegerSignedness(self, lhs_expr)) |signed| return signed;
+            if (@This().exprIntegerSignedness(self, rhs_expr)) |signed| return signed;
+            return @This().exprIntegerSignedness(self, expr_id) orelse false;
         }
 
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
@@ -51,8 +62,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn predicateForBinaryCompare(op: ast.BinaryOp, lhs: mlir.MlirValue, rhs: mlir.MlirValue) []const u8 {
-            const is_signed = @This().binaryIntegerValueIsSigned(lhs, rhs);
+        fn predicateForBinaryCompare(op: ast.BinaryOp, is_signed: bool) []const u8 {
             return switch (op) {
                 .lt => if (is_signed) "slt" else "ult",
                 .le => if (is_signed) "sle" else "ule",
@@ -784,7 +794,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             if (binary.op == .pow) {
-                return self.lowerCheckedPower(lhs, rhs, result_type, binary.range);
+                return self.lowerCheckedPower(lhs, rhs, result_type, @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range);
             }
 
             if (binary.op == .add) {
@@ -832,7 +842,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const is_signed_int_op = switch (binary.op) {
-                .add, .sub, .mul, .div, .mod, .shr => @This().binaryIntegerValueIsSigned(lhs, rhs),
+                .add, .sub, .mul, .div, .mod, .shr, .lt, .le, .gt, .ge => @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
                 else => false,
             };
 
@@ -855,7 +865,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .wrapping_shr => mlir.oraShrWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .eq => self.createCompareOp(loc, "eq", lhs, rhs),
                 .ne => self.createCompareOp(loc, "ne", lhs, rhs),
-                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(binary.op, lhs, rhs), lhs, rhs),
+                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(binary.op, is_signed_int_op), lhs, rhs),
                 .pow => unreachable,
             };
 
@@ -2685,7 +2695,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const value_ty = mlir.oraValueGetType(lhs);
-            const is_signed = support.mlirIntegerValueIsSigned(lhs);
+            const is_signed = blk: {
+                if (@This().exprIntegerSignedness(self, builtin.args[0])) |signed| break :blk signed;
+                if (@This().exprIntegerSignedness(self, builtin.args[1])) |signed| break :blk signed;
+                break :blk false;
+            };
             const div_op = if (is_signed)
                 mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
@@ -2783,7 +2797,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerStaticArrayToSliceCast(self, value, concrete_target, builtin.range)) |slice_value| {
                 value = slice_value;
             } else {
-                value = try @This().convertBuiltinCastValue(self, value, concrete_target, builtin.range, checked);
+                value = try @This().convertBuiltinCastValue(
+                    self,
+                    value,
+                    concrete_target,
+                    @This().exprIntegerSignedness(self, builtin.args[0]) orelse false,
+                    @This().exprIntegerSignedness(self, expr_id) orelse false,
+                    builtin.range,
+                    checked,
+                );
             }
 
             if (!mlir.oraTypeIsNull(target_ref_base) and !mlir.oraTypeEqual(mlir.oraValueGetType(value), target_type)) {
@@ -2942,6 +2964,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
+            source_is_signed: bool,
+            target_is_signed: bool,
             range: source.TextRange,
             checked: bool,
         ) anyerror!mlir.MlirValue {
@@ -2957,7 +2981,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(op)) return value;
                 const i160_value = appendValueOp(self.block, op);
                 if (mlir.oraIntegerTypeGetWidth(target_type) == 160) return i160_value;
-                return try @This().convertBuiltinCastValue(self, i160_value, target_type, range, checked);
+                return try @This().convertBuiltinCastValue(self, i160_value, target_type, false, target_is_signed, range, checked);
             }
 
             if (value_is_int and mlir.oraTypeIsAddressType(target_type)) {
@@ -2966,7 +2990,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const i160_value = if (mlir.oraIntegerTypeGetWidth(value_type) == 160)
                     value
                 else
-                    try @This().convertBuiltinCastValue(self, value, i160_type, range, checked);
+                    try @This().convertBuiltinCastValue(self, value, i160_type, source_is_signed, false, range, checked);
                 const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, i160_value);
                 if (mlir.oraOperationIsNull(op)) return i160_value;
                 return appendValueOp(self.block, op);
@@ -2983,7 +3007,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             if (value_width < target_width) {
-                const op = if (mlir.oraIntegerTypeIsSigned(value_type))
+                const op = if (source_is_signed)
                     mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
                 else
                     mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
@@ -2992,7 +3016,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             if (checked) {
-                try @This().emitCastOverflowCheck(self, value, target_type, range);
+                try @This().emitCastOverflowCheck(self, value, target_type, target_is_signed, range);
             }
 
             const trunc = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
@@ -3004,6 +3028,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
+            target_is_signed: bool,
             range: source.TextRange,
         ) anyerror!void {
             const value_type = mlir.oraValueGetType(value);
@@ -3012,7 +3037,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (target_width >= value_width) return;
 
             const loc = self.parent.location(range);
-            if (!mlir.oraIntegerTypeIsSigned(target_type)) {
+            if (!target_is_signed) {
                 const trunc_op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
                 if (mlir.oraOperationIsNull(trunc_op)) return error.MlirOperationCreationFailed;
                 const truncated = appendValueOp(self.block, trunc_op);
@@ -3088,7 +3113,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             const lhs_type = mlir.oraValueGetType(lhs);
-            const is_signed = mlir.oraTypeIsAInteger(lhs_type) and mlir.oraIntegerTypeIsSigned(lhs_type);
+            const is_signed = @This().exprIntegerSignedness(self, builtin.args[0]) orelse false;
 
             var value: mlir.MlirValue = lhs;
             var overflow_flag: mlir.MlirValue = undefined;
@@ -3139,7 +3164,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else
                     try @This().computeUnsignedMulOverflow(self, value, lhs, rhs, lhs_type, loc);
             } else if (std.mem.eql(u8, builtin.name, "powerWithOverflow")) {
-                const power = try self.lowerPowerWithOverflow(lhs, rhs, lhs_type, builtin.range);
+                const power = try self.lowerPowerWithOverflow(lhs, rhs, lhs_type, is_signed, builtin.range);
                 value = power.value;
                 overflow_flag = power.overflow;
             } else if (std.mem.eql(u8, builtin.name, "shlWithOverflow")) {
