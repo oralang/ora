@@ -1004,6 +1004,63 @@ fn findCallable(contract_abi: *const abi.ContractAbi, kind: abi.CallableKind, na
     return null;
 }
 
+fn findTypeByWire(contract_abi: *const abi.ContractAbi, wire_type: []const u8) ?*const abi.AbiTypeNode {
+    for (contract_abi.types) |*typ| {
+        if (typ.wire_type) |wire| {
+            if (std.mem.eql(u8, wire, wire_type)) return typ;
+        }
+    }
+    return null;
+}
+
+fn countTypesByWire(contract_abi: *const abi.ContractAbi, wire_type: []const u8) usize {
+    var count: usize = 0;
+    for (contract_abi.types) |typ| {
+        if (typ.wire_type) |wire| {
+            if (std.mem.eql(u8, wire, wire_type)) count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectSequentialTypeIds(contract_abi: *const abi.ContractAbi) !void {
+    for (contract_abi.types, 0..) |typ, index| {
+        const type_id = typ.type_id orelse return error.TestUnexpectedResult;
+        try testing.expect(std.mem.startsWith(u8, type_id, "t:"));
+        const parsed = try std.fmt.parseInt(usize, type_id["t:".len..], 10);
+        try testing.expectEqual(index, parsed);
+        const found = contract_abi.findType(type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(type_id, found.type_id.?);
+    }
+}
+
+const ConstantHashPayloadContext = struct {
+    pub fn hash(_: @This(), _: []const u8) u64 {
+        return 0;
+    }
+
+    pub fn eql(_: @This(), lhs: []const u8, rhs: []const u8) bool {
+        return abi.AbiTypePayloadContext.eql(.{}, lhs, rhs);
+    }
+};
+
+test "abi payload lookup equality distinguishes forced hash collisions" {
+    var lookup = std.HashMap(
+        []const u8,
+        usize,
+        ConstantHashPayloadContext,
+        std.hash_map.default_max_load_percentage,
+    ).init(testing.allocator);
+    defer lookup.deinit();
+
+    try lookup.put("primitive:u256", 0);
+    try lookup.put("primitive:address", 1);
+
+    try testing.expectEqual(@as(usize, 0), lookup.get("primitive:u256") orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 1), lookup.get("primitive:address") orelse return error.TestUnexpectedResult);
+    try testing.expect(lookup.get("primitive:bool") == null);
+}
+
 test "abi layout serializer is consumed by OraToSIR parser with matching static decisions" {
     const u256_ty: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
     const u8_ty: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
@@ -1933,7 +1990,7 @@ test "abi layout rejects non-wire Ora types" {
     try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, .{ .external_proxy = .{ .trait_name = "ERC20" } }));
 }
 
-test "abi manifest includes functions errors events effects and hashed type ids" {
+test "abi manifest includes functions errors events effects and sequential type ids" {
     const allocator = testing.allocator;
     const source =
         \\contract Test {
@@ -1978,10 +2035,7 @@ test "abi manifest includes functions errors events effects and hashed type ids"
     try testing.expect(transfer.inputs[0].indexed orelse false);
     try testing.expect(!(transfer.inputs[1].indexed orelse false));
 
-    for (contract_abi.types) |typ| {
-        const type_id = typ.type_id orelse return error.TestUnexpectedResult;
-        try testing.expect(std.mem.startsWith(u8, type_id, "t:"));
-    }
+    try expectSequentialTypeIds(contract_abi);
 
     var u256_count: usize = 0;
     for (contract_abi.types) |typ| {
@@ -2025,6 +2079,70 @@ test "abi manifest includes functions errors events effects and hashed type ids"
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"stateMutability\":\"nonpayable\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"error\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"event\"") != null);
+}
+
+test "abi sequential type ids dedup equal payloads and keep distinct payloads" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract TypeIds {
+        \\    pub fn useTypes(
+        \\        a: u256,
+        \\        b: u256,
+        \\        owner: address,
+        \\        values: [u256; 2],
+        \\        pair: (u256, address)
+        \\    ) {}
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    try expectSequentialTypeIds(contract_abi);
+    try testing.expectEqual(@as(usize, 1), countTypesByWire(contract_abi, "uint256"));
+
+    const u256_type = findTypeByWire(contract_abi, "uint256") orelse return error.TestUnexpectedResult;
+    const address_type = findTypeByWire(contract_abi, "address") orelse return error.TestUnexpectedResult;
+    const array_type = findTypeByWire(contract_abi, "uint256[2]") orelse return error.TestUnexpectedResult;
+    const tuple_type = findTypeByWire(contract_abi, "(uint256,address)") orelse return error.TestUnexpectedResult;
+
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, address_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, array_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, tuple_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, address_type.type_id.?, array_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, address_type.type_id.?, tuple_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, array_type.type_id.?, tuple_type.type_id.?));
+}
+
+test "abi sequential type id json is byte stable across generation" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract TypeIds {
+        \\    pub fn useTypes(
+        \\        a: u256,
+        \\        b: u256,
+        \\        owner: address,
+        \\        values: [u256; 2],
+        \\        pair: (u256, address)
+        \\    ) {}
+        \\}
+    ;
+
+    var first = try generateAbiForSource(allocator, source);
+    defer first.deinit();
+    var second = try generateAbiForSource(allocator, source);
+    defer second.deinit();
+
+    try expectSequentialTypeIds(&first.contract_abi);
+    try expectSequentialTypeIds(&second.contract_abi);
+
+    const first_json = try first.contract_abi.toJson(allocator);
+    defer allocator.free(first_json);
+    const second_json = try second.contract_abi.toJson(allocator);
+    defer allocator.free(second_json);
+
+    try testing.expectEqualStrings(first_json, second_json);
 }
 
 test "abi manifest uses pinned event_name metadata for event wire identity" {
