@@ -37,6 +37,7 @@
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/RegionUtils.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -75,12 +76,31 @@ namespace
         return lhsWidth && rhsWidth && *lhsWidth == *rhsWidth;
     }
 
-    static bool isExplicitSirWordProducer(Operation *op)
+    static std::optional<APInt> constU256(Value value)
     {
-        return llvm::isa<sir::AddOp, sir::SubOp, sir::MulOp, sir::DivOp, sir::SDivOp,
-                         sir::ModOp, sir::SModOp, sir::AddModOp, sir::MulModOp,
-                         sir::ExpOp, sir::SignExtendOp, sir::AndOp, sir::OrOp,
-                         sir::XorOp, sir::NotOp, sir::ShlOp, sir::ShrOp, sir::SarOp>(op);
+        if (auto constOp = value.getDefiningOp<sir::ConstOp>())
+            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+                return intAttr.getValue().zextOrTrunc(256);
+        return std::nullopt;
+    }
+
+    static bool isLowBitsMask(Value value, unsigned width)
+    {
+        if (width == 0 || width > 256)
+            return false;
+        auto mask = constU256(value);
+        return mask && *mask == APInt::getLowBitsSet(256, width);
+    }
+
+    static bool isIntegerNormalizationProducer(Operation *op, unsigned width)
+    {
+        if (llvm::isa<sir::SignExtendOp>(op))
+            return true;
+        if (llvm::isa<sir::SDivOp, sir::SModOp, sir::SarOp>(op))
+            return true;
+        if (auto andOp = llvm::dyn_cast<sir::AndOp>(op))
+            return isLowBitsMask(andOp.getLhs(), width) || isLowBitsMask(andOp.getRhs(), width);
+        return false;
     }
 
     static bool canDropExplicitIntegerCarrierRoundTrip(sir::BitcastOp inner, sir::BitcastOp outer)
@@ -94,7 +114,7 @@ namespace
         if (!inner.getResult().hasOneUse())
             return false;
         Operation *producer = inner.getInput().getDefiningOp();
-        return producer && isExplicitSirWordProducer(producer);
+        return producer && isIntegerNormalizationProducer(producer, middleInt.getWidth());
     }
 
     static void foldRedundantSirBitcasts(ModuleOp module)
@@ -1912,10 +1932,17 @@ public:
 
             SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op) { residualCasts.push_back(op); });
+            llvm::SmallPtrSet<Operation *, 16> erasedResidualCasts;
             for (auto castOp : residualCasts)
             {
+                if (erasedResidualCasts.contains(castOp.getOperation()))
+                    continue;
                 mlir::IRRewriter b(ctx);
                 b.setInsertionPoint(castOp);
+                auto eraseResidualCast = [&](mlir::UnrealizedConversionCastOp op) {
+                    erasedResidualCasts.insert(op.getOperation());
+                    b.eraseOp(op);
+                };
                 auto loc = castOp.getLoc();
                 auto u256Ty = sir::U256Type::get(ctx);
                 auto isNarrowErr = [&](ora::ErrorUnionType errType) {
@@ -1945,7 +1972,7 @@ public:
 
                 if (llvm::all_of(castOp.getResults(), [](Value result) { return result.use_empty(); }))
                 {
-                    b.eraseOp(castOp);
+                    eraseResidualCast(castOp);
                     continue;
                 }
 
@@ -1957,7 +1984,7 @@ public:
                     if (input.getType() == resultType)
                     {
                         castOp.getResult(0).replaceAllUsesWith(input);
-                        b.eraseOp(castOp);
+                        eraseResidualCast(castOp);
                         continue;
                     }
 
@@ -1982,9 +2009,9 @@ public:
                             for (auto backCast : backCasts)
                             {
                                 backCast.getResult(0).replaceAllUsesWith(input);
-                                b.eraseOp(backCast);
+                                eraseResidualCast(backCast);
                             }
-                            b.eraseOp(castOp);
+                            eraseResidualCast(castOp);
                             continue;
                         }
                     }
@@ -1993,7 +2020,7 @@ public:
                     {
                         Value repl = asU256(input);
                         castOp.getResult(0).replaceAllUsesWith(repl);
-                        b.eraseOp(castOp);
+                        eraseResidualCast(castOp);
                         continue;
                     }
 
@@ -2001,7 +2028,7 @@ public:
                     {
                         Value repl = asInteger(resultType, input);
                         castOp.getResult(0).replaceAllUsesWith(repl);
-                        b.eraseOp(castOp);
+                        eraseResidualCast(castOp);
                         continue;
                     }
 
@@ -2010,7 +2037,7 @@ public:
                     {
                         Value repl = b.create<sir::BitcastOp>(loc, resultType, input);
                         castOp.getResult(0).replaceAllUsesWith(repl);
-                        b.eraseOp(castOp);
+                        eraseResidualCast(castOp);
                         continue;
                     }
 
@@ -2018,7 +2045,7 @@ public:
                         llvm::isa<sir::PtrType>(input.getType()))
                     {
                         castOp.getResult(0).replaceAllUsesWith(input);
-                        b.eraseOp(castOp);
+                        eraseResidualCast(castOp);
                         continue;
                     }
 
@@ -2028,7 +2055,7 @@ public:
                         {
                             Value repl = asU256(input);
                             castOp.getResult(0).replaceAllUsesWith(repl);
-                            b.eraseOp(castOp);
+                            eraseResidualCast(castOp);
                             continue;
                         }
                     }
@@ -2048,7 +2075,7 @@ public:
                             Value shifted = b.create<sir::ShlOp>(loc, u256Ty, one, payload);
                             Value packed = b.create<sir::OrOp>(loc, u256Ty, shifted, tag);
                             castOp.getResult(0).replaceAllUsesWith(packed);
-                            b.eraseOp(castOp);
+                            eraseResidualCast(castOp);
                             continue;
                         }
                     }

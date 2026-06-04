@@ -33,6 +33,15 @@ static SIRNamingHelper &getNamingHelper(Operation *op)
     return arithmeticNamingHelper;
 }
 
+static bool isU256IntegerCarrierType(Type type)
+{
+    if (llvm::isa<sir::U256Type>(type))
+        return true;
+    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+        return intType.getWidth() <= 256;
+    return false;
+}
+
 void clearArithmeticNamingHelper()
 {
     arithmeticNamingHelper.reset();
@@ -1209,7 +1218,7 @@ LogicalResult ConvertArithAddIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::AddOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1241,7 +1250,7 @@ LogicalResult ConvertAddWrappingOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::AddOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1262,7 +1271,7 @@ LogicalResult ConvertSubWrappingOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::SubOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
     rewriter.replaceOp(op, result);
     return success();
@@ -1282,7 +1291,7 @@ LogicalResult ConvertMulWrappingOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::MulOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
     rewriter.replaceOp(op, result);
     return success();
@@ -1313,7 +1322,7 @@ LogicalResult ConvertArithSubIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::SubOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1345,7 +1354,7 @@ LogicalResult ConvertArithMulIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::MulOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1377,7 +1386,7 @@ LogicalResult ConvertArithDivUIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::DivOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1409,7 +1418,7 @@ LogicalResult ConvertArithRemUIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::ModOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1441,7 +1450,7 @@ LogicalResult ConvertArithDivSIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::SDivOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1469,7 +1478,7 @@ LogicalResult ConvertArithRemSIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::SModOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1501,7 +1510,7 @@ LogicalResult ConvertArithAndIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::AndOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1533,7 +1542,7 @@ LogicalResult ConvertArithOrIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::OrOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1565,7 +1574,7 @@ LogicalResult ConvertArithXOrIOp::matchAndRewrite(
     Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
     Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<sir::XorOp>(loc, u256Type, lhs, rhs).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
 
     rewriter.replaceOp(op, result);
@@ -1596,7 +1605,7 @@ LogicalResult ConvertArithShlIOp::matchAndRewrite(
     {
         return rewriter.notifyMatchFailure(op, "unable to convert shli result type");
     }
-    if (resultType == u256Type)
+    if (isU256IntegerCarrierType(resultType))
     {
         rewriter.replaceOp(op, shifted);
     }
@@ -1622,7 +1631,7 @@ LogicalResult ConvertShlWrappingOp::matchAndRewrite(
     if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
     auto resultType = typeConverter->convertType(op.getResult().getType());
     if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert shl_wrapping result type");
-    if (resultType == u256Type) rewriter.replaceOp(op, shifted);
+    if (isU256IntegerCarrierType(resultType)) rewriter.replaceOp(op, shifted);
     else rewriter.replaceOp(op, rewriter.create<sir::BitcastOp>(loc, resultType, shifted).getResult());
     return success();
 }
@@ -1651,7 +1660,7 @@ LogicalResult ConvertArithShrUIOp::matchAndRewrite(
     {
         return rewriter.notifyMatchFailure(op, "unable to convert shrui result type");
     }
-    if (resultType == u256Type)
+    if (isU256IntegerCarrierType(resultType))
     {
         rewriter.replaceOp(op, shifted);
     }
@@ -1687,7 +1696,7 @@ LogicalResult ConvertArithShrSIOp::matchAndRewrite(
     {
         return rewriter.notifyMatchFailure(op, "unable to convert shrsi result type");
     }
-    if (resultType == u256Type)
+    if (isU256IntegerCarrierType(resultType))
     {
         rewriter.replaceOp(op, shifted);
     }
@@ -1716,7 +1725,7 @@ LogicalResult ConvertShrWrappingOp::matchAndRewrite(
     if (!typeConverter) return rewriter.notifyMatchFailure(op, "missing type converter");
     auto resultType = typeConverter->convertType(op.getResult().getType());
     if (!resultType) return rewriter.notifyMatchFailure(op, "unable to convert shr_wrapping result type");
-    if (resultType == u256Type) rewriter.replaceOp(op, shifted);
+    if (isU256IntegerCarrierType(resultType)) rewriter.replaceOp(op, shifted);
     else rewriter.replaceOp(op, rewriter.create<sir::BitcastOp>(loc, resultType, shifted).getResult());
     return success();
 }
@@ -1750,7 +1759,7 @@ LogicalResult ConvertArithSelectOp::matchAndRewrite(
     // SIR select is strictly u256-typed. Cast the selected word back when the
     // converted target type is narrower/non-u256.
     Value selected = rewriter.create<sir::SelectOp>(loc, u256Type, cond, trueVal, falseVal).getResult();
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
     {
         selected = rewriter.create<sir::BitcastOp>(loc, resultType, selected).getResult();
     }
@@ -1814,7 +1823,7 @@ LogicalResult ConvertArithExtSIOp::matchAndRewrite(
         input = rewriter.create<sir::SarOp>(loc, u256Type, shift, shiftedLeft).getResult();
     }
 
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
     {
         input = rewriter.create<sir::BitcastOp>(loc, resultType, input).getResult();
     }
@@ -1904,7 +1913,7 @@ LogicalResult ConvertArithTruncIOp::matchAndRewrite(
     Value inputU256 = ensureU256(rewriter, loc, input);
     Value masked = rewriter.create<sir::AndOp>(loc, u256Type, inputU256, maskConst);
 
-    if (resultType != u256Type)
+    if (!isU256IntegerCarrierType(resultType))
         masked = rewriter.create<sir::BitcastOp>(loc, resultType, masked);
     rewriter.replaceOp(op, masked);
     return success();

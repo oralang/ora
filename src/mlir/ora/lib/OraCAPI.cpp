@@ -252,6 +252,11 @@ extern "C"
         unwrap(ctx)->loadAllAvailableDialects();
     }
 
+    void oraContextLoadSIRDialect(MlirContext ctx)
+    {
+        unwrap(ctx)->getOrLoadDialect<sir::SIRDialect>();
+    }
+
     MlirModule oraModuleCreateEmpty(MlirLocation loc)
     {
         return wrap(mlir::ModuleOp::create(unwrap(loc)));

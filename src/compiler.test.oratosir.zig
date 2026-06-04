@@ -54,6 +54,7 @@ fn createOraMlirContext() mlir.MlirContext {
     mlir.oraContextAppendDialectRegistry(ctx, registry);
     mlir.oraDialectRegistryDestroy(registry);
     mlir.oraContextLoadAllAvailableDialects(ctx);
+    mlir.oraContextLoadSIRDialect(ctx);
     _ = mlir.oraDialectRegister(ctx);
     return ctx;
 }
@@ -180,6 +181,100 @@ test "compiler lowers signed integer operations through signed SIR ops" {
     try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_checked_add"), 1, "slt"));
 }
 
+test "compiler lowers unsigned integer operations through unsigned SIR ops" {
+    const source_text =
+        \\contract UnsignedOps {
+        \\    pub fn unsigned_div(a: u256, b: u256) -> u256 {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn unsigned_mod(a: u256, b: u256) -> u256 {
+        \\        return a % b;
+        \\    }
+        \\
+        \\    pub fn unsigned_shr(a: u256, b: u8) -> u256 {
+        \\        return a >> b;
+        \\    }
+        \\
+        \\    pub fn unsigned_gt(a: u256, b: u256) -> bool {
+        \\        return a > b;
+        \\    }
+        \\
+        \\    pub fn unsigned_checked_add(a: u256, b: u256) -> u256 {
+        \\        return a + b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const div_fn = try functionSlice(rendered, "unsigned_div");
+    const mod_fn = try functionSlice(rendered, "unsigned_mod");
+    const shr_fn = try functionSlice(rendered, "unsigned_shr");
+    const gt_fn = try functionSlice(rendered, "unsigned_gt");
+    const add_fn = try functionSlice(rendered, "unsigned_checked_add");
+
+    try testing.expect(std.mem.containsAtLeast(u8, div_fn, 1, " = div "));
+    try testing.expect(!std.mem.containsAtLeast(u8, div_fn, 1, " = sdiv "));
+    try testing.expect(std.mem.containsAtLeast(u8, mod_fn, 1, " = mod "));
+    try testing.expect(!std.mem.containsAtLeast(u8, mod_fn, 1, " = smod "));
+    try testing.expect(std.mem.containsAtLeast(u8, shr_fn, 1, " = shr "));
+    try testing.expect(!std.mem.containsAtLeast(u8, shr_fn, 1, " = sar "));
+    try testing.expect(std.mem.containsAtLeast(u8, gt_fn, 1, " = gt "));
+    try testing.expect(!std.mem.containsAtLeast(u8, gt_fn, 1, " = sgt "));
+    try testing.expect(std.mem.containsAtLeast(u8, add_fn, 1, " = lt "));
+    try testing.expect(!std.mem.containsAtLeast(u8, add_fn, 1, " = slt "));
+}
+
+test "compiler lowers generic requires clauses with substituted integer signedness" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract GenericRequires {
+        \\    fn add(comptime T: type, a: T, b: T) -> T
+        \\        requires a <= std.constants.U256_MAX - b
+        \\    {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    fn guarded_div(comptime T: type, a: T, b: T) -> T
+        \\        requires a >= b
+        \\    {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn run_unsigned(a: u256, b: u256) -> u256 {
+        \\        return add(u256, a, b);
+        \\    }
+        \\
+        \\    pub fn run_signed(a: i256, b: i256) -> i256 {
+        \\        return guarded_div(i256, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn add__u256"));
+    const signed_fn = try functionSlice(rendered, "guarded_div__i256");
+    try testing.expect(std.mem.containsAtLeast(u8, signed_fn, 1, "sdiv"));
+}
+
 test "OraToSIR folds redundant integer/u256 bitcast round trips" {
     const source_text =
         \\contract Counter {
@@ -233,6 +328,61 @@ test "OraToSIR keeps width-changing bitcast round trips" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": i1 : !sir.u256"));
 }
 
+test "OraToSIR keeps arithmetic width-changing carrier round trips" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @add_carrier(%arg0: !sir.u256, %arg1: !sir.u256) {
+        \\    %0 = sir.add %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256
+        \\    %1 = sir.bitcast %0 : !sir.u256 : i128
+        \\    %2 = sir.bitcast %1 : i128 : !sir.u256
+        \\    sir.iret %2
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
+}
+
+test "OraToSIR handles residual cast worklist entries erased by an earlier cast" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @stale_residual_cast(%arg0: !sir.u256) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : !sir.u256 to i128
+        \\    %1 = builtin.unrealized_conversion_cast %0 : i128 to !sir.u256
+        \\    %2 = builtin.unrealized_conversion_cast %0 : i128 to !sir.u256
+        \\    %3 = sir.add %1 : !sir.u256, %2 : !sir.u256 : !sir.u256
+        \\    sir.iret %3
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
+}
+
 test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
     const source_text =
         \\pub fn div_i128(a: i128, b: i128) -> i128 {
@@ -271,7 +421,7 @@ test "OraToSIR preserves explicit narrow integer truncation mask" {
     defer testing.allocator.free(rendered);
     const narrow_fn = try functionSlice(rendered, "narrow");
 
-    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "const 255"));
+    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "const 0xFF"));
     try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "and"));
     try testing.expect(!std.mem.containsAtLeast(u8, narrow_fn, 1, "bitcast"));
 }
@@ -3312,6 +3462,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/apps/arithmetic_probe.ora",
         "ora-example/apps/erc20_verified.ora",
         "ora-example/apps/defi_lending_pool.ora",
+        "ora-example/apps/defi_lending_pool_fv.ora",
         "ora-example/apps/erc20_bitfield_comptime_generics.ora",
         "ora-example/array_operations.ora",
         "ora-example/structs/basic_structs.ora",
@@ -3340,6 +3491,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     };
 
     for (example_paths) |path| {
+        errdefer std.debug.print("OraToSIR residual runtime-op example failed: {s}\n", .{path});
         var compilation = try compilePackage(path);
         defer compilation.deinit();
 
