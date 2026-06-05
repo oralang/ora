@@ -1,0 +1,26 @@
+// Golden coverage for signed narrow arithmetic lowering.
+// Exercises sign-extension before SIR signed operators for i8/i16 values.
+
+contract SignedNarrowLowering {
+    pub fn div_i8(a: i8, b: i8) -> i8
+        requires(b != 0)
+        requires(!(a == -128 && b == -1))
+    {
+        return a / b;
+    }
+
+    pub fn rem_i16(a: i16, b: i16) -> i16
+        requires(b != 0)
+        requires(!(a == -32768 && b == -1))
+    {
+        return a % b;
+    }
+
+    pub fn lt_i8(a: i8, b: i8) -> bool {
+        return a < b;
+    }
+
+    pub fn shr_i16(a: i16, bits: u8) -> i16 {
+        return a >> bits;
+    }
+}
