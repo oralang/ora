@@ -1,1 +1,15 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/errors/simple_error_test.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/simple_error_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {sir.error_ids = {TestError = 224292994 : i256}, sir.error_selectors = {TestError = "0x0d5e7082"}} {
+// CHECK-NEXT:   func.func @test() -> !sir.u256 attributes {ora.abi_return = "bool", ora.abi_return_layout = "bool", ora.abi_return_words = 1 : i256, ora.returns_error_union = true, ora.selector = "0xf8a8fd6d", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 224292994 {ora.error_id = 224292994 : i256} : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:16)))
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:16)))
+// CHECK-NEXT:     %2 = sir.shl %1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:16)))
+// CHECK-NEXT:     %3 = sir.or %2 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:16)))
+// CHECK-NEXT:     %4 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
+// CHECK-NEXT:     %5 = sir.malloc %4 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/simple_error_test.ora":6:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/simple_error_test.ora":5:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/errors/simple_error_test.ora":2:1)

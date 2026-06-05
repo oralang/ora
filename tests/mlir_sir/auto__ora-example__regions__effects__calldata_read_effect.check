@@ -1,1 +1,23 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/effects/calldata_read_effect.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/calldata_read_effect.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @testCalldataRead(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":9:29)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x9a8f85e3", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":9:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":9:5)
+// CHECK-NEXT:   func.func @testMultipleCalldataReads(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":14:38), %arg1: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":14:47), %arg2: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":14:56)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256, 0 : i256], ora.abi_param_refinements = ["", "", ""], ora.abi_params = ["uint256", "bool", "address"], ora.param_names = ["x", "y", "addr"], ora.result_input_error_ids = [0 : i256, 0 : i256, 0 : i256], ora.result_input_modes = ["", "", ""], ora.selector = "0xa1ab738a", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":14:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":14:5)
+// CHECK-NEXT:   func.func @testCalldataReadInConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":21:42)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xe49b3d65", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":21:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":21:5)
+// CHECK-NEXT:   func.func @testCalldataReadInLoop(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":28:35)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xb930efd1", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":28:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":28:5)
+// CHECK-NEXT:   func.func @testCalldataReadArithmetic(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":37:39), %arg1: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":37:48)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x68e497ed", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":37:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":37:5)
+// CHECK-NEXT:   func.func @testCalldataForCall(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":42:32)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xa4eea8e6", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":42:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":42:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/regions/effects/calldata_read_effect.ora":7:1)

@@ -1,9 +1,123 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/comptime/generics/generic_nested_calls.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK-LABEL: func.func @clamp_u256
-// CHECK-LABEL: func.func @clamp_u8
-// CHECK-LABEL: func.func @max__u256
-// CHECK-LABEL: func.func @min__u256
-// CHECK-LABEL: func.func @max__u8
-// CHECK-LABEL: func.func @min__u8
+// CHECK: module {
+// CHECK-NEXT:   func.func @clamp_u256(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":12:23)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x5d22f0d7", ora.visibility = "pub"} {
+// CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:39)))
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:44)))
+// CHECK-NEXT:     %0 = sir.icall @max__u256(%arg0, %c10) : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:26)))
+// CHECK-NEXT:     %1 = sir.icall @min__u256(%0, %c100) : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:16)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:9)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":13:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":12:5)
+// CHECK-NEXT:   func.func @max__u256(%arg0: !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:30))), %arg1: !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.gt %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %7 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     %8 = sir.malloc %7 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     %10 = sir.malloc %9 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %9 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:   } loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:5)))
+// CHECK-NEXT:   func.func @min__u256(%arg0: !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:30))), %arg1: !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.lt %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %7 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     %8 = sir.malloc %7 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %9 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     %10 = sir.malloc %9 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %9 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:   } loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:5)))
+// CHECK-NEXT:   func.func @clamp_u8(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":16:21)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint8"], ora.abi_return = "uint8", ora.abi_return_layout = "uint8", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xda0672e1", ora.visibility = "pub"} {
+// CHECK-NEXT:     %c2 = sir.const 2 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:35)))
+// CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:39)))
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":16:21)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":16:21)
+// CHECK-NEXT:     %2 = sir.icall @max__u8(%1, %c2) : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:24)))
+// CHECK-NEXT:     %3 = sir.and %2 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:24)))
+// CHECK-NEXT:     %4 = sir.icall @min__u8(%3, %c10) : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:16)))
+// CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:16)))
+// CHECK-NEXT:     %6 = sir.const 32 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:9)))
+// CHECK-NEXT:     %7 = sir.malloc %6 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:9)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:9)))
+// CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":17:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":16:5)
+// CHECK-NEXT:   func.func @max__u8(%arg0: !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:30))), %arg1: !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:36)))
+// CHECK-NEXT:     %1 = sir.and %arg1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:36)))
+// CHECK-NEXT:     %2 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:30)))
+// CHECK-NEXT:     %3 = sir.gt %2 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %4 = sir.const 1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %5 = sir.and %3 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:13)))
+// CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     %11 = sir.malloc %10 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %10 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":8:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %12 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     %13 = sir.malloc %12 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:     sir.return %13 : !sir.ptr<1>, %12 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":9:9)))
+// CHECK-NEXT:   } loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":7:5)))
+// CHECK-NEXT:   func.func @min__u8(%arg0: !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:30))), %arg1: !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:36)))
+// CHECK-NEXT:     %1 = sir.and %arg1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:36)))
+// CHECK-NEXT:     %2 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:30)))
+// CHECK-NEXT:     %3 = sir.lt %2 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %4 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %5 = sir.and %3 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:13)))
+// CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %10 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     %11 = sir.malloc %10 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     sir.store %11 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:     sir.return %11 : !sir.ptr<1>, %10 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":3:9)))
+// CHECK-NEXT:   ^bb3:  // pred: ^bb2
+// CHECK-NEXT:     %12 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     %13 = sir.malloc %12 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:     sir.return %13 : !sir.ptr<1>, %12 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":4:9)))
+// CHECK-NEXT:   } loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":2:5)))
+// CHECK-NEXT: } loc("{{.*}}/ora-example/comptime/generics/generic_nested_calls.ora":1:1)

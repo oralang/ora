@@ -56,7 +56,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn reportIndeterminateIntegerSignedness(self: *FunctionLowerer, range: source.TextRange) anyerror!bool {
-            try self.parent.emitLoweringError(range, "cannot determine signedness for integer expression", .{});
+            try self.parent.emitLoweringError(
+                range,
+                "cannot determine signedness for integer expression; annotate the expression or one operand with a concrete integer type",
+                .{},
+            );
             return false;
         }
 

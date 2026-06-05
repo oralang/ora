@@ -1,8 +1,117 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/comptime/generic_max.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK-LABEL: func.func @test_comptime_max
-// CHECK-LABEL: func.func @test_runtime_max
-// CHECK-LABEL: func.func @test_runtime_max_u8
-// CHECK-LABEL: func.func @max__u256
-// CHECK-LABEL: func.func @max__u8
+// CHECK: module {
+// CHECK-NEXT:   func.func @test_comptime_max() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0x3853e82e", ora.visibility = "pub"} {
+// CHECK-NEXT:     %c20 = sir.const 20 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generic_max.ora":9:16)))
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generic_max.ora":9:9)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generic_max.ora":9:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c20 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generic_max.ora":9:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generic_max.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generic_max.ora":8:5)
+// CHECK-NEXT:   func.func @test_runtime_max(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":13:29), %arg1: !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":13:38)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x45604cba", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.icall @max__u256(%arg0, %arg1) : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":14:16)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":14:9)))
+// CHECK-NEXT:     %2 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":14:9)))
+// CHECK-NEXT:     sir.store %2 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":14:9)))
+// CHECK-NEXT:     sir.return %2 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":14:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generic_max.ora":13:5)
+// CHECK-NEXT:   func.func @max__u256(%arg0: !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":3:30))), %arg1: !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":3:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %1 = sir.and %c0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.and %c1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.gt %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %alloc_size = sir.const 32 : !sir.u256 loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     %base = sir.malloc %alloc_size : !sir.u256 : !sir.ptr<1> loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %base_0 = sir.malloc %alloc_size : !sir.u256 : !sir.ptr<1> loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.store %base_0 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.store %base_0 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %9 = sir.load %base : !sir.ptr<1> {sir.result_name_0 = "elem0"} : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %12 = sir.iszero %11 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb4, ^bb5 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb4:  // 2 preds: ^bb3, ^bb5
+// CHECK-NEXT:     %14 = sir.load %base_0 : !sir.ptr<1> {sir.result_name_0 = "elem1"} : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %15 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %16 = sir.malloc %15 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.store %16 : !sir.ptr<1>, %14 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.return %16 : !sir.ptr<1>, %15 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb3
+// CHECK-NEXT:     sir.br ^bb4 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   } loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generic_max.ora":3:5)))
+// CHECK-NEXT:   func.func @test_runtime_max_u8(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":18:32), %arg1: !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":18:39)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint8", "uint8"], ora.abi_return = "uint8", ora.abi_return_layout = "uint8", ora.abi_return_words = 1 : i256, ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x76470382", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":18:39)
+// CHECK-NEXT:     %1 = sir.and %arg1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":18:39)
+// CHECK-NEXT:     %2 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generic_max.ora":18:32)
+// CHECK-NEXT:     %3 = sir.icall @max__u8(%2, %1) : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:16)))
+// CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:16)))
+// CHECK-NEXT:     %5 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:9)))
+// CHECK-NEXT:     %6 = sir.malloc %5 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:9)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:9)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":19:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generic_max.ora":18:5)
+// CHECK-NEXT:   func.func @max__u8(%arg0: !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:30))), %arg1: !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:36)))) -> !sir.u256 attributes {ora.param_names = ["a", "b"], ora.visibility = "private"} {
+// CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %1 = sir.and %c0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.and %c1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %3 = sir.const 255 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:36)))
+// CHECK-NEXT:     %4 = sir.and %arg1 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:36)))
+// CHECK-NEXT:     %5 = sir.and %arg0 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:30)))
+// CHECK-NEXT:     %6 = sir.gt %5 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %7 = sir.and %6 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %8 = sir.bitcast %7 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:13)))
+// CHECK-NEXT:     %9 = sir.bitcast %8 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %alloc_size = sir.const 32 : !sir.u256 loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     %base = sir.malloc %alloc_size : !sir.u256 : !sir.ptr<1> loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %base_0 = sir.malloc %alloc_size : !sir.u256 : !sir.ptr<1> loc("alloc"("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9))))
+// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %11 = sir.iszero %10 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.store %base_0 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generic_max.ora":4:22)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.store %base_0 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:     sir.store %base : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generic_max.ora":4:41)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %12 = sir.load %base : !sir.ptr<1> {sir.result_name_0 = "elem0"} : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %13 = sir.bitcast %12 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %14 = sir.bitcast %13 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %15 = sir.iszero %14 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %16 = sir.iszero %15 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.cond_br %16 : !sir.u256, ^bb4, ^bb5 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb4:  // 2 preds: ^bb3, ^bb5
+// CHECK-NEXT:     %17 = sir.load %base_0 : !sir.ptr<1> {sir.result_name_0 = "elem1"} : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %18 = sir.bitcast %17 : !sir.u256 : i8 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %19 = sir.bitcast %18 : i8 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %20 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     %21 = sir.malloc %20 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.store %21 : !sir.ptr<1>, %19 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:     sir.return %21 : !sir.ptr<1>, %20 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   ^bb5:  // pred: ^bb3
+// CHECK-NEXT:     sir.br ^bb4 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generic_max.ora":4:9)))
+// CHECK-NEXT:   } loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/comptime/generic_max.ora":3:5)))
+// CHECK-NEXT: } loc("{{.*}}/ora-example/comptime/generic_max.ora":1:1)

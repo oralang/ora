@@ -1,1 +1,5 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/errors/error_declarations.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/error_declarations.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {sir.error_ids = {DeadlineExpired = 352581112 : i256, InsufficientBalance = 3477574017 : i256, InvalidAddress = 3871614075 : i256, InvalidInput = 3036299187 : i256, TransferFailed = 2428038168 : i256, Unauthorized = 693797313 : i256}, sir.error_selectors = {DeadlineExpired = "0x1503f5f8", InsufficientBalance = "0xcf479181", InvalidAddress = "0xe6c4247b", InvalidInput = "0xb4fa3fb3", TransferFailed = "0x90b8ec18", Unauthorized = "0x295a81c1"}} {
+// CHECK-NEXT: } loc("{{.*}}/ora-example/errors/error_declarations.ora":6:1)

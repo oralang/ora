@@ -1,1 +1,44 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/errors/test_error_union.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/test_error_union.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {sir.error_ids = {InsufficientBalance = 3477574017 : i256, InvalidAddress = 3871614075 : i256}, sir.error_selectors = {InsufficientBalance = "0xcf479181", InvalidAddress = "0xe6c4247b"}} {
+// CHECK-NEXT:   func.func @test1() -> !sir.u256 attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     %c2 = sir.const 2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/test_error_union.ora":9:9)))
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/test_error_union.ora":9:9)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/test_error_union.ora":9:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/test_error_union.ora":9:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/test_error_union.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/test_error_union.ora":8:5)
+// CHECK-NEXT:   func.func @test2() -> !sir.u256 attributes {ora.force_wide_error_union = true, ora.visibility = "private"} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:16)))
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:16)))
+// CHECK-NEXT:     %1 = sir.and %c1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:16)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:16)))
+// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %4 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %5 = sir.and %3 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %6 = sir.const 64 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %7 = sir.malloc %6 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %8 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     %9 = sir.addptr %7 : !sir.ptr<1>, %8 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/test_error_union.ora":14:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/test_error_union.ora":13:5)
+// CHECK-NEXT:   func.func @test3() -> !sir.u256 attributes {ora.force_wide_error_union = true, ora.visibility = "private"} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:16)))
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:16)))
+// CHECK-NEXT:     %1 = sir.and %c1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:16)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:16)))
+// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %4 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %5 = sir.and %3 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %6 = sir.const 64 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %7 = sir.malloc %6 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %8 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     %9 = sir.addptr %7 : !sir.ptr<1>, %8 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     sir.store %9 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/test_error_union.ora":19:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/test_error_union.ora":18:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/errors/test_error_union.ora":6:1)

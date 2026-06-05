@@ -7143,11 +7143,7 @@ const TypeChecker = struct {
         const item_type = self.forIterableItemType(self.expr_types[for_stmt.iterable.index()]);
         self.pattern_types[for_stmt.item_pattern.index()] = LocatedType.unlocated(item_type);
         if (for_stmt.index_pattern) |index_pattern| {
-            self.pattern_types[index_pattern.index()] = LocatedType.unlocated(.{ .integer = .{
-                .bits = 256,
-                .signed = false,
-                .spelling = "u256",
-            } });
+            self.pattern_types[index_pattern.index()] = LocatedType.unlocated(forRangeIndexType());
         }
     }
 
@@ -7156,9 +7152,18 @@ const TypeChecker = struct {
         if (iterable_type.elementType()) |element| return element.*;
         return switch (iterable_type) {
             .bytes, .string => .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } },
-            .integer => .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
+            .integer => iterable_type,
+            .comptime_integer => forRangeIndexType(),
             else => .{ .unknown = {} },
         };
+    }
+
+    fn forRangeIndexType() Type {
+        return .{ .integer = .{
+            .bits = 256,
+            .signed = false,
+            .spelling = "u256",
+        } };
     }
 
     fn constTupleIndex(self: *const TypeChecker, expr_id: ast.ExprId) ?usize {

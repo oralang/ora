@@ -826,6 +826,15 @@ pub fn build(b: *std.Build) void {
     check_query_view_ownership_step.dependOn(&query_view_ownership_cmd.step);
     test_step.dependOn(&query_view_ownership_cmd.step);
 
+    // zig build check-mlir-sir
+    const mlir_sir_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-mlir-checks-sir.sh",
+    });
+    mlir_sir_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_mlir_sir_step = b.step("check-mlir-sir", "Run SIR MLIR FileCheck snapshots");
+    check_mlir_sir_step.dependOn(&mlir_sir_checks_cmd.step);
+
     // zig build check-sir-shift-operand-order
     const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",

@@ -2668,6 +2668,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const loc = self.parent.location(for_stmt.range);
             const is_range_iterable = for_stmt.range_end != null;
+            if (is_range_iterable and !try @This().ensureForRangeItemSignednessResolved(self, for_stmt)) {
+                try self.appendUnsupportedControlPlaceholder("ora.for_placeholder", for_stmt.range);
+                return false;
+            }
             const iterable = try self.lowerExpr(for_stmt.iterable, locals);
             const iterable_type = mlir.oraValueGetType(iterable);
             const has_return = bodyMayReturn(self.parent.file, for_stmt.body);
@@ -2927,6 +2931,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(for_stmt.range, locals);
             }
+            return false;
+        }
+
+        fn ensureForRangeItemSignednessResolved(self: *FunctionLowerer, for_stmt: ast.ForStmt) anyerror!bool {
+            const item_type = self.parent.typecheck.pattern_types[for_stmt.item_pattern.index()].type;
+            const signedness = support.resolvedIntegerSignedness(item_type) catch |err| switch (err) {
+                error.MlirOperationCreationFailed => null,
+                else => return err,
+            };
+            if (signedness != null) return true;
+            switch (support.unwrapRefinementSemaType(item_type)) {
+                .comptime_integer => {},
+                else => return true,
+            }
+
+            const item_range = source.rangeOf(self.parent.file.pattern(for_stmt.item_pattern).*);
+            try self.parent.emitLoweringError(
+                item_range,
+                "cannot determine signedness for for-range item; range bounds must resolve to a concrete integer type",
+                .{},
+            );
             return false;
         }
 

@@ -1,1 +1,8 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/refinements/simple_test.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/refinements/simple_test.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @test() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/simple_test.ora":4:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/simple_test.ora":4:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/refinements/simple_test.ora":3:1)

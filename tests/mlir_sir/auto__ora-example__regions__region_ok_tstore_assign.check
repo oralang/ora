@@ -1,1 +1,18 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/region_ok_tstore_assign.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/region_ok_tstore_assign.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {temp = 0 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT:   func.func @setTemp(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":4:16)) attributes {ora.effect = "writes", ora.param_names = ["x"], ora.visibility = "private", ora.write_slots = ["transient:temp"]} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":5:9)))
+// CHECK-NEXT:     sir.tstore %0 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":5:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":4:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":4:5)
+// CHECK-NEXT:   func.func @getTemp() -> !sir.u256 attributes {ora.effect = "reads", ora.read_slots = ["transient:temp"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":2:5)))
+// CHECK-NEXT:     %1 = sir.tload %0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":2:5)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":9:9)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":9:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":9:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":8:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/regions/region_ok_tstore_assign.ora":1:1)

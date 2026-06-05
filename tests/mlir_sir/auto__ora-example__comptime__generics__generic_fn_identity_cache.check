@@ -1,7 +1,40 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/comptime/generics/generic_fn_identity_cache.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK-LABEL: func.func @roundtrip_u256
-// CHECK-LABEL: func.func @roundtrip_u8
-// CHECK-LABEL: func.func @id__u256
-// CHECK-LABEL: func.func @id__u8
+// CHECK: module {
+// CHECK-NEXT:   func.func @roundtrip_u256(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":6:27)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x550205b3", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.icall @id__u256(%arg0) : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":7:23)))
+// CHECK-NEXT:     %1 = sir.icall @id__u256(%0) : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":8:23)))
+// CHECK-NEXT:     %2 = sir.icall @id__u256(%1) : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":9:16)))
+// CHECK-NEXT:     %3 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":9:9)))
+// CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":9:9)))
+// CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":9:9)))
+// CHECK-NEXT:     sir.return %4 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":6:5)
+// CHECK-NEXT:   func.func @id__u256(%arg0: !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:29)))) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:   } loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:5)))
+// CHECK-NEXT:   func.func @roundtrip_u8(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":12:25)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint8"], ora.abi_return = "uint8", ora.abi_return_layout = "uint8", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x1a8b8f67", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":12:25)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":12:25)
+// CHECK-NEXT:     %2 = sir.icall @id__u8(%1) : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:23)))
+// CHECK-NEXT:     %3 = sir.and %2 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:23)))
+// CHECK-NEXT:     %4 = sir.icall @id__u8(%3) : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:16)))
+// CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:16)))
+// CHECK-NEXT:     %6 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:9)))
+// CHECK-NEXT:     %7 = sir.malloc %6 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:9)))
+// CHECK-NEXT:     sir.store %7 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:9)))
+// CHECK-NEXT:     sir.return %7 : !sir.ptr<1>, %6 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":13:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":12:5)
+// CHECK-NEXT:   func.func @id__u8(%arg0: !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:29)))) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:29)))
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:29)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":3:9)))
+// CHECK-NEXT:   } loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":2:5)))
+// CHECK-NEXT: } loc("{{.*}}/ora-example/comptime/generics/generic_fn_identity_cache.ora":1:1)

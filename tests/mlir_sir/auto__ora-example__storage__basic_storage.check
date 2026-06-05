@@ -1,1 +1,5 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/storage/basic_storage.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/storage/basic_storage.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {active = 1 : ui64, allowances = 7 : ui64, balances = 6 : ui64, counter = 0 : ui64, data = 4 : ui64, history = 8 : ui64, name = 3 : ui64, owner = 2 : ui64, token_name = 5 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT: } loc("{{.*}}/ora-example/storage/basic_storage.ora":6:1)

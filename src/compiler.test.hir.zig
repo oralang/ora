@@ -1319,6 +1319,42 @@ test "compiler lowers integer range for loops with break and continue" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
+test "compiler preserves signed integer range loop item type" {
+    const source_text =
+        \\pub fn sum_signed_range(a: i256, b: i256) -> i256 {
+        \\    var total: i256 = 0;
+        \\    for (a..b) |value, _| {
+        \\        total = total + value;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const for_stmt = ast_file.statement(body.statements[1]).For;
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const item_type = typecheck.pattern_types[for_stmt.item_pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.integer, item_type.kind());
+    try testing.expectEqual(@as(u16, 256), item_type.integer.bits);
+    try testing.expectEqual(true, item_type.integer.signed);
+    try testing.expectEqualStrings("i256", item_type.integer.spelling.?);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
 test "compiler lowers for loops with early return without placeholders" {
     const source_text =
         \\pub fn scan(values: slice[u256], stop_at: u256) -> u256 {
