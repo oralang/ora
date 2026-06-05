@@ -377,6 +377,13 @@ jobs:
           zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
+      - name: Run OraToSIR de-bloat gate
+        shell: bash
+        run: |
+          echo "🧪 Running OraToSIR de-bloat gate..."
+          zig build gate-oratosir-debloat --summary all
+          echo "✅ OraToSIR de-bloat gate completed"
+
       - name: Run SMT modifies corpus
         shell: bash
         run: |

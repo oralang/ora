@@ -1,0 +1,211 @@
+{
+  "version": 1,
+  "description": "By-construction coverage map for OraToSIR de-bloat. Every conversion pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden.",
+  "ci_commands": [
+    "zig build check-oratosir-coverage",
+    "zig build check-mlir-sir",
+    "zig build test-conformance",
+    "zig build test-evm",
+    "zig build gate-oratosir-debloat"
+  ],
+  "patterns": [
+    {
+      "id": "foundation.u256_boundary_and_bitcasts",
+      "tier": "T0",
+      "area": "LoweringHelpers",
+      "conversion": "U256 boundary coercion, redundant bitcast cleanup, SIR operand/result carrier normalization",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkAbiRoundtripProperty",
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+      ]
+    },
+    {
+      "id": "arithmetic.unsigned_wrapping",
+      "tier": "T1",
+      "area": "Arithmetic",
+      "conversion": "Unsigned wrapping add/sub/mul and word-width arithmetic lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__arithmetic_test.check"
+      ]
+    },
+    {
+      "id": "arithmetic.signed_narrow",
+      "tier": "T1",
+      "area": "Arithmetic",
+      "conversion": "Signed narrow div/rem/compare/shr, sign extension, and truncation-preserving returns",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty",
+        "tests/conformance/storage_narrow_integer_mapping.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check",
+        "tests/mlir_sir/signed_arithmetic_lowering.check"
+      ]
+    },
+    {
+      "id": "abi.static_and_dynamic_values",
+      "tier": "T4",
+      "area": "AbiDecode/Encode",
+      "conversion": "Static scalar ABI words plus dynamic array and tuple head/tail encoding",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/root.zig#conformance arg encoder writes static ABI words",
+        "tests/conformance/root.zig#conformance arg encoder writes dynamic arrays and tuple aggregates",
+        "tests/conformance/properties.zig#checkAbiRoundtripProperty",
+        "tests/conformance/storage_dynamic_array.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+      ]
+    },
+    {
+      "id": "storage.scalar_map_nested",
+      "tier": "T0",
+      "area": "Storage",
+      "conversion": "Scalar storage, map keys, nested mappings, and storage slot derivation",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/storage_mapping.spec.toml",
+        "tests/conformance/storage_nested_mapping.spec.toml",
+        "tests/conformance/storage_triple_nested_mapping.spec.toml",
+        "tests/conformance/properties.zig#checkStorageProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check",
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_1.check"
+      ]
+    },
+    {
+      "id": "storage.struct_bitfield",
+      "tier": "T0",
+      "area": "Storage",
+      "conversion": "Struct, struct-in-map, bitfield, custom bitfield, and fixed-bytes map storage lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/storage_struct.spec.toml",
+        "tests/conformance/storage_map_struct.spec.toml",
+        "tests/conformance/storage_bitfield.spec.toml",
+        "tests/conformance/storage_custom_bitfield.spec.toml",
+        "tests/conformance/storage_map_bitfield.spec.toml",
+        "tests/conformance/storage_fixed_bytes_mapping.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__structs__basic_structs.check",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+      ]
+    },
+    {
+      "id": "memory.regions_memref",
+      "tier": "T0",
+      "area": "MemRef",
+      "conversion": "Memory, storage, tstore, calldata region coercions and MemRef-style pointer lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkStorageProperty",
+        "tests/conformance/storage_dynamic_array.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__memory__basic_memory.check",
+        "tests/mlir_sir/auto__ora-example__regions__coercions__implicit_storage_to_stack.check",
+        "tests/mlir_sir/auto__ora-example__regions__region_ok_memory_to_storage.check"
+      ]
+    },
+    {
+      "id": "evm.nullary_environment",
+      "tier": "T2",
+      "area": "EVM",
+      "conversion": "Nullary environment operations such as caller/sender and block context",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/environment_log.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check"
+      ]
+    },
+    {
+      "id": "logs.events",
+      "tier": "T2",
+      "area": "Logs",
+      "conversion": "Event/log declaration and emission lowering, including zero-topic and indexed forms",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/environment_log.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check",
+        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check"
+      ]
+    },
+    {
+      "id": "control_flow.loops_switch",
+      "tier": "T3",
+      "area": "ControlFlow",
+      "conversion": "If/loop/break/continue/switch expression and case lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty",
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__control_flow__basic_control_flow.check",
+        "tests/mlir_sir/auto__ora-example__control_flow__break_continue.check",
+        "tests/mlir_sir/auto__ora-example__switch__switch_test.check"
+      ]
+    },
+    {
+      "id": "control_flow.error_union",
+      "tier": "T3",
+      "area": "ControlFlow",
+      "conversion": "Error-union pack/split/tag propagation, try/catch, and terminator normalization",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__errors__error_union_encoding.check",
+        "tests/mlir_sir/auto__ora-example__errors__try_catch.check"
+      ]
+    },
+    {
+      "id": "adt.enum_carrier",
+      "tier": "T3",
+      "area": "AdtCarrier",
+      "conversion": "Enum/ADT carrier construction, tag extraction, payload projection, and switch use",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__enums__basic_enums.check",
+        "tests/mlir_sir/auto__ora-example__enums__enum_usage_test.check"
+      ]
+    },
+    {
+      "id": "naming.attributes_and_symbols",
+      "tier": "T0",
+      "area": "Naming",
+      "conversion": "Function names, selectors, ABI attributes, visibility, and generated symbol stability",
+      "high_churn": false,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/runner.zig#AbiDoc.findFunction"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check"
+      ]
+    }
+  ]
+}

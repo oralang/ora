@@ -1,0 +1,22 @@
+[deploy]
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+
+[[call]]
+fn = "caller()"
+caller = "0x2000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = { address = "0x2000000000000000000000000000000000000000" }
+
+[[call]]
+fn = "ping()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = {}
+
+[[call.log]]
+topics = []
+data = "0x"

@@ -516,6 +516,17 @@ pub fn build(b: *std.Build) void {
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
 
+    const evm_tests_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build",
+        "unit",
+        "--summary",
+        "all",
+    });
+    evm_tests_cmd.setCwd(b.path("lib/evm"));
+    const test_evm_step = b.step("test-evm", "Run lib/evm unit tests");
+    test_evm_step.dependOn(&evm_tests_cmd.step);
+
     // lexer tests
     const lexer_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer.test.zig"),
@@ -874,6 +885,16 @@ pub fn build(b: *std.Build) void {
     check_query_view_ownership_step.dependOn(&query_view_ownership_cmd.step);
     test_step.dependOn(&query_view_ownership_cmd.step);
 
+    // zig build check-oratosir-coverage
+    const oratosir_coverage_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-oratosir-coverage.py",
+        "tests/oratosir_debloat_coverage.json",
+    });
+    const check_oratosir_coverage_step = b.step("check-oratosir-coverage", "Validate OraToSIR de-bloat coverage manifest");
+    check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
+    test_step.dependOn(&oratosir_coverage_cmd.step);
+
     // zig build check-mlir-sir
     const mlir_sir_checks_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
@@ -882,6 +903,13 @@ pub fn build(b: *std.Build) void {
     mlir_sir_checks_cmd.step.dependOn(b.getInstallStep());
     const check_mlir_sir_step = b.step("check-mlir-sir", "Run SIR MLIR FileCheck snapshots");
     check_mlir_sir_step.dependOn(&mlir_sir_checks_cmd.step);
+
+    // zig build gate-oratosir-debloat
+    const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR de-bloat merge gate");
+    oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
+    oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
+    oratosir_debloat_gate_step.dependOn(test_conformance_step);
+    oratosir_debloat_gate_step.dependOn(test_evm_step);
 
     // zig build check-sir-shift-operand-order
     const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
