@@ -62,6 +62,7 @@
         "tests/conformance/root.zig#conformance arg encoder writes static ABI words",
         "tests/conformance/root.zig#conformance arg encoder writes dynamic arrays and tuple aggregates",
         "tests/conformance/properties.zig#checkAbiRoundtripProperty",
+        "tests/conformance/external_return_decode.spec.toml",
         "tests/conformance/storage_dynamic_array.spec.toml"
       ],
       "sir_goldens": [

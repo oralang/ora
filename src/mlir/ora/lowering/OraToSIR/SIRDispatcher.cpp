@@ -853,6 +853,43 @@ namespace mlir
                 return total;
             }
 
+            struct AbiReturnBuffer
+            {
+                Value ptr;
+                Value size;
+            };
+
+            static AbiReturnBuffer materializeSingleDynamicAbiReturn(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtrWord,
+                bool byteLengthPayload)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = IntegerType::get(ctx, 64, IntegerType::Unsigned);
+                Value wordSize = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value twoWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 64));
+                Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
+                Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                Value payloadBytes = byteLengthPayload
+                                         ? length
+                                         : builder.create<sir::MulOp>(loc, u256Type, length, wordSize).getResult();
+                Value paddedPayloadBytes = byteLengthPayload
+                                               ? lowering::ceil32(builder, loc, payloadBytes)
+                                               : payloadBytes;
+                Value size = builder.create<sir::AddOp>(loc, u256Type, twoWords, paddedPayloadBytes);
+                Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                builder.create<sir::StoreOp>(loc, retPtr, wordSize);
+                Value lengthSlot = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, wordSize);
+                builder.create<sir::StoreOp>(loc, lengthSlot, length);
+                Value sourcePayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, wordSize);
+                Value destPayload = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, twoWords);
+                builder.create<sir::MCopyOp>(loc, destPayload, sourcePayload, payloadBytes);
+                return AbiReturnBuffer{retPtr, size};
+            }
+
             struct PubFuncInfo
             {
                 func::FuncOp func;
@@ -3633,8 +3670,24 @@ namespace mlir
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
-                            Value ptr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, ptr_u);
-                            builder.create<sir::ReturnOp>(caseReturnLoc, ptr, len);
+                            if (info.hasAbiReturn &&
+                                (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String ||
+                                 info.abiReturn.supportsDynamicArray()))
+                            {
+                                (void)len;
+                                AbiReturnBuffer encoded = materializeSingleDynamicAbiReturn(
+                                    builder,
+                                    caseReturnLoc,
+                                    ctx,
+                                    ptr_u,
+                                    info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String);
+                                builder.create<sir::ReturnOp>(caseReturnLoc, encoded.ptr, encoded.size);
+                            }
+                            else
+                            {
+                                Value ptr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, ptr_u);
+                                builder.create<sir::ReturnOp>(caseReturnLoc, ptr, len);
+                            }
                         }
                         else if (info.retCount == 1)
                         {

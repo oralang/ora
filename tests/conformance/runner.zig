@@ -19,7 +19,9 @@ pub const PropertyRuntime = struct {
     pub fn call(self: *PropertyRuntime, signature: []const u8, args: []const types.ArgValue) !types.Evm.CallResult {
         const function_abi = try self.abi.findFunction(signature);
         defer function_abi.deinit(self.allocator);
-        const encoded_args = try abi.encodeArgs(self.allocator, function_abi.inputs, args);
+        const resolved_args = try resolveContractAddressArgs(self.allocator, function_abi.inputs, args, self.contract_address);
+        defer deinitResolvedContractAddressArgs(self.allocator, args, resolved_args);
+        const encoded_args = try abi.encodeArgs(self.allocator, function_abi.inputs, resolved_args);
         defer self.allocator.free(encoded_args);
 
         var calldata = std.ArrayList(u8){};
@@ -262,7 +264,10 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
     for (spec.calls) |call| {
         const function_abi = try doc.findFunction(call.@"fn");
         defer function_abi.deinit(allocator);
-        const encoded_args = try abi.encodeArgs(allocator, function_abi.inputs, call.args);
+        const resolved_args = try resolveContractAddressArgs(allocator, function_abi.inputs, call.args, contract_address);
+        defer deinitResolvedContractAddressArgs(allocator, call.args, resolved_args);
+        const encoded_args = try abi.encodeArgs(allocator, function_abi.inputs, resolved_args);
+        defer allocator.free(encoded_args);
 
         var calldata = std.ArrayList(u8){};
         defer calldata.deinit(allocator);
@@ -312,6 +317,63 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
             try testing.expectEqual(assertion.value, host.getStorageSlot(contract_address, assertion.slot));
         }
     }
+}
+
+fn resolveContractAddressArgs(
+    allocator: std.mem.Allocator,
+    wires: []const []const u8,
+    args: []const types.ArgValue,
+    contract_address: types.Address,
+) ![]types.ArgValue {
+    if (wires.len != args.len) return error.ArgumentCountMismatch;
+    const resolved = try allocator.alloc(types.ArgValue, args.len);
+    var initialized: usize = 0;
+    errdefer {
+        freeResolvedContractAddressLiterals(allocator, args[0..initialized], resolved[0..initialized]);
+        allocator.free(resolved);
+    }
+    for (args, 0..) |arg, i| {
+        resolved[i] = switch (arg) {
+            .literal => |literal| if (std.mem.eql(u8, literal, "$contract")) blk: {
+                if (!std.mem.eql(u8, wires[i], "address")) return error.UnsupportedArgType;
+                break :blk .{ .literal = try allocAddressLiteral(allocator, contract_address) };
+            } else arg,
+            .boolean => arg,
+        };
+        initialized += 1;
+    }
+    return resolved;
+}
+
+fn deinitResolvedContractAddressArgs(allocator: std.mem.Allocator, original: []const types.ArgValue, resolved: []const types.ArgValue) void {
+    freeResolvedContractAddressLiterals(allocator, original, resolved);
+    allocator.free(resolved);
+}
+
+fn freeResolvedContractAddressLiterals(allocator: std.mem.Allocator, original: []const types.ArgValue, resolved: []const types.ArgValue) void {
+    for (original, resolved) |original_arg, resolved_arg| {
+        const original_literal = switch (original_arg) {
+            .literal => |literal| literal,
+            .boolean => continue,
+        };
+        if (!std.mem.eql(u8, original_literal, "$contract")) continue;
+        switch (resolved_arg) {
+            .literal => |literal| allocator.free(@constCast(literal)),
+            .boolean => {},
+        }
+    }
+}
+
+fn allocAddressLiteral(allocator: std.mem.Allocator, address: types.Address) ![]u8 {
+    const hex_chars = "0123456789abcdef";
+    const out = try allocator.alloc(u8, 42);
+    out[0] = '0';
+    out[1] = 'x';
+    for (address.bytes, 0..) |byte, i| {
+        out[2 + i * 2] = hex_chars[byte >> 4];
+        out[3 + i * 2] = hex_chars[byte & 0x0f];
+    }
+    return out;
 }
 
 pub fn compileAndRunPropertySource(

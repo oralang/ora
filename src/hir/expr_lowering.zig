@@ -823,8 +823,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (result_kind == .string or result_kind == .bytes) {
                     try @This().emitConcatBoundsAssert(self, lhs, rhs, binary.range);
                     const op = mlir.oraConcatOpCreate(self.parent.context, loc, lhs, rhs, result_type);
-                    if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, binary.range);
-                    return appendValueOp(self.block, op);
+                    return try @This().expectValueOp(self, op, binary.range, "ora.concat");
                 }
             }
 
@@ -1136,7 +1135,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (imported_target != null) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.imported_call"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
@@ -2176,7 +2175,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
@@ -2311,7 +2310,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
                 return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
@@ -2562,8 +2561,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     operands.len,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.keccak256");
             }
             if (std.mem.eql(u8, builtin.name, "abiEncode")) {
                 return try @This().lowerAbiEncodeBuiltin(self, expr_id, builtin, locals);
@@ -2583,8 +2581,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     rhs,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.concat");
             }
             if (builtin.args.len == 3 and std.mem.eql(u8, builtin.name, "slice")) {
                 const value = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
@@ -2604,8 +2601,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     length,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.slice");
             }
             try self.parent.emitLoweringError(
                 builtin.range,
@@ -2757,15 +2753,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
                 mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs);
-            if (mlir.oraOperationIsNull(div_op)) return self.defaultValue(result_type, builtin.range);
-            const quotient = appendValueOp(self.block, div_op);
+            const quotient = try @This().expectValueOp(self, div_op, builtin.range, "arith.div");
 
             const rem_op = if (is_signed)
                 mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
                 mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs);
-            if (mlir.oraOperationIsNull(rem_op)) return self.defaultValue(result_type, builtin.range);
-            const remainder = appendValueOp(self.block, rem_op);
+            const remainder = try @This().expectValueOp(self, rem_op, builtin.range, "arith.rem");
 
             if (std.mem.eql(u8, builtin.name, "divmod")) {
                 const tuple_op = mlir.oraTupleCreateOpCreate(
@@ -2775,8 +2769,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     2,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(tuple_op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, tuple_op);
+                return try @This().expectValueOp(self, tuple_op, builtin.range, "ora.tuple.create");
             }
 
             if (std.mem.eql(u8, builtin.name, "divTrunc")) return quotient;
@@ -2786,7 +2779,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (std.mem.eql(u8, builtin.name, "divExact")) {
                 const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, appendValueOp(self.block, self.createCompareOp(loc, "eq", remainder, zero)), strRef("exact division requires zero remainder"));
-                if (mlir.oraOperationIsNull(assert_op)) return self.defaultValue(result_type, builtin.range);
+                _ = try @This().expectOperation(self, assert_op, builtin.range, "ora.assert");
                 appendOp(self.block, assert_op);
                 return quotient;
             }
@@ -3174,8 +3167,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "negWithOverflow")) {
                 const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 0));
                 const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, lhs);
-                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, sub_op);
+                value = try @This().expectValueOp(self, sub_op, builtin.range, "arith.sub");
                 if (is_signed) {
                     const bit_width: i64 = @intCast(mlir.oraIntegerTypeGetWidth(lhs_type) - 1);
                     const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 1));
@@ -3194,24 +3186,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
             if (std.mem.eql(u8, builtin.name, "addWithOverflow")) {
                 const add_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(add_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, add_op);
+                value = try @This().expectValueOp(self, add_op, builtin.range, "arith.add");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedAddOverflow(self, value, lhs, rhs, loc)
                 else
                     appendValueOp(self.block, self.createCompareOp(loc, "ult", value, lhs));
             } else if (std.mem.eql(u8, builtin.name, "subWithOverflow")) {
                 const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, sub_op);
+                value = try @This().expectValueOp(self, sub_op, builtin.range, "arith.sub");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedSubOverflow(self, value, lhs, rhs, loc)
                 else
                     appendValueOp(self.block, self.createCompareOp(loc, "ult", lhs, rhs));
             } else if (std.mem.eql(u8, builtin.name, "mulWithOverflow")) {
                 const mul_op = mlir.oraArithMulIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(mul_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, mul_op);
+                value = try @This().expectValueOp(self, mul_op, builtin.range, "arith.mul");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedMulOverflow(self, value, lhs, rhs, lhs_type, loc)
                 else
@@ -3222,8 +3211,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 overflow_flag = power.overflow;
             } else if (std.mem.eql(u8, builtin.name, "shlWithOverflow")) {
                 const shl_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(shl_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, shl_op);
+                value = try @This().expectValueOp(self, shl_op, builtin.range, "arith.shl");
                 const shr_op = if (is_signed)
                     mlir.oraArithShrSIOpCreate(self.parent.context, loc, value, rhs)
                 else
@@ -3236,16 +3224,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     mlir.oraArithShrSIOpCreate(self.parent.context, loc, lhs, rhs)
                 else
                     mlir.oraArithShrUIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(shr_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, shr_op);
+                value = try @This().expectValueOp(self, shr_op, builtin.range, "arith.shr");
                 overflow_flag = try @This().makeFalse(self, loc);
             } else if (std.mem.eql(u8, builtin.name, "divWithOverflow") or std.mem.eql(u8, builtin.name, "modWithOverflow")) {
                 const arith_op = if (std.mem.eql(u8, builtin.name, "divWithOverflow"))
                     (if (is_signed) mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs))
                 else
                     (if (is_signed) mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs));
-                if (mlir.oraOperationIsNull(arith_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, arith_op);
+                value = try @This().expectValueOp(self, arith_op, builtin.range, "arith.divrem");
                 overflow_flag = try @This().makeFalse(self, loc);
             } else {
                 return error.MlirOperationCreationFailed;
@@ -4214,6 +4200,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 0,
                 false,
             );
+        }
+
+        fn expectOperation(self: *FunctionLowerer, op: mlir.MlirOperation, range: source.TextRange, op_name: []const u8) anyerror!mlir.MlirOperation {
+            if (!mlir.oraOperationIsNull(op)) return op;
+            try self.parent.emitLoweringError(
+                range,
+                "failed to create MLIR operation '{s}'",
+                .{op_name},
+            );
+            return error.MlirOperationCreationFailed;
+        }
+
+        fn expectValueOp(self: *FunctionLowerer, op: mlir.MlirOperation, range: source.TextRange, op_name: []const u8) anyerror!mlir.MlirValue {
+            return appendValueOp(self.block, try @This().expectOperation(self, op, range, op_name));
         }
 
         pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
