@@ -6314,6 +6314,42 @@ test "compiler runtime static ABI materializer matches comptime abiEncode and ca
     try expectRuntimeAbiPayloadMatchesComptimeAndCast(refinement_comptime_source, refinement_runtime_source, "probe", "expected", "0000000000000000000000000000000000000000000000000000000000000005");
 }
 
+test "compiler lowers source runtime abiEncode builtin instead of empty bytes default" {
+    const param_source =
+        \\pub fn encode(value: u256) -> bytes {
+        \\    return @abiEncode(value);
+        \\}
+    ;
+    const param_hir = try renderOraMlirForSource(param_source);
+    defer testing.allocator.free(param_hir);
+    try testing.expect(std.mem.containsAtLeast(u8, param_hir, 1, "ora.abi_encode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, param_hir, 1, "ora.bytes.constant \"0x\""));
+
+    const const_source =
+        \\pub fn encode() -> bytes {
+        \\    let value: u256 = 5;
+        \\    return @abiEncode(value);
+        \\}
+    ;
+    var compilation = try compileText(const_source);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const expected = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000005";
+    const payload = try extractRuntimeReturnBytesFromSir(rendered, "encode", try expectedHexByteLen(expected));
+    defer testing.allocator.free(payload);
+    try expectHexBytes(expected, payload);
+}
+
 test "compiler plain runtime static ABI encode op matches cast" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);

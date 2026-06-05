@@ -2565,6 +2565,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
                 return appendValueOp(self.block, op);
             }
+            if (std.mem.eql(u8, builtin.name, "abiEncode")) {
+                return try @This().lowerAbiEncodeBuiltin(self, expr_id, builtin, locals);
+            }
             if ((std.mem.eql(u8, builtin.name, "abiDecode") or std.mem.eql(u8, builtin.name, "abiDecodePermissive")) and builtin.args.len > 0) {
                 return try @This().lowerAbiDecodeBuiltin(self, expr_id, builtin, locals);
             }
@@ -2605,6 +2608,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, op);
             }
             return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
+        }
+
+        fn lowerAbiEncodeBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (builtin.args.len != 1) return error.MlirOperationCreationFailed;
+            const arg_id = builtin.args[0];
+            const arg_value = try self.lowerExpr(arg_id, locals);
+            const arg_type = self.parent.typecheck.exprType(arg_id);
+            var param_types = [_]sema.Type{arg_type};
+            var operands = [_]mlir.MlirValue{arg_value};
+            const encode_op = try abi_runtime_encoder.createAbiEncodeOp(
+                self.parent.allocator,
+                self.parent.context,
+                self.parent.location(builtin.range),
+                @This().layoutContext(self),
+                &param_types,
+                &operands,
+                self.parent.lowerExprType(expr_id),
+            );
+            if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, encode_op);
         }
 
         fn lowerAbiDecodeBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {

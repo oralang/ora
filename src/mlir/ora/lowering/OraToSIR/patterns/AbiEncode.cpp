@@ -1035,7 +1035,17 @@ namespace
         Value totalSize = selectorBytes == 0
                               ? payloadSize
                               : addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), selectorBytes), payloadSize);
-        Value basePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, totalSize);
+        const bool materializeBytesValue = llvm::isa<ora::BytesType, ora::StringType>(op.getResult().getType());
+        Value allocationSize = materializeBytesValue
+                                   ? addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), 32), totalSize)
+                                   : totalSize;
+        Value basePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, allocationSize);
+        Value payloadPtr = basePtr;
+        if (materializeBytesValue)
+        {
+            rewriter.create<sir::StoreOp>(op.getLoc(), basePtr, totalSize);
+            payloadPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, basePtr, constU256(rewriter, op.getLoc(), 32));
+        }
 
         if (selectorAttr)
         {
@@ -1045,13 +1055,13 @@ namespace
             // The selector occupies the high 4 bytes of this word. The first
             // argument store starts at byte 4 and intentionally overwrites the
             // zero padding from this selector word.
-            rewriter.create<sir::StoreOp>(op.getLoc(), basePtr, selectorValue);
+            rewriter.create<sir::StoreOp>(op.getLoc(), payloadPtr, selectorValue);
         }
 
-        if (failed(emitAbiEncoding(rewriter, op.getLoc(), op.getOperation(), root, adaptor.getOperands(), basePtr, constU256(rewriter, op.getLoc(), selectorBytes), sizeCache)))
+        if (failed(emitAbiEncoding(rewriter, op.getLoc(), op.getOperation(), root, adaptor.getOperands(), payloadPtr, constU256(rewriter, op.getLoc(), selectorBytes), sizeCache)))
             return rewriter.notifyMatchFailure(op, "unable to materialize ABI layout");
 
-        Value result = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, basePtr);
+        Value result = materializeBytesValue ? basePtr : rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, basePtr).getResult();
         rewriter.replaceOp(op, result);
         return success();
     }

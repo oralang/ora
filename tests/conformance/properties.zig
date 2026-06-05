@@ -41,6 +41,7 @@ fn expectFixedBytesWord(actual: []const u8, expected: []const u8) !void {
 const PropertyFault = enum {
     none,
     abi,
+    source_abi_encode,
     arithmetic,
     storage,
     error_union,
@@ -57,6 +58,46 @@ const property_source =
     \\    pub fn id_address(x: address) -> address { return x; }
     \\    pub fn id_bool(x: bool) -> bool { return x; }
     \\    pub fn id_bytes4(x: bytes4) -> bytes4 { return x; }
+    \\
+    \\    pub fn source_abi_roundtrip_u256(x: u256) -> u256 {
+    \\        let decoded = @abiDecode(u256, @abiEncode(x));
+    \\        return match (decoded) {
+    \\            Ok(value) => value,
+    \\            Err(_) => 0,
+    \\        };
+    \\    }
+    \\
+    \\    pub fn source_abi_roundtrip_i16(x: i16) -> i16 {
+    \\        let decoded = @abiDecode(i16, @abiEncode(x));
+    \\        return match (decoded) {
+    \\            Ok(value) => value,
+    \\            Err(_) => 0,
+    \\        };
+    \\    }
+    \\
+    \\    pub fn source_abi_roundtrip_address(x: address) -> address {
+    \\        let decoded = @abiDecode(address, @abiEncode(x));
+    \\        return match (decoded) {
+    \\            Ok(value) => value,
+    \\            Err(_) => 0x0000000000000000000000000000000000000000,
+    \\        };
+    \\    }
+    \\
+    \\    pub fn source_abi_roundtrip_bool(x: bool) -> bool {
+    \\        let decoded = @abiDecode(bool, @abiEncode(x));
+    \\        return match (decoded) {
+    \\            Ok(value) => value,
+    \\            Err(_) => false,
+    \\        };
+    \\    }
+    \\
+    \\    pub fn source_abi_roundtrip_bytes4(x: bytes4) -> bytes4 {
+    \\        let decoded = @abiDecode(bytes4, @abiEncode(x));
+    \\        return match (decoded) {
+    \\            Ok(value) => value,
+    \\            Err(_) => hex"00000000",
+    \\        };
+    \\    }
     \\
     \\    pub fn sum_slice(values: slice[u256]) -> u256 {
     \\        var total: u256 = 0;
@@ -128,6 +169,33 @@ fn checkAbiRoundtripProperty(runtime: *runner.PropertyRuntime, fault: PropertyFa
     const slice_result = try runtime.call("sum_slice(uint256[])", &slice_args);
     try testing.expect(slice_result.success);
     try expectWord(slice_result.output, if (fault == .abi) 25 else 26);
+}
+
+fn checkSourceAbiEncodeRoundtripProperty(runtime: *runner.PropertyRuntime, fault: PropertyFault) !void {
+    const u256_args = [_]types.ArgValue{.{ .literal = "340282366920938463463374607431768211455" }};
+    const u256_result = try runtime.call("source_abi_roundtrip_u256(uint256)", &u256_args);
+    try testing.expect(u256_result.success);
+    try expectWord(u256_result.output, if (fault == .source_abi_encode) 1 else 340282366920938463463374607431768211455);
+
+    const i16_args = [_]types.ArgValue{.{ .literal = "-12345" }};
+    const i16_result = try runtime.call("source_abi_roundtrip_i16(int16)", &i16_args);
+    try testing.expect(i16_result.success);
+    try expectSignedWord(i16_result.output, 16, if (fault == .source_abi_encode) -12344 else -12345);
+
+    const address_args = [_]types.ArgValue{.{ .literal = PROPERTY_ADDRESS_A }};
+    const address_result = try runtime.call("source_abi_roundtrip_address(address)", &address_args);
+    try testing.expect(address_result.success);
+    try expectAddressWord(address_result.output, if (fault == .source_abi_encode) PROPERTY_CALLER else PROPERTY_ADDRESS_A);
+
+    const bool_args = [_]types.ArgValue{.{ .boolean = true }};
+    const bool_result = try runtime.call("source_abi_roundtrip_bool(bool)", &bool_args);
+    try testing.expect(bool_result.success);
+    try expectBoolWord(bool_result.output, fault != .source_abi_encode);
+
+    const bytes_args = [_]types.ArgValue{.{ .literal = "0xabcdef12" }};
+    const bytes_result = try runtime.call("source_abi_roundtrip_bytes4(bytes4)", &bytes_args);
+    try testing.expect(bytes_result.success);
+    try expectFixedBytesWord(bytes_result.output, if (fault == .source_abi_encode) "0xabcdef13" else "0xabcdef12");
 }
 
 fn checkArithmeticProperty(runtime: *runner.PropertyRuntime, fault: PropertyFault) !void {
@@ -210,6 +278,9 @@ fn checkErrorUnionProperty(runtime: *runner.PropertyRuntime, fault: PropertyFaul
 fn runPropertyChecks(runtime: *runner.PropertyRuntime) !void {
     try checkAbiRoundtripProperty(runtime, .none);
     try testing.expectError(error.PropertyMismatch, checkAbiRoundtripProperty(runtime, .abi));
+
+    try checkSourceAbiEncodeRoundtripProperty(runtime, .none);
+    try testing.expectError(error.PropertyMismatch, checkSourceAbiEncodeRoundtripProperty(runtime, .source_abi_encode));
 
     try checkArithmeticProperty(runtime, .none);
     try testing.expectError(error.PropertyMismatch, checkArithmeticProperty(runtime, .arithmetic));
