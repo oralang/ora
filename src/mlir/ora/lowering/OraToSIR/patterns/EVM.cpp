@@ -8,88 +8,53 @@
 using namespace mlir;
 using namespace mlir::ora;
 
+namespace
+{
+template <typename SirOp>
+LogicalResult lowerEvmNullary(Operation *op, ConversionPatternRewriter &rewriter)
+{
+    auto loc = op->getLoc();
+    auto resTy = sir::U256Type::get(rewriter.getContext());
+    auto newOp = rewriter.create<SirOp>(loc, resTy);
+    rewriter.replaceOp(op, newOp.getResult());
+    return success();
+}
+
+using EvmNullaryLoweringFn = LogicalResult (*)(Operation *, ConversionPatternRewriter &);
+
+struct EvmNullaryLowering
+{
+    StringRef name;
+    EvmNullaryLoweringFn lower;
+};
+
+static const EvmNullaryLowering kEvmNullaryLowerings[] = {
+    {"ora.evm.origin", &lowerEvmNullary<sir::OriginOp>},
+    {"ora.evm.caller", &lowerEvmNullary<sir::CallerOp>},
+    {"ora.evm.gasprice", &lowerEvmNullary<sir::GasPriceOp>},
+    {"ora.evm.callvalue", &lowerEvmNullary<sir::CallValueOp>},
+    {"ora.evm.gas", &lowerEvmNullary<sir::GasOp>},
+    {"ora.evm.timestamp", &lowerEvmNullary<sir::TimestampOp>},
+    {"ora.evm.number", &lowerEvmNullary<sir::NumberOp>},
+    {"ora.evm.coinbase", &lowerEvmNullary<sir::CoinbaseOp>},
+    {"ora.evm.prevrandao", &lowerEvmNullary<sir::DifficultyOp>},
+    {"ora.evm.difficulty", &lowerEvmNullary<sir::DifficultyOp>},
+    {"ora.evm.gaslimit", &lowerEvmNullary<sir::GasLimitOp>},
+    {"ora.evm.chainid", &lowerEvmNullary<sir::ChainIdOp>},
+    {"ora.evm.basefee", &lowerEvmNullary<sir::BaseFeeOp>},
+};
+} // namespace
+
 static LogicalResult lowerEvmOp(Operation *op, ConversionPatternRewriter &rewriter)
 {
     auto name = op->getName().getStringRef();
-    auto loc = op->getLoc();
 
     if (!name.starts_with("ora.evm."))
         return failure();
 
-    auto resTy = sir::U256Type::get(rewriter.getContext());
-
-    if (name == "ora.evm.origin")
-    {
-        auto newOp = rewriter.create<sir::OriginOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.caller")
-    {
-        auto newOp = rewriter.create<sir::CallerOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.gasprice")
-    {
-        auto newOp = rewriter.create<sir::GasPriceOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.callvalue")
-    {
-        auto newOp = rewriter.create<sir::CallValueOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.gas")
-    {
-        auto newOp = rewriter.create<sir::GasOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.timestamp")
-    {
-        auto newOp = rewriter.create<sir::TimestampOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.number")
-    {
-        auto newOp = rewriter.create<sir::NumberOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.coinbase")
-    {
-        auto newOp = rewriter.create<sir::CoinbaseOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.prevrandao" || name == "ora.evm.difficulty")
-    {
-        auto newOp = rewriter.create<sir::DifficultyOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.gaslimit")
-    {
-        auto newOp = rewriter.create<sir::GasLimitOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.chainid")
-    {
-        auto newOp = rewriter.create<sir::ChainIdOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
-    if (name == "ora.evm.basefee")
-    {
-        auto newOp = rewriter.create<sir::BaseFeeOp>(loc, resTy);
-        rewriter.replaceOp(op, newOp.getResult());
-        return success();
-    }
+    for (const auto &entry : kEvmNullaryLowerings)
+        if (name == entry.name)
+            return entry.lower(op, rewriter);
 
     return failure();
 }

@@ -267,6 +267,56 @@ namespace
         return false;
     }
 
+    static Value coerceStructBasePtr(Location loc, PatternRewriter &rewriter, Value basePtr, bool fallbackBitcast)
+    {
+        auto *ctx = rewriter.getContext();
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+        if (llvm::isa<sir::U256Type>(basePtr.getType()))
+        {
+            basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+        }
+        else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        {
+            if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (castOp.getNumOperands() == 1)
+                {
+                    Value src = castOp.getOperand(0);
+                    if (llvm::isa<sir::PtrType>(src.getType()))
+                    {
+                        basePtr = src;
+                    }
+                    else if (llvm::isa<sir::U256Type>(src.getType()))
+                    {
+                        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
+                    }
+                }
+            }
+        }
+
+        if (fallbackBitcast && !llvm::isa<sir::PtrType>(basePtr.getType()))
+        {
+            basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+        }
+
+        return basePtr;
+    }
+
+    static Value fieldPtrAtIndex(Location loc, PatternRewriter &rewriter, Value basePtr, uint64_t fieldIndex)
+    {
+        if (fieldIndex == 0)
+            return basePtr;
+
+        auto *ctx = rewriter.getContext();
+        auto u256Type = sir::U256Type::get(ctx);
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL);
+        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        return rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
+    }
+
     static Value buildStructBuffer(Location loc, ConversionPatternRewriter &rewriter, ValueRange fieldValues)
     {
         auto *ctx = rewriter.getContext();
@@ -293,16 +343,8 @@ namespace
             else if (!llvm::isa<sir::U256Type>(val.getType()))
                 val = rewriter.create<sir::BitcastOp>(loc, u256Type, val);
 
-            if (i == 0)
-            {
-                rewriter.create<sir::StoreOp>(loc, basePtr, val);
-                continue;
-            }
-
-            auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i) * 32ULL);
-            Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-            Value ptrOff = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-            rewriter.create<sir::StoreOp>(loc, ptrOff, val);
+            Value fieldPtr = fieldPtrAtIndex(loc, rewriter, basePtr, static_cast<uint64_t>(i));
+            rewriter.create<sir::StoreOp>(loc, fieldPtr, val);
         }
 
         if (hasStorageMemRefField)
@@ -357,41 +399,10 @@ LogicalResult ConvertTupleExtractOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
-    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    Value basePtr = adaptor.getTupleValue();
-    if (llvm::isa<sir::U256Type>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
-    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        {
-            if (castOp.getNumOperands() == 1)
-            {
-                Value src = castOp.getOperand(0);
-                if (llvm::isa<sir::PtrType>(src.getType()))
-                {
-                    basePtr = src;
-                }
-                else if (llvm::isa<sir::U256Type>(src.getType()))
-                {
-                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
-                }
-            }
-        }
-    }
-
-    Value slotPtr = basePtr;
+    Value basePtr = coerceStructBasePtr(loc, rewriter, adaptor.getTupleValue(), /*fallbackBitcast=*/false);
     const uint64_t fieldIndex = static_cast<uint64_t>(op.getIndex());
-    if (fieldIndex != 0)
-    {
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-        slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-    }
+    Value slotPtr = fieldPtrAtIndex(loc, rewriter, basePtr, fieldIndex);
 
     Type resultType = getTypeConverter()->convertType(op.getResult().getType());
     Value loaded = rewriter.create<sir::LoadOp>(loc, u256Type, slotPtr);
@@ -434,43 +445,14 @@ LogicalResult LateLowerTupleExtractOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
-    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    Value basePtr = op.getTupleValue();
-    if (llvm::isa<sir::U256Type>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
-    else if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-    {
-        if (castOp.getNumOperands() == 1)
-        {
-            Value src = castOp.getOperand(0);
-            if (llvm::isa<sir::PtrType>(src.getType()))
-            {
-                basePtr = src;
-            }
-            else if (llvm::isa<sir::U256Type>(src.getType()))
-            {
-                basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
-            }
-        }
-    }
+    Value basePtr = coerceStructBasePtr(loc, rewriter, op.getTupleValue(), /*fallbackBitcast=*/false);
 
     if (!llvm::isa<sir::PtrType>(basePtr.getType()))
         return failure();
 
-    Value slotPtr = basePtr;
     const uint64_t fieldIndex = static_cast<uint64_t>(op.getIndex());
-    if (fieldIndex != 0)
-    {
-        Value offset = rewriter.create<sir::ConstOp>(
-            loc,
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL));
-        slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-    }
+    Value slotPtr = fieldPtrAtIndex(loc, rewriter, basePtr, fieldIndex);
 
     Type resultType = op.getResult().getType();
     if (typeConverter)
@@ -714,43 +696,9 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
         }
     }
 
-    Value basePtr = adaptor.getStructValue();
-    if (llvm::isa<sir::U256Type>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
-    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        {
-            if (castOp.getNumOperands() == 1)
-            {
-                Value src = castOp.getOperand(0);
-                if (llvm::isa<sir::PtrType>(src.getType()))
-                {
-                    basePtr = src;
-                }
-                else if (llvm::isa<sir::U256Type>(src.getType()))
-                {
-                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
-                }
-            }
-        }
-    }
-    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        // Last-resort materialization path: tuples/anonymous structs may still
-        // appear as non-SIR values at this point; represent them as pointers.
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
+    Value basePtr = coerceStructBasePtr(loc, rewriter, adaptor.getStructValue(), /*fallbackBitcast=*/true);
 
-    Value fieldPtr = basePtr;
-    if (fieldIndex > 0)
-    {
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(fieldIndex) * 32ULL);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-        fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-    }
+    Value fieldPtr = fieldPtrAtIndex(loc, rewriter, basePtr, static_cast<uint64_t>(fieldIndex));
 
     Value raw = rewriter.create<sir::LoadOp>(loc, u256Type, fieldPtr);
     if (auto memrefType = dyn_cast<mlir::MemRefType>(expected);
@@ -819,8 +767,6 @@ LogicalResult ConvertStructFieldStoreOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
-    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     StringRef fieldName = op.getFieldName();
     size_t fieldIndex = 0;
@@ -868,39 +814,9 @@ LogicalResult ConvertStructFieldStoreOp::matchAndRewrite(
     if (!found)
         return rewriter.notifyMatchFailure(op, "unknown field in struct_field_store");
 
-    Value basePtr = adaptor.getStructValue();
-    if (llvm::isa<sir::U256Type>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
-    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        {
-            if (castOp.getNumOperands() == 1)
-            {
-                Value src = castOp.getOperand(0);
-                if (llvm::isa<sir::PtrType>(src.getType()))
-                {
-                    basePtr = src;
-                }
-                else if (llvm::isa<sir::U256Type>(src.getType()))
-                {
-                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
-                }
-            }
-        }
-    }
-    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+    Value basePtr = coerceStructBasePtr(loc, rewriter, adaptor.getStructValue(), /*fallbackBitcast=*/true);
 
-    Value fieldPtr = basePtr;
-    if (fieldIndex > 0)
-    {
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(fieldIndex) * 32ULL);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-        fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-    }
+    Value fieldPtr = fieldPtrAtIndex(loc, rewriter, basePtr, static_cast<uint64_t>(fieldIndex));
 
     Value val = adaptor.getValue();
     if (auto aggregateWord = materializeAggregateFieldWord(loc, rewriter, val))
@@ -968,33 +884,7 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unknown field in struct_field_update");
     }
 
-    Value basePtr = adaptor.getStructValue();
-    if (llvm::isa<sir::U256Type>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
-    else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        if (auto castOp = basePtr.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        {
-            if (castOp.getNumOperands() == 1)
-            {
-                Value src = castOp.getOperand(0);
-                if (llvm::isa<sir::PtrType>(src.getType()))
-                {
-                    basePtr = src;
-                }
-                else if (llvm::isa<sir::U256Type>(src.getType()))
-                {
-                    basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, src);
-                }
-            }
-        }
-    }
-    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-    {
-        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-    }
+    Value basePtr = coerceStructBasePtr(loc, rewriter, adaptor.getStructValue(), /*fallbackBitcast=*/true);
 
     // Allocate new struct buffer
     const uint64_t fieldCount = static_cast<uint64_t>(fieldNames.size());
@@ -1015,13 +905,7 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
 
     for (size_t i = 0; i < fieldNames.size(); ++i)
     {
-        Value fieldPtr = basePtr;
-        if (i > 0)
-        {
-            auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i) * 32ULL);
-            Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-            fieldPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
-        }
+        Value fieldPtr = fieldPtrAtIndex(loc, rewriter, basePtr, static_cast<uint64_t>(i));
 
         Value fieldVal = rewriter.create<sir::LoadOp>(loc, u256Type, fieldPtr);
         if (i == fieldIndex)
@@ -1049,13 +933,7 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
             }
         }
 
-        Value outPtr = newPtr;
-        if (i > 0)
-        {
-            auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i) * 32ULL);
-            Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
-            outPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, newPtr, offset);
-        }
+        Value outPtr = fieldPtrAtIndex(loc, rewriter, newPtr, static_cast<uint64_t>(i));
         rewriter.create<sir::StoreOp>(loc, outPtr, fieldVal);
     }
 
