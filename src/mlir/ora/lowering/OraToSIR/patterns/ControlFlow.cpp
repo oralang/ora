@@ -4255,23 +4255,43 @@ LogicalResult NormalizeErrorIsErrorOp::matchAndRewrite(
     return success();
 }
 
+static FailureOr<Value> materializeErrorPayloadValue(
+    PatternRewriter &rewriter,
+    Location loc,
+    Value value,
+    Type resultType,
+    Operation *operation);
+
 LogicalResult NormalizeErrorUnwrapOp::matchAndRewrite(
     ora::ErrorUnwrapOp op,
     PatternRewriter &rewriter) const
 {
     if (op->getParentOfType<ora::TryStmtOp>())
         return failure();
-    if (auto cast = op.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    auto replacement = materializeErrorPayloadValue(
+        rewriter, op.getLoc(), op.getValue(), op.getType(), op.getOperation());
+    if (failed(replacement))
+        return failure();
+    rewriter.replaceOp(op, *replacement);
+    return success();
+}
+
+static FailureOr<Value> materializeErrorPayloadValue(
+    PatternRewriter &rewriter,
+    Location loc,
+    Value value,
+    Type resultType,
+    Operation *operation)
+{
+    if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
     {
         if (cast.getNumOperands() == 2)
         {
-            Value replacement = adaptErrorPayloadToResultType(rewriter, op.getLoc(), cast.getOperand(1), op.getType());
-            rewriter.replaceOp(op, replacement);
-            return success();
+            return adaptErrorPayloadToResultType(rewriter, loc, cast.getOperand(1), resultType);
         }
     }
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(op.getValue()))
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(value.getType()))
+        if (shouldUseWideErrorUnionCarrier(errType, operation) || valueHasForceWideErrorUnion(value))
         {
             auto *ctx = rewriter.getContext();
             SmallVector<Type, 2> splitTypes;
@@ -4279,74 +4299,36 @@ LogicalResult NormalizeErrorUnwrapOp::matchAndRewrite(
             // get_error materializes the error payload side, so the wide carrier
             // must be chosen from the requested error result type, not from the
             // union's success type.
-            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, op.getType()));
-            auto split = createWideErrorUnionSplitCast(rewriter, op.getLoc(), op.getValue(), TypeRange(splitTypes));
+            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, resultType));
+            auto split = createWideErrorUnionSplitCast(rewriter, loc, value, TypeRange(splitTypes));
             auto cast = split.getOperation();
-            Value replacement = adaptErrorPayloadToResultType(rewriter, op.getLoc(), cast->getResult(1), op.getType());
-            rewriter.replaceOp(op, replacement);
-            return success();
+            return adaptErrorPayloadToResultType(rewriter, loc, cast->getResult(1), resultType);
         }
-    auto loc = op.getLoc();
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
     auto one = rewriter.create<sir::ConstOp>(loc, u256Type, rewriter.getIntegerAttr(u256IntType, 1));
-    auto packedOr = materializeNarrowErrorUnionPackedValue(rewriter, loc, op.getValue());
+    auto packedOr = materializeNarrowErrorUnionPackedValue(rewriter, loc, value);
     if (!packedOr)
         return failure();
     auto packedU256 = ensureU256(rewriter, loc, *packedOr);
     auto payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, packedU256).getResult();
     auto payload = rewriter.create<sir::BitcastOp>(loc, i256Type, payloadU256).getResult();
-    auto converted = phase0FromI256(rewriter, loc, payload, op.getType());
+    auto converted = phase0FromI256(rewriter, loc, payload, resultType);
     if (failed(converted))
         return failure();
-    rewriter.replaceOp(op, *converted);
-    return success();
+    return *converted;
 }
 
 LogicalResult NormalizeErrorGetErrorOp::matchAndRewrite(
     ora::ErrorGetErrorOp op,
     PatternRewriter &rewriter) const
 {
-    if (auto cast = op.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())
-    {
-        if (cast.getNumOperands() == 2)
-        {
-            Value replacement = adaptErrorPayloadToResultType(rewriter, op.getLoc(), cast.getOperand(1), op.getType());
-            rewriter.replaceOp(op, replacement);
-            return success();
-        }
-    }
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(op.getValue()))
-        {
-            auto *ctx = rewriter.getContext();
-            SmallVector<Type, 2> splitTypes;
-            splitTypes.push_back(sir::U256Type::get(ctx));
-            // get_error materializes the error payload side, so choose the
-            // carrier from the requested result type, not the union success type.
-            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, op.getType()));
-            auto split = createWideErrorUnionSplitCast(rewriter, op.getLoc(), op.getValue(), TypeRange(splitTypes));
-            auto cast = split.getOperation();
-            Value replacement = adaptErrorPayloadToResultType(rewriter, op.getLoc(), cast->getResult(1), op.getType());
-            rewriter.replaceOp(op, replacement);
-            return success();
-        }
-    auto loc = op.getLoc();
-    auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-    auto one = rewriter.create<sir::ConstOp>(loc, u256Type, rewriter.getIntegerAttr(u256IntType, 1));
-    auto packedOr = materializeNarrowErrorUnionPackedValue(rewriter, loc, op.getValue());
-    if (!packedOr)
+    auto replacement = materializeErrorPayloadValue(
+        rewriter, op.getLoc(), op.getValue(), op.getType(), op.getOperation());
+    if (failed(replacement))
         return failure();
-    auto packedU256 = ensureU256(rewriter, loc, *packedOr);
-    auto payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, packedU256).getResult();
-    auto payload = rewriter.create<sir::BitcastOp>(loc, i256Type, payloadU256).getResult();
-    auto converted = phase0FromI256(rewriter, loc, payload, op.getType());
-    if (failed(converted))
-        return failure();
-    rewriter.replaceOp(op, *converted);
+    rewriter.replaceOp(op, *replacement);
     return success();
 }
 
@@ -4905,9 +4887,8 @@ LogicalResult StripNormalizedErrorUnionCastOp::matchAndRewrite(
     return success();
 }
 
-LogicalResult NormalizeReturnOp::matchAndRewrite(
-    ora::ReturnOp op,
-    PatternRewriter &rewriter) const
+template <typename OpTy>
+static LogicalResult normalizeNarrowErrorUnionOperands(OpTy op, PatternRewriter &rewriter)
 {
     if (op.getNumOperands() == 0)
         return failure();
@@ -4936,325 +4917,72 @@ LogicalResult NormalizeReturnOp::matchAndRewrite(
 
     if (!changed)
         return failure();
-    rewriter.replaceOpWithNewOp<ora::ReturnOp>(op, newOperands);
+    rewriter.replaceOpWithNewOp<OpTy>(op, newOperands);
     return success();
+}
+
+LogicalResult NormalizeReturnOp::matchAndRewrite(
+    ora::ReturnOp op,
+    PatternRewriter &rewriter) const
+{
+    return normalizeNarrowErrorUnionOperands(op, rewriter);
 }
 
 LogicalResult NormalizeScfYieldOp::matchAndRewrite(
     mlir::scf::YieldOp op,
     PatternRewriter &rewriter) const
 {
-    if (op.getNumOperands() == 0)
-        return failure();
-
-    SmallVector<Value> newOperands;
-    newOperands.reserve(op.getNumOperands());
-    bool changed = false;
-    for (Value operand : op.getOperands())
-    {
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
-        {
-            if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(operand))
-            {
-                newOperands.push_back(operand);
-                continue;
-            }
-            if (auto packed = materializeNarrowErrorUnionPackedValue(rewriter, op.getLoc(), operand))
-            {
-                newOperands.push_back(*packed);
-                changed = true;
-                continue;
-            }
-        }
-        newOperands.push_back(operand);
-    }
-
-    if (!changed)
-        return failure();
-    rewriter.replaceOpWithNewOp<mlir::scf::YieldOp>(op, newOperands);
-    return success();
+    return normalizeNarrowErrorUnionOperands(op, rewriter);
 }
 
 LogicalResult NormalizeOraYieldOp::matchAndRewrite(
     ora::YieldOp op,
     PatternRewriter &rewriter) const
 {
-    if (op.getNumOperands() == 0)
-        return failure();
-
-    SmallVector<Value> newOperands;
-    newOperands.reserve(op.getNumOperands());
-    bool changed = false;
-    for (Value operand : op.getOperands())
-    {
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
-        {
-            if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(operand))
-            {
-                newOperands.push_back(operand);
-                continue;
-            }
-            if (auto packed = materializeNarrowErrorUnionPackedValue(rewriter, op.getLoc(), operand))
-            {
-                newOperands.push_back(*packed);
-                changed = true;
-                continue;
-            }
-        }
-        newOperands.push_back(operand);
-    }
-
-    if (!changed)
-        return failure();
-    rewriter.replaceOpWithNewOp<ora::YieldOp>(op, newOperands);
-    return success();
+    return normalizeNarrowErrorUnionOperands(op, rewriter);
 }
 
-LogicalResult ConvertSwitchOp::matchAndRewrite(
-    ora::SwitchOp op,
-    typename ora::SwitchOp::Adaptor adaptor,
-    ConversionPatternRewriter &rewriter) const
+struct SwitchCasePlan
 {
-    auto loc = op.getLoc();
-    auto ctx = rewriter.getContext();
-    auto *tc = getTypeConverter();
-    if (op.getNumResults() > 0)
-    {
-        if (!tc)
-            return rewriter.notifyMatchFailure(op, "missing type converter");
-
-        SmallVector<Type> resultTypes;
-        for (Type t : op.getResultTypes())
-        {
-            SmallVector<Type> convertedTypes;
-            if (failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty())
-                return failure();
-            resultTypes.append(convertedTypes.begin(), convertedTypes.end());
-        }
-
-        auto caseKinds = op.getCaseKindsAttr();
-        auto caseValues = op.getCaseValuesAttr();
-        auto rangeStarts = op.getRangeStartsAttr();
-        auto rangeEnds = op.getRangeEndsAttr();
-        auto defaultIdxAttr = op.getDefaultCaseIndexAttr();
-
-        int64_t defaultIdx = -1;
-        if (defaultIdxAttr)
-            defaultIdx = defaultIdxAttr.getInt();
-
-        SmallVector<int64_t> caseIdxs;
-        int64_t numCases = static_cast<int64_t>(op.getCases().size());
-        for (int64_t i = 0; i < numCases; ++i)
-        {
-            int64_t kind = 0;
-            if (caseKinds && i < static_cast<int64_t>(caseKinds.size()))
-                kind = caseKinds[i];
-            if (kind == 2)
-            {
-                if (defaultIdx < 0)
-                    defaultIdx = i;
-                continue;
-            }
-            caseIdxs.push_back(i);
-        }
-
-        Block *parentBlock = op->getBlock();
-        Region *parentRegion = parentBlock->getParent();
-        auto mergeBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-        for (Type t : resultTypes)
-            mergeBlock->addArgument(t, loc);
-        rewriter.setInsertionPointToEnd(parentBlock);
-        Value selector = ensureU256(rewriter, loc, adaptor.getValue());
-
-        SmallVector<Block *> caseBlocks(numCases, nullptr);
-        SmallVector<SmallVector<ora::YieldOp, 4>, 4> caseYields(numCases);
-        for (int64_t i = 0; i < numCases; ++i)
-        {
-            op.getCases()[i].walk([&](ora::YieldOp y) {
-                if (y->getParentOfType<ora::SwitchOp>() == op)
-                    caseYields[i].push_back(y);
-            });
-        }
-        for (int64_t i = 0; i < numCases; ++i)
-        {
-            Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
-            rewriter.inlineRegionBefore(op.getCases()[i], *parentRegion, mergeBlock->getIterator());
-            if (!caseBlock)
-                caseBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            caseBlocks[i] = caseBlock;
-
-            auto &yields = caseYields[i];
-            if (!yields.empty())
-            {
-                for (auto y : yields)
-                {
-                    if (y.getNumOperands() != resultTypes.size())
-                        return failure();
-                    if (hasOpsAfterTerminator(y.getOperation()))
-                        return rewriter.notifyMatchFailure(y, "yield has trailing ops");
-                    rewriter.setInsertionPoint(y);
-                    SmallVector<Value> convertedOperands;
-                    convertedOperands.reserve(y.getNumOperands());
-                    for (auto [idx, operand] : llvm::enumerate(y.getOperands()))
-                    {
-                        Type targetType = mergeBlock->getArgument(idx).getType();
-                        if (operand.getType() == targetType)
-                        {
-                            convertedOperands.push_back(operand);
-                            continue;
-                        }
-                        Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
-                        if (!converted)
-                            return failure();
-                        convertedOperands.push_back(converted);
-                    }
-                    rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
-                }
-                continue;
-            }
-
-            Operation *tail = caseBlock->empty() ? nullptr : &caseBlock->back();
-            if (!tail || tail->hasTrait<mlir::OpTrait::IsTerminator>())
-                return failure();
-            if (tail->getNumResults() != resultTypes.size())
-                return failure();
-
-            rewriter.setInsertionPointToEnd(caseBlock);
-            SmallVector<Value> convertedOperands;
-            convertedOperands.reserve(resultTypes.size());
-            for (auto [idx, result] : llvm::enumerate(tail->getResults()))
-            {
-                Type targetType = mergeBlock->getArgument(idx).getType();
-                if (result.getType() == targetType)
-                {
-                    convertedOperands.push_back(result);
-                    continue;
-                }
-                Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, result);
-                if (!converted)
-                    return failure();
-                convertedOperands.push_back(converted);
-            }
-            rewriter.create<sir::BrOp>(loc, convertedOperands, mergeBlock);
-        }
-
-        auto u256Type = sir::U256Type::get(ctx);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        auto makeConst = [&](int64_t v) -> Value {
-            return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, v));
-        };
-
-        // Synthesize a default block if none was provided.
-        if (defaultIdx < 0)
-            defaultIdx = numCases;
-
-        Block *defaultBlock;
-        if (defaultIdx < numCases)
-        {
-            defaultBlock = caseBlocks[defaultIdx];
-        }
-        else
-        {
-            // Exhaustive switch: default is unreachable, use sir.invalid.
-            defaultBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            rewriter.setInsertionPointToStart(defaultBlock);
-            rewriter.create<sir::InvalidOp>(loc);
-            rewriter.setInsertionPointToEnd(parentBlock);
-        }
-
-        if (caseIdxs.empty())
-        {
-            rewriter.setInsertionPointToEnd(parentBlock);
-            rewriter.create<sir::BrOp>(loc, ValueRange{}, defaultBlock);
-            if (static_cast<unsigned>(mergeBlock->getNumArguments()) != op.getNumResults())
-                return rewriter.notifyMatchFailure(op, "switch result/merge mismatch");
-            rewriter.setInsertionPointToStart(mergeBlock);
-            op->replaceAllUsesWith(mergeBlock->getArguments());
-            rewriter.eraseOp(op);
-            return success();
-        }
-
-        Block *currentCheck = parentBlock;
-        for (size_t i = 0; i < caseIdxs.size(); ++i)
-        {
-            int64_t caseIdx = caseIdxs[i];
-            int64_t kind = 0;
-            if (caseKinds && caseIdx < static_cast<int64_t>(caseKinds.size()))
-                kind = caseKinds[caseIdx];
-
-            Block *nextCheck = (i + 1 < caseIdxs.size())
-                                   ? rewriter.createBlock(parentRegion, mergeBlock->getIterator())
-                                   : defaultBlock;
-
-            rewriter.setInsertionPointToEnd(currentCheck);
-            Value cond;
-            if (kind == 0 && caseValues && caseIdx < static_cast<int64_t>(caseValues.size()))
-            {
-                Value cst = makeConst(caseValues[caseIdx]);
-                cond = rewriter.create<sir::EqOp>(loc, u256Type, selector, cst);
-            }
-            else if (kind == 1 && rangeStarts && rangeEnds &&
-                     caseIdx < static_cast<int64_t>(rangeStarts.size()) &&
-                     caseIdx < static_cast<int64_t>(rangeEnds.size()))
-            {
-                Value start = makeConst(rangeStarts[caseIdx]);
-                Value end = makeConst(rangeEnds[caseIdx]);
-                Value lt = rewriter.create<sir::LtOp>(loc, u256Type, selector, start);
-                Value gt = rewriter.create<sir::GtOp>(loc, u256Type, selector, end);
-                Value ge = rewriter.create<sir::IsZeroOp>(loc, u256Type, lt);
-                Value le = rewriter.create<sir::IsZeroOp>(loc, u256Type, gt);
-                cond = rewriter.create<sir::AndOp>(loc, u256Type, ge, le);
-            }
-            else
-            {
-                return failure();
-            }
-
-            rewriter.create<sir::CondBrOp>(loc, cond, ValueRange{}, ValueRange{}, caseBlocks[caseIdx], nextCheck);
-            currentCheck = nextCheck;
-        }
-
-        if (static_cast<unsigned>(mergeBlock->getNumArguments()) != op.getNumResults())
-            return rewriter.notifyMatchFailure(op, "switch result/merge mismatch");
-        rewriter.setInsertionPointToStart(mergeBlock);
-        op->replaceAllUsesWith(mergeBlock->getArguments());
-        rewriter.eraseOp(op);
-        return success();
-    }
-
-    auto caseKinds = op.getCaseKindsAttr();
-    auto caseValues = op.getCaseValuesAttr();
-    auto rangeStarts = op.getRangeStartsAttr();
-    auto rangeEnds = op.getRangeEndsAttr();
-    auto defaultIdxAttr = op.getDefaultCaseIndexAttr();
-
+    DenseI64ArrayAttr caseKinds;
+    DenseI64ArrayAttr caseValues;
+    DenseI64ArrayAttr rangeStarts;
+    DenseI64ArrayAttr rangeEnds;
     int64_t defaultIdx = -1;
-    if (defaultIdxAttr)
-        defaultIdx = defaultIdxAttr.getInt();
+    int64_t numCases = 0;
+    SmallVector<int64_t, 8> caseIdxs;
+};
 
-    SmallVector<int64_t> caseIdxs;
-    int64_t numCases = static_cast<int64_t>(op.getCases().size());
-    for (int64_t i = 0; i < numCases; ++i)
+static SwitchCasePlan buildSwitchCasePlan(ora::SwitchOp op)
+{
+    SwitchCasePlan plan;
+    plan.caseKinds = op.getCaseKindsAttr();
+    plan.caseValues = op.getCaseValuesAttr();
+    plan.rangeStarts = op.getRangeStartsAttr();
+    plan.rangeEnds = op.getRangeEndsAttr();
+    if (auto defaultIdxAttr = op.getDefaultCaseIndexAttr())
+        plan.defaultIdx = defaultIdxAttr.getInt();
+
+    plan.numCases = static_cast<int64_t>(op.getCases().size());
+    for (int64_t i = 0; i < plan.numCases; ++i)
     {
         int64_t kind = 0;
-        if (caseKinds && i < static_cast<int64_t>(caseKinds.size()))
-            kind = caseKinds[i];
+        if (plan.caseKinds && i < static_cast<int64_t>(plan.caseKinds.size()))
+            kind = plan.caseKinds[i];
         if (kind == 2)
         {
-            if (defaultIdx < 0)
-                defaultIdx = i;
+            if (plan.defaultIdx < 0)
+                plan.defaultIdx = i;
             continue;
         }
-        caseIdxs.push_back(i);
+        plan.caseIdxs.push_back(i);
     }
 
-    Block *parentBlock = op->getBlock();
-    Region *parentRegion = parentBlock->getParent();
-    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-    rewriter.setInsertionPointToEnd(parentBlock);
-    Value selector = ensureU256(rewriter, loc, adaptor.getValue());
+    return plan;
+}
 
-    SmallVector<Block *> caseBlocks(numCases, nullptr);
+static SmallVector<SmallVector<ora::YieldOp, 4>, 4> collectSwitchCaseYields(ora::SwitchOp op, int64_t numCases)
+{
     SmallVector<SmallVector<ora::YieldOp, 4>, 4> caseYields(numCases);
     for (int64_t i = 0; i < numCases; ++i)
     {
@@ -5263,9 +4991,238 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
                 caseYields[i].push_back(y);
         });
     }
-        for (int64_t i = 0; i < numCases; ++i)
+    return caseYields;
+}
+
+static Value makeSwitchConst(ConversionPatternRewriter &rewriter, Location loc, Type u256Type, Type ui64Type, int64_t value)
+{
+    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
+}
+
+static Value buildSwitchCondition(
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    const SwitchCasePlan &plan,
+    int64_t caseIdx,
+    Value selector,
+    Type u256Type,
+    Type ui64Type)
+{
+    int64_t kind = 0;
+    if (plan.caseKinds && caseIdx < static_cast<int64_t>(plan.caseKinds.size()))
+        kind = plan.caseKinds[caseIdx];
+
+    if (kind == 0 && plan.caseValues && caseIdx < static_cast<int64_t>(plan.caseValues.size()))
+    {
+        Value cst = makeSwitchConst(rewriter, loc, u256Type, ui64Type, plan.caseValues[caseIdx]);
+        return rewriter.create<sir::EqOp>(loc, u256Type, selector, cst);
+    }
+
+    if (kind == 1 && plan.rangeStarts && plan.rangeEnds &&
+        caseIdx < static_cast<int64_t>(plan.rangeStarts.size()) &&
+        caseIdx < static_cast<int64_t>(plan.rangeEnds.size()))
+    {
+        Value start = makeSwitchConst(rewriter, loc, u256Type, ui64Type, plan.rangeStarts[caseIdx]);
+        Value end = makeSwitchConst(rewriter, loc, u256Type, ui64Type, plan.rangeEnds[caseIdx]);
+        Value lt = rewriter.create<sir::LtOp>(loc, u256Type, selector, start);
+        Value gt = rewriter.create<sir::GtOp>(loc, u256Type, selector, end);
+        Value ge = rewriter.create<sir::IsZeroOp>(loc, u256Type, lt);
+        Value le = rewriter.create<sir::IsZeroOp>(loc, u256Type, gt);
+        return rewriter.create<sir::AndOp>(loc, u256Type, ge, le);
+    }
+
+    return Value();
+}
+
+static LogicalResult emitSwitchDispatch(
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    const SwitchCasePlan &plan,
+    Region *parentRegion,
+    Block *insertBeforeBlock,
+    Block *parentBlock,
+    Value selector,
+    ArrayRef<Block *> caseBlocks,
+    Block *defaultBlock)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned);
+
+    if (plan.caseIdxs.empty())
+    {
+        rewriter.setInsertionPointToEnd(parentBlock);
+        rewriter.create<sir::BrOp>(loc, ValueRange{}, defaultBlock);
+        return success();
+    }
+
+    Block *currentCheck = parentBlock;
+    for (size_t i = 0; i < plan.caseIdxs.size(); ++i)
+    {
+        int64_t caseIdx = plan.caseIdxs[i];
+        Block *nextCheck = (i + 1 < plan.caseIdxs.size())
+                               ? rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator())
+                               : defaultBlock;
+
+        rewriter.setInsertionPointToEnd(currentCheck);
+        Value cond = buildSwitchCondition(rewriter, loc, plan, caseIdx, selector, u256Type, ui64Type);
+        if (!cond)
+            return failure();
+
+        rewriter.create<sir::CondBrOp>(loc, cond, ValueRange{}, ValueRange{}, caseBlocks[caseIdx], nextCheck);
+        currentCheck = nextCheck;
+    }
+
+    return success();
+}
+
+static LogicalResult appendSwitchConvertedOperands(
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    const TypeConverter *tc,
+    Block *mergeBlock,
+    ValueRange operands,
+    SmallVectorImpl<Value> &convertedOperands)
+{
+    for (auto [idx, operand] : llvm::enumerate(operands))
+    {
+        Type targetType = mergeBlock->getArgument(idx).getType();
+        if (operand.getType() == targetType)
         {
-            Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
+            convertedOperands.push_back(operand);
+            continue;
+        }
+        Value converted = tc->materializeTargetConversion(rewriter, loc, targetType, operand);
+        if (!converted)
+            return failure();
+        convertedOperands.push_back(converted);
+    }
+
+    return success();
+}
+
+static LogicalResult lowerSwitchWithResults(
+    ora::SwitchOp op,
+    ora::SwitchOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter,
+    const TypeConverter *tc)
+{
+    auto loc = op.getLoc();
+    if (!tc)
+        return rewriter.notifyMatchFailure(op, "missing type converter");
+
+    SmallVector<Type> resultTypes;
+    for (Type t : op.getResultTypes())
+    {
+        SmallVector<Type> convertedTypes;
+        if (failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty())
+            return failure();
+        resultTypes.append(convertedTypes.begin(), convertedTypes.end());
+    }
+
+    SwitchCasePlan plan = buildSwitchCasePlan(op);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto mergeBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    for (Type t : resultTypes)
+        mergeBlock->addArgument(t, loc);
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value selector = ensureU256(rewriter, loc, adaptor.getValue());
+
+    SmallVector<Block *> caseBlocks(plan.numCases, nullptr);
+    auto caseYields = collectSwitchCaseYields(op, plan.numCases);
+    for (int64_t i = 0; i < plan.numCases; ++i)
+    {
+        Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
+        rewriter.inlineRegionBefore(op.getCases()[i], *parentRegion, mergeBlock->getIterator());
+        if (!caseBlock)
+            caseBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+        caseBlocks[i] = caseBlock;
+
+        auto &yields = caseYields[i];
+        if (!yields.empty())
+        {
+            for (auto y : yields)
+            {
+                if (y.getNumOperands() != resultTypes.size())
+                    return failure();
+                if (hasOpsAfterTerminator(y.getOperation()))
+                    return rewriter.notifyMatchFailure(y, "yield has trailing ops");
+                rewriter.setInsertionPoint(y);
+                SmallVector<Value> convertedOperands;
+                convertedOperands.reserve(y.getNumOperands());
+                if (failed(appendSwitchConvertedOperands(
+                        rewriter, loc, tc, mergeBlock, y.getOperands(), convertedOperands)))
+                    return failure();
+                rewriter.replaceOpWithNewOp<sir::BrOp>(y, convertedOperands, mergeBlock);
+            }
+            continue;
+        }
+
+        Operation *tail = caseBlock->empty() ? nullptr : &caseBlock->back();
+        if (!tail || tail->hasTrait<mlir::OpTrait::IsTerminator>())
+            return failure();
+        if (tail->getNumResults() != resultTypes.size())
+            return failure();
+
+        rewriter.setInsertionPointToEnd(caseBlock);
+        SmallVector<Value> convertedOperands;
+        convertedOperands.reserve(resultTypes.size());
+        if (failed(appendSwitchConvertedOperands(
+                rewriter, loc, tc, mergeBlock, tail->getResults(), convertedOperands)))
+            return failure();
+        rewriter.create<sir::BrOp>(loc, convertedOperands, mergeBlock);
+    }
+
+    // Synthesize a default block if none was provided.
+    if (plan.defaultIdx < 0)
+        plan.defaultIdx = plan.numCases;
+
+    Block *defaultBlock;
+    if (plan.defaultIdx < plan.numCases)
+    {
+        defaultBlock = caseBlocks[plan.defaultIdx];
+    }
+    else
+    {
+        // Exhaustive switch: default is unreachable, use sir.invalid.
+        defaultBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+        rewriter.setInsertionPointToStart(defaultBlock);
+        rewriter.create<sir::InvalidOp>(loc);
+        rewriter.setInsertionPointToEnd(parentBlock);
+    }
+
+    if (failed(emitSwitchDispatch(
+            rewriter, loc, plan, parentRegion, mergeBlock, parentBlock, selector, caseBlocks, defaultBlock)))
+        return failure();
+
+    if (static_cast<unsigned>(mergeBlock->getNumArguments()) != op.getNumResults())
+        return rewriter.notifyMatchFailure(op, "switch result/merge mismatch");
+    rewriter.setInsertionPointToStart(mergeBlock);
+    op->replaceAllUsesWith(mergeBlock->getArguments());
+    rewriter.eraseOp(op);
+    return success();
+}
+
+static LogicalResult lowerSwitchWithoutResults(
+    ora::SwitchOp op,
+    ora::SwitchOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter)
+{
+    auto loc = op.getLoc();
+    SwitchCasePlan plan = buildSwitchCasePlan(op);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value selector = ensureU256(rewriter, loc, adaptor.getValue());
+
+    SmallVector<Block *> caseBlocks(plan.numCases, nullptr);
+    auto caseYields = collectSwitchCaseYields(op, plan.numCases);
+    for (int64_t i = 0; i < plan.numCases; ++i)
+    {
+        Block *caseBlock = op.getCases()[i].empty() ? nullptr : &op.getCases()[i].front();
         rewriter.inlineRegionBefore(op.getCases()[i], *parentRegion, afterBlock->getIterator());
         if (!caseBlock)
             caseBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
@@ -5286,22 +5243,15 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
         }
     }
 
-    auto u256Type = sir::U256Type::get(ctx);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    auto makeConst = [&](int64_t v) -> Value {
-        return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, v));
-    };
-
     // Synthesize a default block if none was provided. For exhaustive switches
     // (all enum variants covered), the default falls through to the merge block.
-    // For switches with results, we create an unreachable/invalid block.
-    if (defaultIdx < 0)
-        defaultIdx = numCases; // sentinel: will create a synthetic default below
+    if (plan.defaultIdx < 0)
+        plan.defaultIdx = plan.numCases;
 
     Block *defaultBlock;
-    if (defaultIdx < numCases)
+    if (plan.defaultIdx < plan.numCases)
     {
-        defaultBlock = caseBlocks[defaultIdx];
+        defaultBlock = caseBlocks[plan.defaultIdx];
     }
     else
     {
@@ -5311,56 +5261,23 @@ LogicalResult ConvertSwitchOp::matchAndRewrite(
         rewriter.create<sir::BrOp>(loc, ValueRange{}, afterBlock);
         rewriter.setInsertionPointToEnd(parentBlock);
     }
-    if (caseIdxs.empty())
-    {
-        rewriter.setInsertionPointToEnd(parentBlock);
-        rewriter.create<sir::BrOp>(loc, ValueRange{}, defaultBlock);
-        rewriter.eraseOp(op);
-        return success();
-    }
 
-    Block *currentCheck = parentBlock;
-    for (size_t i = 0; i < caseIdxs.size(); ++i)
-    {
-        int64_t caseIdx = caseIdxs[i];
-        int64_t kind = 0;
-        if (caseKinds && caseIdx < static_cast<int64_t>(caseKinds.size()))
-            kind = caseKinds[caseIdx];
-
-        Block *nextCheck = (i + 1 < caseIdxs.size())
-                               ? rewriter.createBlock(parentRegion, afterBlock->getIterator())
-                               : defaultBlock;
-
-        rewriter.setInsertionPointToEnd(currentCheck);
-        Value cond;
-        if (kind == 0 && caseValues && caseIdx < static_cast<int64_t>(caseValues.size()))
-        {
-            Value cst = makeConst(caseValues[caseIdx]);
-            cond = rewriter.create<sir::EqOp>(loc, u256Type, selector, cst);
-        }
-        else if (kind == 1 && rangeStarts && rangeEnds &&
-                 caseIdx < static_cast<int64_t>(rangeStarts.size()) &&
-                 caseIdx < static_cast<int64_t>(rangeEnds.size()))
-        {
-            Value start = makeConst(rangeStarts[caseIdx]);
-            Value end = makeConst(rangeEnds[caseIdx]);
-            Value lt = rewriter.create<sir::LtOp>(loc, u256Type, selector, start);
-            Value gt = rewriter.create<sir::GtOp>(loc, u256Type, selector, end);
-            Value ge = rewriter.create<sir::IsZeroOp>(loc, u256Type, lt);
-            Value le = rewriter.create<sir::IsZeroOp>(loc, u256Type, gt);
-            cond = rewriter.create<sir::AndOp>(loc, u256Type, ge, le);
-        }
-        else
-        {
-            return failure();
-        }
-
-        rewriter.create<sir::CondBrOp>(loc, cond, ValueRange{}, ValueRange{}, caseBlocks[caseIdx], nextCheck);
-        currentCheck = nextCheck;
-    }
+    if (failed(emitSwitchDispatch(
+            rewriter, loc, plan, parentRegion, afterBlock, parentBlock, selector, caseBlocks, defaultBlock)))
+        return failure();
 
     rewriter.eraseOp(op);
     return success();
+}
+
+LogicalResult ConvertSwitchOp::matchAndRewrite(
+    ora::SwitchOp op,
+    typename ora::SwitchOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    if (op.getNumResults() > 0)
+        return lowerSwitchWithResults(op, adaptor, rewriter, getTypeConverter());
+    return lowerSwitchWithoutResults(op, adaptor, rewriter);
 }
 
 // -----------------------------------------------------------------------------
