@@ -288,6 +288,85 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         return rewriter.create<sir::OrOp>(loc, u256Type, shifted, one);
     }
 
+    struct ScalarAbiWordDecode
+    {
+        Value payload;
+        Value canonicalWord;
+        Value valid;
+        AbiDecodeError error;
+    };
+
+    static ScalarAbiWordDecode decodeScalarWord(
+        PatternRewriter &rewriter,
+        Location loc,
+        const AbiLayoutNode &node,
+        Value word,
+        Value one,
+        bool permissive)
+    {
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        Value payload = word;
+        Value canonicalWord = word;
+        Value valid = one;
+        AbiDecodeError err = AbiDecodeError::NonCanonicalPadding;
+
+        if (isStaticU256AbiNode(node) || isStaticI256AbiNode(node))
+        {
+            return ScalarAbiWordDecode{payload, canonicalWord, valid, err};
+        }
+
+        switch (node.staticKind)
+        {
+        case AbiStaticKind::Bool:
+            valid = permissive ? one : boolAbiWordIsCanonical(rewriter, loc, word);
+            payload = permissive ? boolAbiWordPermissivePayload(rewriter, loc, word) : word;
+            canonicalWord = word;
+            err = AbiDecodeError::InvalidBoolValue;
+            break;
+        case AbiStaticKind::Uint:
+            payload = maskLowBits(rewriter, loc, word, node.width);
+            canonicalWord = payload;
+            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
+            err = AbiDecodeError::NonCanonicalPadding;
+            break;
+        case AbiStaticKind::Int:
+        {
+            Value byteIndex = constU256(rewriter, loc, (node.width / 8) - 1);
+            Value expected = rewriter.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word).getResult();
+            payload = maskLowBits(rewriter, loc, word, node.width);
+            canonicalWord = expected;
+            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, expected).getResult();
+            err = AbiDecodeError::NonCanonicalPadding;
+            break;
+        }
+        case AbiStaticKind::Address:
+            payload = maskLowBits(rewriter, loc, word, 160);
+            canonicalWord = payload;
+            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
+            err = AbiDecodeError::InvalidAddress;
+            break;
+        case AbiStaticKind::FixedBytes:
+        {
+            err = AbiDecodeError::InvalidFixedBytes;
+            if (node.width == 32)
+            {
+                payload = word;
+                canonicalWord = word;
+                valid = one;
+                break;
+            }
+            const uint64_t shiftBits = static_cast<uint64_t>(32 - node.width) * 8ULL;
+            Value shift = constU256(rewriter, loc, shiftBits);
+            payload = rewriter.create<sir::ShrOp>(loc, u256Type, shift, word).getResult();
+            canonicalWord = rewriter.create<sir::ShlOp>(loc, u256Type, shift, payload).getResult();
+            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, canonicalWord).getResult();
+            break;
+        }
+        }
+
+        return ScalarAbiWordDecode{payload, canonicalWord, valid, err};
+    }
+
     static Value lowerNarrowScalarMemoryResult(
         PatternRewriter &rewriter,
         Location loc,
@@ -304,75 +383,32 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         auto u256Type = sir::U256Type::get(rewriter.getContext());
         Value one = constU256(rewriter, loc, 1);
         Value word = decodeAbiU256FromMemory(rewriter, loc, payloadPtr, byteOffset);
-        Value valid;
-        Value payload;
-        Value canonicalWord;
-        AbiDecodeError err;
-
-        switch (node.staticKind)
-        {
-        case AbiStaticKind::Bool:
-            // Bool is intentionally stricter than mask+eq: only full-word 0
-            // and full-word 1 are canonical. Values such as 0x...02 must
-            // reject instead of truncating to a low-bit boolean.
-            valid = permissive ? one : boolAbiWordIsCanonical(rewriter, loc, word);
-            payload = permissive ? boolAbiWordPermissivePayload(rewriter, loc, word) : word;
-            canonicalWord = word;
-            err = AbiDecodeError::InvalidBoolValue;
-            break;
-        case AbiStaticKind::Uint:
-            payload = maskLowBits(rewriter, loc, word, node.width);
-            canonicalWord = payload;
-            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
-            err = AbiDecodeError::NonCanonicalPadding;
-            break;
-        case AbiStaticKind::Int:
-        {
-            // Canonical sign-extension: SIGNEXTEND(byteIndex, word)
-            // reconstructs the wire form from the low N bits. Comparing it
-            // with the original word rejects non-canonical high-bit padding.
-            Value byteIndex = constU256(rewriter, loc, (node.width / 8) - 1);
-            Value expected = rewriter.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word).getResult();
-            payload = maskLowBits(rewriter, loc, word, node.width);
-            canonicalWord = expected;
-            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, expected).getResult();
-            err = AbiDecodeError::NonCanonicalPadding;
-            break;
-        }
-        case AbiStaticKind::Address:
-            payload = maskLowBits(rewriter, loc, word, 160);
-            canonicalWord = payload;
-            valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
-            err = AbiDecodeError::InvalidAddress;
-            break;
-        case AbiStaticKind::FixedBytes:
-            llvm_unreachable("narrow scalar predicate accepted an unimplemented ABI static kind");
-        }
+        ScalarAbiWordDecode decoded = decodeScalarWord(rewriter, loc, node, word, one, permissive);
 
         if (std::optional<uint64_t> enumCount = enumVariantCountForType(successType, contextOp))
         {
             // Enum decode is uintN decode plus an ordinal range check. This
             // mirrors the comptime decoder's current positional-variant model.
-            Value rangeValid = rewriter.create<sir::LtOp>(loc, u256Type, payload, constU256(rewriter, loc, *enumCount));
-            Value allValid = rewriter.create<sir::AndOp>(loc, u256Type, valid, rangeValid);
-            Value paddingError = abiDecodeErrorValue(rewriter, loc, err);
+            Value rangeValid = rewriter.create<sir::LtOp>(loc, u256Type, decoded.payload, constU256(rewriter, loc, *enumCount));
+            Value allValid = rewriter.create<sir::AndOp>(loc, u256Type, decoded.valid, rangeValid);
+            Value paddingError = abiDecodeErrorValue(rewriter, loc, decoded.error);
             Value rangeError = abiDecodeErrorValue(rewriter, loc, AbiDecodeError::EnumOutOfRange);
-            Value errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, valid, rangeError, paddingError);
-            Value ok = packNarrowAbiDecodeResult(rewriter, loc, payload, /*isError=*/false);
+            Value errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, decoded.valid, rangeError, paddingError);
+            Value ok = packNarrowAbiDecodeResult(rewriter, loc, decoded.payload, /*isError=*/false);
             Value errValue = packNarrowAbiDecodeResult(rewriter, loc, errorValue, /*isError=*/true);
             return rewriter.create<sir::SelectOp>(loc, u256Type, allValid, ok, errValue);
         }
         if (isEnumSuccessType(successType))
             return {};
 
-        Value refinementValid = abiDecodeRefinementSatisfied(rewriter, loc, successType, canonicalWord, node.staticKind == AbiStaticKind::Int);
-        Value allValid = refinementValid ? rewriter.create<sir::AndOp>(loc, u256Type, valid, refinementValid).getResult() : valid;
-        Value abiErrorValue = abiDecodeErrorValue(rewriter, loc, err);
+        Value refinementValid = abiDecodeRefinementSatisfied(rewriter, loc, successType, decoded.canonicalWord, node.staticKind == AbiStaticKind::Int);
+        Value allValid = refinementValid ? rewriter.create<sir::AndOp>(loc, u256Type, decoded.valid, refinementValid).getResult() : decoded.valid;
+        Value abiErrorValue = abiDecodeErrorValue(rewriter, loc, decoded.error);
         Value refinementErrorValue = abiDecodeErrorValue(rewriter, loc, AbiDecodeError::RefinementViolation);
         Value errorValue = refinementValid
-                               ? rewriter.create<sir::SelectOp>(loc, u256Type, valid, refinementErrorValue, abiErrorValue).getResult()
+                               ? rewriter.create<sir::SelectOp>(loc, u256Type, decoded.valid, refinementErrorValue, abiErrorValue).getResult()
                                : abiErrorValue;
-        Value ok = packNarrowAbiDecodeResult(rewriter, loc, payload, /*isError=*/false);
+        Value ok = packNarrowAbiDecodeResult(rewriter, loc, decoded.payload, /*isError=*/false);
         Value errValue = packNarrowAbiDecodeResult(rewriter, loc, errorValue, /*isError=*/true);
         return rewriter.create<sir::SelectOp>(loc, u256Type, allValid, ok, errValue);
     }
@@ -606,107 +642,59 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
             return std::nullopt;
 
         Value word = decodeAbiU256FromMemory(rewriter, loc, payloadPtr, byteOffset);
-        Value payload = word;
-        Value canonicalWord = word;
-        Value valid = one;
-        AbiDecodeError err = AbiDecodeError::NonCanonicalPadding;
 
-        if (isStaticU256AbiNode(node) || isStaticI256AbiNode(node))
+        if (!isStaticU256AbiNode(node) && !isStaticI256AbiNode(node))
         {
-            payload = word;
-            canonicalWord = word;
-            valid = one;
-        }
-        else
-        {
-            // Gate by both ABI leaf kind and target MLIR type:
-            // - bool/int/address require the exact narrow Ora type;
-            // - uint also admits u256-backed targets such as bitfields;
-            // - bytesN uses a u256-backed value with left-aligned ABI payload.
             switch (node.staticKind)
             {
             case AbiStaticKind::Bool:
                 if (!isSupportedNarrowScalarAbiNodeForType(node, targetType))
                     return std::nullopt;
-                valid = permissive ? one : boolAbiWordIsCanonical(rewriter, loc, word);
-                payload = permissive ? boolAbiWordPermissivePayload(rewriter, loc, word) : word;
-                canonicalWord = word;
-                err = AbiDecodeError::InvalidBoolValue;
                 break;
             case AbiStaticKind::Uint:
                 if (!(isSupportedNarrowScalarAbiNodeForType(node, targetType) || successTypeIsU256Backed(targetType)))
                     return std::nullopt;
-                payload = maskLowBits(rewriter, loc, word, node.width);
-                canonicalWord = payload;
-                valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
-                err = AbiDecodeError::NonCanonicalPadding;
                 break;
             case AbiStaticKind::Int:
-            {
                 if (!isSupportedNarrowScalarAbiNodeForType(node, targetType))
                     return std::nullopt;
-                Value byteIndex = constU256(rewriter, loc, (node.width / 8) - 1);
-                Value expected = rewriter.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word).getResult();
-                payload = maskLowBits(rewriter, loc, word, node.width);
-                canonicalWord = expected;
-                valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, expected).getResult();
-                err = AbiDecodeError::NonCanonicalPadding;
                 break;
-            }
             case AbiStaticKind::Address:
                 if (!isSupportedNarrowScalarAbiNodeForType(node, targetType))
                     return std::nullopt;
-                payload = maskLowBits(rewriter, loc, word, 160);
-                canonicalWord = payload;
-                valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, payload).getResult();
-                err = AbiDecodeError::InvalidAddress;
                 break;
             case AbiStaticKind::FixedBytes:
-            {
                 if (!isSupportedFixedBytesAbiNodeForType(node, targetType))
                     return std::nullopt;
-                err = AbiDecodeError::InvalidFixedBytes;
-                if (node.width == 32)
-                {
-                    payload = word;
-                    canonicalWord = word;
-                    valid = one;
-                    break;
-                }
-                const uint64_t shiftBits = static_cast<uint64_t>(32 - node.width) * 8ULL;
-                Value shift = constU256(rewriter, loc, shiftBits);
-                payload = rewriter.create<sir::ShrOp>(loc, u256Type, shift, word).getResult();
-                canonicalWord = rewriter.create<sir::ShlOp>(loc, u256Type, shift, payload).getResult();
-                valid = permissive ? one : rewriter.create<sir::EqOp>(loc, u256Type, word, canonicalWord).getResult();
                 break;
-            }
             }
         }
 
-        Value errorValue = abiDecodeErrorValue(rewriter, loc, err);
+        ScalarAbiWordDecode decoded = decodeScalarWord(rewriter, loc, node, word, one, permissive);
+        Value errorValue = abiDecodeErrorValue(rewriter, loc, decoded.error);
         if (std::optional<uint64_t> enumCount = enumVariantCountForType(targetType, contextOp))
         {
-            Value rangeValid = rewriter.create<sir::LtOp>(loc, u256Type, payload, constU256(rewriter, loc, *enumCount));
+            Value rangeValid = rewriter.create<sir::LtOp>(loc, u256Type, decoded.payload, constU256(rewriter, loc, *enumCount));
             Value paddingError = errorValue;
             Value rangeError = abiDecodeErrorValue(rewriter, loc, AbiDecodeError::EnumOutOfRange);
-            errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, valid, rangeError, paddingError);
-            valid = rewriter.create<sir::AndOp>(loc, u256Type, valid, rangeValid);
+            errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, decoded.valid, rangeError, paddingError);
+            decoded.valid = rewriter.create<sir::AndOp>(loc, u256Type, decoded.valid, rangeValid);
         }
         else if (isEnumSuccessType(targetType))
         {
             return std::nullopt;
         }
 
-        if (Value refinementValid = abiDecodeRefinementSatisfied(rewriter, loc, targetType, canonicalWord, node.staticKind == AbiStaticKind::Int))
+        if (Value refinementValid = abiDecodeRefinementSatisfied(rewriter, loc, targetType, decoded.canonicalWord, node.staticKind == AbiStaticKind::Int))
         {
             Value refinementError = abiDecodeErrorValue(rewriter, loc, AbiDecodeError::RefinementViolation);
-            errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, valid, refinementError, errorValue);
-            valid = rewriter.create<sir::AndOp>(loc, u256Type, valid, refinementValid);
+            errorValue = rewriter.create<sir::SelectOp>(loc, u256Type, decoded.valid, refinementError, errorValue);
+            decoded.valid = rewriter.create<sir::AndOp>(loc, u256Type, decoded.valid, refinementValid);
         }
 
         return StaticMemoryDecodePart{
-            adaptDecodedAbiPayloadToType(rewriter, loc, payload, targetType),
-            valid,
+            adaptDecodedAbiPayloadToType(rewriter, loc, decoded.payload, targetType),
+            decoded.valid,
             errorValue,
         };
     }
@@ -879,6 +867,53 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
             return failure();
 
         return finish();
+    }
+
+    struct AbiValidationLoopBlocks
+    {
+        Block *entry;
+        Block *done;
+    };
+
+    template <typename ElementValidAt>
+    static AbiValidationLoopBlocks emitAbiAccumulatorValidationLoop(
+        PatternRewriter &rewriter,
+        Location loc,
+        Region *parentRegion,
+        Block *insertBeforeBlock,
+        Type u256Type,
+        Value count,
+        ElementValidAt elementValidAt)
+    {
+        auto initBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
+        auto condBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
+        condBlock->addArgument(u256Type, loc);
+        condBlock->addArgument(u256Type, loc);
+        auto bodyBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
+        bodyBlock->addArgument(u256Type, loc);
+        bodyBlock->addArgument(u256Type, loc);
+        auto doneBlock = rewriter.createBlock(parentRegion, insertBeforeBlock->getIterator());
+        doneBlock->addArgument(u256Type, loc);
+
+        rewriter.setInsertionPointToStart(initBlock);
+        rewriter.create<sir::BrOp>(loc, ValueRange{constU256(rewriter, loc, 0), constU256(rewriter, loc, 1)}, condBlock);
+
+        rewriter.setInsertionPointToStart(condBlock);
+        Value iv = condBlock->getArgument(0);
+        Value allValid = condBlock->getArgument(1);
+        Value hasElement = rewriter.create<sir::LtOp>(loc, u256Type, iv, count);
+        Value shouldContinue = rewriter.create<sir::AndOp>(loc, u256Type, hasElement, allValid);
+        rewriter.create<sir::CondBrOp>(loc, shouldContinue, ValueRange{iv, allValid}, ValueRange{allValid}, bodyBlock, doneBlock);
+
+        rewriter.setInsertionPointToStart(bodyBlock);
+        Value bodyIv = bodyBlock->getArgument(0);
+        Value bodyValid = bodyBlock->getArgument(1);
+        Value itemValid = elementValidAt(bodyIv);
+        Value nextValid = rewriter.create<sir::AndOp>(loc, u256Type, bodyValid, itemValid);
+        Value nextIv = addU256(rewriter, loc, bodyIv, constU256(rewriter, loc, 1));
+        rewriter.create<sir::BrOp>(loc, ValueRange{nextIv, nextValid}, condBlock);
+
+        return AbiValidationLoopBlocks{initBlock, doneBlock};
     }
 
 }
@@ -1081,44 +1116,6 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             };
         };
 
-        struct ValidationLoopBlocks
-        {
-            Block *entry;
-            Block *done;
-        };
-
-        auto emitAccumulatorValidationLoop = [&](Value count, auto elementValidAt) -> ValidationLoopBlocks {
-            auto initBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            auto condBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            condBlock->addArgument(u256Type, op.getLoc());
-            condBlock->addArgument(u256Type, op.getLoc());
-            auto bodyBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            bodyBlock->addArgument(u256Type, op.getLoc());
-            bodyBlock->addArgument(u256Type, op.getLoc());
-            auto doneBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            doneBlock->addArgument(u256Type, op.getLoc());
-
-            rewriter.setInsertionPointToStart(initBlock);
-            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{constU256(rewriter, op.getLoc(), 0), constU256(rewriter, op.getLoc(), 1)}, condBlock);
-
-            rewriter.setInsertionPointToStart(condBlock);
-            Value iv = condBlock->getArgument(0);
-            Value allValid = condBlock->getArgument(1);
-            Value hasElement = rewriter.create<sir::LtOp>(op.getLoc(), u256Type, iv, count);
-            Value shouldContinue = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, hasElement, allValid);
-            rewriter.create<sir::CondBrOp>(op.getLoc(), shouldContinue, ValueRange{iv, allValid}, ValueRange{allValid}, bodyBlock, doneBlock);
-
-            rewriter.setInsertionPointToStart(bodyBlock);
-            Value bodyIv = bodyBlock->getArgument(0);
-            Value bodyValid = bodyBlock->getArgument(1);
-            Value itemValid = elementValidAt(bodyIv);
-            Value nextValid = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, bodyValid, itemValid);
-            Value nextIv = addU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 1));
-            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{nextIv, nextValid}, condBlock);
-
-            return ValidationLoopBlocks{initBlock, doneBlock};
-        };
-
         auto emitValidatedWordArrayTail = [&](Value tailPtr,
                                               Value elementLen,
                                               Value requiredDynamic,
@@ -1127,7 +1124,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                                               auto elementCanonical,
                                               auto successPayloadBits) -> Block * {
             Value contentPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tailPtr, constU256(rewriter, op.getLoc(), 32));
-            ValidationLoopBlocks validation = emitAccumulatorValidationLoop(
+            AbiValidationLoopBlocks validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 elementLen,
                 [&](Value bodyIv) -> Value {
                     Value elementByteOffset = mulU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 32));
@@ -1172,7 +1174,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                                                   auto successPayloadBits) -> Block * {
             Value sourceContentPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tailPtr, constU256(rewriter, op.getLoc(), 32));
 
-            ValidationLoopBlocks validation = emitAccumulatorValidationLoop(
+            AbiValidationLoopBlocks validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 elementLen,
                 [&](Value bodyIv) -> Value {
                     Value elementByteOffset = mulU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 32));
@@ -1266,7 +1273,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             // ABI canonical padding is byte-addressed, so validation is a
             // per-padding-byte loop. This is correct but gas-linear in the
             // padding length; D2 tracks broader decode hot-path costs.
-            ValidationLoopBlocks validation = emitAccumulatorValidationLoop(
+            AbiValidationLoopBlocks validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 padCount,
                 [&](Value bodyIv) -> Value {
                     Value bytePtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, padStart, bodyIv);
@@ -1779,44 +1791,6 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             return ensureU256(rewriter, op.getLoc(), tuplePtr);
         };
 
-        struct ReturndataValidationLoopBlocks
-        {
-            Block *entry;
-            Block *done;
-        };
-
-        auto emitReturndataAccumulatorValidationLoop = [&](Value count, auto elementValidAt) -> ReturndataValidationLoopBlocks {
-            auto initBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            auto condBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            condBlock->addArgument(u256Type, op.getLoc());
-            condBlock->addArgument(u256Type, op.getLoc());
-            auto bodyBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            bodyBlock->addArgument(u256Type, op.getLoc());
-            bodyBlock->addArgument(u256Type, op.getLoc());
-            auto doneBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
-            doneBlock->addArgument(u256Type, op.getLoc());
-
-            rewriter.setInsertionPointToStart(initBlock);
-            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{constU256(rewriter, op.getLoc(), 0), constU256(rewriter, op.getLoc(), 1)}, condBlock);
-
-            rewriter.setInsertionPointToStart(condBlock);
-            Value iv = condBlock->getArgument(0);
-            Value allValid = condBlock->getArgument(1);
-            Value hasElement = rewriter.create<sir::LtOp>(op.getLoc(), u256Type, iv, count);
-            Value shouldContinue = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, hasElement, allValid);
-            rewriter.create<sir::CondBrOp>(op.getLoc(), shouldContinue, ValueRange{iv, allValid}, ValueRange{allValid}, bodyBlock, doneBlock);
-
-            rewriter.setInsertionPointToStart(bodyBlock);
-            Value bodyIv = bodyBlock->getArgument(0);
-            Value bodyValid = bodyBlock->getArgument(1);
-            Value itemValid = elementValidAt(bodyIv);
-            Value nextValid = rewriter.create<sir::AndOp>(op.getLoc(), u256Type, bodyValid, itemValid);
-            Value nextIv = addU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 1));
-            rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{nextIv, nextValid}, condBlock);
-
-            return ReturndataValidationLoopBlocks{initBlock, doneBlock};
-        };
-
         auto emitReturndataOkAfterOversize = [&](Value requiredDynamic, auto successPayloadBits) -> Block * {
             auto oversizeCheckBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
             auto oversizeBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
@@ -1845,7 +1819,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             Value contentPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tailPtr, constU256(rewriter, op.getLoc(), 32));
             Value padStart = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, contentPtr, dynamicLen);
             Value padCount = subU256(rewriter, op.getLoc(), padded, dynamicLen);
-            auto validation = emitReturndataAccumulatorValidationLoop(
+            auto validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 padCount,
                 [&](Value bodyIv) -> Value {
                     Value bytePtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, padStart, bodyIv);
@@ -1878,7 +1857,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                                                         auto elementCanonical,
                                                         auto successPayloadBits) -> Block * {
             Value contentPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tailPtr, constU256(rewriter, op.getLoc(), 32));
-            auto validation = emitReturndataAccumulatorValidationLoop(
+            auto validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 elementLen,
                 [&](Value bodyIv) -> Value {
                     Value elementByteOffset = mulU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 32));
@@ -1911,7 +1895,12 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                                                             const AbiLayoutNode &elementNode,
                                                             auto successPayloadBits) -> Block * {
             Value sourceContentPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tailPtr, constU256(rewriter, op.getLoc(), 32));
-            auto validation = emitReturndataAccumulatorValidationLoop(
+            auto validation = emitAbiAccumulatorValidationLoop(
+                rewriter,
+                op.getLoc(),
+                parentRegion,
+                mergeBlock,
+                u256Type,
                 elementLen,
                 [&](Value bodyIv) -> Value {
                     Value elementByteOffset = mulU256(rewriter, op.getLoc(), bodyIv, constU256(rewriter, op.getLoc(), 32));
