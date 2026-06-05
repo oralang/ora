@@ -1,0 +1,51 @@
+bitfield PackedFlags : u256 {
+    enabled: bool;
+    locked: bool;
+    mode: u8;
+    threshold: u16;
+}
+
+contract MapBitfieldStorageSmoke {
+    storage var flags: map<address, PackedFlags>;
+
+    pub fn configure(account: address, mode: u8, threshold: u16) {
+        let f: PackedFlags = flags[account];
+        f.enabled = true;
+        f.locked = false;
+        f.mode = mode;
+        f.threshold = threshold;
+        flags[account] = f;
+    }
+
+    pub fn set_locked(account: address, value: bool) {
+        let f: PackedFlags = flags[account];
+        f.locked = value;
+        flags[account] = f;
+    }
+
+    pub fn set_mode(account: address, value: u8) {
+        let f: PackedFlags = flags[account];
+        f.mode = value;
+        flags[account] = f;
+    }
+
+    pub fn is_enabled(account: address) -> bool {
+        let f: PackedFlags = flags[account];
+        return f.enabled;
+    }
+
+    pub fn is_locked(account: address) -> bool {
+        let f: PackedFlags = flags[account];
+        return f.locked;
+    }
+
+    pub fn get_mode(account: address) -> u8 {
+        let f: PackedFlags = flags[account];
+        return f.mode;
+    }
+
+    pub fn get_threshold(account: address) -> u16 {
+        let f: PackedFlags = flags[account];
+        return f.threshold;
+    }
+}

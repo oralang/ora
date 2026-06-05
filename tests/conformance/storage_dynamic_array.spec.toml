@@ -1,0 +1,34 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[5, 8, 13]]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 3
+
+[[call.storage]]
+slot = "keccak(0)"
+value = 5
+
+[[call.storage]]
+slot = "add(keccak(0),1)"
+value = 8
+
+[[call.storage]]
+slot = "add(keccak(0),2)"
+value = 13
+
+[[call]]
+fn = "get(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 8 }

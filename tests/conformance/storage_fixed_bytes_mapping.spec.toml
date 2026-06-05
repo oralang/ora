@@ -1,0 +1,108 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_b1(bytes1,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x12", 101]
+returns = {}
+
+[[call]]
+fn = "set_b1(bytes1,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xab", 102]
+returns = {}
+
+[[call]]
+fn = "get_b1(bytes1)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x12"]
+returns = { u256 = 101 }
+
+[[call]]
+fn = "set_b4(bytes4,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x12345678", 201]
+returns = {}
+
+[[call]]
+fn = "set_b4(bytes4,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xdeadbeef", 202]
+returns = {}
+
+[[call]]
+fn = "get_b4(bytes4)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xdeadbeef"]
+returns = { u256 = 202 }
+
+[[call]]
+fn = "set_b20(bytes20,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1111111111111111111111111111111111111111", 301]
+returns = {}
+
+[[call]]
+fn = "get_b20(bytes20)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1111111111111111111111111111111111111111"]
+returns = { u256 = 301 }
+
+[[call]]
+fn = "set_b31(bytes31,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x11111111111111111111111111111111111111111111111111111111111111", 401]
+returns = {}
+
+[[call]]
+fn = "get_b31(bytes31)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x11111111111111111111111111111111111111111111111111111111111111"]
+returns = { u256 = 401 }
+
+[[call]]
+fn = "set_b32(bytes32,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1111111111111111111111111111111111111111111111111111111111111111", 501]
+returns = {}
+
+[[call]]
+fn = "get_b32(bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1111111111111111111111111111111111111111111111111111111111111111"]
+returns = { u256 = 501 }
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call.storage]]
+slot = 1
+value = 0
+
+[[call.storage]]
+slot = 2
+value = 0
+
+[[call.storage]]
+slot = 3
+value = 0
+
+[[call.storage]]
+slot = 4
+value = 0

@@ -3633,6 +3633,28 @@ namespace
         return success();
     }
 
+    static std::optional<unsigned> fixedBytesAbiReturnWidth(ora::ReturnOp op)
+    {
+        auto func = op->getParentOfType<func::FuncOp>();
+        if (!func)
+            return std::nullopt;
+        auto attr = func->getAttrOfType<StringAttr>("ora.abi_return");
+        if (!attr)
+            return std::nullopt;
+
+        StringRef abiReturn = attr.getValue();
+        if (!abiReturn.starts_with("bytes") || abiReturn == "bytes")
+            return std::nullopt;
+        StringRef digits = abiReturn.drop_front(5);
+        if (digits.empty() || (digits.size() > 1 && digits.front() == '0'))
+            return std::nullopt;
+
+        unsigned width = 0;
+        if (digits.getAsInteger(10, width) || width < 1 || width > 32)
+            return std::nullopt;
+        return width;
+    }
+
     // Default: scalar EVM-word return. Coerce retVal to sir.u256, malloc 32,
     // store, return.
     static LogicalResult returnScalarFallback(ReturnCtx &c)
@@ -3644,6 +3666,18 @@ namespace
         }
 
         c.retVal = ensureU256(c.rewriter, c.loc, c.retVal);
+        if (std::optional<unsigned> fixedBytesWidth = fixedBytesAbiReturnWidth(c.op))
+        {
+            if (*fixedBytesWidth < 32)
+            {
+                // Ora fixed-bytes values carry their bytes in the low bits;
+                // ABI fixed-bytes words are left-aligned.
+                Value shift = c.rewriter.create<sir::ConstOp>(
+                    c.loc, c.u256Type,
+                    mlir::IntegerAttr::get(c.ui64Type, static_cast<uint64_t>(32 - *fixedBytesWidth) * 8ULL));
+                c.retVal = c.rewriter.create<sir::ShlOp>(c.loc, c.u256Type, shift, c.retVal);
+            }
+        }
 
         Value sizeConst = c.rewriter.create<sir::ConstOp>(
             c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 32));

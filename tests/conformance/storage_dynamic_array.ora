@@ -1,0 +1,11 @@
+contract DynamicArrayStorageSmoke {
+    storage var history: slice[u256];
+
+    pub fn set(values: slice[u256]) {
+        history = values;
+    }
+
+    pub fn get(index: u256) -> u256 {
+        return history[index];
+    }
+}

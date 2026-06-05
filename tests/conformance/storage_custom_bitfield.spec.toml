@@ -1,0 +1,72 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "configure(uint8,int16,uint32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [31, -7, 65537]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 274886295167
+
+[[call]]
+fn = "is_enabled()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { bool = true }
+
+[[call]]
+fn = "get_code()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u8 = 31 }
+
+[[call]]
+fn = "get_delta()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { i16 = -7 }
+
+[[call]]
+fn = "get_amount()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u32 = 65537 }
+
+[[call]]
+fn = "set_delta(int16)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1234]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 274882180287
+
+[[call]]
+fn = "get_delta()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { i16 = 1234 }
+
+[[call]]
+fn = "set_code(uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [18]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 274882180261

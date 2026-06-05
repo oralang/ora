@@ -1,0 +1,68 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set(address,address,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", 101, 202, 303]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0))"
+value = 101
+
+[[call.storage]]
+slot = "add(map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)),1)"
+value = 202
+
+[[call.storage]]
+slot = "add(map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)),2)"
+value = 303
+
+[[call]]
+fn = "set(address,address,uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", 404, 505, 606]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0))"
+value = 404
+
+[[call.storage]]
+slot = "add(map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0)),1)"
+value = 505
+
+[[call.storage]]
+slot = "add(map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0)),2)"
+value = 606
+
+[[call]]
+fn = "set_nonce(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", 777]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0))"
+value = 101
+
+[[call.storage]]
+slot = "add(map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)),1)"
+value = 777
+
+[[call.storage]]
+slot = "add(map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)),2)"
+value = 303
+
+[[call]]
+fn = "get_nonce(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"]
+returns = { u256 = 777 }

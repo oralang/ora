@@ -1,0 +1,76 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "configure(uint8,uint16)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 4660]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 4771861
+
+[[call]]
+fn = "is_enabled()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { bool = true }
+
+[[call]]
+fn = "get_mode()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u8 = 5 }
+
+[[call]]
+fn = "get_threshold()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u16 = 4660 }
+
+[[call]]
+fn = "set_locked(bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 4771863
+
+[[call]]
+fn = "is_locked()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { bool = true }
+
+[[call]]
+fn = "set_mode(uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [17]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 4771911
+
+[[call]]
+fn = "set_locked(bool)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 4771909

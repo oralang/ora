@@ -222,6 +222,31 @@ pub fn build(b: *std.Build) void {
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
 
+    const voltaire_dep = b.dependency("voltaire", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const evm_primitives_mod = voltaire_dep.module("primitives");
+    const evm_crypto_mod = voltaire_dep.module("crypto");
+    const evm_precompiles_mod = voltaire_dep.module("precompiles");
+    const bootstrap_voltaire_crypto = b.addSystemCommand(&.{
+        "cargo",
+        "build",
+        "--manifest-path",
+        b.pathJoin(&.{ "../voltaire", "Cargo.toml" }),
+        "--release",
+    });
+    bootstrap_voltaire_crypto.setName("bootstrap-voltaire-crypto");
+
+    const ora_evm_mod = b.createModule(.{
+        .root_source_file = b.path("lib/evm/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_evm_mod.addImport("voltaire", evm_primitives_mod);
+    ora_evm_mod.addImport("crypto", evm_crypto_mod);
+    ora_evm_mod.addImport("precompiles", evm_precompiles_mod);
+
     // modules can depend on one another using the `std.Build.Module.addImport` function.
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
     // file path. In this case, we set up `exe_mod` to import `lib_mod`.
@@ -379,6 +404,7 @@ pub fn build(b: *std.Build) void {
     // Sensei SIR CLI integration (vendored Rust tool)
     const sensei_root = "vendor/sensei/senseic";
     const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});
+    var sensei_build_dependency: ?*std.Build.Step = null;
     if (std.fs.cwd().access(sensei_cargo, .{}) catch null) |_| {
         const sensei_build_cmd = b.addSystemCommand(&[_][]const u8{
             "cargo",
@@ -388,6 +414,7 @@ pub fn build(b: *std.Build) void {
             "--release",
         });
         sensei_build_cmd.setCwd(b.path(sensei_root));
+        sensei_build_dependency = &sensei_build_cmd.step;
 
         const sensei_build_step = b.step("sensei-sir", "Build Sensei SIR CLI");
         sensei_build_step.dependOn(&sensei_build_cmd.step);
@@ -467,6 +494,27 @@ pub fn build(b: *std.Build) void {
     // test suite - Unit tests are co-located with source files
     // tests are added to build.zig as they are created (e.g., src/lexer.test.zig)
     const test_step = b.step("test", "Run all tests");
+
+    // Runtime conformance harness: compile Ora through the installed CLI,
+    // deploy the emitted bytecode into lib/evm, and assert sidecar outcomes.
+    const conformance_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    conformance_test_mod.addImport("ora_evm", ora_evm_mod);
+    conformance_test_mod.addImport("voltaire", evm_primitives_mod);
+    const conformance_tests = b.addTest(.{
+        .name = "ora-conformance-tests",
+        .root_module = conformance_test_mod,
+    });
+    conformance_tests.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const conformance_tests_run = b.addRunArtifact(conformance_tests);
+    conformance_tests_run.step.dependOn(b.getInstallStep());
+    if (sensei_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
+
+    const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
+    test_conformance_step.dependOn(&conformance_tests_run.step);
 
     // lexer tests
     const lexer_test_mod = b.createModule(.{

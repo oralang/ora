@@ -1,0 +1,56 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_limit(address,address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", 17]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)))"
+value = 17
+
+[[call.storage]]
+slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)))"
+value = 0
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call]]
+fn = "set_limit(address,address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", 19]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)))"
+value = 17
+
+[[call.storage]]
+slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)))"
+value = 19
+
+[[call]]
+fn = "set_limit(address,address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", 23]
+returns = {}
+
+[[call.storage]]
+slot = "map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0)))"
+value = 23
+
+[[call]]
+fn = "get_limit(address,address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"]
+returns = { u256 = 23 }

@@ -477,6 +477,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_decode_mode", "permissive"));
                 }
             }
+            if (function.visibility == .private) {
+                if (return_type) |ret_type| {
+                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ret_type))) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                    }
+                }
+            }
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
             try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 

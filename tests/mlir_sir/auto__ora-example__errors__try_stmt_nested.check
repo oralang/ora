@@ -2,7 +2,7 @@
 // INPUT: ora-example/errors/try_stmt_nested.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {sir.error_ids = {E1 = 1141528511 : i256}, sir.error_selectors = {E1 = "0x440a57bf"}} {
-// CHECK-NEXT:   func.func @mayFail(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/try_stmt_nested.ora":8:16)) -> (!sir.u256, !sir.u256) attributes {ora.param_names = ["x"], ora.visibility = "private"} {
+// CHECK-NEXT:   func.func @mayFail(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/try_stmt_nested.ora":8:16)) -> (!sir.u256, !sir.u256) attributes {ora.param_names = ["x"], ora.returns_error_union = true, ora.visibility = "private"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.eq %arg0 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/errors/try_stmt_nested.ora":9:13)))

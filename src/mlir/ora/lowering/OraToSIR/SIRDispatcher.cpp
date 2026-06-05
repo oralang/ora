@@ -765,8 +765,7 @@ namespace mlir
                         return std::nullopt;
                     Value byteIndex = lowering::constU256(builder, loc, (abi.width / 8) - 1);
                     Value expected = builder.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word);
-                    Value payload = lowering::maskLowBits(builder, loc, word, abi.width);
-                    return addEnumRangeCheck(makeDecode(payload, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::NonCanonicalPadding));
+                    return addEnumRangeCheck(makeDecode(expected, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::NonCanonicalPadding));
                 }
                 case AbiBase::FixedBytes:
                 {
@@ -781,6 +780,17 @@ namespace mlir
                 default:
                     return std::nullopt;
                 }
+            }
+
+            static Value materializeAbiReturnStaticWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiType &abi, Value payload)
+            {
+                if (abi.base != AbiBase::FixedBytes || abi.width == 0 || abi.width >= 32)
+                    return payload;
+
+                // Ora fixed-bytes values carry their bytes in the low bits
+                // after ABI decode. The ABI word is left-aligned.
+                Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - abi.width) * 8ULL);
+                return builder.create<sir::ShlOp>(loc, sir::U256Type::get(ctx), shift, payload).getResult();
             }
 
             static Value computeAbiEncodedSize(
@@ -1017,6 +1027,10 @@ namespace mlir
                             vis && vis.getValue() == "private" &&
                             ft.getNumResults() == 1 &&
                             !isa<sir::PtrType>(ft.getResult(0));
+                        const bool privateErrorUnionReturn =
+                            vis && vis.getValue() == "private" &&
+                            ft.getNumResults() == 2 &&
+                            func->getAttrOfType<BoolAttr>("ora.returns_error_union");
 
                         bool hasReturn = false;
                         for (Block &block : func.getBlocks())
@@ -1026,7 +1040,16 @@ namespace mlir
                             if (auto ret = dyn_cast<sir::ReturnOp>(block.getTerminator()))
                             {
                                 builder.setInsertionPoint(ret);
-                                if (privateScalarReturn)
+                                if (privateErrorUnionReturn)
+                                {
+                                    Value ptr = ret.getPtr();
+                                    Value tag = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ptr);
+                                    Value c32 = builder.create<sir::ConstOp>(ret.getLoc(), u256Type, IntegerAttr::get(i64Type, 32));
+                                    Value payloadPtr = builder.create<sir::AddPtrOp>(ret.getLoc(), ptrType, ptr, c32);
+                                    Value payload = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, payloadPtr);
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{tag, payload});
+                                }
+                                else if (privateScalarReturn)
                                 {
                                     Value scalar = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ret.getPtr());
                                     builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{scalar});
@@ -1045,7 +1068,12 @@ namespace mlir
                         if (hasReturn)
                         {
                             SmallVector<Type, 4> results;
-                            if (privateScalarReturn)
+                            if (privateErrorUnionReturn)
+                            {
+                                results.push_back(u256Type);
+                                results.push_back(u256Type);
+                            }
+                            else if (privateScalarReturn)
                             {
                                 results.push_back(u256Type);
                             }
@@ -3475,14 +3503,13 @@ namespace mlir
                             Value one = getConst(builder, caseErrorLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
                             Value maskedTag = builder.create<sir::AndOp>(caseErrorLoc, u256Type, tag, one);
                             Value isError = builder.create<sir::EqOp>(caseErrorLoc, u256Type, maskedTag, one);
-                            Value payloadScratchOffset = getConst(builder, caseErrorLoc, u256Type, i64Type, 0, constCache, caseBody, "zero");
-                            Value payloadScratchPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, payloadScratchOffset);
+                            Value payloadScratchSize = getConst(builder, caseErrorLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value payloadScratchPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, payloadScratchSize);
                             builder.create<sir::StoreOp>(caseErrorLoc, payloadScratchPtr, payload);
 
                             auto loadPayloadFromScratch = [&](Block *block, Location loc) -> Value {
-                                Value scratchOffset = getConst(builder, loc, u256Type, i64Type, 0, constCache, block, "zero");
-                                Value scratchPtr = builder.create<sir::BitcastOp>(loc, ptrType, scratchOffset);
-                                return builder.create<sir::LoadOp>(loc, u256Type, scratchPtr);
+                                (void)block;
+                                return builder.create<sir::LoadOp>(loc, u256Type, payloadScratchPtr);
                             };
 
                             Block *successBlock = mainFunc.addBlock();
@@ -3503,7 +3530,7 @@ namespace mlir
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
                                 retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                                 setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, successPayload);
+                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, info.abiReturn, successPayload));
                             }
                             else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
                             {
@@ -3616,7 +3643,7 @@ namespace mlir
                             Value size = c32_ret;
                             Value ptr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                             setResultName(ptr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, val);
+                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, info.abiReturn, val));
                             builder.create<sir::ReturnOp>(caseReturnLoc, ptr, size);
                         }
                         else

@@ -1,0 +1,43 @@
+[deploy]
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = [7]
+
+[[call]]
+fn = "increment()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x8"
+
+[[call]]
+fn = "get()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = { u256 = 8 }
+
+[[call]]
+fn = "credit(address,uint256)"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 42]
+returns = {}
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 42 }
+
+[[call]]
+fn = "fail()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+reverts = {}

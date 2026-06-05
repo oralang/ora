@@ -42,6 +42,29 @@ static bool isU256IntegerCarrierType(Type type)
     return false;
 }
 
+static unsigned integerCarrierSourceWidth(Type type)
+{
+    if (auto intType = llvm::dyn_cast<mlir::IntegerType>(type))
+        return intType.getWidth();
+    if (auto oraIntType = llvm::dyn_cast<ora::IntegerType>(type))
+        return oraIntType.getWidth();
+    return 256;
+}
+
+static Value signExtendToU256(ConversionPatternRewriter &rewriter, Location loc, Value value, Type sourceType)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    Value input = ensureU256(rewriter, loc, value);
+    unsigned sourceWidth = integerCarrierSourceWidth(sourceType);
+    if (sourceWidth >= 256)
+        return input;
+
+    llvm::APInt shiftAmount(256, 256 - sourceWidth);
+    Value shift = rewriter.create<sir::ConstOp>(loc, shiftAmount);
+    Value shiftedLeft = rewriter.create<sir::ShlOp>(loc, u256Type, shift, input).getResult();
+    return rewriter.create<sir::SarOp>(loc, u256Type, shift, shiftedLeft).getResult();
+}
+
 void clearArithmeticNamingHelper()
 {
     arithmeticNamingHelper.reset();
@@ -1122,6 +1145,18 @@ LogicalResult ConvertArithCmpIOp::matchAndRewrite(
         rhs = maskAddressTo160(rewriter, loc, rhs);
 
     const auto pred = op.getPredicate();
+    switch (pred)
+    {
+    case mlir::arith::CmpIPredicate::slt:
+    case mlir::arith::CmpIPredicate::sgt:
+    case mlir::arith::CmpIPredicate::sle:
+    case mlir::arith::CmpIPredicate::sge:
+        lhs = signExtendToU256(rewriter, loc, lhs, op.getLhs().getType());
+        rhs = signExtendToU256(rewriter, loc, rhs, op.getRhs().getType());
+        break;
+    default:
+        break;
+    }
 
     auto mkEq = [&]() { return rewriter.create<sir::EqOp>(loc, resultType, lhs, rhs).getResult(); };
     auto mkLt = [&]() { return rewriter.create<sir::LtOp>(loc, resultType, lhs, rhs).getResult(); };
@@ -1447,8 +1482,8 @@ LogicalResult ConvertArithDivSIOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unable to convert divsi result type");
     }
 
-    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
-    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value lhs = signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType());
+    Value rhs = signExtendToU256(rewriter, loc, adaptor.getRhs(), op.getRhs().getType());
     Value result = rewriter.create<sir::SDivOp>(loc, u256Type, lhs, rhs).getResult();
     if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
@@ -1475,8 +1510,8 @@ LogicalResult ConvertArithRemSIOp::matchAndRewrite(
     if (!resultType)
         return rewriter.notifyMatchFailure(op, "unable to convert remsi result type");
 
-    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
-    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value lhs = signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType());
+    Value rhs = signExtendToU256(rewriter, loc, adaptor.getRhs(), op.getRhs().getType());
     Value result = rewriter.create<sir::SModOp>(loc, u256Type, lhs, rhs).getResult();
     if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
@@ -1682,7 +1717,7 @@ LogicalResult ConvertArithShrSIOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
-    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value value = signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType());
     auto u256Type = sir::U256Type::get(op.getContext());
     auto shifted = rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult();
 
@@ -1715,9 +1750,11 @@ LogicalResult ConvertShrWrappingOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
-    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
-    auto u256Type = sir::U256Type::get(op.getContext());
     auto intType = llvm::dyn_cast<ora::IntegerType>(op.getLhs().getType());
+    Value value = (intType && intType.getIsSigned())
+        ? signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType())
+        : ensureU256(rewriter, loc, adaptor.getLhs());
+    auto u256Type = sir::U256Type::get(op.getContext());
     Value shifted = (intType && intType.getIsSigned())
         ? rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult()
         : rewriter.create<sir::ShrOp>(loc, u256Type, shift, value).getResult();
