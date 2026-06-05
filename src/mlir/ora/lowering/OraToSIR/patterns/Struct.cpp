@@ -2,6 +2,7 @@
 
 #include "patterns/MissingOps.h"
 #include "patterns/Storage.h"
+#include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
@@ -13,12 +14,14 @@
 using namespace mlir;
 using namespace mlir::ora;
 
+using mlir::ora::lowering::addStorageWordOffset;
+using mlir::ora::lowering::getStorageWordCount;
+using mlir::ora::lowering::kStorageMemRefViewKind;
+using mlir::ora::lowering::kStorageStructCarrierKind;
+using mlir::ora::lowering::kStorageStructViewFieldsAttr;
+
 namespace
 {
-    static constexpr llvm::StringLiteral kStorageStructCarrierKind{"storage_struct_carrier"};
-    static constexpr llvm::StringLiteral kStorageMemRefViewKind{"storage_memref_view"};
-    static constexpr llvm::StringLiteral kStorageStructViewFieldsAttr{"ora.storage_struct_view_fields"};
-
     static LogicalResult getStructFieldsFromDecl(ora::StructDeclOp structDecl, SmallVectorImpl<StringRef> &names, SmallVectorImpl<Type> &types)
     {
         auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
@@ -134,44 +137,6 @@ namespace
             return failure();
         }
         return success();
-    }
-
-    static uint64_t getStorageWordCount(Operation *anchor, Type type)
-    {
-        if (auto structType = llvm::dyn_cast<ora::StructType>(type))
-        {
-            SmallVector<StringRef, 8> fieldNames;
-            SmallVector<Type, 8> fieldTypes;
-            if (succeeded(getStructFields(anchor, structType.getName(), fieldNames, fieldTypes)))
-            {
-                uint64_t words = 0;
-                for (Type fieldType : fieldTypes)
-                    words += getStorageWordCount(anchor, fieldType);
-                return words == 0 ? 1 : words;
-            }
-        }
-
-        if (auto memrefType = llvm::dyn_cast<mlir::MemRefType>(type);
-            memrefType && !memrefType.hasStaticShape())
-            return 1;
-
-        return 1;
-    }
-
-    static Value addStorageWordOffset(Location loc,
-                                      Value slot,
-                                      uint64_t offset,
-                                      ConversionPatternRewriter &rewriter)
-    {
-        if (offset == 0)
-            return slot;
-
-        auto *ctx = rewriter.getContext();
-        auto u256Type = sir::U256Type::get(ctx);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        Value offsetValue = rewriter.create<sir::ConstOp>(
-            loc, u256Type, mlir::IntegerAttr::get(ui64Type, offset));
-        return rewriter.create<sir::AddOp>(loc, u256Type, slot, offsetValue);
     }
 
     static std::optional<uint64_t> getStructFieldStorageOffset(Operation *anchor,

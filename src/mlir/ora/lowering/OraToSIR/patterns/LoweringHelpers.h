@@ -49,6 +49,19 @@ namespace mlir::ora::lowering
         return constU256(rewriter, loc, llvm::APInt(256, value));
     }
 
+    inline Value u256Const(OpBuilder &rewriter, Location loc, uint64_t value)
+    {
+        return constU256(rewriter, loc, value);
+    }
+
+    inline Value coerceToU256(OpBuilder &rewriter, Location loc, Value value)
+    {
+        if (llvm::isa<sir::U256Type>(value.getType()))
+            return value;
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+    }
+
     inline Value maskLowBits(OpBuilder &rewriter, Location loc, Value value, unsigned bits)
     {
         if (bits >= 256)

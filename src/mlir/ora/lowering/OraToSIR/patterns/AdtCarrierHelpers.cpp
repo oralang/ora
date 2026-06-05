@@ -1,4 +1,5 @@
 #include "patterns/AdtCarrierHelpers.h"
+#include "patterns/LoweringHelpers.h"
 
 #include "OraDialect.h"
 #include "OraMaterializationKinds.h"
@@ -10,20 +11,7 @@
 #include "llvm/Support/Casting.h"
 
 using namespace mlir;
-
-namespace
-{
-    // Local copy of ensureU256 — the per-pattern translation units each carry
-    // their own static version. Folding those into a shared helper is a
-    // separate cleanup; this keeps C1 scoped to the ADT-helper dedup.
-    Value ensureU256Local(PatternRewriter &rewriter, Location loc, Value value)
-    {
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
-        if (llvm::isa<sir::U256Type>(value.getType()))
-            return value;
-        return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-    }
-} // namespace
+using mlir::ora::lowering::coerceToU256;
 
 namespace mlir
 {
@@ -104,8 +92,8 @@ namespace mlir
                 if (operands.size() != 2)
                     return failure();
                 return std::make_pair(
-                    ensureU256Local(rewriter, loc, operands[0]),
-                    ensureU256Local(rewriter, loc, operands[1]));
+                    coerceToU256(rewriter, loc, operands[0]),
+                    coerceToU256(rewriter, loc, operands[1]));
             }
 
             FailureOr<std::pair<Value, Value>>
@@ -119,8 +107,8 @@ namespace mlir
                 if (cast.getNumOperands() != 2)
                     return failure();
                 return std::make_pair(
-                    ensureU256Local(rewriter, loc, cast.getOperand(0)),
-                    ensureU256Local(rewriter, loc, cast.getOperand(1)));
+                    coerceToU256(rewriter, loc, cast.getOperand(0)),
+                    coerceToU256(rewriter, loc, cast.getOperand(1)));
             }
 
             LogicalResult decodeAdtPayloadFromCarrier(Operation *op,
@@ -136,7 +124,7 @@ namespace mlir
                         return rewriter.notifyMatchFailure(
                             op, "aggregate ADT payload requires compiler-runtime handle lowering");
                     payload = rewriter.create<sir::BitcastOp>(
-                        loc, loweredType, ensureU256Local(rewriter, loc, payload));
+                        loc, loweredType, coerceToU256(rewriter, loc, payload));
                     return success();
                 }
 
@@ -144,13 +132,13 @@ namespace mlir
                     return success();
                 if (llvm::isa<sir::U256Type>(loweredType))
                 {
-                    payload = ensureU256Local(rewriter, loc, payload);
+                    payload = coerceToU256(rewriter, loc, payload);
                     return success();
                 }
                 if (llvm::isa<mlir::IntegerType>(loweredType))
                 {
                     payload = rewriter.create<sir::BitcastOp>(
-                        loc, loweredType, ensureU256Local(rewriter, loc, payload));
+                        loc, loweredType, coerceToU256(rewriter, loc, payload));
                     return success();
                 }
                 return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");
