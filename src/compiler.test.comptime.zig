@@ -4199,6 +4199,62 @@ test "compiler rejects unknown builtin functions during typecheck" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown built-in function '@totallyBogusBuiltin'"));
 }
 
+test "compiler rejects eip712TypeHash while support is disabled" {
+    const source_text =
+        \\struct Permit {
+        \\    owner: address,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(Permit);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown built-in function '@eip712TypeHash'"));
+}
+
+test "compiler validates cast-like and overflow builtin arguments during typecheck" {
+    const source_text =
+        \\pub fn bad_cast(value: u256) -> u256 {
+        \\    return @cast(value);
+        \\}
+        \\
+        \\pub fn bad_bitcast(value: u256) -> address {
+        \\    return @bitCast(address, value, value);
+        \\}
+        \\
+        \\pub fn bad_truncate(value: u256) -> u8 {
+        \\    return @truncate(value);
+        \\}
+        \\
+        \\pub fn bad_overflow_arity(value: u8) -> bool {
+        \\    let pair = @addWithOverflow(value);
+        \\    return pair.overflow;
+        \\}
+        \\
+        \\pub fn bad_overflow_type(value: u8) -> bool {
+        \\    let pair = @mulWithOverflow(value, true);
+        \\    return pair.overflow;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@cast expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@bitCast expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@truncate expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@addWithOverflow expects 2 arguments"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@mulWithOverflow expects integer operands"));
+}
+
 test "compiler @structFields returns ordered fields" {
     const source_text =
         \\struct Point {

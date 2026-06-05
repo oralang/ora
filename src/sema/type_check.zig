@@ -71,7 +71,6 @@ const BuiltinKind = enum {
     div_trunc,
     div_with_overflow,
     divmod,
-    eip712_type_hash,
     event_topic,
     keccak256,
     lock,
@@ -111,7 +110,6 @@ const builtin_name_entries = [_]BuiltinNameEntry{
     .{ "divTrunc", .div_trunc },
     .{ "divWithOverflow", .div_with_overflow },
     .{ "divmod", .divmod },
-    .{ "eip712TypeHash", .eip712_type_hash },
     .{ "eventTopic", .event_topic },
     .{ "keccak256", .keccak256 },
     .{ "lock", .lock },
@@ -157,7 +155,7 @@ fn builtinKind(name: []const u8) ?BuiltinKind {
 
 fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
     return switch (kind) {
-        .selector, .abi_signature, .event_topic, .eip712_type_hash, .struct_fields, .trait_methods => true,
+        .selector, .abi_signature, .event_topic, .struct_fields, .trait_methods => true,
         else => false,
     };
 }
@@ -1223,23 +1221,15 @@ const TypeChecker = struct {
     }
 
     fn checkStructMetadata(self: *TypeChecker, struct_item: ast.StructItem) !void {
-        var seen_eip712_name: ?source.TextRange = null;
         for (struct_item.metadata) |metadata_id| {
             const metadata = self.file.item(metadata_id).*;
             if (metadata != .Constant) continue;
 
             try self.visitItem(metadata_id);
             const constant = metadata.Constant;
-            if (!std.mem.eql(u8, constant.name, "eip712_name")) continue;
-
-            if (seen_eip712_name) |_| {
-                try self.emitRangeError(constant.range, "duplicate struct metadata constant 'eip712_name'", .{});
-            }
-            seen_eip712_name = constant.range;
-
-            if (self.file.expression(constant.value).* != .StringLiteral) {
-                try self.emitRangeError(constant.range, "struct metadata 'eip712_name' must be a string literal", .{});
-            }
+            try self.emitRangeError(constant.range, "struct metadata constant '{s}' is not supported in this compiler phase", .{
+                constant.name,
+            });
         }
     }
 
@@ -3536,6 +3526,17 @@ const TypeChecker = struct {
 
     fn checkBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
         switch (kind) {
+            .cast, .bit_cast, .truncate => try self.checkCastLikeBuiltinArguments(kind, builtin),
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .div_with_overflow,
+            .mod_with_overflow,
+            .neg_with_overflow,
+            .shl_with_overflow,
+            .shr_with_overflow,
+            .power_with_overflow,
+            => try self.checkOverflowBuiltinArguments(kind, builtin),
             .div_trunc, .div_floor, .div_ceil, .div_exact, .divmod => try self.checkDivisionBuiltinArguments(builtin),
             .keccak256 => try self.checkKeccak256BuiltinArguments(builtin),
             .abi_encode => try self.checkAbiEncodeBuiltinArguments(builtin),
@@ -3544,12 +3545,60 @@ const TypeChecker = struct {
             .compile_error => try self.checkCompileErrorBuiltinArguments(builtin),
             .selector, .abi_signature => try self.checkAbiFunctionReferenceBuiltinArguments(builtin),
             .event_topic => try self.checkEventReferenceBuiltinArguments(builtin),
-            .eip712_type_hash => try self.checkEip712TypeHashArguments(builtin),
             .struct_fields => try self.checkReflectionBuiltinArguments(builtin, "structFields", "struct", TypeChecker.resolveBuiltinStructReference),
             .trait_methods => try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference),
             .concat => try self.checkConcatBuiltinArguments(builtin),
             .slice => try self.checkSliceBuiltinArguments(builtin),
             else => {},
+        }
+    }
+
+    fn checkCastLikeBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        _ = kind;
+        if (builtin.type_arg == null or builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@{s} expects a type argument and 1 value argument", .{builtin.name});
+        }
+    }
+
+    fn checkOverflowBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const expected_args: usize = if (kind == .neg_with_overflow) 1 else 2;
+        if (builtin.args.len != expected_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects {d} arguments", .{ builtin.name, expected_args });
+            return;
+        }
+
+        const target_type = self.builtinDivisionOperandType(builtin);
+        if (target_type.kind() != .unknown) {
+            for (builtin.args) |arg| {
+                try self.contextualizeLiteral(arg, target_type);
+                _ = try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, target_type);
+            }
+        }
+
+        const lhs_type = self.expr_types[builtin.args[0].index()];
+        const lhs_base = if (lhs_type.refinementBaseType()) |base| base.* else lhs_type;
+        if (lhs_base.kind() != .unknown and !isIntegerType(lhs_base)) {
+            try self.emitRangeError(builtin.range, "@{s} expects integer operands", .{builtin.name});
+            return;
+        }
+
+        if (expected_args == 1) return;
+
+        const rhs_type = self.expr_types[builtin.args[1].index()];
+        const rhs_base = if (rhs_type.refinementBaseType()) |base| base.* else rhs_type;
+        if (rhs_base.kind() != .unknown and !isIntegerType(rhs_base)) {
+            try self.emitRangeError(builtin.range, "@{s} expects integer operands", .{builtin.name});
+            return;
+        }
+
+        if (lhs_base.kind() != .unknown and rhs_base.kind() != .unknown and
+            !typesFlowCompatible(lhs_base, rhs_base) and !typesFlowCompatible(rhs_base, lhs_base))
+        {
+            try self.emitRangeError(builtin.range, "@{s} expects compatible integer operand types, found '{s}' and '{s}'", .{
+                builtin.name,
+                diagnosticTypeDisplayName(self, lhs_type),
+                diagnosticTypeDisplayName(self, rhs_type),
+            });
         }
     }
 
@@ -3673,27 +3722,6 @@ const TypeChecker = struct {
         }
     }
 
-    fn checkEip712TypeHashArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
-        if (builtin.args.len != 1) {
-            try self.emitRangeError(builtin.range, "@eip712TypeHash expects 1 argument", .{});
-            return;
-        }
-
-        const struct_id = self.resolveBuiltinStructReference(builtin.args[0]) orelse {
-            try self.emitRangeError(builtin.range, "@eip712TypeHash expects a struct type", .{});
-            return;
-        };
-
-        const struct_item = self.file.item(struct_id).Struct;
-        for (struct_item.fields) |field| {
-            const field_type = try self.resolveTypeExpr(field.type_expr);
-            if (self.typeContainsStructReference(field_type)) {
-                try self.emitRangeError(builtin.range, "@eip712TypeHash does not yet support nested struct fields", .{});
-                return;
-            }
-        }
-    }
-
     fn checkReflectionBuiltinArguments(
         self: *TypeChecker,
         builtin: ast.BuiltinExpr,
@@ -3812,28 +3840,6 @@ const TypeChecker = struct {
             }) catch "a value";
         }
         return "an unknown value";
-    }
-
-    fn typeContainsStructReference(self: *const TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .struct_ => true,
-            .refinement => |refinement| self.typeContainsStructReference(refinement.base_type.*),
-            .array => |array| self.typeContainsStructReference(array.element_type.*),
-            .slice => |slice| self.typeContainsStructReference(slice.element_type.*),
-            .tuple => |elements| {
-                for (elements) |element| {
-                    if (self.typeContainsStructReference(element)) return true;
-                }
-                return false;
-            },
-            .anonymous_struct => |struct_type| {
-                for (struct_type.fields) |field| {
-                    if (self.typeContainsStructReference(field.ty)) return true;
-                }
-                return false;
-            },
-            else => false,
-        };
     }
 
     fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) !?Type {
@@ -5461,7 +5467,7 @@ const TypeChecker = struct {
 
             .selector => .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } },
 
-            .event_topic, .eip712_type_hash => .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } },
+            .event_topic => .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } },
 
             .compile_error => .{ .never = {} },
 

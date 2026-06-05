@@ -1116,8 +1116,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const loc = self.location(struct_item.range);
             const op = mlir.oraStructDeclOpCreate(self.context, loc, strRef(struct_item.name));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-            const eip712_name = abi_support.eip712WireNameFromStructItem(self.file, struct_item) orelse struct_item.name;
-            mlir.oraOperationSetAttributeByName(op, strRef("ora.eip712_name"), mlir.oraStringAttrCreate(self.context, strRef(eip712_name)));
 
             if (struct_item.fields.len > 0) {
                 const field_names = try self.allocator.alloc(mlir.MlirAttribute, struct_item.fields.len);

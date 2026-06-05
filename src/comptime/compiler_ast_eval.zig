@@ -1452,32 +1452,6 @@ const ConstEvaluator = struct {
         return try hir_abi.signatureForAbiTypes(self.allocator, event_name, abi_types.items);
     }
 
-    fn signatureForEip712Struct(self: *ConstEvaluator, builtin_range: source.TextRange, struct_item: ast.StructItem) !?[]const u8 {
-        const type_name = hir_abi.eip712WireNameFromStructItem(self.file, struct_item) orelse return null;
-
-        var fields: std.ArrayList(hir_abi.Eip712Field) = .{};
-        defer fields.deinit(self.allocator);
-
-        for (struct_item.fields) |field| {
-            if (self.typeExprIsStructReference(field.type_expr)) {
-                self.recordCtError(error_mod.CtError.init(
-                    .compile_error,
-                    self.sourceSpan(builtin_range),
-                    "@eip712TypeHash does not yet support nested struct fields",
-                ));
-                return null;
-            }
-
-            const abi_type = (try self.typeExprAbiName(field.type_expr)) orelse return null;
-            try fields.append(self.allocator, .{
-                .name = field.name,
-                .abi_type = abi_type,
-            });
-        }
-
-        return try hir_abi.signatureForEip712Type(self.allocator, type_name, fields.items);
-    }
-
     fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
         const module_id = self.module_id orelse return;
         const type_query = self.type_query orelse return;
@@ -1712,25 +1686,6 @@ const ConstEvaluator = struct {
                 break :blk try std.fmt.allocPrint(self.allocator, "{s}[]", .{element});
             },
             .ErrorUnion, .Error => null,
-        };
-    }
-
-    fn typeExprIsStructReference(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) bool {
-        return switch (self.file.typeExpr(type_expr_id).*) {
-            .Path => |path| blk: {
-                const item_id = self.lookupNamedItem(path.name) orelse break :blk false;
-                break :blk self.file.item(item_id).* == .Struct;
-            },
-            .Generic => |generic| blk: {
-                if (refinements.isKnownName(generic.name)) {
-                    if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprIsStructReference(generic.args[0].Type);
-                }
-                const item_id = self.lookupNamedItem(generic.name) orelse break :blk false;
-                break :blk self.file.item(item_id).* == .Struct;
-            },
-            .Array => |array| self.typeExprIsStructReference(array.element),
-            .Slice => |slice| self.typeExprIsStructReference(slice.element),
-            .Tuple, .AnonymousStruct, .ErrorUnion, .Error => false,
         };
     }
 
@@ -2699,13 +2654,6 @@ const ConstEvaluator = struct {
             return try self.evalAbiEncodeBuiltin(builtin);
         }
 
-        if (std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
-            if (builtin.args.len != 1) return null;
-            const struct_ref = (try self.resolveAbiStructReference(builtin.args[0])) orelse return null;
-            const signature = (try self.signatureForEip712Struct(builtin.range, struct_ref.item)) orelse return null;
-            return .{ .fixed_bytes = try keccakFixedBytes(self.allocator, signature) };
-        }
-
         if (std.mem.eql(u8, builtin.name, "cast")) {
             if (builtin.args.len == 0) return null;
             if (builtin.type_arg) |type_arg| {
@@ -2794,6 +2742,7 @@ const ConstEvaluator = struct {
         }
 
         if (std.mem.eql(u8, builtin.name, "truncate")) {
+            if (builtin.args.len == 0) return null;
             return try self.evalExpr(builtin.args[0]);
         }
 

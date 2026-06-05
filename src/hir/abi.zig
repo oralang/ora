@@ -20,36 +20,10 @@ pub fn eventWireNameFromLogDecl(file: *const ast.AstFile, log_decl: ast.LogDeclI
     return metadataStringLiteral(file, log_decl.metadata, "event_name") orelse log_decl.name;
 }
 
-pub fn eip712WireNameFromStructItem(file: *const ast.AstFile, struct_item: ast.StructItem) ?[]const u8 {
-    return metadataStringLiteral(file, struct_item.metadata, "eip712_name") orelse struct_item.name;
-}
-
 pub fn signatureForAbiTypes(allocator: std.mem.Allocator, name: []const u8, abi_types: []const []const u8) ![]const u8 {
     const joined = try std.mem.join(allocator, ",", abi_types);
     defer allocator.free(joined);
     return std.fmt.allocPrint(allocator, "{s}({s})", .{ name, joined });
-}
-
-pub const Eip712Field = struct {
-    name: []const u8,
-    abi_type: []const u8,
-};
-
-pub fn signatureForEip712Type(allocator: std.mem.Allocator, type_name: []const u8, fields: []const Eip712Field) ![]const u8 {
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
-
-    try buffer.appendSlice(allocator, type_name);
-    try buffer.append(allocator, '(');
-    for (fields, 0..) |field, index| {
-        if (index > 0) try buffer.append(allocator, ',');
-        try buffer.appendSlice(allocator, field.abi_type);
-        try buffer.append(allocator, ' ');
-        try buffer.appendSlice(allocator, field.name);
-    }
-    try buffer.append(allocator, ')');
-
-    return buffer.toOwnedSlice(allocator);
 }
 
 pub fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {

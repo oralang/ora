@@ -2607,7 +2607,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
                 return appendValueOp(self.block, op);
             }
-            return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
+            try self.parent.emitLoweringError(
+                builtin.range,
+                "builtin '@{s}' reached HIR lowering without a runtime implementation or const-eval result",
+                .{builtin.name},
+            );
+            return error.MlirOperationCreationFailed;
         }
 
         fn lowerAbiEncodeBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -2726,7 +2731,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const loc = self.parent.location(builtin.range);
             const result_type = self.parent.lowerExprType(expr_id);
-            if (builtin.args.len < 2) return self.defaultValue(result_type, builtin.range);
+            if (builtin.args.len < 2) return error.MlirOperationCreationFailed;
 
             var lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             var rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
@@ -3157,7 +3162,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const result_type = self.parent.lowerExprType(expr_id);
             const is_unary = std.mem.eql(u8, builtin.name, "negWithOverflow");
             const expected_args: usize = if (is_unary) 1 else 2;
-            if (builtin.args.len < expected_args) return self.defaultValue(result_type, builtin.range);
+            if (builtin.args.len < expected_args) return error.MlirOperationCreationFailed;
 
             const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             const lhs_type = mlir.oraValueGetType(lhs);
@@ -3243,7 +3248,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value = appendValueOp(self.block, arith_op);
                 overflow_flag = try @This().makeFalse(self, loc);
             } else {
-                return self.defaultValue(result_type, builtin.range);
+                return error.MlirOperationCreationFailed;
             }
 
             return @This().packOverflowResult(self, value, overflow_flag, result_type, builtin.range);
@@ -3263,7 +3268,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 2,
                 result_type,
             );
-            if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, range);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
