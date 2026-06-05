@@ -20,8 +20,8 @@
         "tests/conformance/properties.zig#checkArithmeticProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check",
-        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check#sir.sdiv",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
       ]
     },
     {
@@ -34,7 +34,7 @@
         "tests/conformance/properties.zig#checkArithmeticProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__arithmetic_test.check"
+        "tests/mlir_sir/auto__ora-example__arithmetic_test.check#sir.add"
       ]
     },
     {
@@ -48,8 +48,8 @@
         "tests/conformance/storage_narrow_integer_mapping.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check",
-        "tests/mlir_sir/signed_arithmetic_lowering.check"
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check#sir.sar",
+        "tests/mlir_sir/signed_arithmetic_lowering.check#sir.sdiv"
       ]
     },
     {
@@ -65,7 +65,7 @@
         "tests/conformance/storage_dynamic_array.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
       ]
     },
     {
@@ -82,8 +82,9 @@
         "tests/conformance/properties.zig#checkStorageProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check",
-        "tests/mlir_sir/auto__ora-example__storage__storage_test_1.check"
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check#ora.global_slots",
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_1.check#sir.sstore",
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_3.check#sir.keccak256"
       ]
     },
     {
@@ -101,8 +102,8 @@
         "tests/conformance/storage_fixed_bytes_mapping.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__structs__basic_structs.check",
-        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check"
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_3.check#sir.sstore",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
       ]
     },
     {
@@ -116,9 +117,9 @@
         "tests/conformance/storage_dynamic_array.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__memory__basic_memory.check",
-        "tests/mlir_sir/auto__ora-example__regions__coercions__implicit_storage_to_stack.check",
-        "tests/mlir_sir/auto__ora-example__regions__region_ok_memory_to_storage.check"
+        "tests/mlir_sir/auto__ora-example__memory__basic_memory.check#sir.malloc",
+        "tests/mlir_sir/auto__ora-example__regions__coercions__implicit_storage_to_stack.check#sir.sload",
+        "tests/mlir_sir/auto__ora-example__regions__region_ok_memory_to_storage.check#sir.sstore"
       ]
     },
     {
@@ -131,7 +132,7 @@
         "tests/conformance/environment_log.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check"
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log0"
       ]
     },
     {
@@ -144,8 +145,8 @@
         "tests/conformance/environment_log.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check",
-        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check"
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log0",
+        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check#sir.log0"
       ]
     },
     {
@@ -159,9 +160,9 @@
         "tests/conformance/properties.zig#checkErrorUnionProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__control_flow__basic_control_flow.check",
-        "tests/mlir_sir/auto__ora-example__control_flow__break_continue.check",
-        "tests/mlir_sir/auto__ora-example__switch__switch_test.check"
+        "tests/mlir_sir/auto__ora-example__control_flow__basic_control_flow.check#func.func @testIf",
+        "tests/mlir_sir/auto__ora-example__control_flow__break_continue.check#func.func @test_breaks_continues",
+        "tests/mlir_sir/auto__ora-example__switch__switch_test.check#sir.cond_br"
       ]
     },
     {
@@ -175,8 +176,8 @@
         "tests/conformance/properties.zig#checkErrorUnionProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__errors__error_union_encoding.check",
-        "tests/mlir_sir/auto__ora-example__errors__try_catch.check"
+        "tests/mlir_sir/auto__ora-example__errors__error_union_encoding.check#returns_error_union = true",
+        "tests/mlir_sir/auto__ora-example__errors__try_catch.check#func.func @test_try_catch"
       ]
     },
     {
@@ -189,8 +190,7 @@
         "tests/conformance/properties.zig#checkErrorUnionProperty"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__enums__basic_enums.check",
-        "tests/mlir_sir/auto__ora-example__enums__enum_usage_test.check"
+        "tests/mlir_sir/auto__ora-example__enums__enum_usage_test.check#sir.load"
       ]
     },
     {
@@ -201,10 +201,10 @@
       "high_churn": false,
       "executing_tests": [
         "tests/conformance/counter.spec.toml",
-        "tests/conformance/runner.zig#AbiDoc.findFunction"
+        "tests/conformance/root.zig#conformance corpus specs execute"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check"
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check#ora.global_slots"
       ]
     }
   ]

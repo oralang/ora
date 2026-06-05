@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ REQUIRED_CI_COMMANDS = {
     "zig build test-evm",
     "zig build gate-oratosir-debloat",
 }
+ZIG_SYMBOL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 def fail(message: str) -> "None":
@@ -24,11 +26,52 @@ def fail(message: str) -> "None":
     raise SystemExit(1)
 
 
-def repo_path(ref: str) -> Path:
-    path = ref.split("#", 1)[0]
+def split_ref(ref: str) -> tuple[Path, str | None]:
+    path, sep, fragment = ref.partition("#")
     if not path:
         fail(f"empty path reference in {ref!r}")
-    return ROOT / path
+    if sep and not fragment:
+        fail(f"empty fragment in reference: {ref}")
+    return ROOT / path, fragment if sep else None
+
+
+def validate_zig_fragment(path: Path, text: str, fragment: str, context: str) -> None:
+    if " " in fragment:
+        if f'test "{fragment}"' in text:
+            return
+        fail(f"{context} references missing Zig test {fragment!r} in {path.relative_to(ROOT)}")
+
+    if not ZIG_SYMBOL_RE.fullmatch(fragment):
+        fail(f"{context} has invalid Zig fragment {fragment!r}")
+
+    symbol = fragment.rsplit(".", 1)[-1]
+    symbol_re = re.compile(rf"\b(?:pub\s+)?(?:inline\s+)?(?:fn|const|var)\s+{re.escape(symbol)}\b")
+    if symbol_re.search(text) or f'test "{fragment}"' in text:
+        return
+    fail(f"{context} references missing Zig symbol {fragment!r} in {path.relative_to(ROOT)}")
+
+
+def validate_reference(ref: str, context: str, *, is_sir_golden: bool = False) -> None:
+    path, fragment = split_ref(ref)
+    if not path.exists():
+        fail(f"{context} references missing file: {path.relative_to(ROOT)}")
+
+    if path.suffix == ".zig" and fragment is None:
+        fail(f"{context} references Zig file without #test-or-symbol: {ref}")
+    if is_sir_golden and fragment is None:
+        fail(f"{context} references SIR golden without #CHECK-fragment: {ref}")
+    if fragment is None:
+        return
+
+    text = path.read_text()
+    if path.suffix == ".zig":
+        validate_zig_fragment(path, text, fragment, context)
+    elif path.suffix == ".check":
+        if any(line.startswith("// CHECK") and fragment in line for line in text.splitlines()):
+            return
+        fail(f"{context} references missing CHECK fragment {fragment!r} in {path.relative_to(ROOT)}")
+    elif fragment not in text:
+        fail(f"{context} references missing fragment {fragment!r} in {path.relative_to(ROOT)}")
 
 
 def require_string(value: object, context: str) -> str:
@@ -92,10 +135,10 @@ def main() -> None:
             if not sir_goldens:
                 fail(f"{pattern_id} is high-churn and must list at least one SIR golden")
 
-        for ref in executing_tests + sir_goldens:
-            path = repo_path(ref)
-            if not path.exists():
-                fail(f"{pattern_id} references missing file: {path.relative_to(ROOT)}")
+        for ref in executing_tests:
+            validate_reference(ref, pattern_id)
+        for ref in sir_goldens:
+            validate_reference(ref, pattern_id, is_sir_golden=True)
 
     if high_churn_count == 0:
         fail("no high-churn patterns listed")
