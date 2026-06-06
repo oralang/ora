@@ -14,6 +14,7 @@ DEFAULT_MANIFEST = ROOT / "tests/oratosir_debloat_coverage.json"
 REQUIRED_CI_COMMANDS = {
     "zig build check-oratosir-coverage",
     "zig build check-mlir-sir",
+    "zig build check-sir-text",
     "zig build test-conformance",
     "zig build test-evm",
     "zig build gate-oratosir-debloat",

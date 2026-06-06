@@ -1,0 +1,4 @@
+// INPUT: tests/sir_text/inputs/dispatcher_dynamic_tuple_arg.ora
+// EXPECT-FAIL: dynamic tuple dispatcher input is still a fail-closed unsupported path.
+
+// CHECK: unsupported dynamic tuple ABI type for dispatcher

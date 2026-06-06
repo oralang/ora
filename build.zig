@@ -904,10 +904,20 @@ pub fn build(b: *std.Build) void {
     const check_mlir_sir_step = b.step("check-mlir-sir", "Run SIR MLIR FileCheck snapshots");
     check_mlir_sir_step.dependOn(&mlir_sir_checks_cmd.step);
 
+    // zig build check-sir-text
+    const sir_text_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-sir-text-checks.sh",
+    });
+    sir_text_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_sir_text_step = b.step("check-sir-text", "Run SIR text FileCheck snapshots");
+    check_sir_text_step.dependOn(&sir_text_checks_cmd.step);
+
     // zig build gate-oratosir-debloat
     const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR de-bloat merge gate");
     oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
     oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
+    oratosir_debloat_gate_step.dependOn(check_sir_text_step);
     oratosir_debloat_gate_step.dependOn(test_conformance_step);
     oratosir_debloat_gate_step.dependOn(test_evm_step);
 

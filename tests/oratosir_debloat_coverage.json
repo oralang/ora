@@ -4,11 +4,142 @@
   "ci_commands": [
     "zig build check-oratosir-coverage",
     "zig build check-mlir-sir",
+    "zig build check-sir-text",
     "zig build test-conformance",
     "zig build test-evm",
     "zig build gate-oratosir-debloat"
   ],
   "patterns": [
+    {
+      "id": "dispatcher.selector_entry_and_public_decode",
+      "tier": "T5",
+      "area": "SIRDispatcher",
+      "conversion": "Public entry dispatcher construction, selector extraction/switch routing, calldata size/canonicality checks, public function icall, and return/revert routing",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/external_return_decode.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_refinement_e2e.check#fn main:",
+        "tests/sir_text/dispatcher_refinement_e2e.check#switch selector",
+        "tests/sir_text/dispatcher_refinement_e2e.check#icall @deposit a_deposit",
+        "tests/sir_text/dispatcher_refinement_e2e.check#abi_decode_revert_10"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_return_abi_encoding",
+      "tier": "T5",
+      "area": "SIRDispatcher",
+      "conversion": "Public dynamic return ABI encoding for string/bytes-style dispatcher returns: offset word, length word, padded payload copy, and returndata length",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/external_return_decode.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_return.check#0x06FDDE03 => @name_",
+        "tests/sir_text/dispatcher_dynamic_return.check#mstore256 v17 v8",
+        "tests/sir_text/dispatcher_dynamic_return.check#mcopy v20 v19 v10",
+        "tests/sir_text/dispatcher_dynamic_return.check#return v17 v16"
+      ]
+    },
+    {
+      "id": "dispatcher.fixed_bytes_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher fixed-bytes argument decode: left-aligned bytesN word mask, canonicality check, invalid-fixed-bytes revert, and payload passed to the user function",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#0x445D858C => @take_",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shl v4 v5",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#abi_decode_revert_6"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_bytes_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher dynamic string/bytes argument decode: head offset, tail length, bounds checks, padded copy, null-padding validation, and user icall",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_string_arg.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#0x436A66E7 => @length_",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#large_const 0xFFFFFFFFFFFFFFFF",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#calldatacopy",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#mload8"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_array_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher dynamic uint256[] argument decode: head offset, element count, max-count guard, byte-size calculation, bounds check, copy, and user icall",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_dynamic_array_arg.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#0x0194DB8E => @sum_",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#const 0x8000",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#mul v13",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#calldatacopy"
+      ]
+    },
+    {
+      "id": "dispatcher.static_tuple_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher static tuple argument decode: tuple-sized calldata minimum, inline head copy into scratch storage, and tuple pointer passed to the user function",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#calldatacopy v5 selector_offset_0 v4"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#0xE18D95B8 => @first_",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#min_cdsize_2args_0 = const 0x43",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#sallocany 0x40",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#calldatacopy v5 selector_offset_0 v4"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_tuple_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher mixed dynamic tuple argument path. Current behavior is fail-closed unsupported; the check keeps the limitation visible until this path is implemented.",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before legacy fallback",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#unsupported dynamic tuple ABI type for dispatcher"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#unsupported dynamic tuple ABI type for dispatcher"
+      ]
+    },
+    {
+      "id": "dispatcher.error_union_revert_return",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher error-union return conversion: internal error tag dispatch, ABI custom-error selector materialization, four-byte revert buffer, and revert",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_error_union_revert.spec.toml",
+        "tests/conformance/counter.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_error_union_revert_return.check#0xA9CC4718 => @fail_",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#const 0xFF7E9F57",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#large_const 0xFF7E9F5700000000000000000000000000000000000000000000000000000000",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#sallocany 0x4"
+      ]
+    },
     {
       "id": "foundation.u256_boundary_and_bitcasts",
       "tier": "T0",
@@ -67,6 +198,23 @@
       ],
       "sir_goldens": [
         "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
+      ]
+    },
+    {
+      "id": "abi.decode_wide_result_sink",
+      "tier": "T4",
+      "area": "AbiDecode",
+      "conversion": "Wide Result<T, AbiDecodeError> decode sink for full-word success payloads: explicit tag/payload carrier, Ok payload branch, and Err payload branch",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkSourceAbiEncodeRoundtripProperty",
+        "tests/conformance/external_return_decode.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/abi_decode_wide_result_sink.check#fn roundtrip:",
+        "tests/sir_text/abi_decode_wide_result_sink.check#v[[RT_OK_TAG]] = or",
+        "tests/sir_text/abi_decode_wide_result_sink.check#v[[BAD_ERR_TAG]] = const 0x1",
+        "tests/sir_text/abi_decode_wide_result_sink.check#fn malformed:"
       ]
     },
     {

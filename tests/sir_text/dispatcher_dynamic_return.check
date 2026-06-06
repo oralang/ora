@@ -1,0 +1,36 @@
+// INPUT: tests/conformance/external_return_decode.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn name:
+// CHECK: v0 = const 0x3
+// CHECK: v1 = const 0x20
+// CHECK: v3 = malloc
+// CHECK: mstore256 v3 v0
+// CHECK: large_const 0x6F72610000000000000000000000000000000000000000000000000000000000
+// CHECK: mstore256 v5 v4
+// CHECK: iret
+
+// CHECK-LABEL: fn main:
+// CHECK: load_selector {
+// CHECK: selector_word = calldataload zero_0
+// CHECK: selector = shr selector_shift_0 selector_word
+// CHECK: switch selector {
+// CHECK: 0x06FDDE03 => @name_
+
+// CHECK-LABEL:     name_ {
+// CHECK: icall @name
+// CHECK: const 0x20
+// CHECK: const 0x40
+// CHECK: mload256
+// CHECK: add {{.*}} v12
+// CHECK: div
+// CHECK: mul
+// CHECK: add {{.*}} v15
+// CHECK: mallocany
+// CHECK: mstore256 v17 v8
+// CHECK: add v17 v8
+// CHECK: mstore256 v18 v10
+// CHECK: add v6 v8
+// CHECK: add v17 v9
+// CHECK: mcopy v20 v19 v10
+// CHECK: return v17 v16

@@ -1,0 +1,5 @@
+contract DispatcherFixedBytesArg {
+    pub fn take(tag: bytes4) -> u256 {
+        return 1;
+    }
+}
