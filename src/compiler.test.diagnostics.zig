@@ -67,6 +67,87 @@ fn expectSingleBarePipeTypeDiagnostic(source_text: []const u8) !void {
     try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(syntax_diags, "error-union types must start with '!'"));
 }
 
+fn expectTypecheckOmits(source_text: []const u8, must_not_contain: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, must_not_contain));
+}
+
+// Locks the fail-closed contract for cast-like / overflow builtins: a malformed
+// shape MUST be rejected at type-check, never slide through to the HIR lowering
+// fallback ("reached HIR lowering without ...") or an ICE. Each needle here was
+// confirmed against a freshly built `ora` binary (EXIT=1 at sema, not EXIT=0).
+test "cast-like and overflow builtins reject malformed shapes at sema (fail-closed)" {
+    // Overflow: wrong arity (binary form needs 2 operands).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        let r = @addWithOverflow(x);
+        \\        return x;
+        \\    }
+        \\}
+    , .typecheck, "@addWithOverflow expects 2 arguments");
+
+    // Overflow: wrong arity (unary negWithOverflow needs exactly 1 operand).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        let r = @negWithOverflow(x, x);
+        \\        return x;
+        \\    }
+        \\}
+    , .typecheck, "@negWithOverflow expects 1 arguments");
+
+    // Overflow: non-integer operands.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f() -> u256 {
+        \\        let r = @addWithOverflow(true, false);
+        \\        return 0;
+        \\    }
+        \\}
+    , .typecheck, "@addWithOverflow expects integer operands");
+
+    // Cast-like: too many value arguments (type slot + 1 value is the only shape).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        return @bitCast(u256, x, x);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast expects a type argument and 1 value argument");
+
+    // Cast-like: missing value argument.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        return @bitCast(u256);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast expects a type argument and 1 value argument");
+
+    // Cast-like: a non-type in the type slot fails closed via type resolution
+    // (@truncate(x) parses `x` as the type argument).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u128 {
+        \\        return @truncate(x);
+        \\    }
+        \\}
+    , .typecheck, "undefined type 'x'");
+
+    // Positive control: a well-formed cast must NOT trip the shape check.
+    try expectTypecheckOmits(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u128 {
+        \\        return @truncate(u128, x);
+        \\    }
+        \\}
+    , "expects");
+}
+
 test "compiler diagnostic release matrix stays readable" {
     try expectDiagnosticProbeContains(
         \\trait Plain {
