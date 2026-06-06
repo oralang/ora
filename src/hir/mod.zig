@@ -182,8 +182,18 @@ pub const LoweringResult = struct {
     module: HirModuleHandle,
     items: []HirItemHandle,
     type_fallback_count: usize = 0,
+    placeholder_count: usize = 0,
+    default_value_count: usize = 0,
     type_fallbacks: []const TypeFallbackRecord = &.{},
     diagnostics: diagnostics.DiagnosticList,
+
+    pub fn executableFallbackCount(self: *const LoweringResult) usize {
+        return self.type_fallback_count + self.placeholder_count + self.default_value_count;
+    }
+
+    pub fn isEmittable(self: *const LoweringResult) bool {
+        return self.executableFallbackCount() == 0;
+    }
 
     pub fn deinit(self: *LoweringResult) void {
         if (!mlir.oraModuleIsNull(self.module.raw_module)) {

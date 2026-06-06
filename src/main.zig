@@ -2216,6 +2216,29 @@ fn exitOnCompilerErrors(
     std.process.exit(1);
 }
 
+fn rejectIfNotEmittable(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
+    if (lowering.isEmittable()) return;
+
+    try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
+    if (lowering.type_fallback_count != 0) {
+        try writer.print("  type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    }
+    if (lowering.placeholder_count != 0) {
+        try writer.print("  placeholders: {d}\n", .{lowering.placeholder_count});
+    }
+    if (lowering.default_value_count != 0) {
+        try writer.print("  default values: {d}\n", .{lowering.default_value_count});
+    }
+    try writer.flush();
+    std.process.exit(1);
+}
+
 fn exitOnCompilationErrors(
     writer: anytype,
     db: *compiler.db.CompilerDb,
@@ -3749,7 +3772,7 @@ fn runCompilerMlirEmit(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -3834,7 +3857,7 @@ fn runMlirEmitAdvanced(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try exitOnCompilerErrors(stdout, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
 
