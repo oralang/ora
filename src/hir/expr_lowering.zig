@@ -4169,6 +4169,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn createValuePlaceholder(self: *FunctionLowerer, op_name: []const u8, text: []const u8, range: source.TextRange, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
+            self.parent.recordPlaceholder();
             var attrs: [1]mlir.MlirNamedAttribute = .{namedStringAttr(self.parent.context, "value", text)};
             return mlir.oraOperationCreate(
                 self.parent.context,
@@ -4186,6 +4187,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn createAggregatePlaceholder(self: *FunctionLowerer, op_name: []const u8, range: source.TextRange, operands: []const mlir.MlirValue, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
+            if (!std.mem.eql(u8, op_name, "ora.default_value")) {
+                self.parent.recordPlaceholder();
+            }
             var attrs: [1]mlir.MlirNamedAttribute = .{namedTypeAttr(self.parent.context, "ora.type", result_type)};
             return mlir.oraOperationCreate(
                 self.parent.context,
@@ -4217,6 +4221,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
+            self.parent.recordDefaultValue();
             if (mlir.oraTypeIsNull(ty)) return error.MlirOperationCreationFailed;
             if (self.typeIsVoid(ty)) {
                 const seed = appendValueOp(

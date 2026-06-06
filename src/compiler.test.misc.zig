@@ -724,13 +724,12 @@ test "compiler tracks HIR unknown type fallbacks" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.type_fallback_count > 0);
-    try testing.expect(!hir_result.isEmittable());
     try testing.expect(hir_result.executableFallbackCount() >= hir_result.type_fallback_count);
     try testing.expectEqual(compiler.hir.TypeFallbackReason.sema_unknown, hir_result.type_fallbacks[0].reason);
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
 }
 
-test "HIR emittability rejects executable fallback counters" {
+test "HIR emittability arms placeholders while observing pending counters" {
     var hir_result: compiler.hir.LoweringResult = undefined;
     hir_result.type_fallback_count = 0;
     hir_result.placeholder_count = 0;
@@ -745,8 +744,54 @@ test "HIR emittability rejects executable fallback counters" {
 
     hir_result.placeholder_count = 0;
     hir_result.default_value_count = 1;
-    try testing.expect(!hir_result.isEmittable());
+    try testing.expect(hir_result.isEmittable());
     try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+
+    hir_result.default_value_count = 0;
+    hir_result.type_fallback_count = 1;
+    try testing.expect(hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+}
+
+test "compiler tracks HIR executable placeholders as detect-only" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum: u256 = 0;
+        \\        for (9) |i| {
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(hir_result.placeholder_count > 0);
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler tracks HIR default values as detect-only" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    let value: u256;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.default_value_count > 0);
+    try testing.expect(hir_result.isEmittable());
 }
 
 test "compiler persists divmod as a tuple consteval value" {

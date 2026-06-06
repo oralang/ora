@@ -293,6 +293,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .module_body = self.module_body,
                 .items = self.items,
                 .type_fallbacks = self.type_fallbacks,
+                .placeholder_count = self.placeholder_count,
+                .default_value_count = self.default_value_count,
                 .diagnostics = self.diagnostics,
                 .contract_body_blocks = imported_contract_body_blocks,
                 .monomorphized_function_names = std.StringHashMap(void).init(self.allocator),
@@ -337,6 +339,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
                 self.items = imported_lowerer.items;
                 self.type_fallbacks = imported_lowerer.type_fallbacks;
+                self.placeholder_count = imported_lowerer.placeholder_count;
+                self.default_value_count = imported_lowerer.default_value_count;
                 return symbol_name;
             }
 
@@ -346,6 +350,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             self.items = imported_lowerer.items;
             self.type_fallbacks = imported_lowerer.type_fallbacks;
+            self.placeholder_count = imported_lowerer.placeholder_count;
+            self.default_value_count = imported_lowerer.default_value_count;
             return base_symbol_name;
         }
 
@@ -1655,6 +1661,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
+            if (std.mem.endsWith(u8, op_name, "_placeholder")) {
+                self.recordPlaceholder();
+            }
             const op = mlir.oraOperationCreate(
                 self.context,
                 loc,

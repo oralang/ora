@@ -192,7 +192,10 @@ pub const LoweringResult = struct {
     }
 
     pub fn isEmittable(self: *const LoweringResult) bool {
-        return self.executableFallbackCount() == 0;
+        // P0 arms only counters proven clean across ora-example/. Type
+        // fallbacks and default values are measured until their valid-code
+        // producers are eliminated.
+        return self.placeholder_count == 0;
     }
 
     pub fn deinit(self: *LoweringResult) void {
@@ -278,6 +281,8 @@ pub fn lowerModule(
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
+        .placeholder_count = 0,
+        .default_value_count = 0,
         .diagnostics = &result.diagnostics,
         .contract_body_blocks = try arena.alloc(mlir.MlirBlock, file.items.len),
         .monomorphized_function_names = std.StringHashMap(void).init(arena),
@@ -304,6 +309,8 @@ pub fn lowerModule(
     result.items = try lowerer.items.toOwnedSlice(result.arena.allocator());
     result.type_fallbacks = try lowerer.type_fallbacks.toOwnedSlice(result.arena.allocator());
     result.type_fallback_count = result.type_fallbacks.len;
+    result.placeholder_count = lowerer.placeholder_count;
+    result.default_value_count = lowerer.default_value_count;
     return result;
 }
 
@@ -344,6 +351,8 @@ const Lowerer = struct {
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
+    placeholder_count: usize,
+    default_value_count: usize,
     diagnostics: *diagnostics.DiagnosticList,
     guarded_storage_roots: ?*const std.StringHashMap(void) = null,
     contract_body_blocks: []mlir.MlirBlock,
@@ -1317,6 +1326,14 @@ const Lowerer = struct {
             },
         }) catch {};
         return support.defaultIntegerType(self.context);
+    }
+
+    pub fn recordPlaceholder(self: *Lowerer) void {
+        self.placeholder_count += 1;
+    }
+
+    pub fn recordDefaultValue(self: *Lowerer) void {
+        self.default_value_count += 1;
     }
 
     pub fn emitLoweringError(self: *Lowerer, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
