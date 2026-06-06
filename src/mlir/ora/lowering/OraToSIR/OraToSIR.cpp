@@ -52,6 +52,27 @@ using namespace ora;
 
 namespace
 {
+    template <typename... Dialects>
+    static void addLegalDialects(ConversionTarget &target)
+    {
+        (target.addLegalDialect<Dialects>(), ...);
+    }
+
+    static void addOraToSirBaseLegalDialects(ConversionTarget &target)
+    {
+        addLegalDialects<mlir::BuiltinDialect, mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                         mlir::cf::ControlFlowDialect, mlir::scf::SCFDialect,
+                         mlir::tensor::TensorDialect, mlir::memref::MemRefDialect>(target);
+    }
+
+    static void addOraToSirBaseLegalDialectsWithSir(ConversionTarget &target)
+    {
+        addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, mlir::func::FuncDialect,
+                         mlir::cf::ControlFlowDialect, mlir::tensor::TensorDialect,
+                         mlir::memref::MemRefDialect, mlir::scf::SCFDialect,
+                         mlir::arith::ArithDialect>(target);
+    }
+
     static std::optional<unsigned> bitcastPayloadWidth(Type type)
     {
         if (!type)
@@ -544,6 +565,30 @@ static void dumpModuleOnFailure(ModuleOp module, StringRef phase)
     // inconsistent, so we skip it.
 }
 
+static LogicalResult applyFullConversionWithDiagnostics(
+    ModuleOp module, ConversionTarget &target, RewritePatternSet &&patterns,
+    StringRef failureMessage, StringRef failureDump = StringRef(),
+    StringRef beforeLog = StringRef(), StringRef afterLog = StringRef(),
+    StringRef failureLog = StringRef(), const ConversionConfig *config = nullptr)
+{
+    if (!beforeLog.empty())
+        logModuleOps(module, beforeLog);
+    LogicalResult result = config ? applyFullConversion(module, target, std::move(patterns), *config)
+                                  : applyFullConversion(module, target, std::move(patterns));
+    if (failed(result))
+    {
+        if (!failureLog.empty())
+            logModuleOps(module, failureLog);
+        if (!failureDump.empty())
+            dumpModuleOnFailure(module, failureDump);
+        module.emitError(failureMessage);
+        return failure();
+    }
+    if (!afterLog.empty())
+        logModuleOps(module, afterLog);
+    return success();
+}
+
 static bool isPayloadlessErrorStructType(Type type, Operation *contextOp)
 {
     auto structType = llvm::dyn_cast<ora::StructType>(type);
@@ -690,14 +735,8 @@ static LogicalResult eraseRefinements(ModuleOp module)
     RefinementErasureTypeConverter typeConverter;
 
     ConversionTarget target(*ctx);
-    target.addLegalDialect<mlir::BuiltinDialect>();
+    addOraToSirBaseLegalDialects(target);
     target.addLegalDialect<ora::OraDialect>();
-    target.addLegalDialect<mlir::func::FuncDialect>();
-    target.addLegalDialect<mlir::arith::ArithDialect>();
-    target.addLegalDialect<mlir::cf::ControlFlowDialect>();
-    target.addLegalDialect<mlir::scf::SCFDialect>();
-    target.addLegalDialect<mlir::tensor::TensorDialect>();
-    target.addLegalDialect<mlir::memref::MemRefDialect>();
 
     target.addIllegalOp<ora::RefinementToBaseOp, ora::BaseToRefinementOp>();
 
@@ -901,13 +940,10 @@ public:
 
         RewritePatternSet patterns(module.getContext());
         ConversionTarget target(*module.getContext());
-        target.addLegalDialect<mlir::BuiltinDialect>();
+        addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, ora::OraDialect,
+                         mlir::func::FuncDialect, mlir::arith::ArithDialect,
+                         mlir::cf::ControlFlowDialect>(target);
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
-        target.addLegalDialect<sir::SIRDialect>();
-        target.addLegalDialect<ora::OraDialect>();
-        target.addLegalDialect<mlir::func::FuncDialect>();
-        target.addLegalDialect<mlir::arith::ArithDialect>();
-        target.addLegalDialect<mlir::cf::ControlFlowDialect>();
         target.addIllegalDialect<mlir::memref::MemRefDialect>();
 
         if (failed(applyFullConversion(module, target, std::move(patterns))))
@@ -1501,21 +1537,19 @@ public:
             } });
 
         // Apply conversion (leave ora.return for second phase)
-        logModuleOps(module, "Before Phase1 conversion");
-        if (failed(applyFullConversion(module, target, std::move(patterns))))
+        if (failed(applyFullConversionWithDiagnostics(
+                module, target, std::move(patterns),
+                "[OraToSIR] Phase 1: main conversion failed (illegal ops remain)",
+                "Phase1 conversion", "Before Phase1 conversion", "After Phase1 conversion",
+                "Phase1 failure state")))
         {
-            logModuleOps(module, "Phase1 failure state");
-            dumpModuleOnFailure(module, "Phase1 conversion");
-            module.emitError("[OraToSIR] Phase 1: main conversion failed (illegal ops remain)");
-            signalPassFailure();
-            return;
+            return signalPassFailure();
         }
 
         DBG("Conversion completed successfully!");
-        logModuleOps(module, "After Phase1 conversion");
 
         // ---------------------------------------------------------------
-        // Phase 2 (two sub-phases, consolidated from the original 4):
+        // Remaining lowering is intentionally multi-phase:
         //
         //  2a: Lower scf.if → CFG + error union ops + try_stmt
         //      (ora.return stays legal so returns inside scf.if regions
@@ -1550,15 +1584,8 @@ public:
             phase2Patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
 
             ConversionTarget phase2Target(*ctx);
-            phase2Target.addLegalDialect<mlir::BuiltinDialect>();
-            phase2Target.addLegalDialect<sir::SIRDialect>();
-            phase2Target.addLegalDialect<mlir::func::FuncDialect>();
-            phase2Target.addLegalDialect<mlir::cf::ControlFlowDialect>();
-            phase2Target.addLegalDialect<mlir::tensor::TensorDialect>();
-            phase2Target.addLegalDialect<mlir::memref::MemRefDialect>();
+            addOraToSirBaseLegalDialectsWithSir(phase2Target);
             phase2Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
-            phase2Target.addLegalDialect<mlir::scf::SCFDialect>();
-            phase2Target.addLegalDialect<mlir::arith::ArithDialect>();
             phase2Target.addLegalOp<ora::ReturnOp>();
             // Defer ora.error.is_error lowering to phase 2b. Some wide error-union
             // forms are normalized there after additional rewrites.
@@ -1575,15 +1602,13 @@ public:
             phase2Target.addLegalOp<ora::SwitchOp>();
             phase2Target.addLegalDialect<ora::OraDialect>();
 
-            logModuleOps(module, "Before Phase2 conversion");
-            if (failed(applyFullConversion(module, phase2Target, std::move(phase2Patterns))))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, phase2Target, std::move(phase2Patterns),
+                    "[OraToSIR] Phase 2: error-union lowering failed",
+                    "Phase2 conversion", "Before Phase2 conversion", "After Phase2 conversion")))
             {
-                dumpModuleOnFailure(module, "Phase2 conversion");
-                module.emitError("[OraToSIR] Phase 2: error-union lowering failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
-            logModuleOps(module, "After Phase2 conversion");
         }
 
         // Phase 2b: re-run try_stmt/error lowering + scf.if → CFG + ora.conditional_return + returns.
@@ -1603,14 +1628,7 @@ public:
             phase2bPatterns.add<ConvertIfOp>(typeConverter, ctx);
 
             ConversionTarget phase2bTarget(*ctx);
-            phase2bTarget.addLegalDialect<mlir::BuiltinDialect>();
-            phase2bTarget.addLegalDialect<sir::SIRDialect>();
-            phase2bTarget.addLegalDialect<mlir::func::FuncDialect>();
-            phase2bTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
-            phase2bTarget.addLegalDialect<mlir::tensor::TensorDialect>();
-            phase2bTarget.addLegalDialect<mlir::memref::MemRefDialect>();
-            phase2bTarget.addLegalDialect<mlir::scf::SCFDialect>();
-            phase2bTarget.addLegalDialect<mlir::arith::ArithDialect>();
+            addOraToSirBaseLegalDialectsWithSir(phase2bTarget);
             phase2bTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
             phase2bTarget.addIllegalOp<mlir::scf::IfOp>();
             phase2bTarget.addIllegalOp<ora::TryStmtOp>();
@@ -1627,15 +1645,13 @@ public:
             phase2bTarget.addLegalOp<ora::SwitchOp>();
             phase2bTarget.addLegalDialect<ora::OraDialect>();
 
-            logModuleOps(module, "Before Phase2b conversion");
-            if (failed(applyFullConversion(module, phase2bTarget, std::move(phase2bPatterns))))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, phase2bTarget, std::move(phase2bPatterns),
+                    "[OraToSIR] Phase 2b: scf.if/error-union/return lowering failed",
+                    "Phase2b conversion", "Before Phase2b conversion", "After Phase2b conversion")))
             {
-                dumpModuleOnFailure(module, "Phase2b conversion");
-                module.emitError("[OraToSIR] Phase 2b: scf.if/error-union/return lowering failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
-            logModuleOps(module, "After Phase2b conversion");
 
             // Drop any dead blocks introduced by try_stmt inlining.
             {
@@ -1680,14 +1696,7 @@ public:
                                                     /*lowerReturnsInMergeBlock=*/false, PatternBenefit(10));
 
                 ConversionTarget phase3bTarget(*ctx);
-                phase3bTarget.addLegalDialect<mlir::BuiltinDialect>();
-                phase3bTarget.addLegalDialect<sir::SIRDialect>();
-                phase3bTarget.addLegalDialect<mlir::func::FuncDialect>();
-                phase3bTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
-                phase3bTarget.addLegalDialect<mlir::tensor::TensorDialect>();
-                phase3bTarget.addLegalDialect<mlir::memref::MemRefDialect>();
-                phase3bTarget.addLegalDialect<mlir::arith::ArithDialect>();
-                phase3bTarget.addLegalDialect<mlir::scf::SCFDialect>();
+                addOraToSirBaseLegalDialectsWithSir(phase3bTarget);
                 phase3bTarget.addLegalOp<mlir::UnrealizedConversionCastOp>();
                 phase3bTarget.addIllegalOp<mlir::scf::IfOp>();
                 phase3bTarget.addIllegalOp<ora::ReturnOp>();
@@ -1698,13 +1707,12 @@ public:
                 phase3bTarget.addLegalOp<ora::SwitchOp>();
                 phase3bTarget.addLegalDialect<ora::OraDialect>();
 
-                logModuleOps(module, "Before Phase3b conversion");
-                if (failed(applyFullConversion(module, phase3bTarget, std::move(phase3bPatterns))))
+                if (failed(applyFullConversionWithDiagnostics(
+                        module, phase3bTarget, std::move(phase3bPatterns),
+                        "[OraToSIR] Phase 3b: final return lowering failed",
+                        "Phase3b conversion", "Before Phase3b conversion")))
                 {
-                    dumpModuleOnFailure(module, "Phase3b conversion");
-                    module.emitError("[OraToSIR] Phase 3b: final return lowering failed");
-                    signalPassFailure();
-                    return;
+                    return signalPassFailure();
                 }
             }
             logModuleOps(module, "After Phase3 conversion");
@@ -1736,13 +1744,9 @@ public:
             phase3Patterns.add<ConvertMemRefDimOp>(typeConverter, ctx);
 
             ConversionTarget phase3Target(*ctx);
-            phase3Target.addLegalDialect<mlir::BuiltinDialect>();
-            phase3Target.addLegalDialect<sir::SIRDialect>();
-            phase3Target.addLegalDialect<mlir::func::FuncDialect>();
-            phase3Target.addLegalDialect<mlir::cf::ControlFlowDialect>();
-            phase3Target.addLegalDialect<mlir::arith::ArithDialect>();
-            phase3Target.addLegalDialect<mlir::scf::SCFDialect>();
-            phase3Target.addLegalDialect<mlir::tensor::TensorDialect>();
+            addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, mlir::func::FuncDialect,
+                             mlir::cf::ControlFlowDialect, mlir::arith::ArithDialect,
+                             mlir::scf::SCFDialect, mlir::tensor::TensorDialect>(phase3Target);
             phase3Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
             phase3Target.addIllegalDialect<mlir::memref::MemRefDialect>();
             phase3Target.addIllegalOp<mlir::scf::ForOp>();
@@ -1761,15 +1765,14 @@ public:
             ConversionConfig phase3Config;
             // Avoid ptr<->memref materializations; memref ops must be fully rewritten.
             phase3Config.buildMaterializations = false;
-            logModuleOps(module, "Before Phase3 conversion");
-            if (failed(applyFullConversion(module, phase3Target, std::move(phase3Patterns), phase3Config)))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, phase3Target, std::move(phase3Patterns),
+                    "[OraToSIR] Phase 4: scf.for/memref lowering failed",
+                    "Phase3 conversion", "Before Phase3 conversion", "After Phase3 conversion",
+                    StringRef(), &phase3Config)))
             {
-                dumpModuleOnFailure(module, "Phase3 conversion");
-                module.emitError("[OraToSIR] Phase 4: scf.for/memref lowering failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
-            logModuleOps(module, "After Phase3 conversion");
         }
 
         // Phase 5: lower remaining Ora control flow + structs + cleanup.
@@ -1848,12 +1851,10 @@ public:
             phase4Patterns.add<StripBytesMaterializeOp>(typeConverter, ctx);
 
             ConversionTarget phase4Target(*ctx);
-            phase4Target.addLegalDialect<mlir::BuiltinDialect>();
-            phase4Target.addLegalDialect<sir::SIRDialect>();
-            phase4Target.addLegalDialect<mlir::func::FuncDialect>();
+            addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, mlir::func::FuncDialect,
+                             mlir::scf::SCFDialect>(phase4Target);
             phase4Target.addIllegalDialect<mlir::cf::ControlFlowDialect>();
             phase4Target.addIllegalDialect<mlir::arith::ArithDialect>();
-            phase4Target.addLegalDialect<mlir::scf::SCFDialect>();
             phase4Target.addIllegalDialect<mlir::tensor::TensorDialect>();
             phase4Target.addIllegalDialect<mlir::memref::MemRefDialect>();
             phase4Target.addLegalOp<mlir::UnrealizedConversionCastOp>();
@@ -1920,15 +1921,13 @@ public:
             phase4Target.addLegalDialect<ora::OraDialect>();
 
             // Debug: report any unrealized casts still present before Phase 4.
-            logModuleOps(module, "Before Phase4 conversion");
-            if (failed(applyFullConversion(module, phase4Target, std::move(phase4Patterns))))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, phase4Target, std::move(phase4Patterns),
+                    "[OraToSIR] Phase 5: final control-flow/struct lowering failed",
+                    "Phase4 conversion", "Before Phase4 conversion", "After Phase4 conversion")))
             {
-                dumpModuleOnFailure(module, "Phase4 conversion");
-                module.emitError("[OraToSIR] Phase 5: final control-flow/struct lowering failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
-            logModuleOps(module, "After Phase4 conversion");
 
             SmallVector<mlir::UnrealizedConversionCastOp, 16> residualCasts;
             module.walk([&](mlir::UnrealizedConversionCastOp op) { residualCasts.push_back(op); });
@@ -2095,11 +2094,8 @@ public:
             castCleanupPatterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
 
             ConversionTarget castCleanupTarget(*ctx);
-            castCleanupTarget.addLegalDialect<mlir::BuiltinDialect>();
-            castCleanupTarget.addLegalDialect<sir::SIRDialect>();
-            castCleanupTarget.addLegalDialect<mlir::func::FuncDialect>();
-            castCleanupTarget.addLegalDialect<mlir::scf::SCFDialect>();
-            castCleanupTarget.addLegalDialect<ora::OraDialect>();
+            addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, mlir::func::FuncDialect,
+                             mlir::scf::SCFDialect, ora::OraDialect>(castCleanupTarget);
             castCleanupTarget.addDynamicallyLegalOp<mlir::UnrealizedConversionCastOp>(
                 [](mlir::UnrealizedConversionCastOp op)
                 {
@@ -2113,12 +2109,12 @@ public:
                            ora::hasMaterializationKind(op, mat_kind::kWideErrorUnionSplit);
                 });
 
-            if (failed(applyFullConversion(module, castCleanupTarget, std::move(castCleanupPatterns))))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, castCleanupTarget, std::move(castCleanupPatterns),
+                    "[OraToSIR] Phase 5: unrealized cast cleanup failed",
+                    "Phase4 cast cleanup")))
             {
-                dumpModuleOnFailure(module, "Phase4 cast cleanup");
-                module.emitError("[OraToSIR] Phase 5: unrealized cast cleanup failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
 
             {
@@ -2347,10 +2343,8 @@ public:
             finalResidualPatterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
 
             ConversionTarget finalResidualTarget(*ctx);
-            finalResidualTarget.addLegalDialect<mlir::BuiltinDialect>();
-            finalResidualTarget.addLegalDialect<sir::SIRDialect>();
-            finalResidualTarget.addLegalDialect<mlir::func::FuncDialect>();
-            finalResidualTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
+            addLegalDialects<mlir::BuiltinDialect, sir::SIRDialect, mlir::func::FuncDialect,
+                             mlir::cf::ControlFlowDialect>(finalResidualTarget);
             finalResidualTarget.addIllegalDialect<mlir::arith::ArithDialect>();
             finalResidualTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
             finalResidualTarget.addIllegalOp<ora::AddrToI160Op>();
@@ -2359,11 +2353,11 @@ public:
             finalResidualTarget.addIllegalOp<ora::TupleExtractOp>();
             finalResidualTarget.addLegalDialect<ora::OraDialect>();
 
-            if (failed(applyFullConversion(module, finalResidualTarget, std::move(finalResidualPatterns))))
+            if (failed(applyFullConversionWithDiagnostics(
+                    module, finalResidualTarget, std::move(finalResidualPatterns),
+                    "[OraToSIR] final cleanup: residual arith/cast lowering failed")))
             {
-                module.emitError("[OraToSIR] final cleanup: residual arith/cast lowering failed");
-                signalPassFailure();
-                return;
+                return signalPassFailure();
             }
 
             // Final tuple-create conversion can leave ptr_view/source
