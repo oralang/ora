@@ -15,6 +15,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <algorithm>
 #include <cctype>
@@ -89,6 +90,37 @@ namespace mlir
                     return FusedLoc::get(loc.getContext(), children, fusedLoc.getMetadata());
                 }
                 return loc;
+            }
+
+            static std::optional<uint32_t> parseErrorSelector(StringRef selector)
+            {
+                if (!selector.starts_with("0x") || selector.size() != 10)
+                    return std::nullopt;
+
+                uint32_t value = 0;
+                for (char c : selector.drop_front(2))
+                {
+                    value <<= 4;
+                    if (c >= '0' && c <= '9')
+                        value |= (c - '0');
+                    else if (c >= 'a' && c <= 'f')
+                        value |= (c - 'a' + 10);
+                    else if (c >= 'A' && c <= 'F')
+                        value |= (c - 'A' + 10);
+                    else
+                        return std::nullopt;
+                }
+                return value;
+            }
+
+            static Attribute lookupDictionaryAttr(DictionaryAttr dict, StringRef name)
+            {
+                if (!dict)
+                    return {};
+                for (NamedAttribute entry : dict)
+                    if (entry.getName() == name)
+                        return entry.getValue();
+                return {};
             }
 
             static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
@@ -1015,6 +1047,12 @@ namespace mlir
                     auto i64Type = builder.getI64Type();
 
                     SmallVector<ErrorInfo, 8> abiErrors;
+                    llvm::DenseSet<uint64_t> seenErrorIds;
+                    auto addErrorInfo = [&](uint64_t id, uint32_t selector, uint64_t paramCount) {
+                        if (!seenErrorIds.insert(id).second)
+                            return;
+                        abiErrors.push_back(ErrorInfo{id, selector, paramCount});
+                    };
                     module.walk([&](sir::ErrorDeclOp decl) {
                         auto idAttr = decl->getAttrOfType<IntegerAttr>("sir.error_id");
                         auto selectorAttr = decl->getAttrOfType<StringAttr>("sir.error_selector");
@@ -1022,30 +1060,29 @@ namespace mlir
                         if (!idAttr || !selectorAttr || !paramTypes)
                             return;
 
-                        StringRef selStr = selectorAttr.getValue();
-                        if (!selStr.starts_with("0x") || selStr.size() != 10)
+                        auto selector = parseErrorSelector(selectorAttr.getValue());
+                        if (!selector)
                             return;
-
-                        uint32_t selector = 0;
-                        for (char c : selStr.drop_front(2))
-                        {
-                            selector <<= 4;
-                            if (c >= '0' && c <= '9')
-                                selector |= (c - '0');
-                            else if (c >= 'a' && c <= 'f')
-                                selector |= (c - 'a' + 10);
-                            else if (c >= 'A' && c <= 'F')
-                                selector |= (c - 'A' + 10);
-                            else
-                                return;
-                        }
-
-                        abiErrors.push_back(ErrorInfo{
+                        addErrorInfo(
                             idAttr.getValue().getZExtValue(),
-                            selector,
-                            static_cast<uint64_t>(paramTypes.size()),
-                        });
+                            *selector,
+                            static_cast<uint64_t>(paramTypes.size()));
                     });
+                    if (auto idDict = module->getAttrOfType<DictionaryAttr>("sir.error_ids"))
+                    {
+                        auto selectorDict = module->getAttrOfType<DictionaryAttr>("sir.error_selectors");
+                        for (NamedAttribute idEntry : idDict)
+                        {
+                            auto idAttr = dyn_cast<IntegerAttr>(idEntry.getValue());
+                            auto selectorAttr = dyn_cast_or_null<StringAttr>(lookupDictionaryAttr(selectorDict, idEntry.getName()));
+                            if (!idAttr || !selectorAttr)
+                                continue;
+                            auto selector = parseErrorSelector(selectorAttr.getValue());
+                            if (!selector)
+                                continue;
+                            addErrorInfo(idAttr.getValue().getZExtValue(), *selector, 0);
+                        }
+                    }
 
                     // Rewrite all non-entry functions: public ABI functions
                     // return (ptr,len), but private scalar helpers return the

@@ -40,4 +40,4 @@ fn = "fail()"
 caller = "0x1000000000000000000000000000000000000000"
 value = 0
 args = []
-reverts = {}
+reverts = { selector = "0xefde6dcf" }

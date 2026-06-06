@@ -1,0 +1,26 @@
+// INPUT: tests/conformance/dispatcher_error_union_revert.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0xA9CC4718 => @fail_
+
+// CHECK-LABEL:     fail_ {
+// CHECK: icall @fail
+// CHECK: mload256
+// CHECK: eq
+// CHECK: mstore256
+
+// CHECK-LABEL:     bb1 {
+// CHECK: => @bb2
+
+// CHECK-LABEL:     bb2 {
+// CHECK: const 0xFF7E9F57
+// CHECK: eq
+
+// CHECK-LABEL:     bb3 {
+// CHECK: const 0x4
+// CHECK: sallocany 0x4
+// CHECK: large_const 0xFF7E9F5700000000000000000000000000000000000000000000000000000000
+// CHECK: mstore256
+// CHECK: revert
