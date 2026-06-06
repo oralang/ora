@@ -104,33 +104,6 @@ namespace
         return sir::U256Type::get(ctx);
     }
 
-    static bool isPayloadlessErrorStruct(Type type, Operation *contextOp)
-    {
-        auto structType = llvm::dyn_cast<ora::StructType>(type);
-        if (!structType || !contextOp)
-            return false;
-        auto module = contextOp->getParentOfType<mlir::ModuleOp>();
-        if (!module)
-            return false;
-
-        bool matched = false;
-        module.walk([&](Operation *op) {
-            if (matched)
-                return;
-            auto sym = op->getAttrOfType<mlir::StringAttr>("sym_name");
-            if (!sym || sym.getValue() != structType.getName())
-                return;
-            if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
-                return;
-            auto params = op->getAttrOfType<mlir::ArrayAttr>("ora.param_types");
-            if (!params || params.empty())
-            {
-                matched = true;
-                return;
-            }
-        });
-        return matched;
-    }
 }
 
 static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
