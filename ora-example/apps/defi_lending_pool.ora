@@ -176,6 +176,11 @@ contract LendingPool {
     pub fn process_operation_with_tier(operation: OperationType, user: address, amount: u256) -> u256
     requires user != std.constants.ZERO_ADDRESS
     requires amount>0
+    requires(total_borrows <= total_deposits)
+    requires(total_borrows <= std.constants.U256_MAX / 10000)
+    requires(base_rate <= 10000)
+    requires(slope1 <= 10000)
+    requires(slope2 <= 10000)
     {
         // Work around: use u8 directly since enum maps have a bug
         let tier_u8: u8 = user_tiers[user];
