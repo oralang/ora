@@ -540,6 +540,27 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.address_const"));
 }
 
+test "compiler lowers contextual short hex address initializer through address conversion" {
+    const source_text =
+        \\pub fn owner() -> address {
+        \\    let who: address = 0x0;
+        \\    return who;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.i160.to.addr"));
+}
+
 test "compiler lowers top-level const items through ora.const" {
     const source_text =
         \\const LIMIT: u256 = 2;
@@ -965,17 +986,30 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[quotient_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 3), try consteval.values[quotient_stmt.value.?.index()].?.integer.toInt(i128));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bound_variable = \"i\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.quantified \"forall\", \"i\", \"u256\""));
 }
 
 test "compiler lowers divExact and divmod through Ora and SIR" {
     const source_text =
         \\pub fn compute(a: i256, b: i256, x: u256, y: u256) -> i256 {
-        \\    let exact = @divExact(12, 4);
+        \\    let exact = @divExact(@cast(i256, 12), @cast(i256, 4));
         \\    let rounded = @divFloor(a, b);
         \\    let pair = @divmod(x, y);
         \\    return rounded + exact + @cast(i256, pair.0) + @cast(i256, pair.1);
         \\}
     ;
+
+    var checked = try compileText(source_text);
+    defer checked.deinit();
+    const typecheck = try checked.db.moduleTypeCheck(checked.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
@@ -987,6 +1021,22 @@ test "compiler lowers divExact and divmod through Ora and SIR" {
     defer compilation.deinit();
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler resolves all-literal divExact and divmod builtins in u256 flow" {
+    const source_text =
+        \\pub fn compute() -> u256 {
+        \\    let exact = @divExact(12, 4);
+        \\    let pair = @divmod(17, 5);
+        \\    return exact + pair.0 * 5 + pair.1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler lowers tuple, array, struct, switch, and error return expressions" {

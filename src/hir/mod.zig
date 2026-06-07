@@ -192,10 +192,8 @@ pub const LoweringResult = struct {
     }
 
     pub fn isEmittable(self: *const LoweringResult) bool {
-        // P0 arms only counters proven clean across ora-example/. Type
-        // fallbacks and default values are measured until their valid-code
-        // producers are eliminated.
-        return self.placeholder_count == 0;
+        return self.placeholder_count == 0 and
+            self.default_value_count == 0;
     }
 
     pub fn deinit(self: *LoweringResult) void {
@@ -1330,10 +1328,6 @@ const Lowerer = struct {
 
     pub fn recordPlaceholder(self: *Lowerer) void {
         self.placeholder_count += 1;
-    }
-
-    pub fn recordDefaultValue(self: *Lowerer) void {
-        self.default_value_count += 1;
     }
 
     pub fn emitLoweringError(self: *Lowerer, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {

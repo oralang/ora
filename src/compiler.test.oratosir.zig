@@ -2868,11 +2868,18 @@ test "compiler resolves imported std bytes errors in type position and lowers th
         \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
         \\        return std.bytes.at(data, 0);
         \\    }
+        \\
+        \\    pub fn decodeWord(data: bytes) -> !u256 | std.bytes.InvalidLength {
+        \\        return std.bytes.decodeU256BE(data);
+        \\    }
         \\}
     ;
 
     var compilation = try compileText(source_text);
     defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
@@ -2882,6 +2889,7 @@ test "compiler resolves imported std bytes errors in type position and lowers th
     defer testing.allocator.free(rendered);
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_bytes_at:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_bytes_decodeU256BE:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload8"));
 }
 

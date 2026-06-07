@@ -159,6 +159,88 @@ static FailureOr<uint64_t> getStaticMemRefWordCount(Type type)
     return count;
 }
 
+// Peel trivial bitcasts / single-operand unrealized casts to recover the source value.
+static Value stripCasts(Value v)
+{
+    for (int i = 0; i < 8 && v; ++i)
+    {
+        if (auto bc = v.getDefiningOp<sir::BitcastOp>())
+        {
+            v = bc.getOperand();
+            continue;
+        }
+        if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (uc->getNumOperands() == 1)
+            {
+                v = uc.getOperand(0);
+                continue;
+            }
+        }
+        break;
+    }
+    return v;
+}
+
+// True when `load` reads the wide error-union payload word (base + 32) for `basePtr`,
+// addressed either via sir.add_ptr(base, 32) or sir.add(base, 32).
+static bool isWidePayloadLoad(sir::LoadOp load, Value basePtr)
+{
+    if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
+    {
+        if (addPtr.getBase() == basePtr)
+        {
+            auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
+            if (offConst && offConst.getValue() == 32)
+                return true;
+        }
+    }
+    if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
+    {
+        Value lhs = addOp.getLhs();
+        Value rhs = addOp.getRhs();
+        Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
+        if (base)
+        {
+            auto offConst = base.getDefiningOp<sir::ConstOp>();
+            if (offConst && offConst.getValue() == 32)
+                return true;
+        }
+    }
+    return false;
+}
+
+// Scan `boundary`'s block, before `boundary`, for an already-emitted wide-payload load.
+static Value findExistingPayloadBeforeOp(Operation *boundary, Value basePtr)
+{
+    Block *blk = boundary->getBlock();
+    for (auto it = blk->begin(), end = Block::iterator(boundary); it != end; ++it)
+    {
+        if (auto load = dyn_cast<sir::LoadOp>(&*it))
+            if (isWidePayloadLoad(load, basePtr))
+                return load.getResult();
+    }
+    return Value();
+}
+
+// Walk the enclosing function for an already-emitted wide-payload load.
+static Value findExistingPayloadInFunc(Operation *ctx, Value basePtr)
+{
+    if (!basePtr)
+        return Value();
+    auto func = ctx->getParentOfType<func::FuncOp>();
+    if (!func)
+        return Value();
+    Value found;
+    func.walk([&](sir::LoadOp load) {
+        if (found)
+            return;
+        if (isWidePayloadLoad(load, basePtr))
+            found = load.getResult();
+    });
+    return found;
+}
+
 static FailureOr<Value> phase0ToI256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
@@ -1703,60 +1785,6 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         Value payloadU256;
         Value isErrU256;
         SmallVector<Value> wideParts;
-        auto stripCasts = [](Value v) {
-            // Peel trivial casts so we can recover the original source.
-            for (int i = 0; i < 8 && v; ++i)
-            {
-                if (auto bc = v.getDefiningOp<sir::BitcastOp>())
-                {
-                    v = bc.getOperand();
-                    continue;
-                }
-                if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-                {
-                    if (uc->getNumOperands() == 1)
-                    {
-                        v = uc.getOperand(0);
-                        continue;
-                    }
-                }
-                break;
-            }
-            return v;
-        };
-        auto findExistingPayload = [&](Value basePtr) -> Value {
-            Block *blk = unwrap->getBlock();
-            for (auto it = blk->begin(), end = Block::iterator(unwrap); it != end; ++it)
-            {
-                auto load = dyn_cast<sir::LoadOp>(&*it);
-                if (!load)
-                    continue;
-                if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
-                {
-                    if (addPtr.getBase() != basePtr)
-                        continue;
-                    auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
-                    if (!offConst)
-                        continue;
-                    if (offConst.getValue() == 32)
-                        return load.getResult();
-                }
-                if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
-                {
-                    Value lhs = addOp.getLhs();
-                    Value rhs = addOp.getRhs();
-                    Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
-                    if (!base)
-                        continue;
-                    auto offConst = base.getDefiningOp<sir::ConstOp>();
-                    if (!offConst)
-                        continue;
-                    if (offConst.getValue() == 32)
-                        return load.getResult();
-                }
-            }
-            return Value();
-        };
 
         // Prefer wide layout when we see a tag load with a matching payload load (base+32).
         Value raw0 = unwrap->getOperand(0);
@@ -1779,7 +1807,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                 if (auto tagLoad = peeledTag.getDefiningOp<sir::LoadOp>())
                 {
                     Value basePtr = tagLoad.getPtr();
-                    if (Value existing = findExistingPayload(basePtr))
+                    if (Value existing = findExistingPayloadBeforeOp(unwrap, basePtr))
                     {
                         payloadU256 = ensureU256(rewriter, loc, existing);
                         Value maskedTag = ensureU256(rewriter, loc, andOp.getResult());
@@ -1791,7 +1819,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         if (auto tagLoad = peeled0.getDefiningOp<sir::LoadOp>())
         {
             Value basePtr = tagLoad.getPtr();
-            if (Value existing = findExistingPayload(basePtr))
+            if (Value existing = findExistingPayloadBeforeOp(unwrap, basePtr))
             {
                 Value tag = ensureU256(rewriter, loc, tagLoad.getResult());
                 payloadU256 = ensureU256(rewriter, loc, existing);
@@ -1856,7 +1884,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                 if (auto load = peeled.getDefiningOp<sir::LoadOp>())
                 {
                     Value basePtr = load.getPtr();
-                    if (Value existing = findExistingPayload(basePtr))
+                    if (Value existing = findExistingPayloadBeforeOp(unwrap, basePtr))
                     {
                         payloadU256 = ensureU256(rewriter, loc, existing);
                     }
@@ -2606,96 +2634,10 @@ static LogicalResult convertErrorExtractCommon(
         operands = localOperands;
     }
 
-    auto stripCasts = [](Value v) {
-        for (int i = 0; i < 8 && v; ++i)
-        {
-            if (auto bc = v.getDefiningOp<sir::BitcastOp>())
-            {
-                v = bc.getOperand();
-                continue;
-            }
-            if (auto uc = v.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-            {
-                if (uc->getNumOperands() == 1)
-                {
-                    v = uc.getOperand(0);
-                    continue;
-                }
-            }
-            break;
-        }
-        return v;
-    };
     auto isConstOne = [](Value v) -> bool {
         if (auto c = v.getDefiningOp<sir::ConstOp>())
             return c.getValue() == 1;
         return false;
-    };
-    auto isOffset32 = [](sir::ConstOp c) -> bool {
-        if (!c)
-            return false;
-        return c.getValue() == 32;
-    };
-    auto findExistingPayload = [&](Value basePtr) -> Value {
-        Block *blk = op->getBlock();
-        for (auto it = blk->begin(), end = Block::iterator(op); it != end; ++it)
-        {
-            auto load = dyn_cast<sir::LoadOp>(&*it);
-            if (!load)
-                continue;
-            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
-            {
-                if (addPtr.getBase() != basePtr)
-                    continue;
-                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
-                if (isOffset32(offConst))
-                    return load.getResult();
-            }
-            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
-            {
-                Value lhs = addOp.getLhs();
-                Value rhs = addOp.getRhs();
-                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
-                if (!base)
-                    continue;
-                auto offConst = base.getDefiningOp<sir::ConstOp>();
-                if (isOffset32(offConst))
-                    return load.getResult();
-            }
-        }
-        return Value();
-    };
-    auto findExistingPayloadInFunc = [&](Value basePtr) -> Value {
-        if (!basePtr)
-            return Value();
-        auto func = op->template getParentOfType<func::FuncOp>();
-        if (!func)
-            return Value();
-        Value found;
-        func.walk([&](sir::LoadOp load) {
-            if (found)
-                return;
-            if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
-            {
-                if (addPtr.getBase() != basePtr)
-                    return;
-                auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
-                if (isOffset32(offConst))
-                    found = load.getResult();
-            }
-            if (auto addOp = load.getPtr().getDefiningOp<sir::AddOp>())
-            {
-                Value lhs = addOp.getLhs();
-                Value rhs = addOp.getRhs();
-                Value base = lhs == basePtr ? rhs : (rhs == basePtr ? lhs : Value());
-                if (!base)
-                    return;
-                auto offConst = base.getDefiningOp<sir::ConstOp>();
-                if (isOffset32(offConst))
-                    found = load.getResult();
-            }
-        });
-        return found;
     };
 
     Value payload;
@@ -2723,11 +2665,11 @@ static LogicalResult convertErrorExtractCommon(
         }
         if (tagLoad)
         {
-            if (Value existing = findExistingPayload(tagLoad.getPtr()))
+            if (Value existing = findExistingPayloadBeforeOp(op, tagLoad.getPtr()))
             {
                 payload = ensureU256(rewriter, loc, existing);
             }
-            else if (Value existing = findExistingPayloadInFunc(tagLoad.getPtr()))
+            else if (Value existing = findExistingPayloadInFunc(op, tagLoad.getPtr()))
             {
                 payload = ensureU256(rewriter, loc, existing);
             }

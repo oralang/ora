@@ -16,8 +16,8 @@ contract RegionVariableDeclarations {
 
     // Memory variables - explicit memory region (in functions)
     pub fn testMemoryDeclarations() {
-        memory var memory_counter: u256;
-        memory var memory_flag: bool;
+        memory var memory_counter: u256 = 0;
+        memory var memory_flag: bool = true;
         memory_counter = 100;
     }
 

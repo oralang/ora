@@ -190,6 +190,50 @@ test "compiler lowers error-union match statements with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch") == null);
 }
 
+test "compiler corpus accepts exhaustive Result match statement returns" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/result_bytes_flow.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects Result match statement fallthrough" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/fail_result_match_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler corpus accepts labeled switch with return-or-continue arms" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/switch_labeled.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects labeled switch fallthrough in non-void function" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/fail_switch_labeled_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
 test "compiler lowers error-union match expressions with ok and err bindings" {
     const source_text =
         \\error Failure(code: u256);
@@ -208,6 +252,25 @@ test "compiler lowers error-union match expressions with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch_expr") == null);
+}
+
+test "compiler lowers exhaustive Result match expressions without placeholder fallback" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.placeholder_count);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
 test "compiler rejects non-exhaustive error-union match expressions without else" {
@@ -691,6 +754,56 @@ test "compiler lowers Result constructors in match expression arms" {
     try testing.expect(std.mem.indexOf(u8, rendered, "func.call @Err") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.return") != null);
+}
+
+test "compiler rejects mixed payload and Result constructor match arms" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => value,
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const message = "match expression arms have incompatible types 'u256' and '!u256 | Overflow'; wrap success values with Ok(...) or use try";
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match expression arms have incompatible types 'u256' and '!u256 | Overflow'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, message));
+}
+
+test "compiler allows explicit Result constructors in every match arm" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => Ok(value),
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler emits error-union ABI attrs for public Result returns" {

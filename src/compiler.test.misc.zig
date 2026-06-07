@@ -729,7 +729,7 @@ test "compiler tracks HIR unknown type fallbacks" {
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
 }
 
-test "HIR emittability arms placeholders while observing pending counters" {
+test "HIR emittability arms placeholder and default counters while measuring type fallbacks" {
     var hir_result: compiler.hir.LoweringResult = undefined;
     hir_result.type_fallback_count = 0;
     hir_result.placeholder_count = 0;
@@ -744,7 +744,7 @@ test "HIR emittability arms placeholders while observing pending counters" {
 
     hir_result.placeholder_count = 0;
     hir_result.default_value_count = 1;
-    try testing.expect(hir_result.isEmittable());
+    try testing.expect(!hir_result.isEmittable());
     try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
 
     hir_result.default_value_count = 0;
@@ -753,7 +753,7 @@ test "HIR emittability arms placeholders while observing pending counters" {
     try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
 }
 
-test "compiler tracks HIR executable placeholders as detect-only" {
+test "compiler tracks HIR executable placeholders as non-emittable" {
     const source_text =
         \\contract Sample {
         \\    pub fn run() -> u256 {
@@ -778,7 +778,7 @@ test "compiler tracks HIR executable placeholders as detect-only" {
     try testing.expect(!hir_result.isEmittable());
 }
 
-test "compiler tracks HIR default values as detect-only" {
+test "compiler diagnoses uninitialized locals instead of emitting HIR default values" {
     const source_text =
         \\pub fn run() -> u256 {
         \\    let value: u256;
@@ -790,8 +790,133 @@ test "compiler tracks HIR default values as detect-only" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(hir_result.default_value_count > 0);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "local declaration requires an initializer"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler does not count unary negation zero as a HIR default value" {
+    const source_text =
+        \\pub fn negate(value: i256) -> i256 {
+        \\    return -value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
     try testing.expect(hir_result.isEmittable());
+}
+
+test "compiler lowers void error-union success without HIR default values" {
+    const source_text =
+        \\error Done;
+        \\
+        \\pub fn explicit_ok() -> !void | Done {
+        \\    return;
+        \\}
+        \\
+        \\pub fn implicit_ok() -> !void | Done {
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
+test "compiler resolves assignment integer literals before HIR lowering" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u256 = 0;
+        \\
+        \\    pub fn init() {
+        \\        counter = 0;
+        \\    }
+        \\
+        \\    pub fn increment() {
+        \\        counter += 1;
+        \\    }
+        \\
+        \\    pub fn get() -> u256 {
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler rejects assignment integer literals that overflow the target type" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u8 = 0;
+        \\
+        \\    pub fn set() {
+        \\        counter = 300;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+}
+
+test "compiler resolves std environment intrinsics before HIR lowering" {
+    const source_text =
+        \\contract Env {
+        \\    storage var owner: address;
+        \\
+        \\    pub fn capture() -> u256 {
+        \\        owner = std.msg.sender();
+        \\        let sender: address = std.msg.sender;
+        \\        let origin: address = std.tx.origin();
+        \\        let coinbase: address = std.block.coinbase;
+        \\        let value: u256 = std.msg.value();
+        \\        let gas_price: u256 = std.transaction.gasprice();
+        \\        let timestamp: u256 = std.block.timestamp;
+        \\        let number: u256 = std.block.number();
+        \\        return value + gas_price + timestamp + number;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler resolves for-range integer bounds before HIR lowering" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    let total: u256 = 0;
+        \\    for (0..5) |i| {
+        \\        total += i;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
 test "compiler persists divmod as a tuple consteval value" {

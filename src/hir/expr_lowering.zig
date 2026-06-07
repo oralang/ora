@@ -28,6 +28,7 @@ const nullStringRef = support.nullStringRef;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
 const parseIntLiteral = support.parseIntLiteral;
+const parseUnsignedIntegerLiteral = support.parseUnsignedIntegerLiteral;
 const strRef = support.strRef;
 const stringType = support.stringType;
 const LocalEnv = hir_locals.LocalEnv;
@@ -328,6 +329,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .IntegerLiteral => |literal| blk: {
                     const ty = self.parent.lowerExprType(expr_id);
+                    if (mlir.oraTypeEqual(ty, addressType(self.parent.context))) {
+                        break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
+                    }
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), ty, parseIntLiteral(literal.text) orelse 0));
                 },
                 .BoolLiteral => |literal| blk: {
@@ -396,7 +400,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 .Name => |name| try self.lowerNameExpr(expr_id, name, locals),
-                .Result => self.current_return_value orelse try self.defaultValue(self.return_type orelse defaultIntegerType(self.parent.context), expr.Result.range),
+                .Result => self.current_return_value orelse
+                    try @This().loweringValueError(self, expr.Result.range, self.parent.lowerExprType(expr_id), "result is not available in this context", .{}),
                 .Group => |group| try self.lowerExpr(group.expr, locals),
                 .Old => |old| blk: {
                     const value = try self.lowerExpr(old.expr, locals);
@@ -532,13 +537,104 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{}, self.parent.lowerExprType(expr_id));
                     break :blk appendValueOp(self.block, op);
                 },
-                .Quantified => |quantified| blk: {
-                    if (quantified.condition) |condition| _ = try self.lowerExpr(condition, locals);
-                    _ = try self.lowerExpr(quantified.body, locals);
-                    break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
-                },
-                .Error => try self.defaultValue(defaultIntegerType(self.parent.context), expr.Error.range),
+                .Quantified => |quantified| try @This().lowerQuantifiedExpr(self, quantified, loc, locals),
+                .Error => try @This().loweringValueError(self, expr.Error.range, self.parent.lowerExprType(expr_id), "cannot lower syntax error expression", .{}),
             };
+        }
+
+        fn lowerContextualAddressIntegerLiteral(self: *FunctionLowerer, literal: ast.IntegerLiteralExpr) !mlir.MlirValue {
+            const loc = self.parent.location(literal.range);
+            const parsed = parseUnsignedIntegerLiteral(u160, literal.text) orelse {
+                return try @This().loweringValueError(self, literal.range, addressType(self.parent.context), "address literal value is out of range", .{});
+            };
+            const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+            const attr = if (parsed <= std.math.maxInt(i64))
+                mlir.oraIntegerAttrCreateI64FromType(i160_type, @intCast(parsed))
+            else blk: {
+                var decimal_buf: [80]u8 = undefined;
+                const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+                    return try @This().loweringValueError(self, literal.range, addressType(self.parent.context), "address literal value is out of range", .{});
+                };
+                break :blk mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
+            };
+            const bits = appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, i160_type, attr));
+            const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, bits);
+            if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, addr_op);
+        }
+
+        fn lowerQuantifiedExpr(
+            self: *FunctionLowerer,
+            quantified: ast.QuantifiedExpr,
+            loc: mlir.MlirLocation,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const pattern = self.parent.file.pattern(quantified.pattern).*;
+            const variable_name = switch (pattern) {
+                .Name => |name| name.name,
+                else => return try @This().loweringValueError(
+                    self,
+                    quantified.range,
+                    boolType(self.parent.context),
+                    "quantified expression requires a named bound variable",
+                    .{},
+                ),
+            };
+
+            const variable_sema_type = self.parent.typecheck.pattern_types[quantified.pattern.index()].type;
+            const variable_type = self.parent.lowerSemaType(variable_sema_type, quantified.range);
+            if (mlir.oraTypeIsNull(variable_type)) {
+                return try @This().loweringValueError(
+                    self,
+                    quantified.range,
+                    boolType(self.parent.context),
+                    "cannot lower quantified variable type",
+                    .{},
+                );
+            }
+
+            const placeholder_op = createIntegerConstant(self.parent.context, loc, variable_type, 0);
+            _ = try @This().expectOperation(self, placeholder_op, quantified.range, "arith.constant");
+            mlir.oraOperationSetAttributeByName(
+                placeholder_op,
+                strRef("ora.bound_variable"),
+                mlir.oraStringAttrCreate(self.parent.context, strRef(variable_name)),
+            );
+            const placeholder = appendValueOp(self.block, placeholder_op);
+
+            var quantified_locals = try locals.clone();
+            try self.bindPatternValue(quantified.pattern, placeholder, &quantified_locals);
+
+            const condition_value = if (quantified.condition) |condition|
+                try self.lowerExpr(condition, &quantified_locals)
+            else
+                null;
+            const body_value = try self.lowerExpr(quantified.body, &quantified_locals);
+
+            const variable_type_text = try @This().quantifiedVariableTypeText(self, variable_sema_type);
+            const condition_operand = if (condition_value) |value| value else std.mem.zeroes(mlir.MlirValue);
+            const op = mlir.oraQuantifiedOpCreate(
+                self.parent.context,
+                loc,
+                strRef(switch (quantified.quantifier) {
+                    .forall => "forall",
+                    .exists => "exists",
+                }),
+                strRef(variable_name),
+                strRef(variable_type_text),
+                condition_operand,
+                condition_value != null,
+                body_value,
+                boolType(self.parent.context),
+            );
+            return try @This().expectValueOp(self, op, quantified.range, "ora.quantified");
+        }
+
+        fn quantifiedVariableTypeText(self: *FunctionLowerer, ty: sema.Type) ![]const u8 {
+            if (ty.name()) |name| return name;
+            var buffer: std.ArrayList(u8) = .{};
+            try sema.appendTypeMangleName(self.parent.allocator, &buffer, ty);
+            return try buffer.toOwnedSlice(self.parent.allocator);
         }
 
         pub fn lowerNameExpr(self: *FunctionLowerer, expr_id: ast.ExprId, name: ast.NameExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -586,7 +682,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
 
-            return self.defaultValue(self.parent.lowerExprType(expr_id), name.range);
+            return try @This().loweringValueError(self, name.range, self.parent.lowerExprType(expr_id), "unresolved name '{s}' during HIR lowering", .{name.name});
         }
 
         fn lowerBoundItemExpr(
@@ -673,7 +769,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const loc = self.parent.location(unary.range);
             return switch (unary.op) {
                 .neg => blk: {
-                    const zero = try self.defaultValue(mlir.oraValueGetType(operand), unary.range);
+                    const zero = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, mlir.oraValueGetType(operand), 0),
+                    );
                     const op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, operand);
                     if (mlir.oraOperationIsNull(op)) break :blk operand;
                     break :blk appendValueOp(self.block, op);
@@ -893,9 +992,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .pow => unreachable,
             };
 
-            if (mlir.oraOperationIsNull(op)) {
-                return self.defaultValue(result_type, binary.range);
-            }
+            if (mlir.oraOperationIsNull(op)) return try @This().loweringValueError(
+                self,
+                binary.range,
+                result_type,
+                "failed to lower binary operator '{s}'",
+                .{@tagName(binary.op)},
+            );
             const value = appendValueOp(self.block, op);
             try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
             return value;
@@ -1104,6 +1207,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try args.append(self.parent.allocator, arg_value);
             }
 
+            const result_type = self.parent.lowerExprType(expr_id);
             const callee_name = if (imported_target != null and callee_function != null)
                 (try self.parent.ensureImportedFunctionSymbol(
                     imported_target.?.module_id,
@@ -1112,7 +1216,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     call,
                     imported_resolution,
                     @This().currentContractParentBlock(self) orelse self.parent.module_body,
-                )) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+                )) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve imported call target", .{})
             else if (callee_function != null and callee_item_id != null)
                 (try self.parent.ensureMonomorphizedFunction(
                     callee_item_id.?,
@@ -1120,11 +1224,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     call,
                     runtime_parameters,
                     @This().currentContractItemId(self),
-                )) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+                )) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve function call target", .{})
             else
-                (@This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range));
+                (@This().calleeName(self, call.callee) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve function call target", .{}));
 
-            const result_type = self.parent.lowerExprType(expr_id);
             var result_types: [1]mlir.MlirType = .{result_type};
             const op = mlir.oraFuncCallOpCreate(
                 self.parent.context,
@@ -1141,7 +1244,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -2178,7 +2281,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -2313,7 +2416,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -4187,9 +4290,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn createAggregatePlaceholder(self: *FunctionLowerer, op_name: []const u8, range: source.TextRange, operands: []const mlir.MlirValue, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
-            if (!std.mem.eql(u8, op_name, "ora.default_value")) {
-                self.parent.recordPlaceholder();
-            }
+            self.parent.recordPlaceholder();
             var attrs: [1]mlir.MlirNamedAttribute = .{namedTypeAttr(self.parent.context, "ora.type", result_type)};
             return mlir.oraOperationCreate(
                 self.parent.context,
@@ -4220,72 +4321,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, try @This().expectOperation(self, op, range, op_name));
         }
 
-        pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
-            self.parent.recordDefaultValue();
-            if (mlir.oraTypeIsNull(ty)) return error.MlirOperationCreationFailed;
-            if (self.typeIsVoid(ty)) {
-                const seed = appendValueOp(
-                    self.block,
-                    createIntegerConstant(self.parent.context, self.parent.location(range), boolType(self.parent.context), 0),
-                );
-                const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
-                    self.parent.context,
-                    self.parent.location(range),
-                    seed,
-                    ty,
-                );
-                if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
-                return appendValueOp(self.block, none_cast);
-            }
-
-            if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ty))) {
-                const payload_type = mlir.oraErrorUnionTypeGetSuccessType(ty);
-                const payload = try self.defaultValue(payload_type, range);
-                const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, ty);
-                if (!mlir.oraOperationIsNull(op)) {
-                    if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
-                        mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
-                    }
-                    return appendValueOp(self.block, op);
-                }
-                return payload;
-            }
-
-            const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
-            if (!mlir.oraTypeIsNull(refinement_base)) {
-                const op = try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
-                return appendValueOp(self.block, op);
-            }
-
-            if (mlir.oraTypeIsAddressType(ty)) {
-                return try @This().createZeroAddressValue(self, range);
-            }
-
-            if (mlir.oraTypeEqual(ty, stringType(self.parent.context))) {
-                const op = mlir.oraStringConstantOpCreate(self.parent.context, self.parent.location(range), strRef(""), ty);
-                mlir.oraOperationSetAttributeByName(
-                    op,
-                    strRef("length"),
-                    mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), 0),
-                );
-                return appendValueOp(self.block, op);
-            }
-
-            if (mlir.oraTypeEqual(ty, bytesType(self.parent.context))) {
-                const op = mlir.oraBytesConstantOpCreate(self.parent.context, self.parent.location(range), strRef("0x"), ty);
-                mlir.oraOperationSetAttributeByName(
-                    op,
-                    strRef("length"),
-                    mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), 0),
-                );
-                return appendValueOp(self.block, op);
-            }
-
-            const op = if (mlir.oraTypeIsAInteger(ty) or mlir.oraTypeIsIntegerType(ty))
-                createIntegerConstant(self.parent.context, self.parent.location(range), ty, 0)
-            else
-                try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
+        fn loweringValueError(self: *FunctionLowerer, range: source.TextRange, result_type: mlir.MlirType, comptime fmt: []const u8, args: anytype) anyerror!mlir.MlirValue {
+            try self.parent.emitLoweringError(range, fmt, args);
+            const op = try self.createAggregatePlaceholder("ora.lowering_error", range, &.{}, result_type);
             return appendValueOp(self.block, op);
+        }
+
+        fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(range);
+            const seed = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+            );
+            const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
+                self.parent.context,
+                loc,
+                seed,
+                mlir.oraNoneTypeCreate(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, none_cast);
         }
 
         pub fn typeIsVoid(self: *const FunctionLowerer, ty: mlir.MlirType) bool {

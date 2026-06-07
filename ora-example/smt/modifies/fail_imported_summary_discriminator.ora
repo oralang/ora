@@ -1,4 +1,4 @@
-comptime const dep = @import("./pass_imported_summary_discriminator_dep.ora");
+comptime const dep = @import("./fail_imported_summary_discriminator_dep.ora");
 
 contract ImportedSummaryDiscriminator {
     storage var balances: map<address, u256>;

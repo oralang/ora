@@ -763,7 +763,7 @@ test "verification uses imported-module opaque modifies metadata by default" {
 
 test "verification imported-summary mode is discriminated from exact imported body inlining" {
     var exact = try verifyPackageWithoutDegradationWithImportedSummaryMode(
-        "ora-example/smt/modifies/pass_imported_summary_discriminator.ora",
+        "ora-example/smt/modifies/fail_imported_summary_discriminator.ora",
         "f",
         false,
     );
@@ -773,7 +773,7 @@ test "verification imported-summary mode is discriminated from exact imported bo
     try testing.expect(!exact.degraded);
 
     var summary_only = try verifyPackageWithoutDegradation(
-        "ora-example/smt/modifies/pass_imported_summary_discriminator.ora",
+        "ora-example/smt/modifies/fail_imported_summary_discriminator.ora",
         "f",
     );
     defer summary_only.deinit(testing.allocator);

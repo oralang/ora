@@ -566,10 +566,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var condition = try before_lowerer.lowerExpr(while_stmt.condition, &before_locals);
             if (!mlir.oraTypeEqual(mlir.oraValueGetType(condition), boolType(self.parent.context))) {
-                const zero = try before_lowerer.defaultValue(mlir.oraValueGetType(condition), while_stmt.range);
-                const cmp = before_lowerer.createCompareOp(loc, "ne", condition, zero);
-                if (mlir.oraOperationIsNull(cmp)) return error.MlirOperationCreationFailed;
-                condition = appendValueOp(before_block, cmp);
+                const condition_type = mlir.oraValueGetType(condition);
+                if (!mlir.oraTypeIsAInteger(condition_type) and !mlir.oraTypeIsIntegerType(condition_type)) {
+                    try self.parent.emitLoweringError(
+                        while_stmt.range,
+                        "while condition lowered to unsupported non-bool type",
+                        .{},
+                    );
+                    const placeholder = try before_lowerer.createAggregatePlaceholder("ora.while_condition", while_stmt.range, &.{condition}, boolType(self.parent.context));
+                    condition = appendValueOp(before_block, placeholder);
+                } else {
+                    const zero = appendValueOp(before_block, createIntegerConstant(self.parent.context, loc, condition_type, 0));
+                    const cmp = before_lowerer.createCompareOp(loc, "ne", condition, zero);
+                    if (mlir.oraOperationIsNull(cmp)) return error.MlirOperationCreationFailed;
+                    condition = appendValueOp(before_block, cmp);
+                }
             }
 
             if (has_loop_control) {
@@ -911,6 +922,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const arm = switch_stmt.arms[arm_index];
+            if (switch_stmt.else_body == null and @This().errorUnionMatchStmtPrefixIsExhaustive(self, switch_stmt.condition, switch_stmt.arms[0 .. arm_index + 1])) {
+                var arm_lowerer = self.*;
+                var arm_locals = try self.cloneLocals(locals);
+                arm_lowerer.current_scf_carried_locals = carried_locals;
+                if (has_return) {
+                    arm_lowerer.deferred_return_kind = .scf_yield;
+                    arm_lowerer.deferred_return_carried_locals = carried_locals;
+                }
+                try @This().bindErrorUnionMatchPatternValue(&arm_lowerer, condition, arm.pattern, arm.range, &arm_locals);
+                const arm_terminated = try arm_lowerer.lowerBody(arm.body, &arm_locals);
+                if (!blockEndsWithTerminator(self.block)) {
+                    try arm_lowerer.appendScfYieldFromLocals(self.block, arm.range, &arm_locals, carried_locals);
+                }
+                return arm_terminated;
+            }
             const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, switch_stmt.condition, condition, arm.pattern, arm.range)) orelse return false;
             const result_types = if (carried_locals.len == 0)
                 std.ArrayList(mlir.MlirType){}
@@ -1238,7 +1264,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             });
             var unlabeled_switch = switch_stmt;
             unlabeled_switch.label = null;
-            _ = try @This().lowerSwitchStmtWithCondition(&body_lowerer, unlabeled_switch, current_condition, current_condition, &body_locals);
+            const body_terminated = try @This().lowerSwitchStmtWithCondition(&body_lowerer, unlabeled_switch, current_condition, current_condition, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, switch_stmt.range, &body_locals, carried_locals.items);
             }
@@ -1249,8 +1275,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             if (has_return and self.deferred_return_flag != null) {
                 try self.appendDeferredReturnCheck(switch_stmt.range, locals);
+                if (body_terminated and !blockEndsWithTerminator(self.block)) {
+                    try self.appendDeferredReturnTerminator(switch_stmt.range, locals);
+                }
             }
-            return false;
+            return body_terminated;
         }
 
         pub fn buildSwitchPatternData(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, synthesize_default_case: bool) anyerror!?SwitchPatternData {
@@ -1542,13 +1571,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     switch_expr.arms,
                     switch_expr.else_expr != null,
                 )) {
-                    return self.defaultValue(self.parent.lowerExprType(expr_id), switch_expr.range);
+                    try self.parent.emitLoweringError(
+                        switch_expr.range,
+                        "exhaustive match expression produced no value during HIR lowering",
+                        .{},
+                    );
+                    const op = try self.createAggregatePlaceholder("ora.match_expr", switch_expr.range, &.{condition}, self.parent.lowerExprType(expr_id));
+                    return appendValueOp(self.block, op);
                 }
                 const op = try self.createAggregatePlaceholder("ora.match_expr", switch_expr.range, &.{condition}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
             }
 
             const arm = switch_expr.arms[arm_index];
+            if (switch_expr.else_expr == null and @This().errorUnionMatchPrefixIsExhaustive(self, switch_expr.condition, switch_expr.arms[0 .. arm_index + 1])) {
+                const result_type = self.parent.lowerExprType(expr_id);
+                var arm_lowerer = self.*;
+                var arm_locals = try self.cloneLocals(locals);
+                try @This().bindErrorUnionMatchPatternValue(&arm_lowerer, condition, arm.pattern, arm.range, &arm_locals);
+                const raw_value = try arm_lowerer.lowerExpr(arm.value, &arm_locals);
+                return arm_lowerer.convertValueForFlow(raw_value, result_type, arm.range);
+            }
             const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, switch_expr.condition, condition, arm.pattern, arm.range)) orelse {
                 const op = try self.createAggregatePlaceholder("ora.match_expr", arm.range, &.{condition}, self.parent.lowerExprType(expr_id));
                 return appendValueOp(self.block, op);
@@ -1578,6 +1621,101 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try appendScfYieldValues(self.parent.context, else_block, self.parent.location(arm.range), &[_]mlir.MlirValue{else_value});
 
             return mlir.oraOperationGetResult(op, 0);
+        }
+
+        fn errorUnionMatchPrefixIsExhaustive(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            arms: []const ast.SwitchExprArm,
+        ) bool {
+            const condition_type = self.parent.typecheck.exprType(condition_expr_id);
+            if (condition_type.kind() != .error_union) return false;
+
+            var seen_errors = std.AutoHashMap(usize, void).init(self.parent.allocator);
+            defer seen_errors.deinit();
+
+            var success_covered = false;
+            var error_fallback_covered = false;
+            for (arms) |arm| {
+                if (!@This().collectErrorUnionMatchPatternCoverage(self, condition_expr_id, arm.pattern, &success_covered, &error_fallback_covered, &seen_errors)) {
+                    return false;
+                }
+            }
+
+            return success_covered and
+                (error_fallback_covered or seen_errors.count() == condition_type.errorTypes().len);
+        }
+
+        fn errorUnionMatchStmtPrefixIsExhaustive(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            arms: []const ast.SwitchArm,
+        ) bool {
+            const condition_type = self.parent.typecheck.exprType(condition_expr_id);
+            if (condition_type.kind() != .error_union) return false;
+
+            var seen_errors = std.AutoHashMap(usize, void).init(self.parent.allocator);
+            defer seen_errors.deinit();
+
+            var success_covered = false;
+            var error_fallback_covered = false;
+            for (arms) |arm| {
+                if (!@This().collectErrorUnionMatchPatternCoverage(self, condition_expr_id, arm.pattern, &success_covered, &error_fallback_covered, &seen_errors)) {
+                    return false;
+                }
+            }
+
+            return success_covered and
+                (error_fallback_covered or seen_errors.count() == condition_type.errorTypes().len);
+        }
+
+        fn collectErrorUnionMatchPatternCoverage(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            pattern: ast.SwitchPattern,
+            success_covered: *bool,
+            error_fallback_covered: *bool,
+            seen_errors: *std.AutoHashMap(usize, void),
+        ) bool {
+            switch (pattern) {
+                .Ok => {
+                    success_covered.* = true;
+                    return true;
+                },
+                .Err => {
+                    error_fallback_covered.* = true;
+                    return true;
+                },
+                .Or => return false,
+                .NamedError => {
+                    const item_id = @This().matchPatternNamedErrorDeclItem(self, condition_expr_id, pattern) orelse return false;
+                    const index = @This().errorUnionErrorIndex(self, condition_expr_id, item_id) orelse return false;
+                    seen_errors.put(index, {}) catch return false;
+                    return true;
+                },
+                .Expr => {
+                    const item_id = @This().matchPatternNamedPayloadlessErrorDeclItem(self, condition_expr_id, pattern) orelse return false;
+                    const index = @This().errorUnionErrorIndex(self, condition_expr_id, item_id) orelse return false;
+                    seen_errors.put(index, {}) catch return false;
+                    return true;
+                },
+                else => return false,
+            }
+        }
+
+        fn errorUnionErrorIndex(
+            self: *FunctionLowerer,
+            condition_expr_id: ast.ExprId,
+            item_id: ast.ItemId,
+        ) ?usize {
+            const condition_type = self.parent.typecheck.exprType(condition_expr_id);
+            if (condition_type.kind() != .error_union) return null;
+            const item = self.parent.file.item(item_id).*;
+            if (item != .ErrorDecl) return null;
+            for (condition_type.errorTypes(), 0..) |error_type, index| {
+                if (std.mem.eql(u8, error_type.name() orelse "", item.ErrorDecl.name)) return index;
+            }
+            return null;
         }
 
         fn switchUsesErrorUnionMatchPatterns(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt) bool {

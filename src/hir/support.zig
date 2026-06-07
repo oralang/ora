@@ -315,26 +315,39 @@ pub fn appendScfYieldValues(ctx: mlir.MlirContext, block: mlir.MlirBlock, loc: m
 }
 
 pub fn blockEndsWithTerminator(block: mlir.MlirBlock) bool {
-    return !mlir.oraOperationIsNull(mlir.oraBlockGetTerminator(block));
+    return operationIsKnownBlockTerminator(blockLastOperation(block));
 }
 
 pub fn clearKnownTerminator(block: mlir.MlirBlock) void {
-    const term = mlir.oraBlockGetTerminator(block);
-    if (mlir.oraOperationIsNull(term)) return;
+    const term = blockLastOperation(block);
+    if (operationIsKnownBlockTerminator(term)) {
+        mlir.oraOperationErase(term);
+    }
+}
 
-    const name_ref = mlir.oraOperationGetName(term);
-    if (name_ref.data == null) return;
+fn blockLastOperation(block: mlir.MlirBlock) mlir.MlirOperation {
+    var current = mlir.oraBlockGetFirstOperation(block);
+    var last = std.mem.zeroes(mlir.MlirOperation);
+    while (!mlir.oraOperationIsNull(current)) {
+        last = current;
+        current = mlir.oraOperationGetNextInBlock(current);
+    }
+    return last;
+}
+
+fn operationIsKnownBlockTerminator(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationIsNull(op)) return false;
+
+    const name_ref = mlir.oraOperationGetName(op);
+    if (name_ref.data == null) return false;
     const op_name = name_ref.data[0..name_ref.length];
 
-    const is_terminator = std.mem.eql(u8, op_name, "ora.yield") or
+    return std.mem.eql(u8, op_name, "ora.yield") or
         std.mem.eql(u8, op_name, "scf.yield") or
         std.mem.eql(u8, op_name, "ora.return") or
         std.mem.eql(u8, op_name, "func.return") or
         std.mem.eql(u8, op_name, "cf.br") or
         std.mem.eql(u8, op_name, "cf.cond_br");
-    if (is_terminator) {
-        mlir.oraOperationErase(term);
-    }
 }
 
 pub fn createIntegerConstant(ctx: mlir.MlirContext, loc: mlir.MlirLocation, ty: mlir.MlirType, value: i64) mlir.MlirOperation {
@@ -438,6 +451,26 @@ pub fn parseIntLiteral(text: []const u8) ?i64 {
     const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
     const digits = if (base == 10) text else text[2..];
     return std.fmt.parseInt(i64, digits, base) catch null;
+}
+
+pub fn parseUnsignedIntegerLiteral(comptime T: type, text: []const u8) ?T {
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x")) 16 else if (std.mem.startsWith(u8, trimmed, "0b")) 2 else 10;
+    const digits = if (base == 10) trimmed else trimmed[2..];
+    var result: T = 0;
+    var digit_count: usize = 0;
+    for (digits) |c| {
+        if (c == '_') continue;
+        const digit = std.fmt.charToDigit(c, base) catch return null;
+        const shifted = @mulWithOverflow(result, @as(T, @intCast(base)));
+        if (shifted[1] != 0) return null;
+        const summed = @addWithOverflow(shifted[0], @as(T, @intCast(digit)));
+        if (summed[1] != 0) return null;
+        result = summed[0];
+        digit_count += 1;
+    }
+    if (digit_count == 0) return null;
+    return result;
 }
 
 pub fn exprRange(file: *const ast.AstFile, expr_id: ast.ExprId) source.TextRange {

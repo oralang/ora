@@ -177,6 +177,10 @@ fn u256Type() Type {
     return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
 }
 
+fn addressType() Type {
+    return .{ .address = {} };
+}
+
 fn metatypeMarkerType() Type {
     return .{ .named = .{ .name = "type" } };
 }
@@ -243,6 +247,19 @@ fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     }
 
     return false;
+}
+
+fn switchBranchTypesCompatible(lhs: Type, rhs: Type) bool {
+    if (lhs.kind() == .unknown or rhs.kind() == .unknown) return true;
+    if (lhs.kind() == .never or rhs.kind() == .never) return true;
+
+    const lhs_unwrapped = unwrapRefinement(lhs);
+    const rhs_unwrapped = unwrapRefinement(rhs);
+    const lhs_is_error_union = lhs_unwrapped.kind() == .error_union;
+    const rhs_is_error_union = rhs_unwrapped.kind() == .error_union;
+    if (lhs_is_error_union != rhs_is_error_union) return false;
+
+    return typesAssignable(lhs, rhs) or typesAssignable(rhs, lhs);
 }
 
 fn exactFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
@@ -793,6 +810,22 @@ const TypeChecker = struct {
             module_id = (try query.resolveImportAlias(module_id, part)) orelse return null;
         }
         return null;
+    }
+
+    fn importedPathIsErrorDecl(self: *const TypeChecker, path: []const u8) !bool {
+        const query = self.import_query orelse return false;
+        var parts = std.mem.splitScalar(u8, path, '.');
+        const first = parts.next() orelse return false;
+        var module_id = (try query.resolveImportAlias(self.module_id, first)) orelse return false;
+        while (parts.next()) |part| {
+            if (parts.peek() == null) {
+                const item_id = (try query.lookupItem(module_id, part)) orelse return false;
+                const target_file = try query.astFile(module_id);
+                return target_file.item(item_id).* == .ErrorDecl;
+            }
+            module_id = (try query.resolveImportAlias(module_id, part)) orelse return false;
+        }
+        return false;
     }
 
     fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) !?ResolvedCall {
@@ -2229,8 +2262,14 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
+                if (for_stmt.range_end != null) {
+                    try self.contextualizeLiteral(for_stmt.iterable, forRangeIndexType());
+                }
                 self.assignForPatternTypes(for_stmt);
-                if (for_stmt.range_end) |end_expr| try self.visitExpr(end_expr);
+                if (for_stmt.range_end) |end_expr| {
+                    try self.visitExpr(end_expr);
+                    try self.contextualizeLiteral(end_expr, forRangeIndexType());
+                }
                 for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
                 try self.visitBody(for_stmt.body);
             },
@@ -2279,6 +2318,7 @@ const TypeChecker = struct {
                 try self.visitExpr(assign.value);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
+                try self.contextualizeLiteral(assign.value, expected_type);
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
@@ -2397,34 +2437,32 @@ const TypeChecker = struct {
                     try self.visitExpr(arm.value);
                     if (result_type.kind() != .unknown) {
                         try self.contextualizeLiteral(arm.value, result_type);
+                    } else if (condition_type.kind() == .error_union and self.exprIsResultConstructor(arm.value)) {
+                        try self.contextualizeLiteral(arm.value, condition_type);
                     }
-                    const arm_type = self.expr_types[arm.value.index()];
-                    if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !typesAssignable(result_type, arm_type) and !typesAssignable(arm_type, result_type)) {
+                    const arm_type = self.switchArmResultType(condition_type, arm.value);
+                    if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !switchBranchTypesCompatible(result_type, arm_type)) {
                         saw_mismatch = true;
-                        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            diagnosticTypeDisplayName(self, result_type),
-                            diagnosticTypeDisplayName(self, arm_type),
-                        });
+                        try self.emitSwitchBranchTypeMismatch(expr_id, condition_type, result_type, arm_type);
                     }
                     if (!saw_mismatch) {
-                        result_type = mergeExprType(result_type, self.expr_types[arm.value.index()]);
+                        result_type = mergeExprType(result_type, arm_type);
                     }
                 }
                 if (switch_expr.else_expr) |else_expr| {
                     try self.visitExpr(else_expr);
                     if (result_type.kind() != .unknown) {
                         try self.contextualizeLiteral(else_expr, result_type);
+                    } else if (condition_type.kind() == .error_union and self.exprIsResultConstructor(else_expr)) {
+                        try self.contextualizeLiteral(else_expr, condition_type);
                     }
-                    const else_type = self.expr_types[else_expr.index()];
-                    if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !typesAssignable(result_type, else_type) and !typesAssignable(else_type, result_type)) {
+                    const else_type = self.switchArmResultType(condition_type, else_expr);
+                    if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !switchBranchTypesCompatible(result_type, else_type)) {
                         saw_mismatch = true;
-                        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            diagnosticTypeDisplayName(self, result_type),
-                            diagnosticTypeDisplayName(self, else_type),
-                        });
+                        try self.emitSwitchBranchTypeMismatch(expr_id, condition_type, result_type, else_type);
                     }
                     if (!saw_mismatch) {
-                        result_type = mergeExprType(result_type, self.expr_types[else_expr.index()]);
+                        result_type = mergeExprType(result_type, else_type);
                     }
                 }
                 if (saw_mismatch) result_type = .{ .unknown = {} };
@@ -2515,6 +2553,12 @@ const TypeChecker = struct {
             .Call => |call| {
                 try self.visitExpr(call.callee);
                 for (call.args) |arg| try self.visitExpr(arg);
+                if (call.args.len == 0) {
+                    if (self.environmentIntrinsicValueType(call.callee)) |result_type| {
+                        self.expr_types[expr_id.index()] = result_type;
+                        return;
+                    }
+                }
                 self.call_resolutions[expr_id.index()] = try self.importedFunctionCallResolution(call);
                 const result_type = try self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
@@ -2601,7 +2645,8 @@ const TypeChecker = struct {
             .Field => |field| {
                 try self.visitExpr(field.base);
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                const result_type = self.environmentIntrinsicValueType(expr_id) orelse
+                    try self.fieldAccessTypeForExpr(field.base, field.name);
                 self.expr_types[expr_id.index()] = result_type;
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
@@ -4513,18 +4558,28 @@ const TypeChecker = struct {
         };
     }
 
+    fn errorUnionErrorDisplayType(self: *const TypeChecker, type_expr: ast.TypeExprId) Type {
+        const qualified = self.namedTypeExprName(type_expr) orelse return .{ .unknown = {} };
+        const name = if (std.mem.lastIndexOfScalar(u8, qualified, '.')) |dot_index|
+            qualified[dot_index + 1 ..]
+        else
+            qualified;
+        if (name.len == 0) return .{ .unknown = {} };
+        return .{ .named = .{ .name = name } };
+    }
+
     fn checkErrorUnionErrorName(self: *TypeChecker, error_type: ast.TypeExprId) !bool {
         const range = self.typeExprRange(error_type);
         const name = self.namedTypeExprName(error_type) orelse {
             try self.emitInvalidErrorUnionErrorName(range);
             return false;
         };
-        const error_item_id = self.item_index.lookup(name);
-        if (error_item_id == null or self.file.item(error_item_id.?).* != .ErrorDecl) {
+        if (self.lookupErrorItemInScope(name) != null) return true;
+        if (try self.importedPathIsErrorDecl(name)) return true;
+        {
             try self.emitUndefinedErrorName(range, name);
             return false;
         }
-        return true;
     }
 
     fn checkErrorUnionErrorNames(self: *TypeChecker, eu: ast.ErrorUnionTypeExpr, valid_errors: []bool) !void {
@@ -4651,7 +4706,7 @@ const TypeChecker = struct {
                 const errors = try self.arena.alloc(Type, error_union.errors.len);
                 for (error_union.errors, 0..) |error_type, index| {
                     if (!valid_errors[index]) {
-                        errors[index] = .{ .unknown = {} };
+                        errors[index] = self.errorUnionErrorDisplayType(error_type);
                         continue;
                     }
                     errors[index] = try self.resolveTypeExprWithBindings(error_type, bindings);
@@ -4856,6 +4911,29 @@ const TypeChecker = struct {
         return null;
     }
 
+    fn lookupErrorItemInScope(self: *const TypeChecker, name: []const u8) ?ast.ItemId {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (self.current_contract) |contract_id| {
+            if (contract_id.index() < self.file.items.len and self.file.item(contract_id).* == .Contract) {
+                if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, trimmed, .{
+                    .error_decl = true,
+                })) |member_id| {
+                    return member_id;
+                }
+            }
+        }
+        if (self.item_index.lookup(trimmed)) |item_id| {
+            if (self.file.item(item_id).* == .ErrorDecl) return item_id;
+        }
+        for (self.file.items, 0..) |item, index| {
+            switch (item) {
+                .ErrorDecl => |error_decl| if (std.mem.eql(u8, error_decl.name, trimmed)) return ast.ItemId.fromIndex(index),
+                else => {},
+            }
+        }
+        return null;
+    }
+
     fn structLiteralType(self: *TypeChecker, name: []const u8) Type {
         if (self.enumVariantStructLiteralInfo(name)) |info| return info.enum_type;
         if (self.item_index.lookup(name)) |item_id| {
@@ -4955,6 +5033,7 @@ const TypeChecker = struct {
             .not_applicable => {},
             .resolved, .overflow => return,
         }
+        if (try self.resolveAddressLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
 
         const expr = self.file.expression(expr_id).*;
         switch (expr) {
@@ -5052,6 +5131,47 @@ const TypeChecker = struct {
             },
             else => false,
         };
+    }
+
+    fn exprIsResultConstructor(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsResultConstructor(group.expr),
+            .Call => |call| self.isResultConstructorCall(call, "Ok") or self.isResultConstructorCall(call, "Err"),
+            else => false,
+        };
+    }
+
+    fn switchArmResultType(self: *const TypeChecker, condition_type: Type, expr_id: ast.ExprId) Type {
+        const actual_type = self.expr_types[expr_id.index()];
+        if (condition_type.kind() == .error_union and actual_type.kind() == .unknown and self.exprIsResultConstructor(expr_id)) {
+            return condition_type;
+        }
+        return actual_type;
+    }
+
+    fn emitSwitchBranchTypeMismatch(self: *TypeChecker, expr_id: ast.ExprId, condition_type: Type, lhs: Type, rhs: Type) !void {
+        if (condition_type.kind() == .error_union) {
+            const lhs_is_error_union = unwrapRefinement(lhs).kind() == .error_union;
+            const rhs_is_error_union = unwrapRefinement(rhs).kind() == .error_union;
+            if (lhs_is_error_union != rhs_is_error_union) {
+                try self.emitExprError(expr_id, "match expression arms have incompatible types '{s}' and '{s}'; wrap success values with Ok(...) or use try", .{
+                    diagnosticTypeDisplayName(self, lhs),
+                    diagnosticTypeDisplayName(self, rhs),
+                });
+                return;
+            }
+
+            try self.emitExprError(expr_id, "match expression arms have incompatible types '{s}' and '{s}'", .{
+                diagnosticTypeDisplayName(self, lhs),
+                diagnosticTypeDisplayName(self, rhs),
+            });
+            return;
+        }
+
+        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
+            diagnosticTypeDisplayName(self, lhs),
+            diagnosticTypeDisplayName(self, rhs),
+        });
     }
 
     fn instantiateGenericStruct(
@@ -5530,12 +5650,23 @@ const TypeChecker = struct {
 
     fn builtinDivisionOperandType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
         if (builtin.args.len == 0) return .{ .unknown = {} };
-        const lhs = self.expr_types[builtin.args[0].index()];
-        if (builtin.args.len < 2) return lhs;
-        const rhs = self.expr_types[builtin.args[1].index()];
-        const lhs_expr = self.file.expression(builtin.args[0]).*;
-        const rhs_expr = self.file.expression(builtin.args[1]).*;
-        if (lhs_expr == .IntegerLiteral and rhs_expr != .IntegerLiteral and isIntegerType(rhs)) return rhs;
+        const lhs_expr_id = builtin.args[0];
+        const lhs = self.expr_types[lhs_expr_id.index()];
+        if (builtin.args.len < 2) {
+            if (self.exprCanAdoptIntegerContext(lhs_expr_id) and unwrapRefinement(lhs).kind() == .comptime_integer) return u256Type();
+            return lhs;
+        }
+
+        const rhs_expr_id = builtin.args[1];
+        const rhs = self.expr_types[rhs_expr_id.index()];
+        const lhs_base = unwrapRefinement(lhs);
+        const rhs_base = unwrapRefinement(rhs);
+        const lhs_adopts = self.exprCanAdoptIntegerContext(lhs_expr_id) and lhs_base.kind() == .comptime_integer;
+        const rhs_adopts = self.exprCanAdoptIntegerContext(rhs_expr_id) and rhs_base.kind() == .comptime_integer;
+
+        if (lhs_adopts and rhs_base.kind() == .integer) return rhs;
+        if (rhs_adopts and lhs_base.kind() == .integer) return lhs;
+        if (lhs_adopts and rhs_adopts) return u256Type();
         return lhs;
     }
 
@@ -6404,6 +6535,30 @@ const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn environmentIntrinsicValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+        const address_paths = [_][]const []const u8{
+            &.{ "std", "msg", "sender" },
+            &.{ "std", "transaction", "sender" },
+            &.{ "std", "tx", "origin" },
+            &.{ "std", "block", "coinbase" },
+        };
+        for (address_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return addressType();
+        }
+
+        const integer_paths = [_][]const []const u8{
+            &.{ "std", "msg", "value" },
+            &.{ "std", "transaction", "gasprice" },
+            &.{ "std", "block", "timestamp" },
+            &.{ "std", "block", "number" },
+        };
+        for (integer_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return u256Type();
+        }
+
+        return null;
     }
 
     fn exprPathMatches(self: *TypeChecker, expr_id: ast.ExprId, components: []const []const u8) bool {
@@ -7286,7 +7441,7 @@ const TypeChecker = struct {
         const actual = unwrapRefinement(self.expr_types[expr_id.index()]);
         switch (actual.kind()) {
             .comptime_integer => {
-                const value = self.const_eval.values[expr_id.index()] orelse return .not_applicable;
+                const value = (try self.integerValueForResolution(expr_id)) orelse return .not_applicable;
                 if (value != .integer) return .not_applicable;
             },
             .integer => {
@@ -7294,7 +7449,7 @@ const TypeChecker = struct {
                 if (!typesAssignable(expected, actual)) return .not_applicable;
                 if (!sameIntegerShape(expected.integer, actual.integer)) {
                     if (!self.exprCanAdoptIntegerContext(expr_id)) return .not_applicable;
-                    const value = self.const_eval.values[expr_id.index()] orelse return .not_applicable;
+                    const value = (try self.integerValueForResolution(expr_id)) orelse return .not_applicable;
                     if (value != .integer) return .not_applicable;
                 }
             },
@@ -7310,6 +7465,41 @@ const TypeChecker = struct {
         return .resolved;
     }
 
+    fn resolveAddressLiteralExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (unwrapRefinement(expected_type).kind() != .address) return false;
+
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| {
+                const resolved = try self.resolveAddressLiteralExpression(range, group.expr, expected_type);
+                if (resolved) self.expr_types[expr_id.index()] = addressType();
+                return resolved;
+            },
+            .IntegerLiteral => |literal| {
+                if (integerLiteralTypeSuffix(literal.text) != null) return false;
+                const value = (try const_bridge.parseIntegerLiteral(self.arena, integerLiteralValueText(literal.text))) orelse return false;
+                if (value != .integer) return false;
+                _ = value.integer.toInt(u160) catch {
+                    const value_text = try self.integerValueText(value.integer);
+                    try self.emitConstantValueDoesNotFitRange(range, value_text, "address");
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return true;
+                };
+                self.expr_types[expr_id.index()] = addressType();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn integerValueForResolution(self: *TypeChecker, expr_id: ast.ExprId) !?ConstValue {
+        if (self.const_eval.values[expr_id.index()]) |value| return value;
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| try const_bridge.parseIntegerLiteral(self.arena, integerLiteralValueText(literal.text)),
+            .Group => |group| try self.integerValueForResolution(group.expr),
+            else => null,
+        };
+    }
+
     fn exprCanAdoptIntegerContext(self: *const TypeChecker, expr_id: ast.ExprId) bool {
         return switch (self.file.expression(expr_id).*) {
             .IntegerLiteral, .Group, .Comptime, .Unary, .Binary => true,
@@ -7318,7 +7508,7 @@ const TypeChecker = struct {
     }
 
     fn emitIntegerOverflowAgainst(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
-        const value = self.const_eval.values[expr_id.index()] orelse return false;
+        const value = (try self.integerValueForResolution(expr_id)) orelse return false;
         if (value != .integer or expected_type.kind() != .integer) return false;
         const checked_value = if (exprUsesWrappedIntegerValue(self, expr_id))
             try const_bridge.wrapIntegerToType(self.arena, value.integer, expected_type.integer)
@@ -8402,6 +8592,11 @@ fn enumBytesLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const 
 fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
     const suffix = integerLiteralTypeSuffix(text) orelse return null;
     return descriptors.integerTypeFromName(suffix);
+}
+
+fn integerLiteralValueText(text: []const u8) []const u8 {
+    const suffix = integerLiteralTypeSuffix(text) orelse return text;
+    return text[0 .. text.len - suffix.len];
 }
 
 fn integerLiteralTypeSuffix(text: []const u8) ?[]const u8 {

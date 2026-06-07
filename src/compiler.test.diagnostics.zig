@@ -75,6 +75,44 @@ fn expectTypecheckOmits(source_text: []const u8, must_not_contain: []const u8) !
     try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, must_not_contain));
 }
 
+test "compiler accepts contextual short integer literals for address declarations only" {
+    const positive =
+        \\pub fn zero() -> address {
+        \\    let short_zero: address = 0x0;
+        \\    let byte_zero: address = 0x00;
+        \\    return short_zero;
+        \\}
+    ;
+    var positive_compilation = try compileText(positive);
+    defer positive_compilation.deinit();
+
+    const positive_typecheck = try positive_compilation.db.moduleTypeCheck(positive_compilation.root_module_id);
+    try testing.expect(positive_typecheck.diagnostics.isEmpty());
+
+    const negative =
+        \\pub fn bad(value: u256) -> address {
+        \\    return value;
+        \\}
+    ;
+    var negative_compilation = try compileText(negative);
+    defer negative_compilation.deinit();
+
+    const negative_typecheck = try negative_compilation.db.moduleTypeCheck(negative_compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&negative_typecheck.diagnostics, "return expects type 'address', found 'u256'"));
+
+    const too_wide =
+        \\pub fn bad() -> address {
+        \\    let addr: address = 0x10000000000000000000000000000000000000000;
+        \\    return addr;
+        \\}
+    ;
+    var too_wide_compilation = try compileText(too_wide);
+    defer too_wide_compilation.deinit();
+
+    const too_wide_typecheck = try too_wide_compilation.db.moduleTypeCheck(too_wide_compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&too_wide_typecheck.diagnostics, "does not fit in type 'address'"));
+}
+
 // Locks the fail-closed contract for cast-like / overflow builtins: a malformed
 // shape MUST be rejected at type-check, never slide through to the HIR lowering
 // fallback ("reached HIR lowering without ...") or an ICE. Each needle here was
@@ -361,6 +399,28 @@ test "compiler reports undefined error-union errors once" {
         errdefer std.debug.print("undefined error-union error case failed: {s}\n", .{case.name});
         try expectSingleUndefinedErrorDiagnostic(case.source, case.error_name);
     }
+}
+
+test "compiler accepts imported error-union error names" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract StdBytesHelpers {
+        \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
+        \\        return std.bytes.at(data, 0);
+        \\    }
+        \\
+        \\    pub fn decodeWord(data: bytes) -> !u256 | std.bytes.InvalidLength {
+        \\        return std.bytes.decodeU256BE(data);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler rejects error-union pipes without bang" {

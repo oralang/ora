@@ -169,8 +169,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), null, 0);
                             if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, ret);
+                        } else if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(return_type)) and
+                            self.typeIsVoid(mlir.oraErrorUnionTypeGetSuccessType(return_type)))
+                        {
+                            const value = try @This().okVoidErrorUnionValue(self, return_type, function.range);
+                            const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
+                            if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
+                            appendOp(self.block, ret);
                         } else {
-                            const value = try self.defaultValue(return_type, function.range);
+                            try self.parent.emitLoweringError(
+                                function.range,
+                                "missing return value for function with non-void return type",
+                                .{},
+                            );
+                            const value = appendValueOp(
+                                self.block,
+                                try self.createAggregatePlaceholder("ora.missing_return", function.range, &.{}, return_type),
+                            );
                             const ret = mlir.oraReturnOpCreate(self.parent.context, self.parent.location(function.range), &[_]mlir.MlirValue{value}, 1);
                             if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, ret);
@@ -616,6 +631,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(range);
+            const seed = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+            );
+            const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
+                self.parent.context,
+                loc,
+                seed,
+                mlir.oraNoneTypeCreate(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, none_cast);
+        }
+
+        fn okVoidErrorUnionValue(self: *FunctionLowerer, return_type: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
+            const payload = try @This().voidValue(self, range);
+            const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, return_type);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
+                mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+            }
+            return appendValueOp(self.block, op);
+        }
+
         fn successResultValueForPostcondition(self: *FunctionLowerer, value: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
             const return_type = self.return_type orelse return value;
             const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
@@ -1034,8 +1075,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             if (mlir.oraOperationIsNull(alloc)) return error.MlirOperationCreationFailed;
                             break :blk appendValueOp(self.block, alloc);
                         }
-                        break :blk try self.defaultValue(lowered_type, decl.range);
-                    } else try self.defaultValue(defaultIntegerType(self.parent.context), decl.range);
+                        try self.parent.emitLoweringError(
+                            decl.range,
+                            "local declaration requires an initializer",
+                            .{},
+                        );
+                        const op = try self.createAggregatePlaceholder("ora.uninitialized_local", decl.range, &.{}, lowered_type);
+                        break :blk appendValueOp(self.block, op);
+                    } else blk: {
+                        try self.parent.emitLoweringError(
+                            decl.range,
+                            "local declaration requires a type or initializer",
+                            .{},
+                        );
+                        const op = try self.createAggregatePlaceholder("ora.uninitialized_local", decl.range, &.{}, defaultIntegerType(self.parent.context));
+                        break :blk appendValueOp(self.block, op);
+                    };
                     try self.bindPatternValue(decl.pattern, value, locals);
                     if (decl.value) |expr_id| {
                         if (@This().evalKnownIntExpr(self, expr_id, locals)) |known_int| {
@@ -1071,7 +1126,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 try @This().emitEnsuresClauses(self, locals, .ok, null);
                                 const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                                 if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
-                                    const value = try self.defaultValue(return_type, ret.range);
+                                    const value = try @This().okVoidErrorUnionValue(self, return_type, ret.range);
                                     const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                                     appendOp(self.block, op);
@@ -1134,7 +1189,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try @This().emitEnsuresClauses(self, locals, .ok, null);
                         const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
                         if (!mlir.oraTypeIsNull(success_type) and self.typeIsVoid(success_type)) {
-                            const value = try self.defaultValue(return_type, ret.range);
+                            const value = try @This().okVoidErrorUnionValue(self, return_type, ret.range);
                             const op = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{value}, 1);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, op);
@@ -3331,10 +3386,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
             if (sema_type.kind() == .unknown) return error.MlirOperationCreationFailed;
-            return self.defaultValue(
-                self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, local_id)),
+            try self.parent.emitLoweringError(
                 patternRange(self.parent.file, local_id),
+                "loop-carried local has no materialized value",
+                .{},
             );
+            const range = patternRange(self.parent.file, local_id);
+            const op = try self.createAggregatePlaceholder(
+                "ora.loop_carried_local",
+                range,
+                &.{},
+                self.parent.lowerSemaType(sema_type, range),
+            );
+            return appendValueOp(self.block, op);
         }
 
         pub fn appendOraYieldFromLocals(
