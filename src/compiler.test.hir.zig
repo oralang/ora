@@ -1039,6 +1039,40 @@ test "compiler resolves all-literal divExact and divmod builtins in u256 flow" {
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
+test "compiler lowers declarations after early return guards in branch suffixes" {
+    const source_text =
+        \\contract Sample {
+        \\    fn burn(amount: u256, rate: u256) -> u256 {
+        \\        if (rate > 0) {
+        \\            const scaled_amount: u256 = amount / 10000;
+        \\            if (scaled_amount > 10) {
+        \\                return amount;
+        \\            }
+        \\            const burn_fee: u256 = scaled_amount * rate;
+        \\            if (burn_fee >= amount) {
+        \\                return 1;
+        \\            }
+        \\            const actual_burn_raw: u256 = amount - burn_fee;
+        \\            if (actual_burn_raw < 1) {
+        \\                return 1;
+        \\            }
+        \\            return actual_burn_raw;
+        \\        }
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+}
+
 test "compiler lowers tuple, array, struct, switch, and error return expressions" {
     const source_text =
         \\struct Pair {

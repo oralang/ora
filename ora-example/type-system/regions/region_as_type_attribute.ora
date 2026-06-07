@@ -11,8 +11,8 @@ contract RegionAsTypeAttribute {
 
     // Memory variables - region is part of type
     pub fn testMemoryTypes() {
-        memory var memory_counter: u256;  // Type: u256 @memory
-        memory var memory_flag: bool;     // Type: bool @memory
+        memory var memory_counter: u256 = 0;  // Type: u256 @memory
+        memory var memory_flag: bool = true;  // Type: bool @memory
     }
 
     // Transient storage variables - region is part of type

@@ -785,7 +785,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (loop_context.continue_flag.ptr != null and self.current_scf_carried_locals == null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
                         return try @This().lowerBodySuffixGuardedOnLoopContinue(self, statements[index..], locals, loop_context);
                     } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
-                        if (try @This().lowerStmtGuardedOnDeferredReturn(self, statement_id, locals)) return true;
+                        return try @This().lowerBodySuffixGuardedOnDeferredReturn(self, statements[index..], locals);
                     } else {
                         if (try self.lowerStmt(statement_id, locals)) return true;
                     }
@@ -796,7 +796,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (self.block_context != null and seen_loop_control and !analysis.stmtContainsLoopControl(self.parent.file, statement_id)) {
                         return try @This().lowerBodySuffixGuardedOnBlockExit(self, statements[index..], locals);
                     } else if (self.deferred_return_flag != null and self.deferred_return_kind != .none and seen_potential_return) {
-                        if (try @This().lowerStmtGuardedOnDeferredReturn(self, statement_id, locals)) return true;
+                        return try @This().lowerBodySuffixGuardedOnDeferredReturn(self, statements[index..], locals);
                     } else {
                         if (try self.lowerStmt(statement_id, locals)) return true;
                     }
@@ -940,13 +940,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return terminated;
         }
 
-        fn lowerStmtGuardedOnDeferredReturn(
+        fn lowerBodySuffixGuardedOnDeferredReturn(
             self: *FunctionLowerer,
-            statement_id: ast.StmtId,
+            statements: []const ast.StmtId,
             locals: *LocalEnv,
         ) anyerror!bool {
-            const return_flag = self.deferred_return_flag orelse return self.lowerStmt(statement_id, locals);
-            const range = support.stmtRange(self.parent.file, statement_id);
+            const return_flag = self.deferred_return_flag orelse return @This().lowerBodyStatements(self, statements, locals);
+            const first_statement = statements[0];
+            const range = support.stmtRange(self.parent.file, first_statement);
             const loc = self.parent.location(range);
 
             const return_value = appendValueOp(self.block, blk: {
@@ -985,7 +986,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             then_lowerer.block = then_block;
             then_lowerer.current_scf_carried_locals = carried_locals;
             var then_locals = try self.cloneLocals(locals);
-            const terminated = try then_lowerer.lowerStmt(statement_id, &then_locals);
+            const terminated = try @This().lowerBodyStatements(&then_lowerer, statements, &then_locals);
             if (!support.blockEndsWithTerminator(then_block)) {
                 try then_lowerer.appendScfYieldFromLocals(then_block, range, &then_locals, carried_locals);
             }
