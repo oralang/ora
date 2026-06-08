@@ -12,8 +12,10 @@
 // CHECK: v[[RT_OK_TAG]] = or
 // CHECK: v[[RT_OK_PAYLOAD]] = or
 // CHECK: bb2 v[[RT_TAG:[0-9]+]] v[[RT_PAYLOAD:[0-9]+]] {
-// CHECK: mstore256 {{.*}} v[[RT_PAYLOAD]]
 // CHECK: {{v[0-9]+}} = and v[[RT_TAG]] {{.*}}
+// CHECK: bb4 -> v[[RT_PAYLOAD]] {
+// CHECK: bb5 v[[RT_SELECTED_PAYLOAD:[0-9]+]] ->
+// CHECK: mstore256 {{.*}} v[[RT_SELECTED_PAYLOAD]]
 // CHECK: iret
 
 // CHECK-LABEL: fn malformed:

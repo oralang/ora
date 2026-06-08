@@ -8,15 +8,12 @@
 
 namespace mlir::ora::lowering
 {
-    inline constexpr uint64_t kSIRTextLegalizerScratchStartBytes = 0x1000;
+    // Constructor dynamic-tail decode uses bounded temporary memory before the
+    // runtime heap is initialized; keep the free pointer above that region.
     inline constexpr uint64_t kConstructorDecodeScratchFenceBytes = 64 * 1024;
 
-    static_assert(kSIRTextLegalizerScratchStartBytes % 32 == 0,
-                  "SIR text legalizer scratch start must be word-aligned");
     static_assert(kConstructorDecodeScratchFenceBytes % 32 == 0,
                   "constructor decode scratch fence must be word-aligned");
-    static_assert(kSIRTextLegalizerScratchStartBytes < kConstructorDecodeScratchFenceBytes,
-                  "SIR text legalizer scratch range must start below the constructor decode scratch fence");
 
     enum class AbiDecodeError : uint64_t
     {
