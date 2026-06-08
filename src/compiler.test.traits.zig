@@ -466,6 +466,28 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
 }
 
+test "compiler lowers extern trait gas literals without type fallback" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Caller {
+        \\    pub fn pull(target: address) -> !u256 | ExternalCallFailed {
+        \\        return external<Oracle>(target, gas: 50000).quote();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
 test "compiler converts trusted extern trait summaries through SIR" {
     const source_text =
         \\extern trait Oracle {

@@ -1368,8 +1368,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Expr => |expr_stmt| {
-                    if (self.parent.file.expression(expr_stmt.expr).* == .TypeValue) {
-                        return false;
+                    switch (self.parent.file.expression(expr_stmt.expr).*) {
+                        .TypeValue => return false,
+                        .Comptime => |comptime_expr| return try @This().lowerComptimeStatementExpr(self, comptime_expr, locals),
+                        else => {},
                     }
                     _ = try self.lowerExpr(expr_stmt.expr, locals);
                     return false;
@@ -1651,6 +1653,295 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Error => return false,
             }
+        }
+
+        fn lowerComptimeStatementExpr(self: *FunctionLowerer, comptime_expr: ast.ComptimeExpr, locals: *LocalEnv) anyerror!bool {
+            var scoped_locals = try self.cloneLocals(locals);
+            const terminated = try @This().lowerComptimeBodyStatements(self, comptime_expr.body, &scoped_locals);
+            try @This().writeBackExistingLocalState(locals, &scoped_locals);
+            return terminated;
+        }
+
+        fn lowerComptimeBodyStatements(self: *FunctionLowerer, body_id: ast.BodyId, locals: *LocalEnv) anyerror!bool {
+            const body = self.parent.file.body(body_id).*;
+            for (body.statements) |statement_id| {
+                if (try @This().lowerComptimeStatement(self, statement_id, locals)) return true;
+            }
+            return false;
+        }
+
+        fn lowerComptimeStatement(self: *FunctionLowerer, statement_id: ast.StmtId, locals: *LocalEnv) anyerror!bool {
+            return switch (self.parent.file.statement(statement_id).*) {
+                .Block => |block_stmt| blk: {
+                    var child_locals = try self.cloneLocals(locals);
+                    const terminated = try @This().lowerComptimeBodyStatements(self, block_stmt.body, &child_locals);
+                    try @This().writeBackExistingLocalState(locals, &child_locals);
+                    break :blk terminated;
+                },
+                .If => |if_stmt| blk: {
+                    const condition = @This().knownComptimeCondition(self, if_stmt.condition, locals) orelse {
+                        try self.parent.emitLoweringError(
+                            if_stmt.range,
+                            "comptime if condition is not statically known during HIR lowering",
+                            .{},
+                        );
+                        break :blk false;
+                    };
+                    if (condition) break :blk try @This().lowerComptimeBodyStatements(self, if_stmt.then_body, locals);
+                    if (if_stmt.else_body) |else_body| break :blk try @This().lowerComptimeBodyStatements(self, else_body, locals);
+                    break :blk false;
+                },
+                .While => |while_stmt| try @This().lowerComptimeWhileStatement(self, while_stmt, locals),
+                .For => |for_stmt| blk: {
+                    if (try @This().lowerUnrolledFiniteForStmt(self, for_stmt, locals)) |terminated| break :blk terminated;
+                    try self.parent.emitLoweringError(
+                        for_stmt.range,
+                        "comptime for loop bounds are not statically known during HIR lowering",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                .VariableDecl => |decl| try @This().lowerKnownComptimeVariableDecl(self, decl, locals),
+                .Assign => |assign| blk: {
+                    if (try @This().lowerKnownComptimeAssignment(self, assign, locals)) break :blk false;
+                    try self.parent.emitLoweringError(
+                        assign.range,
+                        "comptime assignment value is not statically known during HIR lowering",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                .Expr => |expr_stmt| blk: {
+                    switch (self.parent.file.expression(expr_stmt.expr).*) {
+                        .TypeValue => break :blk false,
+                        .Comptime => |comptime_expr| break :blk try @This().lowerComptimeStatementExpr(self, comptime_expr, locals),
+                        else => {},
+                    }
+                    if (@This().evalKnownExprValue(self, expr_stmt.expr, locals) != null) break :blk false;
+                    try self.parent.emitLoweringError(
+                        expr_stmt.range,
+                        "statement-position comptime expression is not statically known during HIR lowering",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                .Break => |jump| blk: {
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label) != null) {
+                        break :blk try self.lowerStmt(statement_id, locals);
+                    }
+                    try self.parent.emitLoweringError(
+                        jump.range,
+                        "break inside statement-position comptime block does not target a comptime loop",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                .Continue => |jump| blk: {
+                    if (@This().findTargetUnrolledLoopContext(self, jump.label) != null) {
+                        break :blk try self.lowerStmt(statement_id, locals);
+                    }
+                    try self.parent.emitLoweringError(
+                        jump.range,
+                        "continue inside statement-position comptime block does not target a comptime loop",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                .Return => |ret| blk: {
+                    try self.parent.emitLoweringError(
+                        ret.range,
+                        "return inside statement-position comptime block is not supported during HIR lowering",
+                        .{},
+                    );
+                    break :blk false;
+                },
+                else => |stmt| blk: {
+                    try self.parent.emitLoweringError(
+                        @This().statementRange(stmt),
+                        "statement kind is not supported inside statement-position comptime block during HIR lowering",
+                        .{},
+                    );
+                    break :blk false;
+                },
+            };
+        }
+
+        fn lowerKnownComptimeVariableDecl(self: *FunctionLowerer, decl: ast.VariableDeclStmt, locals: *LocalEnv) anyerror!bool {
+            const expr_id = decl.value orelse {
+                try self.parent.emitLoweringError(
+                    decl.range,
+                    "comptime local declaration requires a statically known initializer during HIR lowering",
+                    .{},
+                );
+                return false;
+            };
+            const known_value = @This().evalKnownExprValue(self, expr_id, locals) orelse {
+                try self.parent.emitLoweringError(
+                    decl.range,
+                    "comptime local declaration initializer is not statically known during HIR lowering",
+                    .{},
+                );
+                return false;
+            };
+            const target_type = if (decl.type_expr) |type_expr|
+                self.parent.lowerTypeExpr(type_expr)
+            else switch (known_value) {
+                .integer => defaultIntegerType(self.parent.context),
+                .boolean => boolType(self.parent.context),
+            };
+            const loc = self.parent.location(decl.range);
+            const value = switch (known_value) {
+                .integer => |integer| appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, target_type, integer)),
+                .boolean => |boolean| appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, target_type, if (boolean) 1 else 0)),
+            };
+            try locals.bindPattern(self.parent.file, decl.pattern, value);
+            switch (known_value) {
+                .integer => |integer| {
+                    try locals.setPatternKnownInt(self.parent.file, decl.pattern, integer);
+                    try locals.setPatternKnownBool(self.parent.file, decl.pattern, null);
+                },
+                .boolean => |boolean| {
+                    try locals.setPatternKnownBool(self.parent.file, decl.pattern, boolean);
+                    try locals.setPatternKnownInt(self.parent.file, decl.pattern, null);
+                },
+            }
+            return false;
+        }
+
+        fn lowerComptimeWhileStatement(self: *FunctionLowerer, while_stmt: ast.WhileStmt, locals: *LocalEnv) anyerror!bool {
+            var unrolled_loop_context = UnrolledLoopContext{
+                .parent = self.unrolled_loop_context,
+                .label = while_stmt.label,
+            };
+            const prev_unrolled_loop_context = self.unrolled_loop_context;
+            self.unrolled_loop_context = &unrolled_loop_context;
+            defer self.unrolled_loop_context = prev_unrolled_loop_context;
+
+            var iterations: u64 = 0;
+            while (true) {
+                const condition = @This().knownComptimeCondition(self, while_stmt.condition, locals) orelse {
+                    try self.parent.emitLoweringError(
+                        while_stmt.range,
+                        "comptime while condition is not statically known during HIR lowering",
+                        .{},
+                    );
+                    return false;
+                };
+                if (!condition) return false;
+                if (iterations >= runtime_total_unroll_budget) {
+                    try self.parent.emitLoweringError(
+                        while_stmt.range,
+                        "comptime while loop exceeds HIR unroll budget",
+                        .{},
+                    );
+                    return false;
+                }
+                iterations += 1;
+
+                const body_terminated = try @This().lowerComptimeBodyStatements(self, while_stmt.body, locals);
+                switch (unrolled_loop_context.signal) {
+                    .none => if (body_terminated) return true,
+                    .break_loop => {
+                        unrolled_loop_context.signal = .none;
+                        return false;
+                    },
+                    .continue_loop => {
+                        unrolled_loop_context.signal = .none;
+                        continue;
+                    },
+                }
+            }
+        }
+
+        fn lowerKnownComptimeAssignment(self: *FunctionLowerer, assign: ast.AssignStmt, locals: *LocalEnv) anyerror!bool {
+            const local_id = locals.resolvePatternTarget(self.parent.file, assign.target) orelse return false;
+            const current_value = locals.getValue(local_id) orelse return false;
+            const known_value = @This().knownComptimeAssignmentValue(self, assign, local_id, locals) orelse return false;
+            const target_type = mlir.oraValueGetType(current_value);
+            const loc = self.parent.location(assign.range);
+            const value = switch (known_value) {
+                .integer => |integer| appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, target_type, integer)),
+                .boolean => |boolean| appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, target_type, if (boolean) 1 else 0)),
+            };
+            try locals.setValue(local_id, value);
+            switch (known_value) {
+                .integer => |integer| try locals.setKnownInt(local_id, integer),
+                .boolean => |boolean| try locals.setKnownBool(local_id, boolean),
+            }
+            return true;
+        }
+
+        fn knownComptimeAssignmentValue(self: *FunctionLowerer, assign: ast.AssignStmt, local_id: LocalId, locals: *const LocalEnv) ?KnownExprValue {
+            return switch (assign.op) {
+                .assign => @This().evalKnownExprValue(self, assign.value, locals),
+                .add_assign => blk: {
+                    const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                    const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                    break :blk .{ .integer = std.math.add(i64, lhs, rhs) catch return null };
+                },
+                .sub_assign => blk: {
+                    const lhs = locals.getKnownInt(local_id) orelse break :blk null;
+                    const rhs = @This().evalKnownIntExpr(self, assign.value, locals) orelse break :blk null;
+                    break :blk .{ .integer = std.math.sub(i64, lhs, rhs) catch return null };
+                },
+                else => null,
+            };
+        }
+
+        fn knownComptimeCondition(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?bool {
+            if (@This().evalKnownBoolExpr(self, expr_id, locals)) |known| return known;
+            const value = self.parent.const_eval.values[expr_id.index()] orelse return null;
+            return switch (value) {
+                .boolean => |boolean| boolean,
+                .integer => |integer| blk: {
+                    const as_i64 = integer.toInt(i64) catch return null;
+                    break :blk as_i64 != 0;
+                },
+                else => null,
+            };
+        }
+
+        fn writeBackExistingLocalState(parent: *LocalEnv, child: *const LocalEnv) anyerror!void {
+            var it = parent.visible_names.iterator();
+            while (it.next()) |entry| {
+                const local_id = entry.value_ptr.*;
+                if (child.values.get(local_id)) |value| {
+                    try parent.values.put(local_id, value);
+                }
+                if (child.known_ints.get(local_id)) |known_int| {
+                    try parent.setKnownInt(local_id, known_int);
+                } else if (child.known_bools.get(local_id)) |known_bool| {
+                    try parent.setKnownBool(local_id, known_bool);
+                } else {
+                    try parent.setKnownInt(local_id, null);
+                    try parent.setKnownBool(local_id, null);
+                }
+            }
+        }
+
+        fn statementRange(stmt: ast.Stmt) source.TextRange {
+            return switch (stmt) {
+                .VariableDecl => |node| node.range,
+                .Return => |node| node.range,
+                .If => |node| node.range,
+                .While => |node| node.range,
+                .For => |node| node.range,
+                .Switch => |node| node.range,
+                .Try => |node| node.range,
+                .Log => |node| node.range,
+                .Lock => |node| node.range,
+                .Unlock => |node| node.range,
+                .Assert => |node| node.range,
+                .Assume => |node| node.range,
+                .Havoc => |node| node.range,
+                .Break => |node| node.range,
+                .Continue => |node| node.range,
+                .Assign => |node| node.range,
+                .Expr => |node| node.range,
+                .Block => |node| node.range,
+                .LabeledBlock => |node| node.range,
+                .Error => |node| node.range,
+            };
         }
 
         fn findTargetSwitchContext(self: *FunctionLowerer, label: ?[]const u8) ?*const SwitchContext {

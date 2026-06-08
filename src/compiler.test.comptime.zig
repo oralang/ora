@@ -241,8 +241,11 @@ test "compiler supports comptime while statements" {
     const source_text =
         \\pub fn run() -> u256 {
         \\    var total: u256 = 0;
-        \\    comptime while (total < 5) {
-        \\        total = total + 1;
+        \\    comptime {
+        \\        let step = 1;
+        \\        while (total < 5) {
+        \\            total = total + step;
+        \\        }
         \\    }
         \\    return total;
         \\}
@@ -260,6 +263,25 @@ test "compiler supports comptime while statements" {
 
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 5 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c5_i256 : i256"));
+}
+
+test "compiler rejects runtime values inside statement-position comptime blocks" {
+    const source_text =
+        \\pub fn run(input: u256) -> u256 {
+        \\    var total: u256 = 0;
+        \\    comptime {
+        \\        total = input;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime assignment value is not statically known during HIR lowering"));
 }
 
 test "compiler folds comptime shifts before MLIR verification" {

@@ -418,11 +418,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const sema_tuple_type = self.parent.typecheck.exprType(expr_id);
                     var operands: std.ArrayList(mlir.MlirValue) = .{};
                     for (tuple.elements, 0..) |element, index| {
-                        const raw_value = try self.lowerExpr(element, locals);
                         const value = if (sema_tuple_type.kind() == .tuple and index < sema_tuple_type.tuple.len)
-                            try self.convertValueForFlow(raw_value, self.parent.lowerSemaType(sema_tuple_type.tuple[index], tuple.range), exprRange(self.parent.file, element))
+                            try @This().lowerExprForSemaFlowTarget(self, element, sema_tuple_type.tuple[index], exprRange(self.parent.file, element), locals)
                         else
-                            raw_value;
+                            try self.lowerExpr(element, locals);
                         try operands.append(self.parent.allocator, value);
                     }
                     const result_type = self.parent.lowerSemaType(sema_tuple_type, tuple.range);
@@ -571,6 +570,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => try self.lowerExpr(expr_id, locals),
             };
+        }
+
+        fn lowerExprForSemaFlowTarget(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerSemaType(target_sema_type, range);
+            const target_ref_base = mlir.oraRefinementTypeGetBaseType(target_type);
+            const flow_target = if (!mlir.oraTypeIsNull(target_ref_base)) target_ref_base else target_type;
+            const raw_value = try @This().lowerExprForFlowTarget(self, expr_id, flow_target, locals);
+            return try self.convertValueForSemaFlow(raw_value, target_sema_type, range);
         }
 
         fn lowerContextualAddressIntegerLiteral(self: *FunctionLowerer, literal: ast.IntegerLiteralExpr) !mlir.MlirValue {
@@ -1827,7 +1840,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const calldata = appendValueOp(self.block, encode_op);
 
             const target = try self.lowerExpr(proxy.address_expr, locals);
-            const gas = try self.lowerExpr(proxy.gas_expr, locals);
+            const gas = try self.lowerExprForFlowTarget(proxy.gas_expr, defaultIntegerType(self.parent.context), locals);
 
             const external_call_op = mlir.oraExternalCallOpCreate(
                 self.parent.context,
@@ -3537,7 +3550,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
                 );
                 for (struct_literal.fields) |init| {
-                    const field_value = try self.lowerExpr(init.value, locals);
+                    const field_value = try @This().lowerExprForFlowTarget(self, init.value, word_type, locals);
                     packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
                 }
                 return packed_word;
@@ -3568,8 +3581,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return error.MlirOperationCreationFailed;
                 };
                 const field_sema_type = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, decl_field.type_expr);
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, field_sema_type, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, field_sema_type, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
 
@@ -3621,11 +3633,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const field_name_ref = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
                 const field_name = field_name_ref.data[0..field_name_ref.length];
                 const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field_name) orelse return error.MlirOperationCreationFailed;
-                const raw = try self.lowerExpr(init.value, locals);
                 const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .anonymous_struct and index < payload_sema_type.?.anonymous_struct.fields.len)
-                    try self.convertValueForSemaFlow(raw, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range)
-                else
-                    try self.convertValueForFlow(raw, mlir.oraAnonymousStructTypeGetFieldType(payload_type, index), init.range);
+                    try @This().lowerExprForSemaFlowTarget(self, init.value, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range, locals)
+                else blk: {
+                    const field_type = mlir.oraAnonymousStructTypeGetFieldType(payload_type, index);
+                    break :blk try @This().lowerExprForFlowTarget(self, init.value, field_type, locals);
+                };
                 try fields.append(self.parent.allocator, value);
             }
 
@@ -3674,8 +3687,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, decl_field.ty, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInstantiateOpCreate(
@@ -3705,8 +3717,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, decl_field.ty, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInitOpCreate(

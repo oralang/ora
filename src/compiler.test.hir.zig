@@ -854,6 +854,33 @@ test "compiler lowers tuple expressions through real tuple ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.index_access\""));
 }
 
+test "compiler lowers contextual aggregate integer literals without type fallback" {
+    const source_text =
+        \\struct Point {
+        \\    x: u256,
+        \\    y: u16,
+        \\}
+        \\
+        \\bitfield Flags: u256 {
+        \\    enabled: u1,
+        \\    decimals: u8,
+        \\}
+        \\
+        \\pub fn probe() -> u256 {
+        \\    let point: Point = Point { x: 10, y: 20 };
+        \\    let pair: (u256, u8) = (1, 2);
+        \\    let flags = Flags { enabled: 1, decimals: 18 };
+        \\    return point.x + pair[0];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
 test "compiler lowers function-valued bindings without function fallback" {
     const source_text =
         \\fn helper(value: u256) -> u256 {

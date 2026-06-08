@@ -192,7 +192,8 @@ pub const LoweringResult = struct {
     }
 
     pub fn isEmittable(self: *const LoweringResult) bool {
-        return self.placeholder_count == 0 and
+        return self.type_fallback_count == 0 and
+            self.placeholder_count == 0 and
             self.default_value_count == 0;
     }
 

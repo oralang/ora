@@ -724,12 +724,13 @@ test "compiler tracks HIR unknown type fallbacks" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(!hir_result.isEmittable());
     try testing.expect(hir_result.executableFallbackCount() >= hir_result.type_fallback_count);
     try testing.expectEqual(compiler.hir.TypeFallbackReason.sema_unknown, hir_result.type_fallbacks[0].reason);
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
 }
 
-test "HIR emittability arms placeholder and default counters while measuring type fallbacks" {
+test "HIR emittability arms all executable fallback counters" {
     var hir_result: compiler.hir.LoweringResult = undefined;
     hir_result.type_fallback_count = 0;
     hir_result.placeholder_count = 0;
@@ -749,7 +750,7 @@ test "HIR emittability arms placeholder and default counters while measuring typ
 
     hir_result.default_value_count = 0;
     hir_result.type_fallback_count = 1;
-    try testing.expect(hir_result.isEmittable());
+    try testing.expect(!hir_result.isEmittable());
     try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
 }
 
