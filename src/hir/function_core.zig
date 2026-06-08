@@ -631,6 +631,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn lowerReturnExprValue(self: *FunctionLowerer, expr_id: ast.ExprId, is_error_return: bool, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (!is_error_return) {
+                if (self.return_type) |return_type| {
+                    const success_type = mlir.oraErrorUnionTypeGetSuccessType(return_type);
+                    const target_type = if (mlir.oraTypeIsNull(success_type)) return_type else success_type;
+                    return try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                }
+            }
+            return try self.lowerExpr(expr_id, locals);
+        }
+
         fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
             const loc = self.parent.location(range);
             const seed = appendValueOp(
@@ -1110,8 +1121,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (self.deferred_return_flag) |return_flag| {
                         if (self.deferred_return_kind == .none) {
                             if (ret.value) |expr_id| {
-                                const raw_value = try self.lowerExpr(expr_id, locals);
                                 const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                                const raw_value = try @This().lowerReturnExprValue(self, expr_id, is_error_return, locals);
                                 const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
                                 const value = if (is_error_return)
                                     try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
@@ -1145,8 +1156,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             return true;
                         }
                         if (ret.value) |expr_id| {
-                            const raw_value = try self.lowerExpr(expr_id, locals);
                             const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                            const raw_value = try @This().lowerReturnExprValue(self, expr_id, is_error_return, locals);
                             const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
                             const value = if (is_error_return)
                                 try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
@@ -1173,8 +1184,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
 
                     if (ret.value) |expr_id| {
-                        const raw_value = try self.lowerExpr(expr_id, locals);
                         const is_error_return = @This().returnExprIsErrorShaped(self, expr_id);
+                        const raw_value = try @This().lowerReturnExprValue(self, expr_id, is_error_return, locals);
                         const ok_result = if (is_error_return) null else try @This().successResultValueForPostcondition(self, raw_value, ret.range);
                         const value = if (is_error_return)
                             try @This().wrapErrorValueForReturn(self, raw_value, ret.range)
@@ -1520,7 +1531,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (@This().findContinuableSwitchContext(self, jump.label)) |switch_context| {
                             const loc = self.parent.location(jump.range);
                             if (jump.value) |expr_id| {
-                                const raw_value = try self.lowerExpr(expr_id, locals);
+                                const raw_value = if (switch_context.value_type) |target_type|
+                                    try self.lowerExprForFlowTarget(expr_id, target_type, locals)
+                                else
+                                    try self.lowerExpr(expr_id, locals);
                                 const target_type = switch_context.value_type orelse mlir.oraValueGetType(raw_value);
                                 const value = try @This().convertValueForFlow(self, raw_value, target_type, jump.range);
                                 const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
@@ -1570,7 +1584,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (@This().findContinuableSwitchContext(self, jump.label)) |switch_context| {
                         const loc = self.parent.location(jump.range);
                         if (jump.value) |expr_id| {
-                            const raw_value = try self.lowerExpr(expr_id, locals);
+                            const raw_value = if (switch_context.value_type) |target_type|
+                                try self.lowerExprForFlowTarget(expr_id, target_type, locals)
+                            else
+                                try self.lowerExpr(expr_id, locals);
                             const target_type = switch_context.value_type orelse mlir.oraValueGetType(raw_value);
                             const value = try @This().convertValueForFlow(self, raw_value, target_type, jump.range);
                             const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
@@ -2216,7 +2233,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
-                        const key_value = try self.lowerExpr(index.index, locals);
+                        const key_value = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
@@ -2235,7 +2252,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     const map_value_type = mlir.oraMapTypeGetValueType(base_type);
                     if (map_value_type.ptr != null) {
-                        const key_value = try self.lowerExpr(index.index, locals);
+                        const map_key_type = mlir.oraMapTypeGetKeyType(base_type);
+                        const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                        else
+                            try self.lowerExpr(index.index, locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
@@ -2551,10 +2572,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Index => |index| blk: {
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
-                    const key_value = try self.lowerExpr(index.index, locals);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
+                        const key_value = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
-                        const result_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
+                        const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
                             self.parent.context,
                             self.parent.location(index.range),
@@ -2572,6 +2593,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk2 self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, index.range);
                     };
                     const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base_value));
+                    const key_value = if (!mlir.oraTypeIsNull(map_key_type))
+                        try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                    else
+                        try self.lowerExpr(index.index, locals);
                     const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
                         try @This().convertValueForFlow(self, key_value, map_key_type, index.range)
                     else

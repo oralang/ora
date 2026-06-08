@@ -7250,7 +7250,7 @@ const TypeChecker = struct {
 
     fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const target_name = base_type.name() orelse return null;
-        if (self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
+        if (try self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
@@ -7263,7 +7263,7 @@ const TypeChecker = struct {
         return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
-    fn currentImplMethodType(self: *const TypeChecker, target_name: []const u8, field_name: []const u8) ?Type {
+    fn currentImplMethodType(self: *const TypeChecker, target_name: []const u8, field_name: []const u8) !?Type {
         const function_item_id = self.current_function_item orelse return null;
         const impl_item = self.enclosingImplForMethod(function_item_id) orelse return null;
         if (!std.mem.eql(u8, impl_item.target_name, target_name)) return null;
@@ -7271,7 +7271,21 @@ const TypeChecker = struct {
         const impl_item_id = self.enclosingImplItemIdForMethod(function_item_id) orelse return null;
         if (self.item_index.countImplMethodsByReceiver(self.file, impl_item_id, field_name, .value_self) > 1) return null;
         const method_item_id = self.item_index.lookupImplMethodByReceiver(self.file, impl_item_id, field_name, .value_self) orelse return null;
-        return self.item_types[method_item_id.index()];
+        const method_function = switch (self.file.item(method_item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        const method_type = self.item_types[method_item_id.index()];
+        if (method_type.kind() != .function) return null;
+        const param_types = if (self.functionHasBareSelf(method_function) and method_type.function.param_types.len != 0)
+            method_type.function.param_types[1..]
+        else
+            method_type.function.param_types;
+        return .{ .function = .{
+            .name = method_type.function.name,
+            .param_types = param_types,
+            .return_types = method_type.function.return_types,
+        } };
     }
 
     fn traitInterfaceByName(self: *const TypeChecker, name: []const u8) ?TraitInterface {

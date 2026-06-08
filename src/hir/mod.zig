@@ -1452,6 +1452,7 @@ const FunctionLowerer = struct {
     pub const switchPatternValue = ControlFlow.switchPatternValue;
 
     pub const lowerExpr = ExprLowering.lowerExpr;
+    pub const lowerExprForFlowTarget = ExprLowering.lowerExprForFlowTarget;
     pub const lowerNameExpr = ExprLowering.lowerNameExpr;
     pub const lowerUnary = ExprLowering.lowerUnary;
     pub const lowerBinary = ExprLowering.lowerBinary;

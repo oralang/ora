@@ -2223,6 +2223,7 @@ fn rejectIfNotEmittable(
     debug_enabled: bool,
 ) !void {
     try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
+    try writeDetectOnlyTypeFallbacks(writer, sources, lowering, debug_enabled);
     if (lowering.isEmittable()) return;
 
     try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
@@ -2237,6 +2238,36 @@ fn rejectIfNotEmittable(
     }
     try writer.flush();
     std.process.exit(1);
+}
+
+fn writeDetectOnlyTypeFallbacks(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    const report_enabled = debug_enabled or blk: {
+        if (std.posix.getenv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
+            break :blk env_value[0] != 0 and env_value[0] != '0';
+        }
+        break :blk false;
+    };
+    if (!report_enabled or lowering.type_fallback_count == 0) return;
+
+    try writer.print("debug: HIR type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    for (lowering.type_fallbacks) |fallback| {
+        if (sources) |source_store| {
+            const file = source_store.file(fallback.location.file_id);
+            const line_column = source_store.lineColumn(fallback.location);
+            try writer.print(
+                "debug: HIR type fallback: {s} at {s}:{d}:{d}\n",
+                .{ @tagName(fallback.reason), file.path, line_column.line, line_column.column },
+            );
+        } else {
+            try writer.print("debug: HIR type fallback: {s}\n", .{@tagName(fallback.reason)});
+        }
+    }
+    try writer.flush();
 }
 
 fn exitOnCompilationErrors(

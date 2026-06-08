@@ -477,9 +477,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Index => |index| blk: {
                     const base = try self.lowerExpr(index.base, locals);
-                    const key = try self.lowerExpr(index.index, locals);
                     const base_type = self.parent.typecheck.exprType(index.base);
-                    if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base))) {
+                    const base_mlir_type = mlir.oraValueGetType(base);
+                    if (mlir.oraTypeIsAMemRef(base_mlir_type)) {
+                        const key = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key, index.range);
                         const result_type = self.parent.lowerExprType(expr_id);
                         const op = mlir.oraMemrefLoadOpCreate(
@@ -494,6 +495,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     switch (base_type.kind()) {
                         .bytes, .string => {
+                            const key = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
                             const raw_byte_type = defaultIntegerType(self.parent.context);
                             const op = mlir.oraByteAtOpCreate(
                                 self.parent.context,
@@ -511,6 +513,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (base_type == .tuple) {
                         const tuple_index = @This().constTupleIndex(self, index.index) orelse {
+                            const key = try self.lowerExpr(index.index, locals);
                             const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{ base, key }, self.parent.lowerExprType(expr_id));
                             break :blk appendValueOp(self.block, op);
                         };
@@ -526,7 +529,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (base_type == .map) {
                         const result_type = self.parent.lowerExprType(expr_id);
-                        const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base));
+                        const map_key_type = mlir.oraMapTypeGetKeyType(base_mlir_type);
+                        const key = if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                        else
+                            try self.lowerExpr(index.index, locals);
                         const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
                             try self.convertValueForFlow(key, map_key_type, index.range)
                         else
@@ -539,6 +546,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Quantified => |quantified| try @This().lowerQuantifiedExpr(self, quantified, loc, locals),
                 .Error => try @This().loweringValueError(self, expr.Error.range, self.parent.lowerExprType(expr_id), "cannot lower syntax error expression", .{}),
+            };
+        }
+
+        pub fn lowerExprForFlowTarget(self: *FunctionLowerer, expr_id: ast.ExprId, target_type: mlir.MlirType, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| try @This().lowerExprForFlowTarget(self, group.expr, target_type, locals),
+                .IntegerLiteral => |literal| blk: {
+                    if (mlir.oraTypeEqual(target_type, addressType(self.parent.context))) {
+                        break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
+                    }
+                    if (mlir.oraTypeIsAInteger(target_type)) {
+                        break :blk appendValueOp(
+                            self.block,
+                            createIntegerConstant(
+                                self.parent.context,
+                                self.parent.location(literal.range),
+                                target_type,
+                                parseIntLiteral(literal.text) orelse 0,
+                            ),
+                        );
+                    }
+                    break :blk try self.lowerExpr(expr_id, locals);
+                },
+                else => try self.lowerExpr(expr_id, locals),
             };
         }
 
@@ -865,7 +896,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             var lhs = try self.lowerExpr(binary.lhs, locals);
-            var rhs = try self.lowerExpr(binary.rhs, locals);
+            var rhs = switch (binary.op) {
+                .shl, .shr, .wrapping_shl, .wrapping_shr => blk: {
+                    const lhs_type = mlir.oraValueGetType(lhs);
+                    if (mlir.oraTypeIsAInteger(lhs_type)) {
+                        break :blk try self.lowerExprForFlowTarget(binary.rhs, lhs_type, locals);
+                    }
+                    break :blk try self.lowerExpr(binary.rhs, locals);
+                },
+                else => try self.lowerExpr(binary.rhs, locals),
+            };
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
 
@@ -1149,7 +1189,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (callee_expr == .Field) {
                     const path = try @This().fieldExprPath(self, call.callee);
                     defer self.parent.allocator.free(path);
-                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, self.parent.lowerExprType(expr_id), path)) |value| {
+                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, path)) |value| {
                         return value;
                     }
                 }
@@ -3681,10 +3721,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            const result_type = self.parent.lowerExprType(expr_id);
-            if (try @This().lowerBuiltinFieldExpr(self, expr_id, field, result_type)) |value| {
+            if (try @This().lowerBuiltinFieldExpr(self, expr_id, field)) |value| {
                 return value;
             }
+            const result_type = self.parent.lowerExprType(expr_id);
             if (try @This().lowerImportedFieldExpr(self, field, result_type)) |value| {
                 return value;
             }
@@ -4016,10 +4056,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             expr_id: ast.ExprId,
             field: ast.FieldExpr,
-            result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             const path = try @This().fieldExprPath(self, expr_id);
-            if (try @This().lowerBuiltinFieldCall(self, field, result_type, path)) |value| {
+            defer self.parent.allocator.free(path);
+            if (try @This().lowerBuiltinFieldCall(self, field, path)) |value| {
                 return value;
             }
             return null;
@@ -4028,7 +4068,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerBuiltinFieldCall(
             self: *FunctionLowerer,
             field: ast.FieldExpr,
-            result_type: mlir.MlirType,
             path: []const u8,
         ) anyerror!?mlir.MlirValue {
             const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender") or
@@ -4055,7 +4094,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 std.mem.eql(u8, opcode_name, "ora.evm.coinbase"))
                     addressType(self.parent.context)
                 else
-                    result_type;
+                    defaultIntegerType(self.parent.context);
 
             const op = mlir.oraEvmOpCreate(
                 self.parent.context,
