@@ -87,36 +87,6 @@ static Value buildDebugNamedMemoryPtr(
     return rewriter.create<sir::BitcastOp>(loc, ptrType, addr);
 }
 
-static FailureOr<Value> lowerAdtPayloadToCarrier(
-    PatternRewriter &rewriter,
-    Location loc,
-    Type payloadType,
-    Value payloadValue)
-{
-    if (!ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
-        return coerceToU256(rewriter, loc, payloadValue);
-
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
-        return coerceToU256(rewriter, loc, *ptr);
-
-    if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
-        return coerceToU256(rewriter, loc, payloadValue);
-
-    if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        if (cast.getNumOperands() == 1 && llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
-            return coerceToU256(rewriter, loc, cast.getOperand(0));
-
-    return failure();
-}
-
-static Value makeU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
-}
-
 // ---------------------------------------------------------------------------
 // ora.refinement_guard → sir.cond_br (true → continue, false → revert)
 // ---------------------------------------------------------------------------
@@ -430,19 +400,16 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     if (failed(variantIndex))
         return rewriter.notifyMatchFailure(op, "unknown ADT variant");
 
-    auto loc = op.getLoc();
-    Value tag = makeU256Const(rewriter, loc, *variantIndex);
-    Value payload = makeU256Const(rewriter, loc, 0);
-    if (!adaptor.getPayloadValues().empty())
-    {
-        if (adaptor.getPayloadValues().size() != 1)
-            return rewriter.notifyMatchFailure(op, "ADT construct expects zero or one payload operand");
-        auto carrier = lowerAdtPayloadToCarrier(rewriter, loc, adtType.getPayloadTypes()[*variantIndex], adaptor.getPayloadValues().front());
-        if (failed(carrier))
-            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle carrier");
-        payload = *carrier;
-    }
-    rewriter.replaceOp(op, ValueRange{tag, payload});
+    ora::adt_helpers::AdtConstructCarrierOptions options;
+    options.acceptExistingAggregateCarrier = true;
+    options.acceptSingleOperandCarrierCast = true;
+
+    auto parts = ora::adt_helpers::materializeAdtConstructParts(
+        rewriter, op.getLoc(), adtType, op.getVariantName(), adaptor.getPayloadValues(), options);
+    if (failed(parts))
+        return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle carrier");
+
+    rewriter.replaceOp(op, ValueRange{parts->first, parts->second});
     return success();
 }
 

@@ -64,6 +64,38 @@ namespace mlir
             // Linear scan; the variant table is small in practice.
             ::mlir::FailureOr<unsigned> getAdtVariantIndex(::mlir::ora::AdtType type, ::mlir::StringRef variantName);
 
+            struct AdtConstructCarrierOptions
+            {
+                bool requireExistingScalarCarrier = false;
+                bool acceptExistingAggregateCarrier = false;
+                bool acceptSingleOperandCarrierCast = false;
+            };
+
+            // Build the normalized wide ADT carrier `(tag, payload)` for an
+            // `ora.adt.construct`. Aggregate payloads are represented as a
+            // compiler-managed handle in the payload word.
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            materializeAdtConstructParts(::mlir::PatternRewriter &rewriter,
+                                         ::mlir::Location loc,
+                                         ::mlir::ora::AdtType adtType,
+                                         ::mlir::StringRef variantName,
+                                         ::mlir::ValueRange payloadValues,
+                                         AdtConstructCarrierOptions options = {});
+
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            materializeAdtConstructParts(::mlir::PatternRewriter &rewriter,
+                                         ::mlir::Location loc,
+                                         ::mlir::ora::AdtConstructOp constructOp,
+                                         AdtConstructCarrierOptions options = {});
+
+            // Prefer direct construct materialization, then fall back to an
+            // existing normalized_adt materialization cast.
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            getAdtPartsFromConstructOrNormalized(::mlir::PatternRewriter &rewriter,
+                                                 ::mlir::Location loc,
+                                                 ::mlir::Value value,
+                                                 AdtConstructCarrierOptions options = {});
+
             // Wide ADT carrier pulled out of the (already-adapted) operand pair.
             ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
             getNormalizedAdtPartsFromOperands(::mlir::PatternRewriter &rewriter,

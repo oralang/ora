@@ -121,6 +121,113 @@ namespace mlir
                 return failure();
             }
 
+            static Value makeU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
+            {
+                auto u256Type = sir::U256Type::get(rewriter.getContext());
+                auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned);
+                return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
+            }
+
+            static FailureOr<Value> materializeAdtPayloadCarrier(
+                PatternRewriter &rewriter,
+                Location loc,
+                Type payloadType,
+                Value payloadValue,
+                AdtConstructCarrierOptions options)
+            {
+                if (!usesAggregateAdtPayloadHandle(payloadType))
+                {
+                    if (options.requireExistingScalarCarrier)
+                    {
+                        Value existing = lowering::existingU256Value(payloadValue);
+                        if (!existing)
+                            return failure();
+                        return existing;
+                    }
+                    return coerceToU256(rewriter, loc, payloadValue);
+                }
+
+                auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+                if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
+                    return coerceToU256(rewriter, loc, *ptr);
+
+                if (options.acceptExistingAggregateCarrier &&
+                    llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
+                {
+                    return coerceToU256(rewriter, loc, payloadValue);
+                }
+
+                if (options.acceptSingleOperandCarrierCast)
+                {
+                    if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                    {
+                        if (cast.getNumOperands() == 1 &&
+                            llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
+                        {
+                            return coerceToU256(rewriter, loc, cast.getOperand(0));
+                        }
+                    }
+                }
+
+                return failure();
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            materializeAdtConstructParts(PatternRewriter &rewriter,
+                                         Location loc,
+                                         ora::AdtType adtType,
+                                         StringRef variantName,
+                                         ValueRange payloadValues,
+                                         AdtConstructCarrierOptions options)
+            {
+                auto variantIndex = getAdtVariantIndex(adtType, variantName);
+                if (failed(variantIndex))
+                    return failure();
+
+                Value tag = makeU256Const(rewriter, loc, *variantIndex);
+                Value payload = makeU256Const(rewriter, loc, 0);
+
+                if (!payloadValues.empty())
+                {
+                    if (payloadValues.size() != 1)
+                        return failure();
+
+                    auto carrier = materializeAdtPayloadCarrier(
+                        rewriter, loc, adtType.getPayloadTypes()[*variantIndex],
+                        payloadValues.front(), options);
+                    if (failed(carrier))
+                        return failure();
+                    payload = *carrier;
+                }
+
+                return std::make_pair(tag, payload);
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            materializeAdtConstructParts(PatternRewriter &rewriter,
+                                         Location loc,
+                                         ora::AdtConstructOp constructOp,
+                                         AdtConstructCarrierOptions options)
+            {
+                auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
+                if (!adtType)
+                    return failure();
+                return materializeAdtConstructParts(
+                    rewriter, loc, adtType, constructOp.getVariantName(),
+                    constructOp.getPayloadValues(), options);
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            getAdtPartsFromConstructOrNormalized(PatternRewriter &rewriter,
+                                                 Location loc,
+                                                 Value value,
+                                                 AdtConstructCarrierOptions options)
+            {
+                if (auto constructOp = value.getDefiningOp<ora::AdtConstructOp>())
+                    return materializeAdtConstructParts(rewriter, loc, constructOp, options);
+                return getNormalizedAdtPartsFromValue(rewriter, loc, value);
+            }
+
             FailureOr<std::pair<Value, Value>>
             getNormalizedAdtPartsFromOperands(PatternRewriter &rewriter,
                                               Location loc,

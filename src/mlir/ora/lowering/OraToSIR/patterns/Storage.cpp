@@ -960,9 +960,6 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
                                               PatternRewriter &rewriter)
 {
     auto loc = op.getLoc();
-    auto ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     SmallVector<Value, 2> parts;
     if (operands.size() == 2)
@@ -976,63 +973,16 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
     }
     else
     {
-        if (auto constructOp = op.getValue().getDefiningOp<ora::AdtConstructOp>())
-        {
-            auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
-            if (!adtType)
-                return rewriter.notifyMatchFailure(op, "expected !ora.adt construct for storage store");
-            auto variantIndex = ora::adt_helpers::getAdtVariantIndex(adtType, constructOp.getVariantName());
-            if (failed(variantIndex))
-                return rewriter.notifyMatchFailure(op, "unknown ADT variant for storage store");
+        ora::adt_helpers::AdtConstructCarrierOptions options;
+        options.requireExistingScalarCarrier = true;
+        options.acceptExistingAggregateCarrier = true;
 
-            Value tag = rewriter.create<sir::ConstOp>(
-                loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(*variantIndex)));
-            Value payload = rewriter.create<sir::ConstOp>(
-                loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
-
-            if (!constructOp.getPayloadValues().empty())
-            {
-                if (constructOp.getPayloadValues().size() != 1)
-                    return rewriter.notifyMatchFailure(op, "ADT storage store expects zero or one payload value");
-                Type payloadType = adtType.getPayloadTypes()[*variantIndex];
-                Value payloadValue = constructOp.getPayloadValues().front();
-                if (ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
-                {
-                    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                    if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
-                    {
-                        payload = ensureU256(rewriter, loc, op.getOperation(), *ptr, "aggregate ADT storage payload");
-                        if (!payload)
-                            return failure();
-                    }
-                    else if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
-                    {
-                        payload = ensureU256(rewriter, loc, op.getOperation(), payloadValue, "aggregate ADT storage payload");
-                        if (!payload)
-                            return failure();
-                    }
-                    else
-                        return rewriter.notifyMatchFailure(op, "aggregate ADT storage payload requires compiler-runtime handle");
-                }
-                else
-                {
-                    payload = ensureU256(rewriter, loc, op.getOperation(), payloadValue, "ADT storage payload");
-                    if (!payload)
-                        return failure();
-                }
-            }
-
-            parts.push_back(tag);
-            parts.push_back(payload);
-        }
-        else
-        {
-            auto normalized = ora::adt_helpers::getNormalizedAdtPartsFromValue(rewriter, loc, op.getValue());
-            if (failed(normalized))
-                return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier for storage store");
-            parts.push_back(normalized->first);
-            parts.push_back(normalized->second);
-        }
+        auto normalized = ora::adt_helpers::getAdtPartsFromConstructOrNormalized(
+            rewriter, loc, op.getValue(), options);
+        if (failed(normalized))
+            return rewriter.notifyMatchFailure(op, "expected normalized ADT carrier for storage store");
+        parts.push_back(normalized->first);
+        parts.push_back(normalized->second);
     }
 
     ora::adt_helpers::storeAdtPartsToStorageRoot(rewriter, loc, baseSlot, parts[0], parts[1]);

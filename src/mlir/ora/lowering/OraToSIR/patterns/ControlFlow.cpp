@@ -699,54 +699,7 @@ static LogicalResult materializeSplitAdtValue(
     Value value,
     SmallVectorImpl<Value> &out)
 {
-    if (auto constructOp = value.getDefiningOp<ora::AdtConstructOp>())
-    {
-        auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
-        if (!adtType)
-            return failure();
-
-        auto variantIndex = ora::adt_helpers::getAdtVariantIndex(adtType, constructOp.getVariantName());
-        if (failed(variantIndex))
-            return failure();
-
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
-        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-        auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-        Value tag = rewriter.create<sir::ConstOp>(
-            loc,
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(*variantIndex)));
-        Value payload = rewriter.create<sir::ConstOp>(
-            loc,
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, 0));
-
-        auto payloadValues = constructOp.getPayloadValues();
-        if (!payloadValues.empty())
-        {
-            if (payloadValues.size() != 1)
-                return failure();
-            Type payloadType = adtType.getPayloadTypes()[*variantIndex];
-            Value payloadValue = payloadValues.front();
-            if (ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
-            {
-                auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue);
-                if (!ptr)
-                    return failure();
-                payload = coerceToU256(rewriter, loc, *ptr);
-            }
-            else
-            {
-                payload = coerceToU256(rewriter, loc, payloadValue);
-            }
-        }
-
-        out.push_back(tag);
-        out.push_back(payload);
-        return success();
-    }
-
-    auto parts = ora::adt_helpers::getNormalizedAdtPartsFromValue(rewriter, loc, value);
+    auto parts = ora::adt_helpers::getAdtPartsFromConstructOrNormalized(rewriter, loc, value);
     if (failed(parts))
         return failure();
     out.push_back(parts->first);
