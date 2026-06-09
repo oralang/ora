@@ -69,6 +69,43 @@ namespace mlir
                 return {tag, payload};
             }
 
+            Value adtStoragePayloadSlot(OpBuilder &builder,
+                                        Location loc,
+                                        Value baseSlot)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+                Value offset = builder.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtStoragePayloadSlotOffset));
+                return builder.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
+            }
+
+            std::pair<Value, Value> loadAdtPartsFromStorageRoot(OpBuilder &builder,
+                                                                Location loc,
+                                                                Value baseSlot)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+
+                Value payloadSlot = adtStoragePayloadSlot(builder, loc, baseSlot);
+                Value tag = builder.create<sir::SLoadOp>(loc, u256Type, baseSlot);
+                Value payload = builder.create<sir::SLoadOp>(loc, u256Type, payloadSlot);
+                return {tag, payload};
+            }
+
+            void storeAdtPartsToStorageRoot(OpBuilder &builder,
+                                            Location loc,
+                                            Value baseSlot,
+                                            Value tag,
+                                            Value payload)
+            {
+                Value payloadSlot = adtStoragePayloadSlot(builder, loc, baseSlot);
+                builder.create<sir::SStoreOp>(loc, baseSlot, tag);
+                builder.create<sir::SStoreOp>(loc, payloadSlot, payload);
+            }
+
             bool usesAggregateAdtPayloadHandle(Type type)
             {
                 return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,

@@ -22,6 +22,7 @@ namespace mlir
             // tag at offset 0, payload at offset 32, total 64 bytes.
             inline constexpr uint64_t kAdtCarrierSize = 64;
             inline constexpr uint64_t kAdtPayloadOffset = 32;
+            inline constexpr uint64_t kAdtStoragePayloadSlotOffset = 1;
 
             // Allocate a 64-byte handle, store `tag` at offset 0 and `payload`
             // at offset 32, and return the base pointer (sir.ptr<1>). Both
@@ -38,6 +39,23 @@ namespace mlir
             loadAdtPartsFromHandle(::mlir::OpBuilder &builder,
                                    ::mlir::Location loc,
                                    ::mlir::Value handle);
+
+            // Storage representation for wide ADT/error-union carriers:
+            // tag at `baseSlot`, payload at `baseSlot + 1`.
+            ::mlir::Value adtStoragePayloadSlot(::mlir::OpBuilder &builder,
+                                                ::mlir::Location loc,
+                                                ::mlir::Value baseSlot);
+
+            std::pair<::mlir::Value, ::mlir::Value>
+            loadAdtPartsFromStorageRoot(::mlir::OpBuilder &builder,
+                                        ::mlir::Location loc,
+                                        ::mlir::Value baseSlot);
+
+            void storeAdtPartsToStorageRoot(::mlir::OpBuilder &builder,
+                                            ::mlir::Location loc,
+                                            ::mlir::Value baseSlot,
+                                            ::mlir::Value tag,
+                                            ::mlir::Value payload);
 
             // Aggregate ADT payloads (tuples, structs, strings, bytes, memrefs)
             // ride the wide ADT carrier as a compiler-managed handle pointer.

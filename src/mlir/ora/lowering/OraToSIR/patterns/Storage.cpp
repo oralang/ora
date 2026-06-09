@@ -1035,11 +1035,7 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
         }
     }
 
-    Value one = rewriter.create<sir::ConstOp>(
-        loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
-    Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, one);
-    rewriter.create<sir::SStoreOp>(loc, baseSlot, parts[0]);
-    rewriter.create<sir::SStoreOp>(loc, payloadSlot, parts[1]);
+    ora::adt_helpers::storeAdtPartsToStorageRoot(rewriter, loc, baseSlot, parts[0], parts[1]);
     rewriter.eraseOp(op);
     return success();
 }
@@ -1056,20 +1052,12 @@ LogicalResult NormalizeAdtSLoadOp::matchAndRewrite(
     if (!slotIndexOpt)
         return rewriter.notifyMatchFailure(op, "missing ora.slot_index for ADT sload");
 
-    auto loc = op.getLoc();
-    auto ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-
     Value slot = findOrCreateSlotConstant(op.getOperation(), *slotIndexOpt, op.getGlobalName(), rewriter);
     if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
         setResultName(slotOp, 0, ("slot_" + op.getGlobalName()).str());
 
-    Value one = rewriter.create<sir::ConstOp>(
-        loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
-    Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, one);
-    Value tag = rewriter.create<sir::SLoadOp>(loc, u256Type, slot);
-    Value payload = rewriter.create<sir::SLoadOp>(loc, u256Type, payloadSlot);
+    auto loc = op.getLoc();
+    auto [tag, payload] = ora::adt_helpers::loadAdtPartsFromStorageRoot(rewriter, loc, slot);
     Value normalized = ora::createMaterializationCast(
         rewriter, loc, resultType, ValueRange{tag, payload}, ora::mat_kind::kNormalizedAdt);
     rewriter.replaceOp(op, normalized);
@@ -1200,12 +1188,7 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
     if (llvm::isa<ora::AdtType>(resultType))
     {
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        Value one = rewriter.create<sir::ConstOp>(
-            loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
-        Value payloadSlot = rewriter.create<sir::AddOp>(loc, u256, slotConst, one);
-        Value tag = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
-        Value payload = rewriter.create<sir::SLoadOp>(loc, u256, payloadSlot);
+        auto [tag, payload] = ora::adt_helpers::loadAdtPartsFromStorageRoot(rewriter, loc, slotConst);
         rewriter.replaceOp(op, ValueRange{tag, payload});
         return success();
     }
