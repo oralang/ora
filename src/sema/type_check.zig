@@ -11,6 +11,7 @@ const region_rules = @import("region.zig");
 const lookup_index = @import("lookup.zig");
 const unique_list = @import("unique_list.zig");
 const compiler_query = @import("../compiler_query.zig");
+const builtins = @import("../builtins.zig");
 const ora_types = @import("ora_types");
 const type_builtin = ora_types.builtin;
 const abi_policy = @import("../abi/policy.zig");
@@ -54,103 +55,10 @@ const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
 const refinements = ora_types.refinement_semantics;
 
-const BuiltinKind = enum {
-    abi_decode,
-    abi_decode_permissive,
-    abi_encode,
-    abi_signature,
-    add_with_overflow,
-    bit_cast,
-    cast,
-    chain_id,
-    compile_error,
-    concat,
-    div_ceil,
-    div_exact,
-    div_floor,
-    div_trunc,
-    div_with_overflow,
-    divmod,
-    event_topic,
-    keccak256,
-    lock,
-    mod_with_overflow,
-    mul_with_overflow,
-    neg_with_overflow,
-    power_with_overflow,
-    selector,
-    shl_with_overflow,
-    shr_with_overflow,
-    size_of,
-    slice,
-    struct_fields,
-    sub_with_overflow,
-    trait_methods,
-    truncate,
-    type_name,
-    unlock,
-};
-
-const BuiltinNameEntry = struct { []const u8, BuiltinKind };
-
-const builtin_name_entries = [_]BuiltinNameEntry{
-    .{ "abiDecode", .abi_decode },
-    .{ "abiDecodePermissive", .abi_decode_permissive },
-    .{ "abiEncode", .abi_encode },
-    .{ "abiSignature", .abi_signature },
-    .{ "addWithOverflow", .add_with_overflow },
-    .{ "bitCast", .bit_cast },
-    .{ "cast", .cast },
-    .{ "chainId", .chain_id },
-    .{ "compileError", .compile_error },
-    .{ "concat", .concat },
-    .{ "divCeil", .div_ceil },
-    .{ "divExact", .div_exact },
-    .{ "divFloor", .div_floor },
-    .{ "divTrunc", .div_trunc },
-    .{ "divWithOverflow", .div_with_overflow },
-    .{ "divmod", .divmod },
-    .{ "eventTopic", .event_topic },
-    .{ "keccak256", .keccak256 },
-    .{ "lock", .lock },
-    .{ "modWithOverflow", .mod_with_overflow },
-    .{ "mulWithOverflow", .mul_with_overflow },
-    .{ "negWithOverflow", .neg_with_overflow },
-    .{ "powerWithOverflow", .power_with_overflow },
-    .{ "selector", .selector },
-    .{ "shlWithOverflow", .shl_with_overflow },
-    .{ "shrWithOverflow", .shr_with_overflow },
-    .{ "sizeOf", .size_of },
-    .{ "slice", .slice },
-    .{ "structFields", .struct_fields },
-    .{ "subWithOverflow", .sub_with_overflow },
-    .{ "traitMethods", .trait_methods },
-    .{ "truncate", .truncate },
-    .{ "typeName", .type_name },
-    .{ "unlock", .unlock },
-};
-
-comptime {
-    @setEvalBranchQuota(3000);
-    if (builtin_name_entries.len != @typeInfo(BuiltinKind).@"enum".fields.len) {
-        @compileError("builtin function registry must cover every BuiltinKind");
-    }
-    for (builtin_name_entries, 0..) |entry, index| {
-        for (builtin_name_entries[index + 1 ..]) |other| {
-            if (std.mem.eql(u8, entry[0], other[0])) {
-                @compileError("duplicate builtin function name");
-            }
-            if (entry[1] == other[1]) {
-                @compileError("duplicate builtin function kind");
-            }
-        }
-    }
-}
-
-const builtin_name_map = std.StaticStringMap(BuiltinKind).initComptime(builtin_name_entries);
+const BuiltinKind = builtins.Kind;
 
 fn builtinKind(name: []const u8) ?BuiltinKind {
-    return builtin_name_map.get(name);
+    return builtins.kindForName(name);
 }
 
 fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {

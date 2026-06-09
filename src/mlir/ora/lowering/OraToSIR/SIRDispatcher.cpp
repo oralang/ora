@@ -1663,7 +1663,7 @@ namespace mlir
                         {
                             // Dynamic constructor decoding copies appended ABI args into
                             // heap memory before validating dynamic tails. Keep that buffer
-                            // above the SIR text legalizer's fixed low scratch area,
+                            // above the SIR text legalizer's fixed scratch area,
                             // otherwise branch operand spills can corrupt later tails.
                             Value initFreePtrSlot = builder.create<sir::BitcastOp>(initLoc, ptrType, lowering::constU256(builder, initLoc, 32));
                             Value initScratchFence = lowering::constU256(builder, initLoc, lowering::kConstructorDecodeScratchFenceBytes);

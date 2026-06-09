@@ -18,19 +18,21 @@
 // CHECK: 0x06FDDE03 => @name_
 
 // CHECK-LABEL:     name_ {
-// CHECK: icall @name
-// CHECK: const 0x20
-// CHECK: const 0x40
-// CHECK: mload256
-// CHECK: add {{.*}} v12
-// CHECK: div
-// CHECK: mul
-// CHECK: add {{.*}} v15
-// CHECK: mallocany
-// CHECK: mstore256 v17 v8
-// CHECK: add v17 v8
-// CHECK: mstore256 v18 v10
-// CHECK: add v6 v8
-// CHECK: add v17 v9
-// CHECK: mcopy v20 v19 v10
-// CHECK: return v17 v16
+// CHECK: v[[NAME_PTR:[0-9]+]] v[[NAME_RET_LEN:[0-9]+]] = icall @name
+// CHECK: v[[HEAD_OFFSET:[0-9]+]] = const 0x20
+// CHECK: v[[TAIL_OFFSET:[0-9]+]] = const 0x40
+// CHECK: v[[NAME_LEN:[0-9]+]] = mload256 v[[NAME_PTR]]
+// CHECK: v[[WORD_SIZE:[0-9]+]] = const 0x20
+// CHECK: v[[PAD_MASK:[0-9]+]] = const 0x1F
+// CHECK: v[[LEN_PLUS_PAD:[0-9]+]] = add v[[NAME_LEN]] v[[PAD_MASK]]
+// CHECK: v[[WORD_COUNT:[0-9]+]] = div v[[LEN_PLUS_PAD]] v[[WORD_SIZE]]
+// CHECK: v[[PADDED_LEN:[0-9]+]] = mul v[[WORD_COUNT]] v[[WORD_SIZE]]
+// CHECK: v[[TOTAL_LEN:[0-9]+]] = add v[[TAIL_OFFSET]] v[[PADDED_LEN]]
+// CHECK: v[[RET_BUF:[0-9]+]] = mallocany v[[TOTAL_LEN]]
+// CHECK: mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]
+// CHECK: v[[LEN_SLOT:[0-9]+]] = add v[[RET_BUF]] v[[HEAD_OFFSET]]
+// CHECK: mstore256 v[[LEN_SLOT]] v[[NAME_LEN]]
+// CHECK: v[[SRC:[0-9]+]] = add v[[NAME_PTR]] v[[HEAD_OFFSET]]
+// CHECK: v[[DST:[0-9]+]] = add v[[RET_BUF]] v[[TAIL_OFFSET]]
+// CHECK: mcopy v[[DST]] v[[SRC]] v[[NAME_LEN]]
+// CHECK: return v[[RET_BUF]] v[[TOTAL_LEN]]

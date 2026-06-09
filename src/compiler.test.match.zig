@@ -61,7 +61,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
         \\        else => {
         \\            return value;
         \\        }
-        \\    }
+        \\    };
         \\}
     ;
 
@@ -71,6 +71,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const tree = try compilation.db.syntaxTree(module.file_id);
     const root = compiler.syntax.rootNode(tree);
+
     const function = firstChildNodeOfKind(root, .FunctionItem);
     try testing.expect(function != null);
 
@@ -81,6 +82,36 @@ test "compiler syntax parses match statements as match syntax nodes" {
     try testing.expect(nthChildNodeOfKind(body.?, .SwitchStmt, 0) == null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 0) != null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 1) != null);
+}
+
+test "compiler syntax accepts trailing semicolon after match statements" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    var out: u256 = 0;
+        \\    match (value) {
+        \\        Ok(inner) => {
+        \\            out = inner;
+        \\        }
+        \\        Err(_) => {
+        \\            out = 1;
+        \\        }
+        \\    };
+        \\    return out;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diagnostics = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnostics.isEmpty());
+
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    try testing.expect(!containsNodeOfKind(root, .Error));
+    try testing.expect(nthDescendantNodeOfKind(root, .MatchStmt, 0) != null);
 }
 
 test "compiler lowers match expressions through existing switch expression path" {

@@ -12,22 +12,23 @@
 
 // CHECK-LABEL:     bb0 {
 // CHECK: a_length = calldataload selector_offset_0
-// CHECK: v4 = const 0x20
-// CHECK: v6 = eq a_length v4
-// CHECK: => v6 ? @bb1 : @abi_decode_revert_11
+// CHECK: v[[OFFSET_WORD:[0-9]+]] = const 0x20
+// CHECK: v[[SELECTOR_BYTES:[0-9]+]] = const 0x4
+// CHECK: v[[OFFSET_OK:[0-9]+]] = eq a_length v[[OFFSET_WORD]]
+// CHECK: => v[[OFFSET_OK]] ? @bb1 : @abi_decode_revert_11
 
 // CHECK-LABEL:     length_exec {
 // CHECK: icall @length
 // CHECK: return
 
 // CHECK-LABEL:     bb1 {
-// CHECK: v8 = add v5 a_length
+// CHECK: v[[TAIL_HEAD:[0-9]+]] = add v[[SELECTOR_BYTES]] a_length
 // CHECK: calldatasize
 // CHECK: lt
 // CHECK: => {{.*}} ? @bb2 : @abi_decode_revert_0
 
 // CHECK-LABEL:     bb2 {
-// CHECK: v13 = calldataload v8
+// CHECK: v[[DYN_LEN:[0-9]+]] = calldataload v[[TAIL_HEAD]]
 // CHECK: large_const 0xFFFFFFFFFFFFFFFF
 // CHECK: gt
 // CHECK: => {{.*}} ? @bb3 : @abi_decode_revert_13
@@ -40,7 +41,7 @@
 // CHECK-LABEL:     bb4 {
 // CHECK: div
 // CHECK: mul
-// CHECK: v30 = iszero v29
+// CHECK: v[[BOUNDS_OK:[0-9]+]] = iszero v{{[0-9]+}}
 
 // CHECK-LABEL:     bb5
 // CHECK: mallocany

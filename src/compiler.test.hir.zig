@@ -1186,6 +1186,32 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error.return\""));
 }
 
+test "compiler lowers space-form error return constructors" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return error Failure(7);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(ast_diags.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
 test "compiler lowers grouped struct literal bases" {
     const source_text =
         \\pub fn make() -> Pair {

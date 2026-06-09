@@ -1539,6 +1539,9 @@ const Parser = struct {
         } else {
             try self.reportUnterminated("unterminated switch body", children.items);
         }
+        if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
 
         return self.finishNode(node_kind, children.items);
     }
@@ -2031,6 +2034,9 @@ const Parser = struct {
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
         const kind = self.current().kind;
+        if (kind == .Error) {
+            return self.parseErrorReturnExprNode(terminators);
+        }
         if (tokenStartsPrimaryNameExpr(kind)) {
             if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less) {
                 return self.parseExternalProxyExprNode();
@@ -2057,6 +2063,42 @@ const Parser = struct {
             .Switch, .Match => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
+    }
+
+    fn parseErrorReturnExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.Dot)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected error name after 'error'");
+            return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
+                if (!self.at(.Comma)) break;
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after error arguments");
+            }
+        } else {
+            try self.reportHere("expected '(' after error name");
+        }
+
+        _ = terminators;
+        return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
     }
 
     fn parseAnonymousStructLiteralExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {

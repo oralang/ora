@@ -21,6 +21,7 @@ pub const abi_type_names = @import("abi/type_names.zig");
 pub const abi_comptime_decoder = @import("abi/comptime_decoder.zig");
 pub const abi_comptime_encoder = @import("abi/comptime_encoder.zig");
 pub const abi_comptime_decoder_test_support = @import("abi/comptime_decoder_test_support.zig");
+pub const builtins = @import("builtins.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler.zig");
 pub const compiler_query = @import("compiler_query.zig");

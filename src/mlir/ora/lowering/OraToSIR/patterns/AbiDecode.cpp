@@ -1229,6 +1229,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         if (convertedResultTypes.size() != 1 && convertedResultTypes.size() != 2)
             return rewriter.notifyMatchFailure(op, "unsupported memory/result ABI decode carrier shape");
 
+        auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
         Value required = staticDecodeRequiredLengthConst(rewriter, op.getLoc(), root);
         Value tooShort = rewriter.create<sir::LtOp>(op.getLoc(), u256Type, length, required);
 
@@ -1240,6 +1241,18 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         auto shortBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
         auto decodeBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
         AbiDecodeResultSink resultSink{rewriter, op, op.getLoc(), convertedResultTypes, mergeBlock};
+        auto materializeMemoryResultErrorPayload = [&](Value errorPayload) -> Value {
+            if (convertedResultTypes.size() == 2 && llvm::isa<sir::PtrType>(convertedResultTypes[1]) &&
+                !llvm::isa<sir::PtrType>(errorPayload.getType()))
+            {
+                Value ptr = rewriter.create<sir::MallocOp>(op.getLoc(), convertedResultTypes[1], constU256(rewriter, op.getLoc(), 32));
+                rewriter.create<sir::StoreOp>(op.getLoc(), ptr, ensureU256(rewriter, op.getLoc(), errorPayload));
+                return ptr;
+            }
+            if (convertedResultTypes.size() == 2 && errorPayload.getType() != convertedResultTypes[1])
+                return rewriter.create<sir::BitcastOp>(op.getLoc(), convertedResultTypes[1], errorPayload);
+            return errorPayload;
+        };
 
         rewriter.setInsertionPointToEnd(parentBlock);
         rewriter.create<sir::CondBrOp>(op.getLoc(), tooShort, ValueRange{}, ValueRange{}, shortBlock, decodeBlock);
@@ -1257,14 +1270,11 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         }
         else if (resultSink.isWide())
         {
-            Value tag = constU256(rewriter, op.getLoc(), 1);
-            Value payload = abiDecodeErrorValue(rewriter, op.getLoc(), AbiDecodeError::TruncatedBuffer);
-            if (failed(resultSink.branchWide(WideAbiDecodeResult{tag, payload})))
+            if (failed(resultSink.branchErrorKind(AbiDecodeError::TruncatedBuffer, materializeMemoryResultErrorPayload)))
                 return failure();
         }
 
         rewriter.setInsertionPointToStart(decodeBlock);
-        auto ptrType = sir::PtrType::get(op.getContext(), /*addrSpace*/ 1);
         Value payloadPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, bytesPtr, constU256(rewriter, op.getLoc(), 32));
 
         auto branchNarrow = [&](Value value) -> LogicalResult {
@@ -1303,6 +1313,37 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         auto emitWideResultBranch = [&](WideAbiDecodeResult value, Type payloadCarrierType, Value requiredBytes) -> LogicalResult {
             if (convertedResultTypes.size() != 2)
                 return rewriter.notifyMatchFailure(op, "wide ABI decode produced a non-wide carrier");
+            if (llvm::isa<sir::PtrType>(payloadCarrierType))
+            {
+                auto sourceInsertion = rewriter.saveInsertionPoint();
+                auto successBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                auto errorBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                rewriter.restoreInsertionPoint(sourceInsertion);
+                Value isOk = rewriter.create<sir::EqOp>(op.getLoc(), u256Type, value.tag, constU256(rewriter, op.getLoc(), 0));
+                rewriter.create<sir::CondBrOp>(op.getLoc(), isOk, ValueRange{}, ValueRange{}, successBlock, errorBlock);
+
+                rewriter.setInsertionPointToStart(errorBlock);
+                if (failed(resultSink.branchErrorPayload(ensureU256(rewriter, op.getLoc(), value.payload), materializeMemoryResultErrorPayload)))
+                    return failure();
+
+                rewriter.setInsertionPointToStart(successBlock);
+                if (permissive)
+                    return resultSink.branchWide(WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), value.payload});
+
+                auto successInsertion = rewriter.saveInsertionPoint();
+                auto oversizeBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                auto okBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                rewriter.restoreInsertionPoint(successInsertion);
+                Value tooLong = rewriter.create<sir::GtOp>(op.getLoc(), u256Type, length, requiredBytes);
+                rewriter.create<sir::CondBrOp>(op.getLoc(), tooLong, ValueRange{}, ValueRange{}, oversizeBlock, okBlock);
+
+                rewriter.setInsertionPointToStart(oversizeBlock);
+                if (failed(resultSink.branchErrorKind(AbiDecodeError::OversizeBuffer, materializeMemoryResultErrorPayload)))
+                    return failure();
+
+                rewriter.setInsertionPointToStart(okBlock);
+                return resultSink.branchWide(WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), value.payload});
+            }
             auto checked = permissive
                                ? value
                                : applyStaticOversizeCheckToWideResult(
@@ -1326,11 +1367,32 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                                                   Value requiredDynamic,
                                                   Type payloadCarrierType,
                                                   auto successPayloadBits) -> LogicalResult {
+            if (llvm::isa<sir::PtrType>(payloadCarrierType))
+            {
+                auto sourceInsertion = rewriter.saveInsertionPoint();
+                auto okBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                auto invalidBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
+                rewriter.restoreInsertionPoint(sourceInsertion);
+                rewriter.create<sir::CondBrOp>(op.getLoc(), valid, ValueRange{}, ValueRange{}, okBlock, invalidBlock);
+
+                rewriter.setInsertionPointToStart(invalidBlock);
+                if (failed(resultSink.branchErrorKind(invalidError, materializeMemoryResultErrorPayload)))
+                    return failure();
+
+                rewriter.setInsertionPointToStart(okBlock);
+                return emitWideResultBranch(
+                    WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), successPayloadBits()},
+                    payloadCarrierType,
+                    requiredDynamic);
+            }
+
+            auto sourceInsertion = rewriter.saveInsertionPoint();
             auto okBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
             auto invalidBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
             auto resultBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
             resultBlock->addArgument(u256Type, op.getLoc());
             resultBlock->addArgument(u256Type, op.getLoc());
+            rewriter.restoreInsertionPoint(sourceInsertion);
             rewriter.create<sir::CondBrOp>(op.getLoc(), valid, ValueRange{}, ValueRange{}, okBlock, invalidBlock);
 
             rewriter.setInsertionPointToStart(invalidBlock);
@@ -1354,7 +1416,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             rewriter.create<sir::StoreOp>(op.getLoc(), tuplePtr, firstWord);
             Value tailSlot = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tuplePtr, constU256(rewriter, op.getLoc(), 32));
             rewriter.create<sir::StoreOp>(op.getLoc(), tailSlot, ensureU256(rewriter, op.getLoc(), tailPtr));
-            return ensureU256(rewriter, op.getLoc(), tuplePtr);
+            return tuplePtr;
         };
 
         auto computeWordArrayRequiredBytes = [&]() {
@@ -1432,7 +1494,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
 
             rewriter.setInsertionPointToStart(invalidBlock);
             Value errorPayload = abiDecodeErrorValue(rewriter, op.getLoc(), AbiDecodeError::InvalidFixedBytes);
-            if (errorPayload.getType() != payloadCarrierType)
+            if (!llvm::isa<sir::PtrType>(payloadCarrierType) && errorPayload.getType() != payloadCarrierType)
                 errorPayload = rewriter.create<sir::BitcastOp>(op.getLoc(), payloadCarrierType, errorPayload);
             if (failed(emitWideResultBranch(
                     WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 1), errorPayload},
@@ -1442,7 +1504,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
 
             rewriter.setInsertionPointToStart(copy.done);
             Value payloadBits = successPayloadBits(copy.resultPtr);
-            if (payloadBits.getType() != payloadCarrierType)
+            if (!llvm::isa<sir::PtrType>(payloadCarrierType) && payloadBits.getType() != payloadCarrierType)
                 payloadBits = rewriter.create<sir::BitcastOp>(op.getLoc(), payloadCarrierType, payloadBits);
             if (failed(emitWideResultBranch(
                     WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), payloadBits},
@@ -1463,7 +1525,9 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             {
                 auto okBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
                 rewriter.setInsertionPointToStart(okBlock);
-                Value payloadBits = ensureU256(rewriter, op.getLoc(), successPayloadBits(tailPtr));
+                Value payloadBits = successPayloadBits(tailPtr);
+                if (!llvm::isa<sir::PtrType>(payloadCarrierType))
+                    payloadBits = ensureU256(rewriter, op.getLoc(), payloadBits);
                 if (failed(emitWideResultBranch(
                         WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), payloadBits},
                         payloadCarrierType,
@@ -1611,8 +1675,10 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                 auto emitAfterBounds = [&](Value tailPtr, Value, Value requiredDynamic) -> Block * {
                     auto okBlock = rewriter.createBlock(parentRegion, mergeBlock->getIterator());
                     rewriter.setInsertionPointToStart(okBlock);
-                    Value payload = ensureU256(rewriter, op.getLoc(), successPayloadBits(tailPtr));
-                    if (payload.getType() != payloadCarrierType)
+                    Value payload = successPayloadBits(tailPtr);
+                    if (!llvm::isa<sir::PtrType>(payloadCarrierType))
+                        payload = ensureU256(rewriter, op.getLoc(), payload);
+                    if (!llvm::isa<sir::PtrType>(payloadCarrierType) && payload.getType() != payloadCarrierType)
                         payload = rewriter.create<sir::BitcastOp>(op.getLoc(), payloadCarrierType, payload);
                     if (failed(emitWideResultBranch(WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), payload}, payloadCarrierType, requiredDynamic)))
                         return nullptr;
@@ -1687,7 +1753,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                     /*expectedOffset=*/32,
                     /*minBytes=*/64,
                     [&](Value validTailPtr) -> Value {
-                        return ensureU256(rewriter, op.getLoc(), validTailPtr);
+                        return validTailPtr;
                     }))
             {
                 if (failed(*dynamicResult))

@@ -856,19 +856,14 @@
 // CHECK-NEXT:     %78 = sir.iszero %77 : !sir.u256 : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     %79 = sir.iszero %78 : !sir.u256 : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     sir.cond_br %79 : !sir.u256, ^bb11, ^bb12 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
-// CHECK-NEXT:   ^bb11:  // pred: ^bb10
+// CHECK-NEXT:   ^bb11:  // 2 preds: ^bb10, ^bb12
 // CHECK-NEXT:     %80 = sir.load %base_0 : !sir.ptr<1> {sir.result_name_0 = "elem3"} : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     %81 = sir.const 32 : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     %82 = sir.malloc %81 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     sir.store %82 : !sir.ptr<1>, %80 : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:     sir.return %82 : !sir.ptr<1>, %81 : !sir.u256 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:   ^bb12:  // pred: ^bb10
-// CHECK-NEXT:     sir.br ^bb13 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
-// CHECK-NEXT:   ^bb13:  // pred: ^bb12
-// CHECK-NEXT:     %83 = sir.const 32 : !sir.u256 loc("ora.stmt.35"("ora.origin_stmt.35"("{{.*}}/ora-example/break_continue_test.ora":83:9)))
-// CHECK-NEXT:     %84 = sir.malloc %83 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.35"("ora.origin_stmt.35"("{{.*}}/ora-example/break_continue_test.ora":83:9)))
-// CHECK-NEXT:     sir.store %84 : !sir.ptr<1>, %c7 : !sir.u256 loc("ora.stmt.35"("ora.origin_stmt.35"("{{.*}}/ora-example/break_continue_test.ora":83:9)))
-// CHECK-NEXT:     sir.return %84 : !sir.ptr<1>, %83 : !sir.u256 loc("ora.stmt.35"("ora.origin_stmt.35"("{{.*}}/ora-example/break_continue_test.ora":83:9)))
+// CHECK-NEXT:     sir.br ^bb11 loc("ora.stmt.34"("ora.origin_stmt.34"("{{.*}}/ora-example/break_continue_test.ora":76:16)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":74:5)
 // CHECK-NEXT:   func.func @testLabeledSwitchContinueValue() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0x876c0c70", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
@@ -935,19 +930,14 @@
 // CHECK-NEXT:     %26 = sir.iszero %25 : !sir.u256 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     %27 = sir.iszero %26 : !sir.u256 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     sir.cond_br %27 : !sir.u256, ^bb9, ^bb10 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
-// CHECK-NEXT:   ^bb9:  // pred: ^bb8
+// CHECK-NEXT:   ^bb9:  // 2 preds: ^bb8, ^bb10
 // CHECK-NEXT:     %28 = sir.load %base_0 : !sir.ptr<1> {sir.result_name_0 = "elem3"} : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     %29 = sir.const 32 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     %30 = sir.malloc %29 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     sir.store %30 : !sir.ptr<1>, %28 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:     sir.return %30 : !sir.ptr<1>, %29 : !sir.u256 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:   ^bb10:  // pred: ^bb8
-// CHECK-NEXT:     sir.br ^bb11 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
-// CHECK-NEXT:   ^bb11:  // pred: ^bb10
-// CHECK-NEXT:     %31 = sir.const 32 : !sir.u256 loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/break_continue_test.ora":96:9)))
-// CHECK-NEXT:     %32 = sir.malloc %31 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/break_continue_test.ora":96:9)))
-// CHECK-NEXT:     sir.store %32 : !sir.ptr<1>, %c15 : !sir.u256 loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/break_continue_test.ora":96:9)))
-// CHECK-NEXT:     sir.return %32 : !sir.ptr<1>, %31 : !sir.u256 loc("ora.stmt.41"("ora.origin_stmt.41"("{{.*}}/ora-example/break_continue_test.ora":96:9)))
+// CHECK-NEXT:     sir.br ^bb9 loc("ora.stmt.40"("ora.origin_stmt.40"("{{.*}}/ora-example/break_continue_test.ora":89:16)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/break_continue_test.ora":87:5)
 // CHECK-NEXT:   func.func @testBreakInSwitch() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0x8a0c700c", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)

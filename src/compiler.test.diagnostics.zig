@@ -1269,8 +1269,8 @@ test "compiler reports integer constant overflow against declared widths" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
-    try testing.expectEqual(@as(usize, 4), type_diags.len());
-    try testing.expectEqual(@as(usize, 4), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
+    try testing.expectEqual(@as(usize, 5), type_diags.len());
+    try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
 }
 
 test "compiler reports integer constant overflow at call sites" {

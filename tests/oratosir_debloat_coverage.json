@@ -39,9 +39,9 @@
       ],
       "sir_goldens": [
         "tests/sir_text/dispatcher_dynamic_return.check#0x06FDDE03 => @name_",
-        "tests/sir_text/dispatcher_dynamic_return.check#mstore256 v17 v8",
-        "tests/sir_text/dispatcher_dynamic_return.check#mcopy v20 v19 v10",
-        "tests/sir_text/dispatcher_dynamic_return.check#return v17 v16"
+        "tests/sir_text/dispatcher_dynamic_return.check#mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]",
+        "tests/sir_text/dispatcher_dynamic_return.check#mcopy v[[DST]] v[[SRC]] v[[NAME_LEN]]",
+        "tests/sir_text/dispatcher_dynamic_return.check#return v[[RET_BUF]] v[[TOTAL_LEN]]"
       ]
     },
     {

@@ -627,9 +627,14 @@ static void buildWideErrorUnionReturnFromParts(
     Type ui64Type)
 {
     Value normTag = ensureU256(rewriter, loc, tag);
-    Value normPayload = ensureU256(rewriter, loc, payload);
     Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
     normTag = rewriter.create<sir::AndOp>(loc, u256Type, normTag, one);
+    Value normPayload = ensureU256(rewriter, loc, payload);
+    if (llvm::isa<sir::PtrType>(payload.getType()))
+    {
+        Value errorPayload = rewriter.create<sir::LoadOp>(loc, u256Type, payload);
+        normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayload, normPayload);
+    }
 
     auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
     Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);

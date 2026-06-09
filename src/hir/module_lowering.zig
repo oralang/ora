@@ -540,7 +540,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (self.errorUnionRequiresWideCarrier(param_type)) {
                     _ = mlir.oraFuncSetArgAttr(op, @intCast(index), strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
                 }
-                if (@This().publicResultInputErrorId(self, param_type)) |error_id| {
+                if (try @This().publicResultInputErrorId(self, param_type)) |error_id| {
                     _ = mlir.oraFuncSetArgAttr(
                         op,
                         @intCast(index),
@@ -822,7 +822,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 ) catch return error.OutOfMemory;
                 result_input_error_id_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().publicResultInputErrorId(self, param_type) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast((try @This().publicResultInputErrorId(self, param_type)) orelse 0)),
                 ) catch return error.OutOfMemory;
                 abi_param_enum_count_attrs.append(
                     self.allocator,
@@ -1524,7 +1524,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return ctx.publicResultInputMode(ty);
         }
 
-        fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) ?i64 {
+        fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) anyerror!?i64 {
             if (@This().publicResultInputMode(self, ty) != .narrow_payloadless) return null;
             const error_union = switch (ty) {
                 .error_union => |error_union| error_union,
@@ -1534,7 +1534,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const error_name = error_union.error_types[0].name() orelse return null;
             if (self.item_index.lookup(error_name)) |item_id| {
                 if (self.file.item(item_id).* != .ErrorDecl) return null;
-                return @This().errorDeclRuntimeIdForItem(self, item_id) catch null;
+                return try @This().errorDeclRuntimeIdForItem(self, item_id);
             }
 
             var signature_buf: [256]u8 = undefined;

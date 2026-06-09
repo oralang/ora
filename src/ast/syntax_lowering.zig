@@ -1348,6 +1348,7 @@ pub fn mixin(Builder: type) type {
                 .OldExpr => Lowering.lowerOldExprNode(self, node),
                 .ComptimeExpr => Lowering.lowerComptimeExprNode(self, node),
                 .BuiltinExpr => Lowering.lowerBuiltinExprNode(self, node),
+                .ErrorReturnExpr => Lowering.lowerErrorReturnExprNode(self, node),
                 .ErrorExpr => Support.pushExpr(self, .{ .Error = .{ .range = node.range() } }),
                 else => Lowering.unsupportedExpr(self, node),
             };
@@ -1428,6 +1429,21 @@ pub fn mixin(Builder: type) type {
                 .op = mapBinaryOp(op_token.kind()) orelse return Lowering.malformedExpr(self, node, "invalid binary operator"),
                 .lhs = try Lowering.lowerExpressionNode(self, lhs_node),
                 .rhs = try Lowering.lowerExpressionNode(self, rhs_node),
+            } });
+        }
+
+        fn lowerErrorReturnExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            const name_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedExpr(self, node, "missing error name");
+            var args: std.ArrayList(ExprId) = .{};
+            var ordinal: usize = 0;
+            while (nthDirectNode(node, ordinal)) |arg_node| : (ordinal += 1) {
+                try args.append(self.allocator, try Lowering.lowerExpressionNode(self, arg_node));
+            }
+
+            return Support.pushExpr(self, .{ .ErrorReturn = .{
+                .range = node.range(),
+                .name = tokenText(name_token),
+                .args = try args.toOwnedSlice(self.allocator),
             } });
         }
 
