@@ -4,6 +4,8 @@
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
 
 namespace mlir::ora::lowering
@@ -145,9 +147,8 @@ namespace mlir::ora::lowering
         return rewriter.create<sir::IsZeroOp>(loc, u256Type, gt);
     }
 
-    inline Value ensureU256(OpBuilder &rewriter, Location loc, Value value)
+    inline Value existingU256Value(Value value)
     {
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
         if (llvm::isa<sir::U256Type>(value.getType()))
             return value;
         if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
@@ -165,7 +166,25 @@ namespace mlir::ora::lowering
                     return input;
             }
         }
+        return Value();
+    }
+
+    inline Value ensureU256(OpBuilder &rewriter, Location loc, Value value)
+    {
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
+        if (Value existing = existingU256Value(value))
+            return existing;
         return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+    }
+
+    inline Value ensureU256Strict(PatternRewriter &rewriter, Location loc, Operation *anchor, Value value, llvm::StringRef context)
+    {
+        (void)loc;
+        if (Value existing = existingU256Value(value))
+            return existing;
+        if (anchor)
+            (void)rewriter.notifyMatchFailure(anchor, llvm::Twine(context) + " requires u256 value");
+        return Value();
     }
 
     inline Value ceil32(OpBuilder &rewriter, Location loc, Value length)

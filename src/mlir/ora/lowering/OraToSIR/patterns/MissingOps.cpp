@@ -22,6 +22,7 @@
 using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::ensureU256;
+using mlir::ora::lowering::ensureU256Strict;
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
@@ -29,8 +30,7 @@ using mlir::ora::lowering::ensureU256;
 static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value v = ensureU256(rewriter, loc, value);
-    Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, v);
+    Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, value);
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
 }
 
@@ -128,6 +128,9 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     auto loc = op.getLoc();
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
+    Value condition = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getCondition(), "refinement guard condition");
+    if (!condition)
+        return failure();
 
     // Split the block: after the guard instruction, execution continues.
     auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
@@ -148,7 +151,7 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
 
     // At the end of parentBlock, branch based on the guard condition.
     rewriter.setInsertionPointToEnd(parentBlock);
-    Value cond = toCondU256(rewriter, loc, adaptor.getCondition());
+    Value cond = toCondU256(rewriter, loc, condition);
     rewriter.create<sir::CondBrOp>(
         loc, cond,
         ValueRange{}, ValueRange{},
@@ -168,8 +171,10 @@ LogicalResult ConvertPowerOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value base = ensureU256(rewriter, loc, adaptor.getBase());
-    Value exp = ensureU256(rewriter, loc, adaptor.getExponent());
+    Value base = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getBase(), "power base");
+    Value exp = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getExponent(), "power exponent");
+    if (!base || !exp)
+        return failure();
     rewriter.replaceOpWithNewOp<sir::ExpOp>(op, u256Type, base, exp);
     return success();
 }
@@ -222,12 +227,14 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+    Value val = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
+    if (!val)
+        return failure();
 
     if (isDebugInfoLoweringEnabled(op.getOperation()))
     {
         if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
         {
-            Value val = ensureU256(rewriter, loc, adaptor.getValue());
             rewriter.create<sir::StoreOp>(loc, ptr, val);
             rewriter.eraseOp(op);
             return success();
@@ -237,7 +244,6 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
         mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
     Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
-    Value val = ensureU256(rewriter, loc, adaptor.getValue());
     rewriter.create<sir::StoreOp>(loc, ptr, val);
     rewriter.eraseOp(op);
     return success();
@@ -259,7 +265,9 @@ LogicalResult ConvertMLoad8Op::matchAndRewrite(
     // If base is not a ptr, bitcast it.
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
-    Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
+    Value offset = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mload8 offset");
+    if (!offset)
+        return failure();
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
     Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
     Value result = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
@@ -279,10 +287,12 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
 
     Value base = adaptor.getBase();
+    Value offset = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mstore8 offset");
+    Value val = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore8 value");
+    if (!offset || !val)
+        return failure();
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
-    Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
-    Value val = ensureU256(rewriter, loc, adaptor.getValue());
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
     Value zero = rewriter.create<sir::ConstOp>(loc, val.getType(), mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
     rewriter.create<sir::Store8Op>(loc, addr, zero, val);

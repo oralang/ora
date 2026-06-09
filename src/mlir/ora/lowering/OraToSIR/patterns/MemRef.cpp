@@ -24,7 +24,7 @@ using namespace mlir;
 using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
-using mlir::ora::lowering::ensureU256Value;
+using mlir::ora::lowering::ensureU256Strict;
 using mlir::ora::lowering::getMemRefElementWordCount;
 using mlir::ora::lowering::getStructFieldAttrs;
 using mlir::ora::lowering::kStorageMemRefViewKind;
@@ -435,6 +435,7 @@ static LogicalResult storeStructValueToStorageMemRefRoot(Operation *anchor,
 
 static Value buildStaticStorageMemRefSlot(ConversionPatternRewriter &rewriter,
                                           Location loc,
+                                          Operation *anchor,
                                           mlir::MemRefType memrefType,
                                           Value baseSlot,
                                           ValueRange indices);
@@ -592,7 +593,7 @@ static Value getStorageStructValueBaseSlot(Value structValue,
             loadIndices.push_back(unwrapIndexCastInput(index));
 
         return loadMemRefType.hasStaticShape()
-            ? buildStaticStorageMemRefSlot(rewriter, loc, loadMemRefType, baseSlot, loadIndices)
+            ? buildStaticStorageMemRefSlot(rewriter, loc, load.getOperation(), loadMemRefType, baseSlot, loadIndices)
             : buildDynamicStorageMemRefSlot(rewriter, loc, load.getOperation(), loadMemRefType, baseSlot, loadIndices);
     }
 
@@ -747,7 +748,7 @@ static Value getStorageBaseSlot(Value originalMemRef,
                     for (Value index : load.getIndices())
                         loadIndices.push_back(unwrapIndexCastInput(index));
                     Value elementSlot = loadMemRefType.hasStaticShape()
-                        ? buildStaticStorageMemRefSlot(rewriter, loc, loadMemRefType, baseSlot, loadIndices)
+                        ? buildStaticStorageMemRefSlot(rewriter, loc, load.getOperation(), loadMemRefType, baseSlot, loadIndices)
                         : buildDynamicStorageMemRefSlot(rewriter, loc, load.getOperation(), loadMemRefType, baseSlot, loadIndices);
                     if (!elementSlot)
                         return Value();
@@ -814,6 +815,7 @@ static Value buildDynamicStorageMemRefBase(ConversionPatternRewriter &rewriter,
 
 static Value buildStaticStorageMemRefSlot(ConversionPatternRewriter &rewriter,
                                           Location loc,
+                                          Operation *anchor,
                                           mlir::MemRefType memrefType,
                                           Value baseSlot,
                                           ValueRange indices)
@@ -833,7 +835,9 @@ static Value buildStaticStorageMemRefSlot(ConversionPatternRewriter &rewriter,
     int64_t stride = 1;
     for (int64_t i = rank - 1; i >= 0; --i)
     {
-        Value idx = ensureU256Value(rewriter, loc, indices[i]);
+        Value idx = ensureU256Strict(rewriter, loc, anchor, indices[i], "storage memref index");
+        if (!idx)
+            return Value();
         Value strideConst = rewriter.create<sir::ConstOp>(
             loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
         Value scaled = rewriter.create<sir::MulOp>(loc, u256Type, idx, strideConst);
@@ -860,7 +864,9 @@ static Value buildDynamicStorageMemRefSlot(ConversionPatternRewriter &rewriter,
     auto u256Type = sir::U256Type::get(ctx);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
     Value dataBase = buildDynamicStorageMemRefBase(rewriter, loc, baseSlot);
-    Value indexU256 = ensureU256Value(rewriter, loc, indices[0]);
+    Value indexU256 = ensureU256Strict(rewriter, loc, anchor, indices[0], "dynamic storage memref index");
+    if (!indexU256)
+        return Value();
     uint64_t elemWords = getMemRefElementWordCount(anchor, memrefType.getElementType());
     if (elemWords != 1)
     {
@@ -1122,7 +1128,9 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
 
         auto u256Type = sir::U256Type::get(ctx);
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        Value length = ensureU256Value(rewriter, loc, adaptor.getDynamicSizes().front());
+        Value length = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getDynamicSizes().front(), "dynamic memref length");
+        if (!length)
+            return failure();
         Value elementSize = rewriter.create<sir::ConstOp>(
             loc,
             u256Type,
@@ -1292,7 +1300,7 @@ LogicalResult ConvertMemRefLoadOp::matchAndRewrite(
     if (storageBaseSlot)
     {
         Value slot = memrefType.hasStaticShape()
-            ? buildStaticStorageMemRefSlot(rewriter, loc, memrefType, storageBaseSlot, indices)
+            ? buildStaticStorageMemRefSlot(rewriter, loc, op.getOperation(), memrefType, storageBaseSlot, indices)
             : buildDynamicStorageMemRefSlot(rewriter, loc, op.getOperation(), memrefType, storageBaseSlot, indices);
         if (!slot)
         {
@@ -1580,7 +1588,7 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
     if (storageBaseSlot)
     {
         Value slot = memrefType.hasStaticShape()
-            ? buildStaticStorageMemRefSlot(rewriter, loc, memrefType, storageBaseSlot, indices)
+            ? buildStaticStorageMemRefSlot(rewriter, loc, op.getOperation(), memrefType, storageBaseSlot, indices)
             : buildDynamicStorageMemRefSlot(rewriter, loc, op.getOperation(), memrefType, storageBaseSlot, indices);
         if (!slot)
         {

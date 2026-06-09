@@ -17,6 +17,7 @@
 #include "mlir/IR/Dominance.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Hashing.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -26,7 +27,7 @@ using namespace mlir;
 using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
-using mlir::ora::lowering::ensureU256Value;
+using mlir::ora::lowering::ensureU256Strict;
 using mlir::ora::lowering::getElementWordCount;
 using mlir::ora::lowering::getStorageWordCount;
 using mlir::ora::lowering::getStructFieldAttrs;
@@ -119,8 +120,237 @@ static Value computeWordCount(Location loc, Value lengthU256, ConversionPatternR
     return rewriter.create<sir::DivOp>(loc, u256Type, sum, divisor);
 }
 
+static FailureOr<Value> materializeStorageMapKey(Operation *op,
+                                                 Value key,
+                                                 Type originalKeyType,
+                                                 ConversionPatternRewriter &rewriter,
+                                                 StringRef context)
+{
+    auto loc = op->getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    if (llvm::isa<ora::StringType, ora::BytesType>(originalKeyType))
+    {
+        if (!llvm::isa<sir::PtrType>(key.getType()))
+            return rewriter.notifyMatchFailure(op, llvm::Twine(context) + " dynamic key did not lower to pointer");
+        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, key);
+        Value wordSize = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+        Value payload = rewriter.create<sir::AddPtrOp>(loc, ptrType, key, wordSize);
+        return rewriter.create<sir::KeccakOp>(loc, u256Type, payload, length).getResult();
+    }
+
+    Value keyU256 = ensureU256Strict(rewriter, loc, op, key, context);
+    if (!keyU256)
+        return failure();
+    return keyU256;
+}
+
+static LogicalResult replaceWithDynamicBytesLoadFromStorageRoot(Operation *op,
+                                                                Value slot,
+                                                                Type convertedResultType,
+                                                                ConversionPatternRewriter &rewriter)
+{
+    auto loc = op->getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    if (!convertedResultType)
+        convertedResultType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    if (!llvm::isa<sir::PtrType>(convertedResultType))
+        return rewriter.notifyMatchFailure(op, "dynamic bytes storage value did not lower to pointer");
+
+    Value length = rewriter.create<sir::SLoadOp>(loc, u256Type, slot);
+    Value wordSize = rewriter.create<sir::ConstOp>(
+        loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, length, wordSize);
+    Value basePtr = rewriter.create<sir::MallocOp>(loc, convertedResultType, totalSize);
+    rewriter.create<sir::StoreOp>(loc, basePtr, length);
+
+    Value wordCount = computeWordCount(loc, length, rewriter);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
+
+    rewriter.setInsertionPointToStart(condBlock);
+    Value iv = condBlock->getArgument(0);
+    Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, wordCount);
+    rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+
+    rewriter.setInsertionPointToStart(bodyBlock);
+    Value ivU256 = bodyBlock->getArgument(0);
+    Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+    Value wordSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
+    Value wordVal = rewriter.create<sir::SLoadOp>(loc, u256Type, wordSlot);
+
+    Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
+    Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
+    Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, convertedResultType, basePtr, dataOffset);
+    rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
+
+    Value next = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+    rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
+
+    rewriter.replaceOp(op, basePtr);
+    return success();
+}
+
+static LogicalResult storeDynamicBytesValueToStorageRoot(Operation *op,
+                                                         Value value,
+                                                         Value slot,
+                                                         ConversionPatternRewriter &rewriter,
+                                                         const TypeConverter *typeConverter)
+{
+    auto loc = op->getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    Value basePtr = value;
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()) && typeConverter)
+    {
+        Type converted = typeConverter->convertType(basePtr.getType());
+        if (!converted || !llvm::isa<sir::PtrType>(converted))
+            return rewriter.notifyMatchFailure(op, "dynamic bytes storage value did not lower to pointer");
+        if (converted != basePtr.getType())
+            basePtr = rewriter.create<sir::BitcastOp>(loc, converted, basePtr);
+    }
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        return rewriter.notifyMatchFailure(op, "dynamic bytes storage value is not a pointer");
+
+    Value length = rewriter.create<sir::LoadOp>(loc, u256Type, basePtr);
+    rewriter.create<sir::SStoreOp>(loc, slot, length);
+
+    Value writeCount = computeWordCount(loc, length, rewriter);
+    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
+    Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
+
+    rewriter.setInsertionPointToStart(condBlock);
+    Value iv = condBlock->getArgument(0);
+    Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, writeCount);
+    rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+
+    rewriter.setInsertionPointToStart(bodyBlock);
+    Value ivU256 = bodyBlock->getArgument(0);
+    Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+    Value wordSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
+    Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
+    Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
+    Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
+    Value wordVal = rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
+    rewriter.create<sir::SStoreOp>(loc, wordSlot, wordVal);
+
+    Value next = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
+    rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
+
+    rewriter.eraseOp(op);
+    rewriter.setInsertionPointToStart(afterBlock);
+    return success();
+}
+
+static std::optional<uint64_t> getStaticMemRefWordCount(Operation *anchor, mlir::MemRefType memrefType)
+{
+    if (!memrefType.hasStaticShape())
+        return std::nullopt;
+
+    uint64_t elements = 1;
+    for (int64_t dim : memrefType.getShape())
+    {
+        if (dim < 0)
+            return std::nullopt;
+        elements *= static_cast<uint64_t>(dim);
+    }
+    return elements * getElementWordCount(anchor, memrefType.getElementType());
+}
+
+static Value getStorageMemRefViewSlot(Value value);
+
+static LogicalResult copyStaticMemRefValueToStorageRoot(Operation *op,
+                                                        Value value,
+                                                        Value slot,
+                                                        mlir::MemRefType memrefType,
+                                                        ConversionPatternRewriter &rewriter)
+{
+    auto wordCount = getStaticMemRefWordCount(op, memrefType);
+    if (!wordCount)
+        return rewriter.notifyMatchFailure(op, "static memref storage value has dynamic shape");
+
+    auto loc = op->getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    if (Value sourceSlot = getStorageMemRefViewSlot(value))
+    {
+        if (sourceSlot == slot)
+            return success();
+
+        for (uint64_t i = 0; i < *wordCount; ++i)
+        {
+            Value src = addStorageWordOffset(loc, sourceSlot, i, rewriter);
+            Value dst = addStorageWordOffset(loc, slot, i, rewriter);
+            Value word = rewriter.create<sir::SLoadOp>(loc, u256Type, src);
+            rewriter.create<sir::SStoreOp>(loc, dst, word);
+        }
+        return success();
+    }
+
+    Value basePtr = value;
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+
+    for (uint64_t i = 0; i < *wordCount; ++i)
+    {
+        Value dst = addStorageWordOffset(loc, slot, i, rewriter);
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, i * 32ULL));
+        Value wordPtr = i == 0 ? basePtr : rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset).getResult();
+        Value word = rewriter.create<sir::LoadOp>(loc, u256Type, wordPtr);
+        rewriter.create<sir::SStoreOp>(loc, dst, word);
+    }
+    return success();
+}
+
 static Value getStorageMemRefViewSlot(Value value)
 {
+    if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (cast.getNumOperands() == 1)
+        {
+            Value operand = cast.getOperand(0);
+            auto viewKind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            if (operand.getDefiningOp())
+                return getStorageMemRefViewSlot(operand);
+        }
+    }
+
     if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
     {
         Value operand = bitcast.getOperand();
@@ -683,9 +913,9 @@ static LogicalResult storeStructValueToStorageRoot(Operation *anchor,
     return success();
 }
 
-static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
+static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location loc, Operation *anchor, Value value)
 {
-    return ensureU256Value(rewriter, loc, value);
+    return ensureU256Strict(rewriter, loc, anchor, value, "storage index");
 }
 
 // -----------------------------------------------------------------------------
@@ -741,8 +971,12 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
     SmallVector<Value, 2> parts;
     if (operands.size() == 2)
     {
-        parts.push_back(ensureU256Value(rewriter, loc, operands[0]));
-        parts.push_back(ensureU256Value(rewriter, loc, operands[1]));
+        Value tag = ensureU256Strict(rewriter, loc, op.getOperation(), operands[0], "ADT storage tag");
+        Value payload = ensureU256Strict(rewriter, loc, op.getOperation(), operands[1], "ADT storage payload");
+        if (!tag || !payload)
+            return failure();
+        parts.push_back(tag);
+        parts.push_back(payload);
     }
     else
     {
@@ -770,15 +1004,25 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
                 {
                     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
                     if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
-                        payload = ensureU256Value(rewriter, loc, *ptr);
+                    {
+                        payload = ensureU256Strict(rewriter, loc, op.getOperation(), *ptr, "aggregate ADT storage payload");
+                        if (!payload)
+                            return failure();
+                    }
                     else if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
-                        payload = ensureU256Value(rewriter, loc, payloadValue);
+                    {
+                        payload = ensureU256Strict(rewriter, loc, op.getOperation(), payloadValue, "aggregate ADT storage payload");
+                        if (!payload)
+                            return failure();
+                    }
                     else
                         return rewriter.notifyMatchFailure(op, "aggregate ADT storage payload requires compiler-runtime handle");
                 }
                 else
                 {
-                    payload = ensureU256Value(rewriter, loc, payloadValue);
+                    payload = ensureU256Strict(rewriter, loc, op.getOperation(), payloadValue, "ADT storage payload");
+                    if (!payload)
+                        return failure();
                 }
             }
 
@@ -1003,52 +1247,10 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
 
     if (isDynamicBytes)
     {
-        // Use the precomputed converted result type (ptr fallback for dynamic bytes).
-
-        Value length = rewriter.create<sir::SLoadOp>(loc, u256, slotConst);
-        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32));
-        Value totalSize = rewriter.create<sir::AddOp>(loc, u256, length, wordSize);
-        Value basePtr = rewriter.create<sir::MallocOp>(loc, convertedResultType, totalSize);
-        rewriter.create<sir::StoreOp>(loc, basePtr, length);
-
-        Value wordCount = computeWordCount(loc, length, rewriter);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        Value zero = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
-        Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
-
-        Block *parentBlock = op->getBlock();
-        Region *parentRegion = parentBlock->getParent();
-        auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-        auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
-        auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256}, {loc});
-
-        // Enter the loop from the pre-split block. Inserting this branch in the
-        // continuation block would leave trailing ops after a terminator.
-        rewriter.setInsertionPointToEnd(parentBlock);
-        rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
-
-        rewriter.setInsertionPointToStart(condBlock);
-        Value iv = condBlock->getArgument(0);
-        Value lt = rewriter.create<sir::LtOp>(loc, u256, iv, wordCount);
-        rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
-
-        rewriter.setInsertionPointToStart(bodyBlock);
-        Value ivU256 = bodyBlock->getArgument(0);
-        Value slotOffset = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
-        Value slot = rewriter.create<sir::AddOp>(loc, u256, slotConst, slotOffset);
-        Value wordVal = rewriter.create<sir::SLoadOp>(loc, u256, slot);
-
-        Value wordBytes = rewriter.create<sir::MulOp>(loc, u256, ivU256, wordSize);
-        Value dataOffset = rewriter.create<sir::AddOp>(loc, u256, wordBytes, wordSize);
-        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, convertedResultType, basePtr, dataOffset);
-        rewriter.create<sir::StoreOp>(loc, dataPtr, wordVal);
-
-        Value next = rewriter.create<sir::AddOp>(loc, u256, ivU256, one);
-        rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
-
-        rewriter.replaceOp(op, basePtr);
+        LogicalResult loaded = replaceWithDynamicBytesLoadFromStorageRoot(
+            op.getOperation(), slotConst, convertedResultType, rewriter);
         LLVM_DEBUG(llvm::dbgs() << "[OraToSIR]   replaced with dynamic bytes load\n");
-        return success();
+        return loaded;
     }
 
     // Replace the ora.sload with sir.sload for scalar values
@@ -1115,7 +1317,6 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     }
 
     Type u256Type = sir::U256Type::get(ctx);
-    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
 
     if (llvm::isa<ora::AdtType>(op.getValue().getType()))
     {
@@ -1194,86 +1395,8 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
         return storeDynamicMemRefToStorageRoot(op.getOperation(), value, slot, valueMemRefType, rewriter);
 
     if (isDynamicBytes)
-    {
-        Value basePtr = value;
-        if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-        {
-            Type converted = this->getTypeConverter()->convertType(basePtr.getType());
-            if (converted && converted != basePtr.getType())
-            {
-                basePtr = rewriter.create<sir::BitcastOp>(loc, converted, basePtr);
-            }
-        }
-        if (!llvm::isa<sir::PtrType>(basePtr.getType()))
-        {
-            basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
-        }
-
-        Value length = rewriter.create<sir::LoadOp>(loc, u256Type, basePtr);
-        rewriter.create<sir::SStoreOp>(loc, slot, length);
-
-        uint64_t dynamicElemWords = isDynamicStorageMemRef ? getElementWordCount(op.getOperation(), valueMemRefType.getElementType()) : 1;
-        Value writeCount = isDynamicStorageMemRef ? length : computeWordCount(loc, length, rewriter);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
-        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
-        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
-        if (isDynamicStorageMemRef && dynamicElemWords != 1)
-        {
-            Value elemWordsConst = rewriter.create<sir::ConstOp>(
-                loc, u256Type, mlir::IntegerAttr::get(ui64Type, dynamicElemWords));
-            writeCount = rewriter.create<sir::MulOp>(loc, u256Type, length, elemWordsConst);
-        }
-        Value storageDataBase = slot;
-        if (isDynamicStorageMemRef)
-        {
-            Value tmp = rewriter.create<sir::MallocOp>(loc, ptrType, wordSize);
-            rewriter.create<sir::StoreOp>(loc, tmp, slot);
-            storageDataBase = rewriter.create<sir::KeccakOp>(loc, u256Type, tmp, wordSize);
-        }
-
-        Block *parentBlock = op->getBlock();
-        Region *parentRegion = parentBlock->getParent();
-        auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-        auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
-        auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
-
-        // Enter the loop from the pre-split block. Inserting this branch in the
-        // continuation block would leave trailing ops after a terminator.
-        rewriter.setInsertionPointToEnd(parentBlock);
-        rewriter.create<sir::BrOp>(loc, ValueRange{zero}, condBlock);
-
-        rewriter.setInsertionPointToStart(condBlock);
-        Value iv = condBlock->getArgument(0);
-        Value lt = rewriter.create<sir::LtOp>(loc, u256Type, iv, writeCount);
-        rewriter.create<sir::CondBrOp>(loc, lt, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
-
-        rewriter.setInsertionPointToStart(bodyBlock);
-        Value ivU256 = bodyBlock->getArgument(0);
-        Value slotAddr = Value();
-        if (isDynamicStorageMemRef)
-        {
-            slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, storageDataBase, ivU256);
-        }
-        else
-        {
-            Value slotOffset = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
-            slotAddr = rewriter.create<sir::AddOp>(loc, u256Type, slot, slotOffset);
-        }
-
-        Value wordBytes = rewriter.create<sir::MulOp>(loc, u256Type, ivU256, wordSize);
-        Value dataOffset = rewriter.create<sir::AddOp>(loc, u256Type, wordBytes, wordSize);
-        Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, dataOffset);
-        Value wordVal = rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
-
-        rewriter.create<sir::SStoreOp>(loc, slotAddr, wordVal);
-
-        Value next = rewriter.create<sir::AddOp>(loc, u256Type, ivU256, one);
-        rewriter.create<sir::BrOp>(loc, ValueRange{next}, condBlock);
-
-        rewriter.eraseOp(op);
-        return success();
-    }
+        return storeDynamicBytesValueToStorageRoot(
+            op.getOperation(), value, slot, rewriter, this->getTypeConverter());
 
     // Convert value to SIR u256 - ALL Ora types must become SIR u256
     Value convertedValue = value;
@@ -1689,18 +1812,50 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+    Type expectedResultType = op.getResult().getType();
+    const bool returnsMapHandle = llvm::isa<ora::MapType>(expectedResultType);
+    const bool returnsDynamicBytes = llvm::isa<ora::StringType, ora::BytesType>(expectedResultType);
+    auto memRefResultType = llvm::dyn_cast<mlir::MemRefType>(expectedResultType);
+    auto structResultType = llvm::dyn_cast<ora::StructType>(expectedResultType);
+    Type convertedResultType;
+    Type storageMemRefResultType;
+    Type dynamicBytesResultType;
+
+    if (returnsDynamicBytes)
+    {
+        dynamicBytesResultType = this->getTypeConverter()->convertType(expectedResultType);
+        if (!dynamicBytesResultType)
+            return rewriter.notifyMatchFailure(op, "map_get dynamic bytes result type conversion failed");
+        if (!llvm::isa<sir::PtrType>(dynamicBytesResultType))
+            return rewriter.notifyMatchFailure(op, "map_get dynamic bytes result did not lower to pointer");
+    }
+    else if (memRefResultType)
+    {
+        storageMemRefResultType = this->getTypeConverter()->convertType(expectedResultType);
+        if (!storageMemRefResultType || !llvm::isa<sir::PtrType>(storageMemRefResultType))
+            storageMemRefResultType = ptrType;
+    }
+    else if (!returnsMapHandle && !structResultType)
+    {
+        convertedResultType = this->getTypeConverter()->convertType(expectedResultType);
+        if (!convertedResultType)
+            return rewriter.notifyMatchFailure(op, "map_get result type conversion failed");
+        if (!llvm::isa<sir::U256Type>(convertedResultType))
+            return rewriter.notifyMatchFailure(op, "map_get result type did not lower to SIR storage value");
+    }
 
     // Get the map operand and key
     Value originalMapOperand = op.getMap();
     Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
-    Value keyForCache = key;
+    Type originalKeyType = op.getKey().getType();
 
-    // Convert key to SIR u256 if needed
-    if (!llvm::isa<sir::U256Type>(key.getType()))
-    {
-        key = rewriter.create<sir::BitcastOp>(loc, u256Type, key);
-    }
+    FailureOr<Value> materializedKey = materializeStorageMapKey(
+        op.getOperation(), key, originalKeyType, rewriter, "map_get key");
+    if (failed(materializedKey))
+        return failure();
+    key = *materializedKey;
+    Value keyForCache = key;
 
     Value mapSlot = Value();
     llvm::StringRef globalName;
@@ -1764,53 +1919,44 @@ LogicalResult ConvertMapGetOp::matchAndRewrite(
         storeCachedMapHash(*mapHashCache, funcOp, mapSlot, keyForCache, hash);
     }
 
-    // Get the expected result type from ora.map_get and convert it
-    Type expectedResultType = op.getResult().getType();
-
     // If the map value is another map, return the derived slot hash as a map handle
-    if (llvm::isa<ora::MapType>(expectedResultType))
+    if (returnsMapHandle)
     {
         rewriter.replaceOp(op, hash);
         DBG("ConvertMapGetOp: map-of-map, returning derived slot hash");
         return success();
     }
 
-    if (auto memRefType = llvm::dyn_cast<mlir::MemRefType>(expectedResultType);
-        memRefType && !memRefType.hasStaticShape())
+    if (returnsDynamicBytes)
     {
-        Type convertedResultType = this->getTypeConverter()->convertType(expectedResultType);
-        if (!convertedResultType)
-            convertedResultType = ptrType;
-        Value storageView = rewriter.create<sir::BitcastOp>(loc, convertedResultType, hash);
+        DBG("ConvertMapGetOp: loading dynamic bytes map value from storage root");
+        return replaceWithDynamicBytesLoadFromStorageRoot(
+            op.getOperation(), hash, dynamicBytesResultType, rewriter);
+    }
+
+    if (memRefResultType)
+    {
+        (void)storageMemRefResultType;
+        Value storageView = rewriter.create<mlir::UnrealizedConversionCastOp>(
+            loc, expectedResultType, hash).getResult(0);
         storageView.getDefiningOp()->setAttr(
             kOraMaterializationKindAttr,
             StringAttr::get(ctx, kStorageMemRefViewKind));
         rewriter.replaceOp(op, storageView);
-        DBG("ConvertMapGetOp: dynamic map value returned as storage memref view");
+        DBG("ConvertMapGetOp: map memref value returned as storage view");
         return success();
     }
 
     // If the result type is a struct, handle it specially by loading multiple storage slots
-    if (auto structType = llvm::dyn_cast<ora::StructType>(expectedResultType))
+    if (structResultType)
     {
         FailureOr<Value> loaded = loadStructValueFromStorageRoot(
-            op.getOperation(), loc, hash, structType, rewriter, this->getTypeConverter());
+            op.getOperation(), loc, hash, structResultType, rewriter, this->getTypeConverter());
         if (failed(loaded))
             return rewriter.notifyMatchFailure(op, "invalid struct field attributes for map_get");
 
         rewriter.replaceOp(op, *loaded);
         return success();
-    }
-
-    // Non-struct types: convert and load normally
-    Type convertedResultType = this->getTypeConverter()->convertType(expectedResultType);
-
-    // If type conversion failed, use u256 as fallback
-    if (!convertedResultType)
-    {
-        LLVM_DEBUG(llvm::dbgs() << "[OraToSIR] ConvertMapGetOp: Type conversion failed for: "
-                               << expectedResultType << ", using u256 fallback\n");
-        convertedResultType = u256Type;
     }
 
     // SIR storage loads always produce u256; cast after loading if needed.
@@ -1854,16 +2000,18 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
     Value originalMapOperand = op.getMap();
     Value convertedMapOperand = adaptor.getMap();
     Value key = adaptor.getKey();
-    Value keyForCache = key;
     Value value = adaptor.getValue();
+    Type originalKeyType = op.getKey().getType();
     Type originalValueType = op.getValue().getType();
 
-    // Convert key to SIR u256 if needed. Value conversion is delayed until the
-    // final scalar store path so aggregate values can expand into storage slots.
-    if (!llvm::isa<sir::U256Type>(key.getType()))
-    {
-        key = rewriter.create<sir::BitcastOp>(loc, u256Type, key);
-    }
+    // Normalize the key first. Value conversion is delayed until the final
+    // scalar store path so aggregate values can expand into storage slots.
+    FailureOr<Value> materializedKey = materializeStorageMapKey(
+        op.getOperation(), key, originalKeyType, rewriter, "map_store key");
+    if (failed(materializedKey))
+        return failure();
+    key = *materializedKey;
+    Value keyForCache = key;
 
     if (auto tensorType = llvm::dyn_cast<mlir::RankedTensorType>(originalMapOperand.getType()))
     {
@@ -1903,7 +2051,9 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
                 setResultName(slotOp, 0, ("slot_" + globalName).str());
             }
         }
-        Value indexU256 = ensureU256Value(rewriter, loc, key);
+        Value indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), key, "array map_store index");
+        if (!indexU256)
+            return failure();
         uint64_t elemWords = getElementWordCount(op.getOperation(), tensorType.getElementType());
         Value slot = Value();
         if (tensorType.hasStaticShape())
@@ -2027,9 +2177,22 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         storeCachedMapHash(*mapHashCache, funcOp, mapSlot, keyForCache, hash);
     }
 
-    if (auto valueMemRefType = llvm::dyn_cast<mlir::MemRefType>(originalValueType);
-        valueMemRefType && !valueMemRefType.hasStaticShape())
+    if (llvm::isa<ora::StringType, ora::BytesType>(originalValueType))
     {
+        return storeDynamicBytesValueToStorageRoot(
+            op.getOperation(), value, hash, rewriter, this->getTypeConverter());
+    }
+
+    if (auto valueMemRefType = llvm::dyn_cast<mlir::MemRefType>(originalValueType))
+    {
+        if (valueMemRefType.hasStaticShape())
+        {
+            if (failed(copyStaticMemRefValueToStorageRoot(op.getOperation(), value, hash, valueMemRefType, rewriter)))
+                return failure();
+            rewriter.eraseOp(op);
+            return success();
+        }
+
         if (Value sourceSlot = getStorageMemRefViewSlot(value))
         {
             if (sourceSlot == hash)
@@ -2054,6 +2217,10 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
         DBG("ConvertMapStoreOp: replaced struct with keccak256 + field sstores");
         return success();
     }
+
+    Type convertedValueType = this->getTypeConverter()->convertType(originalValueType);
+    if (!convertedValueType || !llvm::isa<sir::U256Type>(convertedValueType))
+        return rewriter.notifyMatchFailure(op, "map_store value type did not lower to SIR storage value");
 
     if (!llvm::isa<sir::U256Type>(value.getType()))
     {
@@ -2099,7 +2266,9 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
     Value indexU256;
     if (tensorType.getRank() == 1)
     {
-        indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+        indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.insert index");
+        if (!indexU256)
+            return failure();
     }
     else
     {
@@ -2111,7 +2280,9 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
         int64_t stride = 1;
         for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
         {
-            Value idx = ensureU256Value(rewriter, loc, adaptor.getIndices()[i]);
+            Value idx = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.insert index");
+            if (!idx)
+                return failure();
             Value strideConst = rewriter.create<sir::ConstOp>(
                 loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
             Value scaled = rewriter.create<sir::MulOp>(loc, u256Type, idx, strideConst);
@@ -2148,7 +2319,9 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
         return success();
     }
 
-    Value storedValue = ensureU256Value(rewriter, loc, adaptor.getScalar());
+    Value storedValue = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getScalar(), "tensor.insert scalar");
+    if (!storedValue)
+        return failure();
     rewriter.create<sir::SStoreOp>(loc, slot, storedValue);
 
     // Preserve SSA flow; the enclosing ora.sstore(tensor, global) is a no-op.
@@ -2182,7 +2355,9 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
     Value indexU256 = Value();
     if (tensorType.getRank() == 1)
     {
-        indexU256 = ensureU256Value(rewriter, loc, adaptor.getIndices()[0]);
+        indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.extract index");
+        if (!indexU256)
+            return failure();
     }
     else
     {
@@ -2197,7 +2372,9 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
         int64_t stride = 1;
         for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
         {
-            Value idx = ensureU256Value(rewriter, loc, adaptor.getIndices()[i]);
+            Value idx = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.extract index");
+            if (!idx)
+                return failure();
             Value strideConst = rewriter.create<sir::ConstOp>(
                 loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(stride)));
             Value scaled = rewriter.create<sir::MulOp>(loc, u256Type, idx, strideConst);
@@ -2293,7 +2470,9 @@ LogicalResult ConvertTensorDimOp::matchAndRewrite(
         auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
         auto u256Type = sir::U256Type::get(ctx);
         Value dimConst = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, dim));
-        Value idx = buildIndexFromU256(rewriter, loc, dimConst);
+        Value idx = buildIndexFromU256(rewriter, loc, op.getOperation(), dimConst);
+        if (!idx)
+            return failure();
         rewriter.replaceOp(op, idx);
         return success();
     }
@@ -2313,7 +2492,9 @@ LogicalResult ConvertTensorDimOp::matchAndRewrite(
     if (isStorageArray)
     {
         Value length = rewriter.create<sir::SLoadOp>(loc, u256Type, base);
-        Value idx = buildIndexFromU256(rewriter, loc, length);
+        Value idx = buildIndexFromU256(rewriter, loc, op.getOperation(), length);
+        if (!idx)
+            return failure();
         rewriter.replaceOp(op, idx);
         return success();
     }
@@ -2321,7 +2502,9 @@ LogicalResult ConvertTensorDimOp::matchAndRewrite(
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
     Value ptr = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
     Value length = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
-    Value idx = buildIndexFromU256(rewriter, loc, length);
+    Value idx = buildIndexFromU256(rewriter, loc, op.getOperation(), length);
+    if (!idx)
+        return failure();
     rewriter.replaceOp(op, idx);
     return success();
 }

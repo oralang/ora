@@ -1,5 +1,7 @@
 #pragma once
 
+#include "LoweringHelpers.h"
+
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
 
@@ -14,14 +16,6 @@ namespace mlir::ora::lowering
     inline constexpr llvm::StringLiteral kStorageMemRefViewKind{"storage_memref_view"};
     inline constexpr llvm::StringLiteral kStorageStructCarrierKind{"storage_struct_carrier"};
     inline constexpr llvm::StringLiteral kStorageStructViewFieldsAttr{"ora.storage_struct_view_fields"};
-
-    inline Value ensureU256Value(PatternRewriter &rewriter, Location loc, Value value)
-    {
-        if (llvm::isa<sir::U256Type>(value.getType()))
-            return value;
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
-        return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-    }
 
     inline ora::StructDeclOp findStructDeclForName(Operation *op, StringRef structName)
     {

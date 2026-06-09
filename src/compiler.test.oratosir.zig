@@ -3366,6 +3366,121 @@ test "OraToSIR lowers deep dynamic struct scalar update to direct field sstore" 
     try testing.expect(!std.mem.containsAtLeast(u8, update_fn, 1, "keccak256"));
 }
 
+test "OraToSIR lowers dynamic string and bytes storage map values through storage roots" {
+    const source_text =
+        \\contract DynamicMapValues {
+        \\    storage var names: map<address, string>;
+        \\    storage var blobs: map<u256, bytes>;
+        \\
+        \\    pub fn setName(account: address, name: string) {
+        \\        names[account] = name;
+        \\    }
+        \\
+        \\    pub fn getName(account: address) -> string {
+        \\        return names[account];
+        \\    }
+        \\
+        \\    pub fn copyBlob(from: u256, to: u256) {
+        \\        blobs[to] = blobs[from];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const set_name = try functionSlice(rendered, "setName");
+    try testing.expect(std.mem.count(u8, set_name, "sstore") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, set_name, 1, "mload"));
+
+    const get_name = try functionSlice(rendered, "getName");
+    try testing.expect(std.mem.count(u8, get_name, "sload") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, get_name, 1, "malloc"));
+
+    const copy_blob = try functionSlice(rendered, "copyBlob");
+    try testing.expect(std.mem.count(u8, copy_blob, "keccak256") >= 2);
+    try testing.expect(std.mem.count(u8, copy_blob, "sload") >= 2);
+    try testing.expect(std.mem.count(u8, copy_blob, "sstore") >= 2);
+}
+
+test "OraToSIR lowers dynamic string storage map keys" {
+    const source_text =
+        \\contract MapStringKey {
+        \\    storage var values: map<string, u256>;
+        \\
+        \\    pub fn set(key: string, val: u256) {
+        \\        values[key] = val;
+        \\    }
+        \\
+        \\    pub fn get(key: string) -> u256 {
+        \\        return values[key];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const set_fn = try functionSlice(rendered, "set");
+    try testing.expect(std.mem.count(u8, set_fn, "keccak256") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, set_fn, 1, "sstore"));
+
+    const get_fn = try functionSlice(rendered, "get");
+    try testing.expect(std.mem.count(u8, get_fn, "keccak256") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, get_fn, 1, "sload"));
+}
+
+test "OraToSIR lowers fixed array storage map values" {
+    const source_text =
+        \\contract MapOfArrays {
+        \\    storage var slots: map<address, [u256; 4]>;
+        \\
+        \\    pub fn set_slot(account: address, index: u256, val: u256) {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        arr[index] = val;
+        \\        slots[account] = arr;
+        \\    }
+        \\
+        \\    pub fn get_slot(account: address, index: u256) -> u256 {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        return arr[index];
+        \\    }
+        \\
+        \\    pub fn set_all(account: address, a: u256, b: u256, c: u256, d: u256) {
+        \\        let arr: [u256; 4] = [a, b, c, d];
+        \\        slots[account] = arr;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const get_slot = try functionSlice(rendered, "get_slot");
+    try testing.expect(std.mem.containsAtLeast(u8, get_slot, 1, "sload"));
+
+    const set_all = try functionSlice(rendered, "set_all");
+    try testing.expect(std.mem.count(u8, set_all, "sstore") >= 4);
+}
+
 test "compiler converts narrowed carried locals in nested scf ifs" {
     const source_text =
         \\contract Test {
