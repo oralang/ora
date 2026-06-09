@@ -2,6 +2,7 @@
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
 #include "patterns/LoweringHelpers.h"
+#include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
@@ -30,6 +31,7 @@
 using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::findStructDeclForName;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -55,22 +57,7 @@ static SmallVector<Value, 4> flattenOneToNOperands(AdaptorT adaptor)
 
 static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structName)
 {
-    ModuleOp module = op->getParentOfType<ModuleOp>();
-    if (!module)
-        return failure();
-
-    ora::StructDeclOp structDecl = nullptr;
-    module.walk([&](ora::StructDeclOp declOp)
-                {
-                    auto nameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
-                    if (nameAttr && nameAttr.getValue() == structName)
-                    {
-                        structDecl = declOp;
-                        return WalkResult::interrupt();
-                    }
-                    return WalkResult::advance();
-                });
-
+    auto structDecl = findStructDeclForName(op, structName);
     if (!structDecl)
         return failure();
 

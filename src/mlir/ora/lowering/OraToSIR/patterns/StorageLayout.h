@@ -84,6 +84,21 @@ namespace mlir::ora::lowering
         return getStructFieldsFromDecl(structDecl, names, types);
     }
 
+    inline std::optional<uint64_t> getStaticMemRefElementCount(mlir::MemRefType memrefType)
+    {
+        if (!memrefType.hasStaticShape())
+            return std::nullopt;
+
+        uint64_t elements = 1;
+        for (int64_t dim : memrefType.getShape())
+        {
+            if (dim < 0)
+                return std::nullopt;
+            elements *= static_cast<uint64_t>(dim);
+        }
+        return elements;
+    }
+
     inline uint64_t getStorageWordCount(Operation *anchor, Type type)
     {
         if (auto structType = llvm::dyn_cast<ora::StructType>(type))
@@ -102,9 +117,12 @@ namespace mlir::ora::lowering
             }
         }
 
-        if (auto memrefType = llvm::dyn_cast<mlir::MemRefType>(type);
-            memrefType && !memrefType.hasStaticShape())
+        if (auto memrefType = llvm::dyn_cast<mlir::MemRefType>(type))
         {
+            if (!memrefType.hasStaticShape())
+                return 1;
+            if (auto elements = getStaticMemRefElementCount(memrefType))
+                return *elements * getStorageWordCount(anchor, memrefType.getElementType());
             return 1;
         }
 
@@ -119,6 +137,14 @@ namespace mlir::ora::lowering
     inline uint64_t getMemRefElementWordCount(Operation *anchor, Type elementType)
     {
         return getStorageWordCount(anchor, elementType);
+    }
+
+    inline std::optional<uint64_t> getStaticMemRefWordCount(Operation *anchor, mlir::MemRefType memrefType)
+    {
+        auto elements = getStaticMemRefElementCount(memrefType);
+        if (!elements)
+            return std::nullopt;
+        return *elements * getStorageWordCount(anchor, memrefType.getElementType());
     }
 
     inline std::optional<uint64_t> getStructFieldStorageOffset(Operation *anchor,

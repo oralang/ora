@@ -1,0 +1,63 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "get_body(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "get_tail()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 99 }
+
+[[call]]
+fn = "set_body(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 77]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 11
+
+[[call.storage]]
+slot = 1
+value = 1
+
+[[call.storage]]
+slot = 2
+value = 77
+
+[[call.storage]]
+slot = 3
+value = 3
+
+[[call.storage]]
+slot = 4
+value = 4
+
+[[call.storage]]
+slot = 5
+value = 99
+
+[[call]]
+fn = "get_body(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 77 }
+
+[[call]]
+fn = "get_tail()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 99 }

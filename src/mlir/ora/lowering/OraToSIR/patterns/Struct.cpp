@@ -508,23 +508,9 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
         return success();
     };
 
-    if (auto init = op.getStructValue().getDefiningOp<ora::StructInitOp>())
+    if (llvm::isa<mlir::MemRefType>(expected))
     {
-        if (fieldIndex < init.getFieldValues().size() &&
-            succeeded(forwardConstructedField(init.getFieldValues()[fieldIndex])))
-            return success();
-    }
-    if (auto instantiate = op.getStructValue().getDefiningOp<ora::StructInstantiateOp>())
-    {
-        if (fieldIndex < instantiate.getFieldValues().size() &&
-            succeeded(forwardConstructedField(instantiate.getFieldValues()[fieldIndex])))
-            return success();
-    }
-
-    if (auto memrefType = dyn_cast<mlir::MemRefType>(expected);
-        memrefType && !memrefType.hasStaticShape())
-    {
-        auto forwardDynamicFieldValue = [&](Value fieldValue) -> LogicalResult {
+        auto forwardMemRefFieldValue = [&](Value fieldValue) -> LogicalResult {
             if (llvm::isa<mlir::MemRefType>(fieldValue.getType()))
             {
                 if (auto bitcast = fieldValue.getDefiningOp<sir::BitcastOp>())
@@ -564,13 +550,13 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
         if (auto init = op.getStructValue().getDefiningOp<ora::StructInitOp>())
         {
             if (fieldIndex < init.getFieldValues().size() &&
-                succeeded(forwardDynamicFieldValue(init.getFieldValues()[fieldIndex])))
+                succeeded(forwardMemRefFieldValue(init.getFieldValues()[fieldIndex])))
                 return success();
         }
         if (auto instantiate = op.getStructValue().getDefiningOp<ora::StructInstantiateOp>())
         {
             if (fieldIndex < instantiate.getFieldValues().size() &&
-                succeeded(forwardDynamicFieldValue(instantiate.getFieldValues()[fieldIndex])))
+                succeeded(forwardMemRefFieldValue(instantiate.getFieldValues()[fieldIndex])))
                 return success();
         }
 
@@ -625,13 +611,25 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
         }
     }
 
+    if (auto init = op.getStructValue().getDefiningOp<ora::StructInitOp>())
+    {
+        if (fieldIndex < init.getFieldValues().size() &&
+            succeeded(forwardConstructedField(init.getFieldValues()[fieldIndex])))
+            return success();
+    }
+    if (auto instantiate = op.getStructValue().getDefiningOp<ora::StructInstantiateOp>())
+    {
+        if (fieldIndex < instantiate.getFieldValues().size() &&
+            succeeded(forwardConstructedField(instantiate.getFieldValues()[fieldIndex])))
+            return success();
+    }
+
     Value basePtr = coerceStructBasePtr(loc, rewriter, adaptor.getStructValue(), /*fallbackBitcast=*/true);
 
     Value fieldPtr = fieldPtrAtIndex(loc, rewriter, basePtr, static_cast<uint64_t>(fieldIndex));
 
     Value raw = rewriter.create<sir::LoadOp>(loc, u256Type, fieldPtr);
-    if (auto memrefType = dyn_cast<mlir::MemRefType>(expected);
-        memrefType && !memrefType.hasStaticShape())
+    if (llvm::isa<mlir::MemRefType>(expected))
     {
         if (valueHasMaterializationKind(basePtr, kStorageStructCarrierKind))
         {

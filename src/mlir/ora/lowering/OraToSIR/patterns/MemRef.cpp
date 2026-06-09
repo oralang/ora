@@ -26,6 +26,7 @@ using namespace ora;
 using mlir::ora::lowering::addStorageWordOffset;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getMemRefElementWordCount;
+using mlir::ora::lowering::getStaticMemRefWordCount;
 using mlir::ora::lowering::getStructFieldStorageOffset;
 using mlir::ora::lowering::getStructFieldStorageOffsetByScan;
 using mlir::ora::lowering::getStructFieldAttrs;
@@ -35,6 +36,76 @@ using mlir::ora::lowering::kStorageStructViewFieldsAttr;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
+
+static bool isPointerBackedMemRefCarrierSource(Type type)
+{
+    return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                     ora::StringType, ora::BytesType,
+                     mlir::MemRefType, mlir::UnrankedMemRefType>(type);
+}
+
+static Value findPointerBackedCarrierCastSource(Value value)
+{
+    for (unsigned i = 0; i < 8 && value; ++i)
+    {
+        if (isPointerBackedMemRefCarrierSource(value.getType()))
+            return value;
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            value = bitcast.getOperand();
+            continue;
+        }
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() != 1)
+                return Value();
+            value = cast.getOperand(0);
+            continue;
+        }
+        break;
+    }
+    return Value();
+}
+
+static Value materializePointerBackedMemRefStoreCarrier(Value originalValue,
+                                                        mlir::MemRefType memrefType,
+                                                        Location loc,
+                                                        ConversionPatternRewriter &rewriter)
+{
+    if (!memrefType)
+        return Value();
+    auto elementIntType = llvm::dyn_cast<mlir::IntegerType>(memrefType.getElementType());
+    if (!elementIntType || elementIntType.getWidth() != 256)
+        return Value();
+
+    Value source = findPointerBackedCarrierCastSource(originalValue);
+    if (!source)
+        return Value();
+
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    if (auto cast = source.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (ora::hasMaterializationKind(cast, mat_kind::kPtrView) &&
+            cast.getNumOperands() == 1 &&
+            llvm::isa<sir::PtrType>(cast.getOperand(0).getType()))
+        {
+            return rewriter.create<sir::BitcastOp>(loc, u256Type, cast.getOperand(0));
+        }
+    }
+
+    if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, source))
+    {
+        if (llvm::isa<sir::U256Type>(materialized->getType()))
+            return *materialized;
+        if (llvm::isa<sir::PtrType>(materialized->getType()))
+            return rewriter.create<sir::BitcastOp>(loc, u256Type, *materialized);
+    }
+
+    return Value();
+}
 
 static bool storageStructCarrierPreservesField(Value carrier, size_t fieldIndex)
 {
@@ -179,6 +250,53 @@ static Value getSlotFromStorageFieldValue(Value value)
     return Value();
 }
 
+static LogicalResult copyStaticMemRefValueToStorageRoot(Operation *anchor,
+                                                        Location loc,
+                                                        Value value,
+                                                        Value slot,
+                                                        mlir::MemRefType memrefType,
+                                                        ConversionPatternRewriter &rewriter)
+{
+    auto wordCount = getStaticMemRefWordCount(anchor, memrefType);
+    if (!wordCount)
+        return failure();
+
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+
+    if (Value sourceSlot = getSlotFromStorageFieldValue(value))
+    {
+        if (sourceSlot == slot)
+            return success();
+
+        for (uint64_t i = 0; i < *wordCount; ++i)
+        {
+            Value src = addStorageWordOffset(loc, sourceSlot, i, rewriter);
+            Value dst = addStorageWordOffset(loc, slot, i, rewriter);
+            Value word = rewriter.create<sir::SLoadOp>(loc, u256Type, src);
+            rewriter.create<sir::SStoreOp>(loc, dst, word);
+        }
+        return success();
+    }
+
+    Value basePtr = value;
+    if (!llvm::isa<sir::PtrType>(basePtr.getType()))
+        basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, basePtr);
+
+    for (uint64_t i = 0; i < *wordCount; ++i)
+    {
+        Value dst = addStorageWordOffset(loc, slot, i, rewriter);
+        Value offset = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, i * 32ULL));
+        Value wordPtr = i == 0 ? basePtr : rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset).getResult();
+        Value word = rewriter.create<sir::LoadOp>(loc, u256Type, wordPtr);
+        rewriter.create<sir::SStoreOp>(loc, dst, word);
+    }
+    return success();
+}
+
 static FailureOr<Value> loadStructValueFromStorageMemRefRoot(Operation *anchor,
                                                              Location loc,
                                                              Value slot,
@@ -215,22 +333,26 @@ static FailureOr<Value> loadStructValueFromStorageMemRefRoot(Operation *anchor,
         else
         {
             auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
-            const bool isDynamicMemRefField = fieldMemRefType && !fieldMemRefType.hasStaticShape();
-            fieldValue = isDynamicMemRefField
-                ? fieldSlot
-                : rewriter.create<sir::SLoadOp>(loc, u256Type, fieldSlot).getResult();
-
-            Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
-            if (!convertedFieldType)
-                convertedFieldType = u256Type;
-            if (convertedFieldType != u256Type)
+            if (fieldMemRefType)
             {
-                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
-                if (isDynamicMemRefField)
+                Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
+                if (!convertedFieldType)
+                    convertedFieldType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldSlot);
+                fieldValue.getDefiningOp()->setAttr(
+                    kOraMaterializationKindAttr,
+                    StringAttr::get(ctx, kStorageMemRefViewKind));
+            }
+            else
+            {
+                fieldValue = rewriter.create<sir::SLoadOp>(loc, u256Type, fieldSlot).getResult();
+
+                Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
+                if (!convertedFieldType)
+                    convertedFieldType = u256Type;
+                if (convertedFieldType != u256Type)
                 {
-                    fieldValue.getDefiningOp()->setAttr(
-                        kOraMaterializationKindAttr,
-                        StringAttr::get(ctx, kStorageMemRefViewKind));
+                    fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
                 }
             }
         }
@@ -348,6 +470,12 @@ static LogicalResult storeStructValueToStorageMemRefRoot(Operation *anchor,
                 anchor, loc, updatedValue, fieldSlot, nestedStructType, rewriter, typeConverter);
         }
         if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
+            fieldMemRefType && fieldMemRefType.hasStaticShape())
+        {
+            return copyStaticMemRefValueToStorageRoot(
+                anchor, loc, updatedValue, fieldSlot, fieldMemRefType, rewriter);
+        }
+        if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
             fieldMemRefType && !fieldMemRefType.hasStaticShape())
         {
             return storeDynamicMemRefValueToStorageMemRefRoot(
@@ -399,6 +527,15 @@ static LogicalResult storeStructValueToStorageMemRefRoot(Operation *anchor,
         if (auto nestedStructType = llvm::dyn_cast<ora::StructType>(fieldType))
         {
             if (failed(storeStructValueToStorageMemRefRoot(anchor, loc, stored, fieldSlot, nestedStructType, rewriter, typeConverter)))
+                return failure();
+            offset += getMemRefElementWordCount(anchor, fieldType);
+            continue;
+        }
+
+        if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
+            fieldMemRefType && fieldMemRefType.hasStaticShape())
+        {
+            if (failed(copyStaticMemRefValueToStorageRoot(anchor, loc, stored, fieldSlot, fieldMemRefType, rewriter)))
                 return failure();
             offset += getMemRefElementWordCount(anchor, fieldType);
             continue;
@@ -588,10 +725,10 @@ static Value getStorageBaseSlot(Value originalMemRef,
         auto structType = llvm::dyn_cast<ora::StructType>(extract.getStructValue().getType());
         size_t fieldIndex = 0;
         std::optional<uint64_t> fieldOffset;
-        if (memrefType && !memrefType.hasStaticShape() && structType)
+        if (memrefType && structType)
             fieldOffset = getStructFieldStorageOffset(
                 extract.getOperation(), structType, extract.getFieldName(), &fieldIndex);
-        if (memrefType && !memrefType.hasStaticShape() && !fieldOffset)
+        if (memrefType && !fieldOffset)
             fieldOffset = getStructFieldStorageOffsetByScan(
                 extract.getOperation(), extract.getFieldName(), extract.getResult().getType());
 
@@ -773,6 +910,13 @@ static Value buildStaticStorageMemRefSlot(ConversionPatternRewriter &rewriter,
 
     if (!linear)
         return baseSlot;
+    uint64_t elemWords = getMemRefElementWordCount(anchor, memrefType.getElementType());
+    if (elemWords != 1)
+    {
+        Value elemWordsConst = rewriter.create<sir::ConstOp>(
+            loc, u256Type, mlir::IntegerAttr::get(ui64Type, elemWords));
+        linear = rewriter.create<sir::MulOp>(loc, u256Type, linear, elemWordsConst);
+    }
     return rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, linear);
 }
 
@@ -1508,6 +1652,9 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
         }
     }
 
+    if (Value carrier = materializePointerBackedMemRefStoreCarrier(op.getValue(), memrefType, loc, rewriter))
+        value = carrier;
+
     Value storageBaseSlot = memrefType ? getStorageBaseSlot(op.getMemref(), memref, rewriter, loc) : Value();
     if (!storageBaseSlot && memrefType)
         storageBaseSlot = getStorageBaseSlotFromConvertedValue(memref);
@@ -1548,6 +1695,18 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
                             rewriter, getTypeConverter())))
                     {
                         return rewriter.notifyMatchFailure(op, "failed to store nested struct storage memref update");
+                    }
+                    rewriter.eraseOp(op);
+                    return success();
+                }
+
+                if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(updatedFieldType);
+                    fieldMemRefType && fieldMemRefType.hasStaticShape())
+                {
+                    if (failed(copyStaticMemRefValueToStorageRoot(
+                            op.getOperation(), loc, updatedValue, updatedFieldSlot, fieldMemRefType, rewriter)))
+                    {
+                        return rewriter.notifyMatchFailure(op, "failed to store static storage memref update");
                     }
                     rewriter.eraseOp(op);
                     return success();

@@ -29,6 +29,7 @@ using namespace ora;
 using mlir::ora::lowering::addStorageWordOffset;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getElementWordCount;
+using mlir::ora::lowering::getStaticMemRefWordCount;
 using mlir::ora::lowering::getStorageWordCount;
 using mlir::ora::lowering::getStructFieldStorageOffset;
 using mlir::ora::lowering::getStructFieldAttrs;
@@ -272,21 +273,6 @@ static LogicalResult storeDynamicBytesValueToStorageRoot(Operation *op,
     return success();
 }
 
-static std::optional<uint64_t> getStaticMemRefWordCount(Operation *anchor, mlir::MemRefType memrefType)
-{
-    if (!memrefType.hasStaticShape())
-        return std::nullopt;
-
-    uint64_t elements = 1;
-    for (int64_t dim : memrefType.getShape())
-    {
-        if (dim < 0)
-            return std::nullopt;
-        elements *= static_cast<uint64_t>(dim);
-    }
-    return elements * getElementWordCount(anchor, memrefType.getElementType());
-}
-
 static Value getStorageMemRefViewSlot(Value value);
 
 static LogicalResult copyStaticMemRefValueToStorageRoot(Operation *op,
@@ -400,23 +386,26 @@ static FailureOr<Value> loadStructValueFromStorageRoot(Operation *anchor,
         else
         {
             auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
-            const bool isDynamicMemRefField = fieldMemRefType && !fieldMemRefType.hasStaticShape();
-            if (isDynamicMemRefField)
-                fieldValue = fieldSlot;
+            if (fieldMemRefType)
+            {
+                Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
+                if (!convertedFieldType)
+                    convertedFieldType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldSlot);
+                fieldValue.getDefiningOp()->setAttr(
+                    kOraMaterializationKindAttr,
+                    StringAttr::get(ctx, kStorageMemRefViewKind));
+            }
             else
+            {
                 fieldValue = rewriter.create<sir::SLoadOp>(loc, u256Type, fieldSlot);
 
-            Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
-            if (!convertedFieldType)
-                convertedFieldType = u256Type;
-            if (convertedFieldType != u256Type)
-            {
-                fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
-                if (isDynamicMemRefField)
+                Type convertedFieldType = typeConverter ? typeConverter->convertType(fieldType) : Type();
+                if (!convertedFieldType)
+                    convertedFieldType = u256Type;
+                if (convertedFieldType != u256Type)
                 {
-                    fieldValue.getDefiningOp()->setAttr(
-                        kOraMaterializationKindAttr,
-                        StringAttr::get(ctx, kStorageMemRefViewKind));
+                    fieldValue = rewriter.create<sir::BitcastOp>(loc, convertedFieldType, fieldValue);
                 }
             }
         }
@@ -778,6 +767,12 @@ static LogicalResult storeStructValueToStorageRoot(Operation *anchor,
                 anchor, loc, updatedValue, fieldSlot, nestedStructType, rewriter, typeConverter);
         }
         if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
+            fieldMemRefType && fieldMemRefType.hasStaticShape())
+        {
+            return copyStaticMemRefValueToStorageRoot(
+                anchor, updatedValue, fieldSlot, fieldMemRefType, rewriter);
+        }
+        if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
             fieldMemRefType && !fieldMemRefType.hasStaticShape())
         {
             return storeDynamicMemRefToStorageRoot(
@@ -850,6 +845,15 @@ static LogicalResult storeStructValueToStorageRoot(Operation *anchor,
         {
             if (failed(storeStructValueToStorageRoot(
                     anchor, loc, stored, fieldSlot, nestedStructType, rewriter, typeConverter, &dynamicFieldStores)))
+                return failure();
+            offset += getStorageWordCount(anchor, fieldType);
+            continue;
+        }
+
+        if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
+            fieldMemRefType && fieldMemRefType.hasStaticShape())
+        {
+            if (failed(copyStaticMemRefValueToStorageRoot(anchor, stored, fieldSlot, fieldMemRefType, rewriter)))
                 return failure();
             offset += getStorageWordCount(anchor, fieldType);
             continue;
@@ -1342,6 +1346,14 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
                 {
                     return rewriter.notifyMatchFailure(op, "invalid nested struct field update for storage sstore");
                 }
+                rewriter.eraseOp(op);
+                return success();
+            }
+            if (auto fieldMemRefType = llvm::dyn_cast<mlir::MemRefType>(fieldType);
+                fieldMemRefType && fieldMemRefType.hasStaticShape())
+            {
+                if (failed(copyStaticMemRefValueToStorageRoot(op.getOperation(), updatedValue, fieldSlot, fieldMemRefType, rewriter)))
+                    return rewriter.notifyMatchFailure(op, "failed to store static storage memref update");
                 rewriter.eraseOp(op);
                 return success();
             }
