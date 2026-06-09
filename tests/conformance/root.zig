@@ -154,6 +154,19 @@ test "conformance arg encoder rejects wrong argument counts" {
 test "conformance slot expressions compute mapping and nested mapping slots" {
     try testing.expectEqual(slots.mappingSlot("address", "0x2000000000000000000000000000000000000000", 0), try slots.parseSlotExpression("map(address,0x2000000000000000000000000000000000000000,0)"));
 
+    var alpha_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash("alpha", &alpha_hash, .{});
+    const alpha_word = std.mem.readInt(u256, &alpha_hash, .big);
+    var alpha_slot_input: [64]u8 = undefined;
+    std.mem.writeInt(u256, alpha_slot_input[0..32], alpha_word, .big);
+    std.mem.writeInt(u256, alpha_slot_input[32..64], 0, .big);
+    var alpha_slot_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(&alpha_slot_input, &alpha_slot_hash, .{});
+    try testing.expectEqual(
+        std.mem.readInt(u256, &alpha_slot_hash, .big),
+        try slots.parseSlotExpression("map(string,alpha,0)"),
+    );
+
     const nested = try slots.parseSlotExpression("map(address,0x3000000000000000000000000000000000000000,map(address,0x2000000000000000000000000000000000000000,0))");
     const manual = try slots.mappingSlot("address", "0x3000000000000000000000000000000000000000", try slots.mappingSlot("address", "0x2000000000000000000000000000000000000000", 0));
     try testing.expectEqual(manual, nested);

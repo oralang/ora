@@ -1,0 +1,59 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "get_value(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["alpha"]
+returns = { u256 = 0 }
+
+[[call.storage]]
+slot = "map(string,alpha,0)"
+value = 0
+
+[[call]]
+fn = "set_value(string,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["alpha", 111]
+returns = {}
+
+[[call.storage]]
+slot = "map(string,alpha,0)"
+value = 111
+
+[[call.storage]]
+slot = "map(string,beta,0)"
+value = 0
+
+[[call]]
+fn = "set_value(string,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["beta", 222]
+returns = {}
+
+[[call.storage]]
+slot = "map(string,alpha,0)"
+value = 111
+
+[[call.storage]]
+slot = "map(string,beta,0)"
+value = 222
+
+[[call]]
+fn = "get_value(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["alpha"]
+returns = { u256 = 111 }
+
+[[call]]
+fn = "get_value(string)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["beta"]
+returns = { u256 = 222 }

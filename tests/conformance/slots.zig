@@ -40,11 +40,25 @@ fn callInner(text: []const u8, name: []const u8) ?[]const u8 {
 
 pub fn mappingSlot(wire_type: []const u8, key_text: []const u8, root_slot: u256) !u256 {
     var input: [64]u8 = undefined;
-    try abi.encodeStaticAbiWord(input[0..32], wire_type, try abi.parseArgValue(key_text));
+    if (std.mem.eql(u8, wire_type, "string")) {
+        std.mem.writeInt(u256, input[0..32], dynamicKeyHash(std.mem.trim(u8, key_text, " \t")), .big);
+    } else if (std.mem.eql(u8, wire_type, "bytes")) {
+        const bytes = try abi.parseHexBytes(std.heap.page_allocator, std.mem.trim(u8, key_text, " \t"));
+        defer std.heap.page_allocator.free(bytes);
+        std.mem.writeInt(u256, input[0..32], dynamicKeyHash(bytes), .big);
+    } else {
+        try abi.encodeStaticAbiWord(input[0..32], wire_type, try abi.parseArgValue(key_text));
+    }
     std.mem.writeInt(u256, input[32..64], root_slot, .big);
 
     var hash: [32]u8 = undefined;
     std.crypto.hash.sha3.Keccak256.hash(&input, &hash, .{});
+    return std.mem.readInt(u256, &hash, .big);
+}
+
+fn dynamicKeyHash(bytes: []const u8) u256 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(bytes, &hash, .{});
     return std.mem.readInt(u256, &hash, .big);
 }
 

@@ -1,0 +1,11 @@
+contract StringKeyMappingStorageSmoke {
+    storage var values: map<string, u256>;
+
+    pub fn set_value(key: string, value: u256) {
+        values[key] = value;
+    }
+
+    pub fn get_value(key: string) -> u256 {
+        return values[key];
+    }
+}
