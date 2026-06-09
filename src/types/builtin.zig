@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const TypeCategory = @import("type_info.zig").TypeCategory;
-
 pub const BuiltinTypeId = enum(u16) {
     u8,
     u16,
@@ -21,6 +19,42 @@ pub const BuiltinTypeId = enum(u16) {
     string,
     bytes,
     void,
+};
+
+pub const TypeCategory = enum {
+    // primitive categories
+    Integer,
+    String,
+    Bool,
+    Address,
+    Hex,
+    Bytes,
+
+    // complex type categories
+    Struct,
+    Bitfield,
+    Enum,
+    Contract,
+    Function,
+    Array,
+    Slice,
+    Map,
+    Tuple,
+    ErrorUnion,
+    Result,
+
+    // special categories
+    Void,
+    Error,
+    Module,
+    Type,
+    Unknown,
+
+    pub fn format(self: TypeCategory, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+        try writer.writeAll(@tagName(self));
+    }
 };
 
 pub const BuiltinTypeSpec = struct {
