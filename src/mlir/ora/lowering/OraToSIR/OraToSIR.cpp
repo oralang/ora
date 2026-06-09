@@ -12,6 +12,7 @@
 #include "patterns/EVM.h"
 #include "patterns/Logs.h"
 #include "patterns/MissingOps.h"
+#include "patterns/StorageLayout.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -775,6 +776,28 @@ static void assignGlobalSlots(ModuleOp module)
     SmallVector<NamedAttribute> slotAttrs;
     const bool requireExistingSlotMetadata = module->hasAttr("ora.global_slots_built");
 
+    auto storageWordCount = [](Operation &op) -> uint64_t
+    {
+        Type type;
+        if (auto globalOp = dyn_cast<ora::GlobalOp>(op))
+        {
+            type = globalOp.getGlobalType();
+        }
+        else if (auto typeAttr = op.getAttrOfType<TypeAttr>("type"))
+        {
+            type = typeAttr.getValue();
+        }
+
+        return mlir::ora::lowering::getStorageWordCount(&op, type);
+    };
+
+    auto advanceSlot = [](uint64_t &slot, uint64_t start, uint64_t words)
+    {
+        uint64_t next = start + (words == 0 ? 1 : words);
+        if (next > slot)
+            slot = next;
+    };
+
     auto assignInBlock = [&](Block &block)
     {
         uint64_t slot = 0;
@@ -782,6 +805,7 @@ static void assignGlobalSlots(ModuleOp module)
         {
             if (auto globalOp = dyn_cast<ora::GlobalOp>(op))
             {
+                uint64_t wordCount = storageWordCount(op);
                 if (globalOp->getAttrOfType<IntegerAttr>("ora.slot_index"))
                 {
                     auto nameAttr = globalOp->getAttrOfType<StringAttr>("sym_name");
@@ -790,12 +814,12 @@ static void assignGlobalSlots(ModuleOp module)
                     {
                         slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
                     }
-                    slot++;
+                    advanceSlot(slot, slotAttr.getUInt(), wordCount);
                     continue;
                 }
                 if (requireExistingSlotMetadata)
                 {
-                    slot++;
+                    advanceSlot(slot, slot, wordCount);
                     continue;
                 }
                 auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
@@ -805,7 +829,7 @@ static void assignGlobalSlots(ModuleOp module)
                 {
                     slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
                 }
-                slot++;
+                advanceSlot(slot, slotAttr.getUInt(), wordCount);
                 continue;
             }
 
@@ -813,6 +837,7 @@ static void assignGlobalSlots(ModuleOp module)
             auto opName = op.getName().getStringRef();
             if (opName == "ora.tstore.global" || opName == "ora.memory.global")
             {
+                uint64_t wordCount = storageWordCount(op);
                 auto nameAttr = op.getAttrOfType<StringAttr>("sym_name");
                 if (!nameAttr)
                 {
@@ -825,18 +850,18 @@ static void assignGlobalSlots(ModuleOp module)
                     {
                         slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
                     }
-                    slot++;
+                    advanceSlot(slot, slotAttr.getUInt(), wordCount);
                     continue;
                 }
                 if (requireExistingSlotMetadata)
                 {
-                    slot++;
+                    advanceSlot(slot, slot, wordCount);
                     continue;
                 }
                 auto slotAttr = mlir::IntegerAttr::get(ui64Type, slot);
                 op.setAttr("ora.slot_index", slotAttr);
                 slotAttrs.push_back(NamedAttribute(nameAttr, slotAttr));
-                slot++;
+                advanceSlot(slot, slotAttr.getUInt(), wordCount);
             }
         }
     };

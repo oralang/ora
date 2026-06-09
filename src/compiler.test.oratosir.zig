@@ -3197,16 +3197,18 @@ test "compiler storage layout manifest matches SIR slot usage" {
         \\    storage var balances: map<address, u256>;
         \\    storage var allowances: map<address, map<address, u256>>;
         \\    storage var history: [u256; 4];
+        \\    storage var after_history: u256;
         \\
         \\    pub fn write(who: address, spender: address, index: u256, amount: u256) {
         \\        balance = amount;
         \\        balances[who] = amount;
         \\        allowances[who][spender] = amount;
         \\        history[index] = amount;
+        \\        after_history = amount;
         \\    }
         \\
         \\    pub fn read(who: address, index: u256) -> u256 {
-        \\        return balance + balances[who] + history[index];
+        \\        return balance + balances[who] + history[index] + after_history;
         \\    }
         \\}
     ;
@@ -3224,6 +3226,7 @@ test "compiler storage layout manifest matches SIR slot usage" {
     try expectGlobalSlot(slots_json, "balances", 2);
     try expectGlobalSlot(slots_json, "allowances", 3);
     try expectGlobalSlot(slots_json, "history", 4);
+    try expectGlobalSlot(slots_json, "after_history", 8);
 
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);

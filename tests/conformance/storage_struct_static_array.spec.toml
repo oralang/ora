@@ -7,6 +7,13 @@ args = []
 fn = "get_body(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
+args = [0]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "get_body(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
 args = [1]
 returns = { u256 = 2 }
 
@@ -16,6 +23,13 @@ caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
 returns = { u256 = 99 }
+
+[[call]]
+fn = "get_marker()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 500 }
 
 [[call]]
 fn = "set_body(uint256,uint256)"
@@ -48,6 +62,10 @@ value = 4
 slot = 5
 value = 99
 
+[[call.storage]]
+slot = 6
+value = 500
+
 [[call]]
 fn = "get_body(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -61,3 +79,10 @@ caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
 returns = { u256 = 99 }
+
+[[call]]
+fn = "get_marker()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 500 }
