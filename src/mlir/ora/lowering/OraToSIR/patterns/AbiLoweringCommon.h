@@ -25,7 +25,7 @@ namespace mlir::ora::abi_lowering
     using mlir::ora::lowering::ceil32;
     using mlir::ora::lowering::constU256;
     using mlir::ora::lowering::decodeFixedBytesAbiWord;
-    using mlir::ora::lowering::ensureU256;
+    using mlir::ora::lowering::coerceToU256;
     using mlir::ora::lowering::FixedBytesWordDecode;
     using mlir::ora::lowering::maskLowBits;
 
@@ -409,7 +409,7 @@ namespace mlir::ora::abi_lowering
         if (llvm::isa<sir::U256Type>(basePtr.getType()) ||
             llvm::isa<mlir::IntegerType>(basePtr.getType()))
         {
-            basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, ensureU256(rewriter, loc, basePtr));
+            basePtr = rewriter.create<sir::BitcastOp>(loc, ptrType, coerceToU256(rewriter, loc, basePtr));
         }
         else if (!llvm::isa<sir::PtrType>(basePtr.getType()))
         {
@@ -455,7 +455,7 @@ namespace mlir::ora::abi_lowering
             // literal layout.
             return rewriter.create<sir::LoadOp>(loc, u256Type, dataPtr);
         }
-        Value value = ensureU256(rewriter, loc, operand);
+        Value value = coerceToU256(rewriter, loc, operand);
         switch (leaf.kind)
         {
         case AbiStaticKind::Uint:

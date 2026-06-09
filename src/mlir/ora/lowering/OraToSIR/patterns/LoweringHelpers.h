@@ -53,14 +53,6 @@ namespace mlir::ora::lowering
         return constU256(rewriter, loc, value);
     }
 
-    inline Value coerceToU256(OpBuilder &rewriter, Location loc, Value value)
-    {
-        if (llvm::isa<sir::U256Type>(value.getType()))
-            return value;
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
-        return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-    }
-
     inline Value maskLowBits(OpBuilder &rewriter, Location loc, Value value, unsigned bits)
     {
         if (bits >= 256)
@@ -169,15 +161,17 @@ namespace mlir::ora::lowering
         return Value();
     }
 
-    inline Value ensureU256(OpBuilder &rewriter, Location loc, Value value)
+    // Explicit carrier relabel. Use only at sites that have already established
+    // the value is representable as a u256 carrier.
+    inline Value coerceToU256(OpBuilder &rewriter, Location loc, Value value)
     {
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
         if (Value existing = existingU256Value(value))
             return existing;
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
         return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
     }
 
-    inline Value ensureU256Strict(PatternRewriter &rewriter, Location loc, Operation *anchor, Value value, llvm::StringRef context)
+    inline Value ensureU256(PatternRewriter &rewriter, Location loc, Operation *anchor, Value value, llvm::StringRef context)
     {
         (void)loc;
         if (Value existing = existingU256Value(value))

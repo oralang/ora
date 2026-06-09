@@ -17,6 +17,7 @@
 using namespace mlir;
 using namespace ora;
 using namespace mlir::ora::abi_lowering;
+using mlir::ora::lowering::coerceToU256;
 
 namespace
 {
@@ -282,7 +283,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         // precondition and documents the intended future scalar entry point.
         auto u256Type = sir::U256Type::get(rewriter.getContext());
         Value one = constU256(rewriter, loc, 1);
-        Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, ensureU256(rewriter, loc, payload));
+        Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, coerceToU256(rewriter, loc, payload));
         if (!isError)
             return shifted;
         return rewriter.create<sir::OrOp>(loc, u256Type, shifted, one);
@@ -589,7 +590,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         Value decodedOk = rewriter.create<sir::EqOp>(loc, u256Type, decoded.tag, zero);
         Value oversizeApplies = rewriter.create<sir::AndOp>(loc, u256Type, tooLong, decodedOk);
 
-        Value payloadBits = ensureU256(rewriter, loc, decoded.payload);
+        Value payloadBits = coerceToU256(rewriter, loc, decoded.payload);
         Value oversize = abiDecodeErrorValue(rewriter, loc, AbiDecodeError::OversizeBuffer);
 
         Value tag = rewriter.create<sir::SelectOp>(loc, u256Type, oversizeApplies, one, decoded.tag);
@@ -1246,7 +1247,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                 !llvm::isa<sir::PtrType>(errorPayload.getType()))
             {
                 Value ptr = rewriter.create<sir::MallocOp>(op.getLoc(), convertedResultTypes[1], constU256(rewriter, op.getLoc(), 32));
-                rewriter.create<sir::StoreOp>(op.getLoc(), ptr, ensureU256(rewriter, op.getLoc(), errorPayload));
+                rewriter.create<sir::StoreOp>(op.getLoc(), ptr, coerceToU256(rewriter, op.getLoc(), errorPayload));
                 return ptr;
             }
             if (convertedResultTypes.size() == 2 && errorPayload.getType() != convertedResultTypes[1])
@@ -1323,7 +1324,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                 rewriter.create<sir::CondBrOp>(op.getLoc(), isOk, ValueRange{}, ValueRange{}, successBlock, errorBlock);
 
                 rewriter.setInsertionPointToStart(errorBlock);
-                if (failed(resultSink.branchErrorPayload(ensureU256(rewriter, op.getLoc(), value.payload), materializeMemoryResultErrorPayload)))
+                if (failed(resultSink.branchErrorPayload(coerceToU256(rewriter, op.getLoc(), value.payload), materializeMemoryResultErrorPayload)))
                     return failure();
 
                 rewriter.setInsertionPointToStart(successBlock);
@@ -1400,7 +1401,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{constU256(rewriter, op.getLoc(), 1), errorValue}, resultBlock);
 
             rewriter.setInsertionPointToStart(okBlock);
-            Value payloadBits = ensureU256(rewriter, op.getLoc(), successPayloadBits());
+            Value payloadBits = coerceToU256(rewriter, op.getLoc(), successPayloadBits());
             rewriter.create<sir::BrOp>(op.getLoc(), ValueRange{constU256(rewriter, op.getLoc(), 0), payloadBits}, resultBlock);
 
             rewriter.setInsertionPointToStart(resultBlock);
@@ -1415,7 +1416,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             Value tuplePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, tupleSize);
             rewriter.create<sir::StoreOp>(op.getLoc(), tuplePtr, firstWord);
             Value tailSlot = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tuplePtr, constU256(rewriter, op.getLoc(), 32));
-            rewriter.create<sir::StoreOp>(op.getLoc(), tailSlot, ensureU256(rewriter, op.getLoc(), tailPtr));
+            rewriter.create<sir::StoreOp>(op.getLoc(), tailSlot, coerceToU256(rewriter, op.getLoc(), tailPtr));
             return tuplePtr;
         };
 
@@ -1527,7 +1528,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                 rewriter.setInsertionPointToStart(okBlock);
                 Value payloadBits = successPayloadBits(tailPtr);
                 if (!llvm::isa<sir::PtrType>(payloadCarrierType))
-                    payloadBits = ensureU256(rewriter, op.getLoc(), payloadBits);
+                    payloadBits = coerceToU256(rewriter, op.getLoc(), payloadBits);
                 if (failed(emitWideResultBranch(
                         WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), payloadBits},
                         payloadCarrierType,
@@ -1677,7 +1678,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                     rewriter.setInsertionPointToStart(okBlock);
                     Value payload = successPayloadBits(tailPtr);
                     if (!llvm::isa<sir::PtrType>(payloadCarrierType))
-                        payload = ensureU256(rewriter, op.getLoc(), payload);
+                        payload = coerceToU256(rewriter, op.getLoc(), payload);
                     if (!llvm::isa<sir::PtrType>(payloadCarrierType) && payload.getType() != payloadCarrierType)
                         payload = rewriter.create<sir::BitcastOp>(op.getLoc(), payloadCarrierType, payload);
                     if (failed(emitWideResultBranch(WideAbiDecodeResult{constU256(rewriter, op.getLoc(), 0), payload}, payloadCarrierType, requiredDynamic)))
@@ -1880,7 +1881,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             Value okPayload = decodedTuple->value;
             if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, op.getLoc(), payloadCarrierType, okPayload))
                 okPayload = *materialized;
-            Value okPayloadBits = ensureU256(rewriter, op.getLoc(), okPayload);
+            Value okPayloadBits = coerceToU256(rewriter, op.getLoc(), okPayload);
             // Wide Result consumers must inspect the tag first. The selected
             // Err payload bits are an AbiDecodeError ordinal, not a success value.
             Value payloadBits = rewriter.create<sir::SelectOp>(op.getLoc(), u256Type, decodedTuple->valid, okPayloadBits, decodedTuple->error);
@@ -1946,7 +1947,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             {
                 Value size = constU256(rewriter, op.getLoc(), 32);
                 Value ptr = rewriter.create<sir::MallocOp>(op.getLoc(), convertedResultTypes[1], size);
-                rewriter.create<sir::StoreOp>(op.getLoc(), ptr, ensureU256(rewriter, op.getLoc(), payload));
+                rewriter.create<sir::StoreOp>(op.getLoc(), ptr, coerceToU256(rewriter, op.getLoc(), payload));
                 payload = ptr;
             }
             else if (payload.getType() != convertedResultTypes[1])
@@ -1969,8 +1970,8 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             Value tuplePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, tupleSize);
             rewriter.create<sir::StoreOp>(op.getLoc(), tuplePtr, firstWord);
             Value tailSlot = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, tuplePtr, constU256(rewriter, op.getLoc(), 32));
-            rewriter.create<sir::StoreOp>(op.getLoc(), tailSlot, ensureU256(rewriter, op.getLoc(), tailPtr));
-            return ensureU256(rewriter, op.getLoc(), tuplePtr);
+            rewriter.create<sir::StoreOp>(op.getLoc(), tailSlot, coerceToU256(rewriter, op.getLoc(), tailPtr));
+            return coerceToU256(rewriter, op.getLoc(), tuplePtr);
         };
 
         auto computeReturndataWordArrayRequiredBytes = [&]() {
@@ -2380,8 +2381,8 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             Value okPayload = decoded->value;
             if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, op.getLoc(), payloadCarrierType, okPayload))
                 okPayload = *materialized;
-            Value okPayloadBits = ensureU256(rewriter, op.getLoc(), okPayload);
-            Value errPayloadBits = ensureU256(rewriter, op.getLoc(), decoded->error);
+            Value okPayloadBits = coerceToU256(rewriter, op.getLoc(), okPayload);
+            Value errPayloadBits = coerceToU256(rewriter, op.getLoc(), decoded->error);
             Value tag = rewriter.create<sir::SelectOp>(op.getLoc(), u256Type, decoded->valid, zero, one);
             Value payload = rewriter.create<sir::SelectOp>(op.getLoc(), u256Type, decoded->valid, okPayloadBits, errPayloadBits);
             if (failed(resultSink.branchWide(WideAbiDecodeResult{tag, payload})))

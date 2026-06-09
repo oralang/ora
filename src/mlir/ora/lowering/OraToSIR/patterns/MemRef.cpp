@@ -24,7 +24,7 @@ using namespace mlir;
 using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
-using mlir::ora::lowering::ensureU256Strict;
+using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getMemRefElementWordCount;
 using mlir::ora::lowering::getStructFieldAttrs;
 using mlir::ora::lowering::kStorageMemRefViewKind;
@@ -835,7 +835,7 @@ static Value buildStaticStorageMemRefSlot(ConversionPatternRewriter &rewriter,
     int64_t stride = 1;
     for (int64_t i = rank - 1; i >= 0; --i)
     {
-        Value idx = ensureU256Strict(rewriter, loc, anchor, indices[i], "storage memref index");
+        Value idx = ensureU256(rewriter, loc, anchor, indices[i], "storage memref index");
         if (!idx)
             return Value();
         Value strideConst = rewriter.create<sir::ConstOp>(
@@ -864,7 +864,7 @@ static Value buildDynamicStorageMemRefSlot(ConversionPatternRewriter &rewriter,
     auto u256Type = sir::U256Type::get(ctx);
     auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
     Value dataBase = buildDynamicStorageMemRefBase(rewriter, loc, baseSlot);
-    Value indexU256 = ensureU256Strict(rewriter, loc, anchor, indices[0], "dynamic storage memref index");
+    Value indexU256 = ensureU256(rewriter, loc, anchor, indices[0], "dynamic storage memref index");
     if (!indexU256)
         return Value();
     uint64_t elemWords = getMemRefElementWordCount(anchor, memrefType.getElementType());
@@ -1128,7 +1128,7 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
 
         auto u256Type = sir::U256Type::get(ctx);
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        Value length = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getDynamicSizes().front(), "dynamic memref length");
+        Value length = ensureU256(rewriter, loc, op.getOperation(), adaptor.getDynamicSizes().front(), "dynamic memref length");
         if (!length)
             return failure();
         Value elementSize = rewriter.create<sir::ConstOp>(

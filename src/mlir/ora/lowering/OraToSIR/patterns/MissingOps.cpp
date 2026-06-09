@@ -21,8 +21,8 @@
 
 using namespace mlir;
 using namespace ora;
+using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::ensureU256;
-using mlir::ora::lowering::ensureU256Strict;
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
@@ -94,18 +94,18 @@ static FailureOr<Value> lowerAdtPayloadToCarrier(
     Value payloadValue)
 {
     if (!ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
-        return ensureU256(rewriter, loc, payloadValue);
+        return coerceToU256(rewriter, loc, payloadValue);
 
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
-        return ensureU256(rewriter, loc, *ptr);
+        return coerceToU256(rewriter, loc, *ptr);
 
     if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
-        return ensureU256(rewriter, loc, payloadValue);
+        return coerceToU256(rewriter, loc, payloadValue);
 
     if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
         if (cast.getNumOperands() == 1 && llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
-            return ensureU256(rewriter, loc, cast.getOperand(0));
+            return coerceToU256(rewriter, loc, cast.getOperand(0));
 
     return failure();
 }
@@ -128,7 +128,7 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     auto loc = op.getLoc();
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
-    Value condition = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getCondition(), "refinement guard condition");
+    Value condition = ensureU256(rewriter, loc, op.getOperation(), adaptor.getCondition(), "refinement guard condition");
     if (!condition)
         return failure();
 
@@ -171,8 +171,8 @@ LogicalResult ConvertPowerOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value base = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getBase(), "power base");
-    Value exp = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getExponent(), "power exponent");
+    Value base = ensureU256(rewriter, loc, op.getOperation(), adaptor.getBase(), "power base");
+    Value exp = ensureU256(rewriter, loc, op.getOperation(), adaptor.getExponent(), "power exponent");
     if (!base || !exp)
         return failure();
     rewriter.replaceOpWithNewOp<sir::ExpOp>(op, u256Type, base, exp);
@@ -227,7 +227,7 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    Value val = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
+    Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
     if (!val)
         return failure();
 
@@ -265,7 +265,7 @@ LogicalResult ConvertMLoad8Op::matchAndRewrite(
     // If base is not a ptr, bitcast it.
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
-    Value offset = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mload8 offset");
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mload8 offset");
     if (!offset)
         return failure();
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
@@ -287,8 +287,8 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
 
     Value base = adaptor.getBase();
-    Value offset = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mstore8 offset");
-    Value val = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore8 value");
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mstore8 offset");
+    Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore8 value");
     if (!offset || !val)
         return failure();
     if (!llvm::isa<sir::PtrType>(base.getType()))

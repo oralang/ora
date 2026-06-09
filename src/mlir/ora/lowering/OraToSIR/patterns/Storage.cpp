@@ -27,7 +27,7 @@ using namespace mlir;
 using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
-using mlir::ora::lowering::ensureU256Strict;
+using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getElementWordCount;
 using mlir::ora::lowering::getStorageWordCount;
 using mlir::ora::lowering::getStructFieldAttrs;
@@ -143,7 +143,7 @@ static FailureOr<Value> materializeStorageMapKey(Operation *op,
         return rewriter.create<sir::KeccakOp>(loc, u256Type, payload, length).getResult();
     }
 
-    Value keyU256 = ensureU256Strict(rewriter, loc, op, key, context);
+    Value keyU256 = ensureU256(rewriter, loc, op, key, context);
     if (!keyU256)
         return failure();
     return keyU256;
@@ -915,7 +915,7 @@ static LogicalResult storeStructValueToStorageRoot(Operation *anchor,
 
 static Value buildIndexFromU256(ConversionPatternRewriter &rewriter, Location loc, Operation *anchor, Value value)
 {
-    return ensureU256Strict(rewriter, loc, anchor, value, "storage index");
+    return ensureU256(rewriter, loc, anchor, value, "storage index");
 }
 
 // -----------------------------------------------------------------------------
@@ -971,8 +971,8 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
     SmallVector<Value, 2> parts;
     if (operands.size() == 2)
     {
-        Value tag = ensureU256Strict(rewriter, loc, op.getOperation(), operands[0], "ADT storage tag");
-        Value payload = ensureU256Strict(rewriter, loc, op.getOperation(), operands[1], "ADT storage payload");
+        Value tag = ensureU256(rewriter, loc, op.getOperation(), operands[0], "ADT storage tag");
+        Value payload = ensureU256(rewriter, loc, op.getOperation(), operands[1], "ADT storage payload");
         if (!tag || !payload)
             return failure();
         parts.push_back(tag);
@@ -1005,13 +1005,13 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
                     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
                     if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
                     {
-                        payload = ensureU256Strict(rewriter, loc, op.getOperation(), *ptr, "aggregate ADT storage payload");
+                        payload = ensureU256(rewriter, loc, op.getOperation(), *ptr, "aggregate ADT storage payload");
                         if (!payload)
                             return failure();
                     }
                     else if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
                     {
-                        payload = ensureU256Strict(rewriter, loc, op.getOperation(), payloadValue, "aggregate ADT storage payload");
+                        payload = ensureU256(rewriter, loc, op.getOperation(), payloadValue, "aggregate ADT storage payload");
                         if (!payload)
                             return failure();
                     }
@@ -1020,7 +1020,7 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
                 }
                 else
                 {
-                    payload = ensureU256Strict(rewriter, loc, op.getOperation(), payloadValue, "ADT storage payload");
+                    payload = ensureU256(rewriter, loc, op.getOperation(), payloadValue, "ADT storage payload");
                     if (!payload)
                         return failure();
                 }
@@ -2051,7 +2051,7 @@ LogicalResult ConvertMapStoreOp::matchAndRewrite(
                 setResultName(slotOp, 0, ("slot_" + globalName).str());
             }
         }
-        Value indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), key, "array map_store index");
+        Value indexU256 = ensureU256(rewriter, loc, op.getOperation(), key, "array map_store index");
         if (!indexU256)
             return failure();
         uint64_t elemWords = getElementWordCount(op.getOperation(), tensorType.getElementType());
@@ -2266,7 +2266,7 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
     Value indexU256;
     if (tensorType.getRank() == 1)
     {
-        indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.insert index");
+        indexU256 = ensureU256(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.insert index");
         if (!indexU256)
             return failure();
     }
@@ -2280,7 +2280,7 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
         int64_t stride = 1;
         for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
         {
-            Value idx = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.insert index");
+            Value idx = ensureU256(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.insert index");
             if (!idx)
                 return failure();
             Value strideConst = rewriter.create<sir::ConstOp>(
@@ -2319,7 +2319,7 @@ LogicalResult ConvertTensorInsertOp::matchAndRewrite(
         return success();
     }
 
-    Value storedValue = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getScalar(), "tensor.insert scalar");
+    Value storedValue = ensureU256(rewriter, loc, op.getOperation(), adaptor.getScalar(), "tensor.insert scalar");
     if (!storedValue)
         return failure();
     rewriter.create<sir::SStoreOp>(loc, slot, storedValue);
@@ -2355,7 +2355,7 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
     Value indexU256 = Value();
     if (tensorType.getRank() == 1)
     {
-        indexU256 = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.extract index");
+        indexU256 = ensureU256(rewriter, loc, op.getOperation(), adaptor.getIndices()[0], "tensor.extract index");
         if (!indexU256)
             return failure();
     }
@@ -2372,7 +2372,7 @@ LogicalResult ConvertTensorExtractOp::matchAndRewrite(
         int64_t stride = 1;
         for (int64_t i = tensorType.getRank() - 1; i >= 0; --i)
         {
-            Value idx = ensureU256Strict(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.extract index");
+            Value idx = ensureU256(rewriter, loc, op.getOperation(), adaptor.getIndices()[i], "tensor.extract index");
             if (!idx)
                 return failure();
             Value strideConst = rewriter.create<sir::ConstOp>(

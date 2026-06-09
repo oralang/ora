@@ -15,6 +15,7 @@
 using namespace mlir;
 using namespace ora;
 using namespace mlir::ora::abi_lowering;
+using mlir::ora::lowering::coerceToU256;
 
 namespace
 {
@@ -44,7 +45,7 @@ namespace
             return {};
         if (llvm::isa<sir::PtrType>(operand.getType()))
             return operand;
-        return rewriter.create<sir::BitcastOp>(loc, ptrType, ensureU256(rewriter, loc, operand));
+        return rewriter.create<sir::BitcastOp>(loc, ptrType, coerceToU256(rewriter, loc, operand));
     }
 
     static bool isPointerBackedAggregateNode(const AbiLayoutNode &node)
@@ -1151,8 +1152,8 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         mlir::IntegerAttr::get(ui64Type, 32));
     Value scratchReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, scratchReturnLen);
     Value calldataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getCalldata());
-    Value gas = ensureU256(rewriter, op.getLoc(), adaptor.getGas());
-    Value target = ensureU256(rewriter, op.getLoc(), adaptor.getTarget());
+    Value gas = coerceToU256(rewriter, op.getLoc(), adaptor.getGas());
+    Value target = coerceToU256(rewriter, op.getLoc(), adaptor.getTarget());
 
     Operation *callOp = nullptr;
     if (callKind.getValue() == "staticcall")

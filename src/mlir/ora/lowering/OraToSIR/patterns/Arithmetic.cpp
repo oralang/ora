@@ -20,8 +20,8 @@
 
 using namespace mlir;
 using namespace ora;
+using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::constU256;
-using mlir::ora::lowering::ensureU256;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -54,7 +54,7 @@ static unsigned integerCarrierSourceWidth(Type type)
 static Value signExtendToU256(ConversionPatternRewriter &rewriter, Location loc, Value value, Type sourceType)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value input = ensureU256(rewriter, loc, value);
+    Value input = coerceToU256(rewriter, loc, value);
     unsigned sourceWidth = integerCarrierSourceWidth(sourceType);
     if (sourceWidth >= 256)
         return input;
@@ -81,8 +81,8 @@ static LogicalResult lowerBinaryOp(SourceOp op,
     if (!resultType)
         return rewriter.notifyMatchFailure(op, ("unable to convert " + opName + " result type").str());
 
-    Value lhs = ensureU256(rewriter, loc, adaptor.getLhs());
-    Value rhs = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value lhs = coerceToU256(rewriter, loc, adaptor.getLhs());
+    Value rhs = coerceToU256(rewriter, loc, adaptor.getRhs());
     Value result = rewriter.create<SirOp>(loc, u256Type, lhs, rhs).getResult();
     if (!isU256IntegerCarrierType(resultType))
         result = rewriter.create<sir::BitcastOp>(loc, resultType, result).getResult();
@@ -125,8 +125,8 @@ static LogicalResult lowerShiftOp(SourceOp op,
                                   StringRef opName)
 {
     auto loc = op.getLoc();
-    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
-    Value value = ensureU256(rewriter, loc, adaptor.getLhs());
+    Value shift = coerceToU256(rewriter, loc, adaptor.getRhs());
+    Value value = coerceToU256(rewriter, loc, adaptor.getLhs());
     auto u256Type = sir::U256Type::get(op.getContext());
     Value shifted = rewriter.create<SirOp>(loc, u256Type, shift, value).getResult();
 
@@ -156,7 +156,7 @@ static LogicalResult lowerSignedRightShiftOp(SourceOp op,
                                              StringRef opName)
 {
     auto loc = op.getLoc();
-    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value shift = coerceToU256(rewriter, loc, adaptor.getRhs());
     Value value = signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType());
     auto u256Type = sir::U256Type::get(op.getContext());
     Value shifted = rewriter.create<SirOp>(loc, u256Type, shift, value).getResult();
@@ -312,8 +312,8 @@ static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc,
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     if (isZeroConst(value) || isAlreadyMasked160(value))
-        return ensureU256(rewriter, loc, value);
-    Value v = ensureU256(rewriter, loc, value);
+        return coerceToU256(rewriter, loc, value);
+    Value v = coerceToU256(rewriter, loc, value);
 
     llvm::APInt maskValue(256, 0);
     maskValue.setLowBits(160);
@@ -345,8 +345,8 @@ LogicalResult ConvertCmpOp::matchAndRewrite(
         lhs = maskAddressTo160(rewriter, loc, lhs);
     if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(op.getRhs().getType()))
         rhs = maskAddressTo160(rewriter, loc, rhs);
-    lhs = ensureU256(rewriter, loc, lhs);
-    rhs = ensureU256(rewriter, loc, rhs);
+    lhs = coerceToU256(rewriter, loc, lhs);
+    rhs = coerceToU256(rewriter, loc, rhs);
     auto u256Type = sir::U256Type::get(ctx);
 
     auto makeEq = [&]() -> Value {
@@ -590,7 +590,7 @@ LogicalResult ConvertByteAtOp::matchAndRewrite(
     if (!llvm::isa<sir::PtrType>(source.getType()))
         source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
 
-    Value index = ensureU256(rewriter, loc, operands[1]);
+    Value index = coerceToU256(rewriter, loc, operands[1]);
     Value headerSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
     Value offset = rewriter.create<sir::AddOp>(loc, u256Type, headerSize, index);
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, offset);
@@ -671,8 +671,8 @@ LogicalResult ConvertSliceOp::matchAndRewrite(
     if (!llvm::isa<sir::PtrType>(source.getType()))
         source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
 
-    Value start = ensureU256(rewriter, loc, operands[1]);
-    Value length = ensureU256(rewriter, loc, operands[2]);
+    Value start = coerceToU256(rewriter, loc, operands[1]);
+    Value length = coerceToU256(rewriter, loc, operands[2]);
     Value headerSize = constU256(rewriter, loc, evm::kWordBytes);
 
     if (auto resultMemRef = llvm::dyn_cast<mlir::MemRefType>(op->getResult(0).getType()))
@@ -1076,7 +1076,7 @@ LogicalResult ConvertAssertOp::matchAndRewrite(
         emitPanicRevert(rewriter, loc, 1);
 
     rewriter.setInsertionPointToEnd(parentBlock);
-    Value cond = ensureU256(rewriter, loc, adaptor.getCondition());
+    Value cond = coerceToU256(rewriter, loc, adaptor.getCondition());
     Value isZero = rewriter.create<sir::IsZeroOp>(loc, sir::U256Type::get(rewriter.getContext()), cond);
     rewriter.create<sir::CondBrOp>(
         loc,
@@ -1526,11 +1526,11 @@ LogicalResult ConvertShrWrappingOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    Value shift = ensureU256(rewriter, loc, adaptor.getRhs());
+    Value shift = coerceToU256(rewriter, loc, adaptor.getRhs());
     auto intType = llvm::dyn_cast<ora::IntegerType>(op.getLhs().getType());
     Value value = (intType && intType.getIsSigned())
         ? signExtendToU256(rewriter, loc, adaptor.getLhs(), op.getLhs().getType())
-        : ensureU256(rewriter, loc, adaptor.getLhs());
+        : coerceToU256(rewriter, loc, adaptor.getLhs());
     auto u256Type = sir::U256Type::get(op.getContext());
     Value shifted = (intType && intType.getIsSigned())
         ? rewriter.create<sir::SarOp>(loc, u256Type, shift, value).getResult()
@@ -1566,9 +1566,9 @@ LogicalResult ConvertArithSelectOp::matchAndRewrite(
 
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(op.getContext());
-    Value cond = ensureU256(rewriter, loc, adaptor.getCondition());
-    Value trueVal = ensureU256(rewriter, loc, adaptor.getTrueValue());
-    Value falseVal = ensureU256(rewriter, loc, adaptor.getFalseValue());
+    Value cond = coerceToU256(rewriter, loc, adaptor.getCondition());
+    Value trueVal = coerceToU256(rewriter, loc, adaptor.getTrueValue());
+    Value falseVal = coerceToU256(rewriter, loc, adaptor.getFalseValue());
 
     // SIR select is strictly u256-typed. Cast the selected word back when the
     // converted target type is narrower/non-u256.
@@ -1626,7 +1626,7 @@ LogicalResult ConvertArithExtSIOp::matchAndRewrite(
 
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value input = ensureU256(rewriter, loc, adaptor.getIn());
+    Value input = coerceToU256(rewriter, loc, adaptor.getIn());
 
     unsigned sourceWidth = op.getIn().getType().getIntOrFloatBitWidth();
     if (sourceWidth < 256)
@@ -1724,7 +1724,7 @@ LogicalResult ConvertArithTruncIOp::matchAndRewrite(
     // Emit AND with low-bits mask: (1 << targetWidth) - 1
     llvm::APInt mask = llvm::APInt::getLowBitsSet(256, targetWidth);
     Value maskConst = rewriter.create<sir::ConstOp>(loc, mask);
-    Value inputU256 = ensureU256(rewriter, loc, input);
+    Value inputU256 = coerceToU256(rewriter, loc, input);
     Value masked = rewriter.create<sir::AndOp>(loc, u256Type, inputU256, maskConst);
 
     if (!isU256IntegerCarrierType(resultType))
