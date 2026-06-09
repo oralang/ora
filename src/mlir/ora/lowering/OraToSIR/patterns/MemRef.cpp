@@ -332,24 +332,15 @@ static LogicalResult storeStructValueToStorageMemRefRoot(Operation *anchor,
 
     if (auto update = value.getDefiningOp<ora::StructFieldUpdateOp>())
     {
-        std::optional<size_t> updatedFieldIndex;
-        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
-        {
-            if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == update.getFieldName())
-            {
-                updatedFieldIndex = i;
-                break;
-            }
-        }
-        if (!updatedFieldIndex)
+        size_t updatedFieldIndex = 0;
+        auto fieldOffset = getStructFieldStorageOffset(
+            anchor, structType, update.getFieldName(), &updatedFieldIndex);
+        if (!fieldOffset)
             return failure();
 
-        uint64_t fieldOffset = 0;
-        for (size_t i = 0; i < *updatedFieldIndex; ++i)
-            fieldOffset += getMemRefElementWordCount(anchor, cast<TypeAttr>(fieldTypesAttr[i]).getValue());
-        Value fieldSlot = addStorageWordOffset(loc, slot, fieldOffset, rewriter);
+        Value fieldSlot = addStorageWordOffset(loc, slot, *fieldOffset, rewriter);
 
-        Type fieldType = cast<TypeAttr>(fieldTypesAttr[*updatedFieldIndex]).getValue();
+        Type fieldType = cast<TypeAttr>(fieldTypesAttr[updatedFieldIndex]).getValue();
         Value updatedValue = update.getValue();
         if (auto nestedStructType = llvm::dyn_cast<ora::StructType>(fieldType))
         {
@@ -1540,24 +1531,15 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
 
             if (auto update = op.getValue().getDefiningOp<ora::StructFieldUpdateOp>())
             {
-                std::optional<size_t> updatedFieldIndex;
-                for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
-                {
-                    if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == update.getFieldName())
-                    {
-                        updatedFieldIndex = i;
-                        break;
-                    }
-                }
-                if (!updatedFieldIndex)
+                size_t updatedFieldIndex = 0;
+                auto updatedFieldOffset = getStructFieldStorageOffset(
+                    op.getOperation(), structType, update.getFieldName(), &updatedFieldIndex);
+                if (!updatedFieldOffset)
                     return rewriter.notifyMatchFailure(op, "unknown struct field in storage memref update");
 
-                uint64_t updatedFieldOffset = 0;
-                for (size_t i = 0; i < *updatedFieldIndex; ++i)
-                    updatedFieldOffset += getMemRefElementWordCount(op.getOperation(), cast<TypeAttr>(fieldTypesAttr[i]).getValue());
-                Value updatedFieldSlot = addStorageWordOffset(loc, slot, updatedFieldOffset, rewriter);
+                Value updatedFieldSlot = addStorageWordOffset(loc, slot, *updatedFieldOffset, rewriter);
 
-                Type updatedFieldType = cast<TypeAttr>(fieldTypesAttr[*updatedFieldIndex]).getValue();
+                Type updatedFieldType = cast<TypeAttr>(fieldTypesAttr[updatedFieldIndex]).getValue();
                 Value updatedValue = update.getValue();
                 if (auto nestedStructType = llvm::dyn_cast<ora::StructType>(updatedFieldType))
                 {
