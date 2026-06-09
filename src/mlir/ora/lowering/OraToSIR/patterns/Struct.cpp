@@ -15,66 +15,15 @@ using namespace mlir;
 using namespace mlir::ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
-using mlir::ora::lowering::getStorageWordCount;
+using mlir::ora::lowering::getStructFieldStorageOffset;
+using mlir::ora::lowering::getStructFields;
+using mlir::ora::lowering::getStructFieldsFromDecl;
 using mlir::ora::lowering::kStorageMemRefViewKind;
 using mlir::ora::lowering::kStorageStructCarrierKind;
 using mlir::ora::lowering::kStorageStructViewFieldsAttr;
 
 namespace
 {
-    static LogicalResult getStructFieldsFromDecl(ora::StructDeclOp structDecl, SmallVectorImpl<StringRef> &names, SmallVectorImpl<Type> &types)
-    {
-        auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
-        auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
-        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
-        {
-            return failure();
-        }
-
-        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
-        {
-            auto nameAttr = cast<StringAttr>(fieldNamesAttr[i]);
-            auto typeAttr = cast<TypeAttr>(fieldTypesAttr[i]);
-            names.push_back(nameAttr.getValue());
-            types.push_back(typeAttr.getValue());
-        }
-
-        return success();
-    }
-
-    static ora::StructDeclOp findStructDecl(Operation *op, StringRef structName)
-    {
-        ModuleOp module = op->getParentOfType<ModuleOp>();
-        if (!module)
-        {
-            return nullptr;
-        }
-
-        ora::StructDeclOp structDecl = nullptr;
-        module.walk([&](ora::StructDeclOp declOp)
-                    {
-            auto nameAttr = declOp->getAttrOfType<StringAttr>("sym_name");
-            if (nameAttr && nameAttr.getValue() == structName)
-            {
-                structDecl = declOp;
-                return WalkResult::interrupt();
-            }
-            return WalkResult::advance(); });
-
-        return structDecl;
-    }
-
-    static LogicalResult getStructFields(Operation *op, StringRef structName, SmallVectorImpl<StringRef> &names, SmallVectorImpl<Type> &types)
-    {
-        auto structDecl = findStructDecl(op, structName);
-        if (!structDecl)
-        {
-            return failure();
-        }
-
-        return getStructFieldsFromDecl(structDecl, names, types);
-    }
-
     static bool parseNumericFieldIndex(StringRef fieldName, size_t &fieldIndex)
     {
         uint64_t parsed = 0;
@@ -137,26 +86,6 @@ namespace
             return failure();
         }
         return success();
-    }
-
-    static std::optional<uint64_t> getStructFieldStorageOffset(Operation *anchor,
-                                                               ora::StructType structType,
-                                                               StringRef fieldName)
-    {
-        SmallVector<StringRef, 8> fieldNames;
-        SmallVector<Type, 8> fieldTypes;
-        if (failed(getStructFields(anchor, structType.getName(), fieldNames, fieldTypes)))
-            return std::nullopt;
-
-        uint64_t offset = 0;
-        for (size_t i = 0; i < fieldNames.size(); ++i)
-        {
-            if (fieldNames[i] == fieldName)
-                return offset;
-            offset += getStorageWordCount(anchor, fieldTypes[i]);
-        }
-
-        return std::nullopt;
     }
 
     static Value getStorageStructValueBaseSlot(Value structValue,

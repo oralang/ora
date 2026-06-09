@@ -9,7 +9,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include <optional>
 
 namespace mlir::ora::lowering
 {
@@ -50,6 +52,38 @@ namespace mlir::ora::lowering
         return fieldNamesAttr && fieldTypesAttr && fieldNamesAttr.size() == fieldTypesAttr.size();
     }
 
+    inline LogicalResult getStructFieldsFromDecl(ora::StructDeclOp structDecl,
+                                                 SmallVectorImpl<StringRef> &names,
+                                                 SmallVectorImpl<Type> &types)
+    {
+        auto fieldNamesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_names");
+        auto fieldTypesAttr = structDecl->getAttrOfType<ArrayAttr>("ora.field_types");
+        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+            return failure();
+
+        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+        {
+            auto nameAttr = cast<StringAttr>(fieldNamesAttr[i]);
+            auto typeAttr = cast<TypeAttr>(fieldTypesAttr[i]);
+            names.push_back(nameAttr.getValue());
+            types.push_back(typeAttr.getValue());
+        }
+
+        return success();
+    }
+
+    inline LogicalResult getStructFields(Operation *op,
+                                         StringRef structName,
+                                         SmallVectorImpl<StringRef> &names,
+                                         SmallVectorImpl<Type> &types)
+    {
+        auto structDecl = findStructDeclForName(op, structName);
+        if (!structDecl)
+            return failure();
+
+        return getStructFieldsFromDecl(structDecl, names, types);
+    }
+
     inline uint64_t getStorageWordCount(Operation *anchor, Type type)
     {
         if (auto structType = llvm::dyn_cast<ora::StructType>(type))
@@ -85,6 +119,73 @@ namespace mlir::ora::lowering
     inline uint64_t getMemRefElementWordCount(Operation *anchor, Type elementType)
     {
         return getStorageWordCount(anchor, elementType);
+    }
+
+    inline std::optional<uint64_t> getStructFieldStorageOffset(Operation *anchor,
+                                                               ora::StructType structType,
+                                                               StringRef fieldName,
+                                                               size_t *fieldIndex = nullptr)
+    {
+        ArrayAttr fieldNamesAttr;
+        ArrayAttr fieldTypesAttr;
+        if (!getStructFieldAttrs(anchor, structType, fieldNamesAttr, fieldTypesAttr))
+            return std::nullopt;
+
+        uint64_t offset = 0;
+        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+        {
+            if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == fieldName)
+            {
+                if (fieldIndex)
+                    *fieldIndex = i;
+                return offset;
+            }
+            Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
+            offset += getStorageWordCount(anchor, fieldType);
+        }
+
+        return std::nullopt;
+    }
+
+    inline std::optional<uint64_t> getStructFieldStorageOffsetByScan(Operation *anchor,
+                                                                     StringRef fieldName,
+                                                                     Type resultType)
+    {
+        ModuleOp module = anchor ? anchor->getParentOfType<ModuleOp>() : ModuleOp();
+        if (!module)
+            return std::nullopt;
+
+        std::optional<uint64_t> foundOffset;
+        bool ambiguous = false;
+        module.walk([&](ora::StructDeclOp declOp)
+                    {
+            ArrayAttr fieldNamesAttr = declOp->getAttrOfType<ArrayAttr>("ora.field_names");
+            ArrayAttr fieldTypesAttr = declOp->getAttrOfType<ArrayAttr>("ora.field_types");
+            if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
+                return WalkResult::advance();
+
+            uint64_t offset = 0;
+            for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
+            {
+                Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
+                if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == fieldName &&
+                    (!resultType || fieldType == resultType))
+                {
+                    if (foundOffset && *foundOffset != offset)
+                    {
+                        ambiguous = true;
+                        return WalkResult::interrupt();
+                    }
+                    foundOffset = offset;
+                }
+                offset += getStorageWordCount(anchor, fieldType);
+            }
+
+            return WalkResult::advance(); });
+
+        if (ambiguous)
+            return std::nullopt;
+        return foundOffset;
     }
 
     inline Value addStorageWordOffset(Location loc,

@@ -26,6 +26,8 @@ using namespace ora;
 using mlir::ora::lowering::addStorageWordOffset;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getMemRefElementWordCount;
+using mlir::ora::lowering::getStructFieldStorageOffset;
+using mlir::ora::lowering::getStructFieldStorageOffsetByScan;
 using mlir::ora::lowering::getStructFieldAttrs;
 using mlir::ora::lowering::kStorageMemRefViewKind;
 using mlir::ora::lowering::kStorageStructCarrierKind;
@@ -446,73 +448,6 @@ static Value buildDynamicStorageMemRefSlot(ConversionPatternRewriter &rewriter,
                                            mlir::MemRefType memrefType,
                                            Value baseSlot,
                                            ValueRange indices);
-
-static std::optional<uint64_t> getStructFieldStorageOffset(Operation *anchor,
-                                                           ora::StructType structType,
-                                                           StringRef fieldName,
-                                                           size_t *fieldIndex = nullptr)
-{
-    ArrayAttr fieldNamesAttr;
-    ArrayAttr fieldTypesAttr;
-    if (!getStructFieldAttrs(anchor, structType, fieldNamesAttr, fieldTypesAttr))
-        return std::nullopt;
-
-    uint64_t offset = 0;
-    for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
-    {
-        if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == fieldName)
-        {
-            if (fieldIndex)
-                *fieldIndex = i;
-            return offset;
-        }
-        Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
-        offset += getMemRefElementWordCount(anchor, fieldType);
-    }
-
-    return std::nullopt;
-}
-
-static std::optional<uint64_t> getStructFieldStorageOffsetByScan(Operation *anchor,
-                                                                 StringRef fieldName,
-                                                                 Type resultType)
-{
-    ModuleOp module = anchor ? anchor->getParentOfType<ModuleOp>() : ModuleOp();
-    if (!module)
-        return std::nullopt;
-
-    std::optional<uint64_t> foundOffset;
-    bool ambiguous = false;
-    module.walk([&](ora::StructDeclOp declOp)
-                {
-        ArrayAttr fieldNamesAttr = declOp->getAttrOfType<ArrayAttr>("ora.field_names");
-        ArrayAttr fieldTypesAttr = declOp->getAttrOfType<ArrayAttr>("ora.field_types");
-        if (!fieldNamesAttr || !fieldTypesAttr || fieldNamesAttr.size() != fieldTypesAttr.size())
-            return WalkResult::advance();
-
-        uint64_t offset = 0;
-        for (size_t i = 0; i < fieldNamesAttr.size(); ++i)
-        {
-            Type fieldType = cast<TypeAttr>(fieldTypesAttr[i]).getValue();
-            if (cast<StringAttr>(fieldNamesAttr[i]).getValue() == fieldName &&
-                (!resultType || fieldType == resultType))
-            {
-                if (foundOffset && *foundOffset != offset)
-                {
-                    ambiguous = true;
-                    return WalkResult::interrupt();
-                }
-                foundOffset = offset;
-            }
-            offset += getMemRefElementWordCount(anchor, fieldType);
-        }
-
-        return WalkResult::advance(); });
-
-    if (ambiguous)
-        return std::nullopt;
-    return foundOffset;
-}
 
 static Value getStorageStructValueBaseSlot(Value structValue,
                                            ConversionPatternRewriter &rewriter,
