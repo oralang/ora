@@ -4418,6 +4418,7 @@ namespace
         mlir::UnrealizedConversionCastOp op;
         Value input;
         Type resultType;
+        Type originalInputType;
         Location loc;
         ConversionPatternRewriter &rewriter;
     };
@@ -4726,6 +4727,19 @@ namespace
         return success();
     }
 
+    static bool isPointerBackedGenericCastSource(Type type)
+    {
+        return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                         ora::StringType, ora::BytesType, ora::AdtType,
+                         ora::MapType, mlir::MemRefType, mlir::UnrankedMemRefType>(type);
+    }
+
+    static bool hasPointerBackedGenericCastSource(const CastCtx &c)
+    {
+        return isPointerBackedGenericCastSource(c.input.getType()) ||
+               isPointerBackedGenericCastSource(c.originalInputType);
+    }
+
     static CastHandlerResult castGenericFallback(CastCtx &c)
     {
         if (c.input.getType() == c.resultType)
@@ -4735,6 +4749,8 @@ namespace
         }
         if (llvm::isa<sir::U256Type>(c.resultType))
         {
+            if (hasPointerBackedGenericCastSource(c))
+                return failure();
             Value packed = ensureU256(c.rewriter, c.loc, c.input);
             c.rewriter.replaceOp(c.op, packed);
             return success();
@@ -4752,6 +4768,8 @@ namespace
         }
         if (llvm::isa<mlir::IntegerType>(c.resultType))
         {
+            if (hasPointerBackedGenericCastSource(c))
+                return failure();
             Value casted = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
             c.rewriter.replaceOp(c.op, casted);
             return success();
@@ -4776,7 +4794,12 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
         op.getNumResults() < 1 || op.getNumResults() > 2)
         return failure();
 
-    CastCtx c{op, adaptor.getOperands().front(), op.getResult(0).getType(), op.getLoc(), rewriter};
+    CastCtx c{op,
+              adaptor.getOperands().front(),
+              op.getResult(0).getType(),
+              op.getOperand(0).getType(),
+              op.getLoc(),
+              rewriter};
 
     // 1. Kind-keyed dispatch. If a kind-handler returns a definite result
     // (success/failure), short-circuit; nullopt falls through to the generic

@@ -383,6 +383,25 @@ test "OraToSIR handles residual cast worklist entries erased by an earlier cast"
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
 }
 
+test "OraToSIR rejects generic aggregate to scalar cast fallback" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @bad(%arg0: !ora.string) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : !ora.string to !sir.u256
+        \\    sir.iret %0
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
 test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
     const source_text =
         \\pub fn div_i128(a: i128, b: i128) -> i128 {
