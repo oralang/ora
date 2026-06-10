@@ -151,6 +151,23 @@ pub const CompilerDb = struct {
         self.sources.deinit();
     }
 
+    pub fn deinitFrontendOnly(self: *CompilerDb) void {
+        deinitSlots(self.allocator, &self.syntax_slots);
+        deinitSlots(self.allocator, &self.ast_slots);
+        deinitSlots(self.allocator, &self.module_graph_slots);
+        deinitSlots(self.allocator, &self.item_index_slots);
+        deinitSlots(self.allocator, &self.resolution_slots);
+        deinitCacheSlots(self.allocator, &self.typecheck_slots);
+        deinitSlots(self.allocator, &self.consteval_slots);
+        self.consteval_tainted_slots.deinit(self.allocator);
+        deinitSlots(self.allocator, &self.consteval_sentinel_slots);
+        self.consteval_in_progress.deinit(self.allocator);
+        deinitCacheSlots(self.allocator, &self.verification_slots);
+        deinitSlots(self.allocator, &self.module_verification_slots);
+        self.hir_slots.deinit(self.allocator);
+        self.sources.deinit();
+    }
+
     pub fn setCompileOptions(self: *CompilerDb, options: compile_options.CompileOptions) void {
         if (self.options.chain_id == options.chain_id) return;
         self.options = options;
@@ -199,8 +216,50 @@ pub const CompilerDb = struct {
         self.invalidateFile(file_id);
     }
 
+    pub fn updateSourceFileFrontendOnly(self: *CompilerDb, file_id: source.FileId, text: []const u8) !void {
+        try self.sources.updateFile(file_id, text);
+        self.invalidateFileFrontendOnly(file_id);
+    }
+
+    pub fn releaseSourceFileFrontendOnly(self: *CompilerDb, file_id: source.FileId) void {
+        self.invalidateFileFrontendOnly(file_id);
+        self.sources.releaseFileText(file_id);
+    }
+
     pub fn sourceText(self: *const CompilerDb, file_id: source.FileId) []const u8 {
         return self.sources.sourceText(file_id);
+    }
+
+    pub fn hasSyntaxResult(self: *const CompilerDb, file_id: source.FileId) bool {
+        const index = file_id.index();
+        return index < self.syntax_slots.items.len and self.syntax_slots.items[index] != null;
+    }
+
+    pub fn hasAstResult(self: *const CompilerDb, file_id: source.FileId) bool {
+        const index = file_id.index();
+        return index < self.ast_slots.items.len and self.ast_slots.items[index] != null;
+    }
+
+    pub fn hasItemIndexResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.item_index_slots.items.len and self.item_index_slots.items[index] != null;
+    }
+
+    pub fn hasResolutionResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.resolution_slots.items.len and self.resolution_slots.items[index] != null;
+    }
+
+    pub fn hasConstEvalResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.consteval_slots.items.len and
+            self.consteval_slots.items[index] != null and
+            !self.consteval_tainted_slots.items[index];
+    }
+
+    pub fn hasTypeCheckResult(self: *const CompilerDb, module_id: source.ModuleId, key: sema.TypeCheckKey) bool {
+        const index = module_id.index();
+        return index < self.typecheck_slots.items.len and self.typecheck_slots.items[index].lookup(key) != null;
     }
 
     pub fn syntaxTree(self: *CompilerDb, file_id: source.FileId) !*const syntax.SyntaxTree {
@@ -542,6 +601,35 @@ pub const CompilerDb = struct {
         }
     }
 
+    fn invalidateFileFrontendOnly(self: *CompilerDb, file_id: source.FileId) void {
+        clearPtrSlot(self.allocator, syntax.ParseResult, &self.syntax_slots.items[file_id.index()]);
+        clearPtrSlot(self.allocator, ast.LowerResult, &self.ast_slots.items[file_id.index()]);
+
+        var invalidated_modules: std.AutoHashMap(source.ModuleId, void) = .init(self.allocator);
+        defer invalidated_modules.deinit();
+        var invalidated_packages: std.AutoHashMap(source.PackageId, void) = .init(self.allocator);
+        defer invalidated_packages.deinit();
+
+        for (self.sources.modules.items) |module_record| {
+            if (module_record.file_id == file_id) {
+                if (self.module_graph_slots.items[module_record.package_id.index()]) |graph| {
+                    self.invalidateModuleDependentsFrontendOnly(graph, module_record.id, &invalidated_modules) catch {
+                        self.invalidateModuleFrontendOnly(module_record.id);
+                    };
+                } else {
+                    self.invalidateModuleFrontendOnly(module_record.id);
+                    invalidated_modules.put(module_record.id, {}) catch {};
+                }
+                invalidated_packages.put(module_record.package_id, {}) catch {};
+            }
+        }
+
+        var package_iterator = invalidated_packages.keyIterator();
+        while (package_iterator.next()) |package_id| {
+            self.invalidatePackage(package_id.*);
+        }
+    }
+
     fn invalidatePackage(self: *CompilerDb, package_id: source.PackageId) void {
         clearPtrSlot(self.allocator, sema.ModuleGraphResult, &self.module_graph_slots.items[package_id.index()]);
     }
@@ -559,6 +647,18 @@ pub const CompilerDb = struct {
         clearPtrSlot(self.allocator, hir.LoweringResult, &self.hir_slots.items[module_id.index()]);
     }
 
+    fn invalidateModuleFrontendOnly(self: *CompilerDb, module_id: source.ModuleId) void {
+        clearPtrSlot(self.allocator, sema.ItemIndexResult, &self.item_index_slots.items[module_id.index()]);
+        clearPtrSlot(self.allocator, sema.NameResolutionResult, &self.resolution_slots.items[module_id.index()]);
+        self.typecheck_slots.items[module_id.index()].clear(self.allocator);
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+        self.consteval_tainted_slots.items[module_id.index()] = false;
+        self.consteval_in_progress.items[module_id.index()] = false;
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
+        self.verification_slots.items[module_id.index()].clear(self.allocator);
+        clearPtrSlot(self.allocator, sema.ModuleVerificationFactsResult, &self.module_verification_slots.items[module_id.index()]);
+    }
+
     fn invalidateModuleDependents(
         self: *CompilerDb,
         graph: *const sema.ModuleGraphResult,
@@ -572,6 +672,22 @@ pub const CompilerDb = struct {
         for (graph.modules) |module_summary| {
             if (!moduleDependsOn(module_summary, module_id)) continue;
             try self.invalidateModuleDependents(graph, module_summary.module_id, visited);
+        }
+    }
+
+    fn invalidateModuleDependentsFrontendOnly(
+        self: *CompilerDb,
+        graph: *const sema.ModuleGraphResult,
+        module_id: source.ModuleId,
+        visited: *std.AutoHashMap(source.ModuleId, void),
+    ) !void {
+        if (visited.contains(module_id)) return;
+        try visited.put(module_id, {});
+        self.invalidateModuleFrontendOnly(module_id);
+
+        for (graph.modules) |module_summary| {
+            if (!moduleDependsOn(module_summary, module_id)) continue;
+            try self.invalidateModuleDependentsFrontendOnly(graph, module_summary.module_id, visited);
         }
     }
 

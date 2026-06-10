@@ -51,6 +51,7 @@ pub const SourceFile = struct {
     path: []const u8,
     text: []const u8,
     line_starts: []u32,
+    released_text: bool = false,
 };
 
 pub const Package = struct {
@@ -93,8 +94,10 @@ pub const SourceStore = struct {
     pub fn deinit(self: *SourceStore) void {
         for (self.files.items) |source_file| {
             self.allocator.free(source_file.path);
-            self.allocator.free(source_file.text);
-            self.allocator.free(source_file.line_starts);
+            if (!source_file.released_text) {
+                self.allocator.free(source_file.text);
+                self.allocator.free(source_file.line_starts);
+            }
         }
         self.files.deinit(self.allocator);
 
@@ -137,10 +140,24 @@ pub const SourceStore = struct {
         errdefer self.allocator.free(line_starts);
 
         const source_file = self.fileMut(file_id);
-        self.allocator.free(source_file.text);
-        self.allocator.free(source_file.line_starts);
+        if (!source_file.released_text) {
+            self.allocator.free(source_file.text);
+            self.allocator.free(source_file.line_starts);
+        }
         source_file.text = owned_text;
         source_file.line_starts = line_starts;
+        source_file.released_text = false;
+    }
+
+    pub fn releaseFileText(self: *SourceStore, file_id: FileId) void {
+        const source_file = self.fileMut(file_id);
+        if (source_file.released_text) return;
+
+        self.allocator.free(source_file.text);
+        self.allocator.free(source_file.line_starts);
+        source_file.text = &.{};
+        source_file.line_starts = &.{};
+        source_file.released_text = true;
     }
 
     pub fn addPackage(self: *SourceStore, name: []const u8) !PackageId {
@@ -201,6 +218,7 @@ pub const SourceStore = struct {
     pub fn lineColumn(self: *const SourceStore, location: SourceLocation) LineColumn {
         const source_file = self.file(location.file_id);
         const offset = location.range.start;
+        if (source_file.line_starts.len == 0) return .{ .line = 1, .column = 1 };
         const line_index_plus_one = std.sort.upperBound(u32, source_file.line_starts, offset, lineStartLessThan);
         const line_index: usize = if (line_index_plus_one == 0) 0 else line_index_plus_one - 1;
         const line_start = source_file.line_starts[line_index];
@@ -254,4 +272,24 @@ fn buildLineStarts(allocator: std.mem.Allocator, text: []const u8) ![]u32 {
         }
     }
     return starts.toOwnedSlice(allocator);
+}
+
+test "source store release file text keeps file id reusable" {
+    var store = SourceStore.init(std.testing.allocator);
+    defer store.deinit();
+
+    const file_id = try store.addFile("lib.ora", "one\ntwo");
+    try std.testing.expectEqualStrings("one\ntwo", store.sourceText(file_id));
+
+    store.releaseFileText(file_id);
+    try std.testing.expect(store.file(file_id).released_text);
+    try std.testing.expectEqual(@as(usize, 0), store.sourceText(file_id).len);
+    try std.testing.expectEqual(
+        LineColumn{ .line = 1, .column = 1 },
+        store.lineColumn(.{ .file_id = file_id, .range = .empty(0) }),
+    );
+
+    try store.updateFile(file_id, "three");
+    try std.testing.expect(!store.file(file_id).released_text);
+    try std.testing.expectEqualStrings("three", store.sourceText(file_id));
 }

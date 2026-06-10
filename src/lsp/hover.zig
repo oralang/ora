@@ -1,5 +1,7 @@
 const std = @import("std");
 const frontend = @import("frontend.zig");
+const keyword_docs = @import("keyword_docs.zig");
+const refinement_docs = @import("refinement_docs.zig");
 const semantic_index = @import("semantic_index.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,13 +15,15 @@ pub const Hover = struct {
     }
 };
 
-pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
+pub fn hoverAtIndex(
+    allocator: Allocator,
+    source: []const u8,
+    position: frontend.Position,
+    index: *const semantic_index.SemanticIndex,
+) !?Hover {
     if (!index.parse_succeeded) return null;
 
-    if (semantic_index.findSymbolAtPosition(index.symbols, position)) |symbol_index| {
+    if (semantic_index.findSymbolAtPosition(index, position)) |symbol_index| {
         const candidate = index.symbols[symbol_index];
         if (rangeContainsPosition(candidate.selection_range, position)) {
             const value = try formatHoverValueAlloc(allocator, candidate);
@@ -27,7 +31,8 @@ pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Posi
         }
     }
 
-    return keywordHoverAt(allocator, source, position);
+    if (try keywordHoverAt(allocator, source, position)) |hover| return hover;
+    return refinementHoverAt(allocator, source, position);
 }
 
 fn formatHoverValueAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {
@@ -96,9 +101,16 @@ fn formatSignatureAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]
 
 fn keywordHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
     const word = wordAtPosition(source, position) orelse return null;
-    const doc = keyword_docs.get(word.text) orelse return null;
+    const doc = keyword_docs.documentation(word.text) orelse return null;
 
     const value = try std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ word.text, doc });
+    return .{ .contents = value, .range = word.range };
+}
+
+fn refinementHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = wordAtPosition(source, position) orelse return null;
+    const entry = refinement_docs.entryForName(word.text) orelse return null;
+    const value = try refinement_docs.markdownAlloc(allocator, entry);
     return .{ .contents = value, .range = word.range };
 }
 
@@ -136,64 +148,6 @@ fn wordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPositi
 fn isIdentChar(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
 }
-
-const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "contract", "Declares a smart contract type." },
-    .{ "struct", "Declares a named struct type." },
-    .{ "enum", "Declares an enumeration type." },
-    .{ "bitfield", "Declares a packed bitfield type for efficient storage." },
-    .{ "type", "Declares a type alias." },
-    .{ "fn", "Declares a function." },
-    .{ "pub", "Makes a declaration publicly visible." },
-    .{ "let", "Declares an immutable local binding." },
-    .{ "var", "Declares a mutable variable." },
-    .{ "const", "Declares a compile-time constant." },
-    .{ "storage", "Storage qualifier — persists on-chain between calls." },
-    .{ "tstore", "Transient storage qualifier — cleared after each transaction." },
-    .{ "memory", "Memory qualifier — temporary data within a call." },
-    .{ "import", "Imports declarations from another module." },
-    .{ "log", "Declares an event (emits an EVM log)." },
-    .{ "error", "Declares a custom error type." },
-    .{ "trait", "Declares an interface trait." },
-    .{ "impl", "Implements a trait for a type." },
-    .{ "comptime", "Evaluates an expression at compile time." },
-    .{ "if", "Conditional branch." },
-    .{ "else", "Alternative branch of an `if` or `switch`." },
-    .{ "while", "Loop that repeats while a condition holds." },
-    .{ "for", "Iterates over a range or collection." },
-    .{ "switch", "Multi-way branch on a value." },
-    .{ "match", "Pattern match over values, enums, and Result/error unions." },
-    .{ "return", "Returns a value from the current function." },
-    .{ "break", "Exits the innermost loop." },
-    .{ "continue", "Skips to the next iteration of the innermost loop." },
-    .{ "try", "Unwraps an error union, propagating the error on failure." },
-    .{ "catch", "Handles an error from an error union." },
-    .{ "requires", "Precondition — must hold when the function is called." },
-    .{ "guard", "Runtime-enforced precondition — checked at runtime and assumed after it passes." },
-    .{ "ensures", "Postcondition — guaranteed to hold when the function returns." },
-    .{ "ensures_ok", "Success postcondition — guaranteed to hold on successful error-union returns." },
-    .{ "ensures_err", "Error postcondition — guaranteed to hold on error-union returns." },
-    .{ "invariant", "Contract or loop invariant — preserved across state transitions." },
-    .{ "ghost", "Ghost declaration — exists only for verification, not compiled." },
-    .{ "assert", "Verification assertion — checked by the prover." },
-    .{ "assume", "Verification assumption — taken as given by the prover." },
-    .{ "havoc", "Assigns an arbitrary value for verification." },
-    .{ "old", "Refers to the pre-state value of an expression in postconditions." },
-    .{ "result", "Refers to the return value in postconditions." },
-    .{ "modifies", "Declares state locations a function may modify." },
-    .{ "decreases", "Declares a decreasing termination measure." },
-    .{ "increases", "Declares an increasing termination measure." },
-    .{ "forall", "Universal quantifier — for all values satisfying a predicate." },
-    .{ "exists", "Existential quantifier — there exists a value satisfying a predicate." },
-    .{ "where", "Type constraint or refinement clause." },
-    .{ "extern", "Declares an external contract interface." },
-    .{ "true", "Boolean literal `true`." },
-    .{ "false", "Boolean literal `false`." },
-    .{ "self", "Refers to the current contract instance." },
-    .{ "call", "Declares or invokes a state-changing external call." },
-    .{ "staticcall", "Declares or invokes a read-only external call." },
-    .{ "errors", "Declares the closed error set an extern trait method may return." },
-});
 
 fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {
     if (positionLessThan(position, range.start)) return false;

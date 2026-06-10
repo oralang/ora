@@ -1,7 +1,9 @@
 const std = @import("std");
 const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
+const line_index_api = @import("line_index.zig");
 const semantic_index = @import("semantic_index.zig");
+const text_edits = @import("text_edits.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -22,11 +24,14 @@ pub const InlayHint = struct {
     }
 };
 
-/// Find inlay hints in the given range of source.
-pub fn hintsInRange(
+pub fn hintsInRangeCached(
     allocator: Allocator,
     source: []const u8,
     range: frontend.Range,
+    line_index: *const line_index_api.LineIndex,
+    encoding: text_edits.PositionEncoding,
+    file: *const compiler.ast.AstFile,
+    index: *const semantic_index.SemanticIndex,
 ) ![]InlayHint {
     var hints = std.ArrayList(InlayHint){};
     errdefer {
@@ -34,23 +39,13 @@ pub fn hintsInRange(
         hints.deinit(allocator);
     }
 
-    var sources = compiler.source.SourceStore.init(allocator);
-    defer sources.deinit();
-    const file_id = try sources.addFile("<lsp>", source);
-
-    var parse_result = compiler.syntax.parse(allocator, file_id, source) catch return try hints.toOwnedSlice(allocator);
-    defer parse_result.deinit();
-
-    var lower_result = compiler.ast.lower(allocator, &parse_result.tree) catch return try hints.toOwnedSlice(allocator);
-    defer lower_result.deinit();
-
-    // Build semantic index for function parameter lookup.
-    var index = semantic_index.indexDocument(allocator, source) catch null;
-    defer if (index) |*idx| idx.deinit(allocator);
-
-    // Walk all items to find function bodies with call expressions.
-    for (lower_result.file.root_items) |item_id| {
-        try collectHintsFromItem(&hints, allocator, &lower_result.file, item_id, &sources, file_id, range, index);
+    const position_resolver = PositionResolver{ .line_index = .{
+        .source = source,
+        .line_index = line_index,
+        .encoding = encoding,
+    } };
+    for (file.root_items) |item_id| {
+        try collectHintsFromItem(&hints, allocator, file, item_id, &position_resolver, range, index);
     }
 
     return hints.toOwnedSlice(allocator);
@@ -63,25 +58,38 @@ pub fn deinitHints(allocator: Allocator, items: []InlayHint) void {
 
 const HintError = Allocator.Error;
 
+const PositionResolver = union(enum) {
+    line_index: struct {
+        source: []const u8,
+        line_index: *const line_index_api.LineIndex,
+        encoding: text_edits.PositionEncoding,
+    },
+
+    fn offsetToPosition(self: *const PositionResolver, offset: u32) frontend.Position {
+        return switch (self.*) {
+            .line_index => |index| index.line_index.offsetToPosition(index.source, offset, index.encoding),
+        };
+    }
+};
+
 fn collectHintsFromItem(
     hints: *std.ArrayList(InlayHint),
     allocator: Allocator,
     file: *const compiler.ast.AstFile,
     item_id: compiler.ast.ItemId,
-    sources: *const compiler.source.SourceStore,
-    file_id: compiler.FileId,
+    positions: *const PositionResolver,
     range: frontend.Range,
-    maybe_index: ?semantic_index.SemanticIndex,
+    maybe_index: ?*const semantic_index.SemanticIndex,
 ) HintError!void {
     const item = file.item(item_id).*;
     switch (item) {
         .Contract => |contract| {
             for (contract.members) |member_id| {
-                try collectHintsFromItem(hints, allocator, file, member_id, sources, file_id, range, maybe_index);
+                try collectHintsFromItem(hints, allocator, file, member_id, positions, range, maybe_index);
             }
         },
         .Function => |function| {
-            try collectHintsFromBody(hints, allocator, file, function.body, sources, file_id, range, maybe_index);
+            try collectHintsFromBody(hints, allocator, file, function.body, positions, range, maybe_index);
         },
         else => {},
     }
@@ -92,14 +100,13 @@ fn collectHintsFromBody(
     allocator: Allocator,
     file: *const compiler.ast.AstFile,
     body_id: compiler.ast.BodyId,
-    sources: *const compiler.source.SourceStore,
-    file_id: compiler.FileId,
+    positions: *const PositionResolver,
     range: frontend.Range,
-    maybe_index: ?semantic_index.SemanticIndex,
+    maybe_index: ?*const semantic_index.SemanticIndex,
 ) HintError!void {
     const body = file.body(body_id).*;
     for (body.statements) |stmt_id| {
-        try collectHintsFromStmt(hints, allocator, file, stmt_id, sources, file_id, range, maybe_index);
+        try collectHintsFromStmt(hints, allocator, file, stmt_id, positions, range, maybe_index);
     }
 }
 
@@ -108,19 +115,18 @@ fn collectHintsFromStmt(
     allocator: Allocator,
     file: *const compiler.ast.AstFile,
     stmt_id: compiler.ast.StmtId,
-    sources: *const compiler.source.SourceStore,
-    file_id: compiler.FileId,
+    positions: *const PositionResolver,
     range: frontend.Range,
-    maybe_index: ?semantic_index.SemanticIndex,
+    maybe_index: ?*const semantic_index.SemanticIndex,
 ) HintError!void {
     const stmt = file.statement(stmt_id).*;
     switch (stmt) {
         .Expr => |expr_stmt| {
-            try collectHintsFromExpr(hints, allocator, file, expr_stmt.expr, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, expr_stmt.expr, positions, range, maybe_index);
         },
         .VariableDecl => |decl| {
             if (decl.value) |value| {
-                try collectHintsFromExpr(hints, allocator, file, value, sources, file_id, range, maybe_index);
+                try collectHintsFromExpr(hints, allocator, file, value, positions, range, maybe_index);
             }
             if (decl.type_expr == null) {
                 if (decl.value) |value| {
@@ -131,15 +137,20 @@ fn collectHintsFromStmt(
                             else => null,
                         };
                         if (name_range) |nr| {
-                            const pos = textRangeToPosition(sources, file_id, nr.end);
+                            const pos = positions.offsetToPosition(nr.end);
                             if (positionInRange(pos, range)) {
+                                const label = try std.fmt.allocPrint(allocator, ": {s}", .{type_str});
+                                var label_owned = true;
+                                errdefer if (label_owned) allocator.free(label);
+
                                 try hints.append(allocator, .{
                                     .position = pos,
-                                    .label = try std.fmt.allocPrint(allocator, ": {s}", .{type_str}),
+                                    .label = label,
                                     .kind = .type_hint,
                                     .padding_left = false,
                                     .padding_right = false,
                                 });
+                                label_owned = false;
                             }
                         }
                     }
@@ -147,30 +158,30 @@ fn collectHintsFromStmt(
             }
         },
         .Assign => |assign| {
-            try collectHintsFromExpr(hints, allocator, file, assign.value, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, assign.value, positions, range, maybe_index);
         },
         .Return => |ret| {
             if (ret.value) |value| {
-                try collectHintsFromExpr(hints, allocator, file, value, sources, file_id, range, maybe_index);
+                try collectHintsFromExpr(hints, allocator, file, value, positions, range, maybe_index);
             }
         },
         .If => |if_stmt| {
-            try collectHintsFromExpr(hints, allocator, file, if_stmt.condition, sources, file_id, range, maybe_index);
-            try collectHintsFromBody(hints, allocator, file, if_stmt.then_body, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, if_stmt.condition, positions, range, maybe_index);
+            try collectHintsFromBody(hints, allocator, file, if_stmt.then_body, positions, range, maybe_index);
             if (if_stmt.else_body) |else_body| {
-                try collectHintsFromBody(hints, allocator, file, else_body, sources, file_id, range, maybe_index);
+                try collectHintsFromBody(hints, allocator, file, else_body, positions, range, maybe_index);
             }
         },
         .While => |while_stmt| {
-            try collectHintsFromExpr(hints, allocator, file, while_stmt.condition, sources, file_id, range, maybe_index);
-            try collectHintsFromBody(hints, allocator, file, while_stmt.body, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, while_stmt.condition, positions, range, maybe_index);
+            try collectHintsFromBody(hints, allocator, file, while_stmt.body, positions, range, maybe_index);
         },
         .For => |for_stmt| {
-            try collectHintsFromExpr(hints, allocator, file, for_stmt.iterable, sources, file_id, range, maybe_index);
-            try collectHintsFromBody(hints, allocator, file, for_stmt.body, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, for_stmt.iterable, positions, range, maybe_index);
+            try collectHintsFromBody(hints, allocator, file, for_stmt.body, positions, range, maybe_index);
         },
         .Block => |block_stmt| {
-            try collectHintsFromBody(hints, allocator, file, block_stmt.body, sources, file_id, range, maybe_index);
+            try collectHintsFromBody(hints, allocator, file, block_stmt.body, positions, range, maybe_index);
         },
         else => {},
     }
@@ -181,78 +192,73 @@ fn collectHintsFromExpr(
     allocator: Allocator,
     file: *const compiler.ast.AstFile,
     expr_id: compiler.ast.ExprId,
-    sources: *const compiler.source.SourceStore,
-    file_id: compiler.FileId,
+    positions: *const PositionResolver,
     range: frontend.Range,
-    maybe_index: ?semantic_index.SemanticIndex,
+    maybe_index: ?*const semantic_index.SemanticIndex,
 ) HintError!void {
     const expr = file.expression(expr_id).*;
     switch (expr) {
         .Call => |call| {
-            // Recurse into callee and args first.
-            try collectHintsFromExpr(hints, allocator, file, call.callee, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, call.callee, positions, range, maybe_index);
             for (call.args) |arg| {
-                try collectHintsFromExpr(hints, allocator, file, arg, sources, file_id, range, maybe_index);
+                try collectHintsFromExpr(hints, allocator, file, arg, positions, range, maybe_index);
             }
 
-            // Now try to add parameter name hints.
             const callee_name = resolveCalleeName(file, call.callee) orelse return;
             const idx = maybe_index orelse return;
             const func_symbol = findFunctionSymbol(idx.symbols, callee_name) orelse return;
-
-            // Find the function's parameter symbols (children of the function symbol).
             const func_idx = findSymbolIndex(idx.symbols, func_symbol);
-            const param_names = collectParameterNames(allocator, idx.symbols, func_idx) catch return;
-            defer allocator.free(param_names);
 
             for (call.args, 0..) |arg, i| {
-                if (i >= param_names.len) break;
-                const param_name = param_names[i] orelse continue;
+                const param_name = parameterNameAt(idx.symbols, func_idx, i) orelse continue;
 
-                // Skip if the argument is a simple name that matches the parameter.
                 const arg_expr = file.expression(arg).*;
                 if (arg_expr == .Name) {
                     if (std.mem.eql(u8, arg_expr.Name.name, param_name)) continue;
                 }
 
                 const arg_range = getExprRange(file, arg);
-                const arg_pos = textRangeToPosition(sources, file_id, arg_range.start);
+                const arg_pos = positions.offsetToPosition(arg_range.start);
 
-                // Only emit if within the requested range.
                 if (!positionInRange(arg_pos, range)) continue;
+
+                const label = try std.fmt.allocPrint(allocator, "{s}:", .{param_name});
+                var label_owned = true;
+                errdefer if (label_owned) allocator.free(label);
 
                 try hints.append(allocator, .{
                     .position = arg_pos,
-                    .label = try std.fmt.allocPrint(allocator, "{s}:", .{param_name}),
+                    .label = label,
                     .kind = .parameter_hint,
                     .padding_left = false,
                     .padding_right = true,
                 });
+                label_owned = false;
             }
         },
         .Binary => |bin| {
-            try collectHintsFromExpr(hints, allocator, file, bin.lhs, sources, file_id, range, maybe_index);
-            try collectHintsFromExpr(hints, allocator, file, bin.rhs, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, bin.lhs, positions, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, bin.rhs, positions, range, maybe_index);
         },
         .Unary => |un| {
-            try collectHintsFromExpr(hints, allocator, file, un.operand, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, un.operand, positions, range, maybe_index);
         },
         .Field => |field| {
-            try collectHintsFromExpr(hints, allocator, file, field.base, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, field.base, positions, range, maybe_index);
         },
         .Index => |index| {
-            try collectHintsFromExpr(hints, allocator, file, index.base, sources, file_id, range, maybe_index);
-            try collectHintsFromExpr(hints, allocator, file, index.index, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, index.base, positions, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, index.index, positions, range, maybe_index);
         },
         .Group => |group| {
-            try collectHintsFromExpr(hints, allocator, file, group.expr, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, group.expr, positions, range, maybe_index);
         },
         .Old => |old| {
-            try collectHintsFromExpr(hints, allocator, file, old.expr, sources, file_id, range, maybe_index);
+            try collectHintsFromExpr(hints, allocator, file, old.expr, positions, range, maybe_index);
         },
         .Tuple => |tuple| {
             for (tuple.elements) |elem| {
-                try collectHintsFromExpr(hints, allocator, file, elem, sources, file_id, range, maybe_index);
+                try collectHintsFromExpr(hints, allocator, file, elem, positions, range, maybe_index);
             }
         },
         else => {},
@@ -282,17 +288,14 @@ fn findSymbolIndex(symbols: []const semantic_index.Symbol, target: *const semant
     return (target_addr - base) / @sizeOf(semantic_index.Symbol);
 }
 
-fn collectParameterNames(allocator: Allocator, symbols: []const semantic_index.Symbol, parent_idx: usize) ![]?[]const u8 {
-    var names = std.ArrayList(?[]const u8){};
-    errdefer names.deinit(allocator);
-
+fn parameterNameAt(symbols: []const semantic_index.Symbol, parent_idx: usize, parameter_index: usize) ?[]const u8 {
+    var seen: usize = 0;
     for (symbols) |symbol| {
-        if (symbol.parent != null and symbol.parent.? == parent_idx and symbol.kind == .parameter) {
-            try names.append(allocator, symbol.name);
-        }
+        if (symbol.parent == null or symbol.parent.? != parent_idx or symbol.kind != .parameter) continue;
+        if (seen == parameter_index) return symbol.name;
+        seen += 1;
     }
-
-    return names.toOwnedSlice(allocator);
+    return null;
 }
 
 fn getExprRange(file: *const compiler.ast.AstFile, expr_id: compiler.ast.ExprId) compiler.TextRange {
@@ -326,21 +329,10 @@ fn getExprRange(file: *const compiler.ast.AstFile, expr_id: compiler.ast.ExprId)
     };
 }
 
-fn textRangeToPosition(sources: *const compiler.source.SourceStore, file_id: compiler.FileId, offset: u32) frontend.Position {
-    const lc = sources.lineColumn(.{
-        .file_id = file_id,
-        .range = .{ .start = offset, .end = offset },
-    });
-    return .{
-        .line = if (lc.line > 0) lc.line - 1 else 0,
-        .character = if (lc.column > 0) lc.column - 1 else 0,
-    };
-}
-
 fn inferExprType(
     file: *const compiler.ast.AstFile,
     expr_id: compiler.ast.ExprId,
-    maybe_index: ?semantic_index.SemanticIndex,
+    maybe_index: ?*const semantic_index.SemanticIndex,
 ) ?[]const u8 {
     const expr = file.expression(expr_id).*;
     return switch (expr) {
