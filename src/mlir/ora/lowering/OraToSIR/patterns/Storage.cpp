@@ -2,6 +2,7 @@
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
 #include "patterns/ErrorUnionCarrierHelpers.h"
+#include "patterns/LoweringHelpers.h"
 #include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
@@ -29,6 +30,7 @@ using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getElementWordCount;
 using mlir::ora::lowering::getStaticMemRefWordCount;
@@ -1056,14 +1058,6 @@ static mlir::IntegerAttr lookupErrorIdAttr(Operation *anchor, StringRef name)
     return foundId;
 }
 
-static Value storageU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-    return rewriter.create<sir::ConstOp>(
-        loc, u256Type, mlir::IntegerAttr::get(u256IntType, value));
-}
-
 static Value storageU256Const(PatternRewriter &rewriter, Location loc, mlir::IntegerAttr value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
@@ -1097,10 +1091,10 @@ static FailureOr<std::pair<Value, Value>> getErrorUnionPartsForStorage(
 
     Value value = op.getValue();
     if (auto ok = value.getDefiningOp<ora::ErrorOkOp>())
-        return std::pair<Value, Value>{storageU256Const(rewriter, loc, 0), coerceToU256(rewriter, loc, ok.getValue())};
+        return std::pair<Value, Value>{constU256(rewriter, loc, 0), coerceToU256(rewriter, loc, ok.getValue())};
 
     if (auto err = value.getDefiningOp<ora::ErrorErrOp>())
-        return std::pair<Value, Value>{storageU256Const(rewriter, loc, 1), coerceToU256(rewriter, loc, err.getValue())};
+        return std::pair<Value, Value>{constU256(rewriter, loc, 1), coerceToU256(rewriter, loc, err.getValue())};
 
     if (auto ret = value.getDefiningOp<ora::ErrorReturnOp>())
     {
@@ -1110,7 +1104,7 @@ static FailureOr<std::pair<Value, Value>> getErrorUnionPartsForStorage(
         if (!errorId)
             return failure();
         return std::pair<Value, Value>{
-            storageU256Const(rewriter, loc, 1),
+            constU256(rewriter, loc, 1),
             storageU256Const(rewriter, loc, errorId)};
     }
 
