@@ -170,8 +170,8 @@ static Value stripCasts(Value v)
     return v;
 }
 
-// True when `load` reads the wide error-union payload word (base + 32) for `basePtr`,
-// addressed either via sir.add_ptr(base, 32) or sir.add(base, 32).
+// True when `load` reads the wide error-union payload word for `basePtr`,
+// addressed either via sir.add_ptr(base, payload_offset) or sir.add(base, payload_offset).
 static bool isWidePayloadLoad(sir::LoadOp load, Value basePtr)
 {
     if (auto addPtr = load.getPtr().getDefiningOp<sir::AddPtrOp>())
@@ -179,7 +179,7 @@ static bool isWidePayloadLoad(sir::LoadOp load, Value basePtr)
         if (addPtr.getBase() == basePtr)
         {
             auto offConst = addPtr.getOffset().getDefiningOp<sir::ConstOp>();
-            if (offConst && offConst.getValue() == 32)
+            if (offConst && offConst.getValue() == ora::adt_helpers::kAdtPayloadOffset)
                 return true;
         }
     }
@@ -191,7 +191,7 @@ static bool isWidePayloadLoad(sir::LoadOp load, Value basePtr)
         if (base)
         {
             auto offConst = base.getDefiningOp<sir::ConstOp>();
-            if (offConst && offConst.getValue() == 32)
+            if (offConst && offConst.getValue() == ora::adt_helpers::kAdtPayloadOffset)
                 return true;
         }
     }
@@ -624,12 +624,13 @@ static void buildWideErrorUnionReturnFromParts(
         normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayload, normPayload);
     }
 
-    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, 64);
+    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize);
     Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
     Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
 
     rewriter.create<sir::StoreOp>(loc, mem, normTag);
-    Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value offset = rewriter.create<sir::ConstOp>(
+        loc, u256Type, mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtPayloadOffset));
     Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
     rewriter.create<sir::StoreOp>(loc, mem2, normPayload);
 
@@ -1677,7 +1678,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         Value isErrU256;
         SmallVector<Value> wideParts;
 
-        // Prefer wide layout when we see a tag load with a matching payload load (base+32).
+        // Prefer wide layout when we see a tag load with a matching payload load.
         Value raw0 = unwrap->getOperand(0);
         Value peeled0 = stripCasts(raw0);
         // If we already have a masked tag (tag & 1), recover the original tag load and payload.
@@ -1767,7 +1768,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                 }
 
                 // If the unwrap operand is already the tag loaded from a pointer,
-                // recover the payload from base+32 for wide error unions.
+                // recover the payload word for wide error unions.
                 if (auto load = peeled.getDefiningOp<sir::LoadOp>())
                 {
                     Value basePtr = load.getPtr();
@@ -1777,8 +1778,9 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                     }
                     else
                     {
-                        Value offs = rewriter.create<sir::ConstOp>(loc, u256Type,
-                                                                  mlir::IntegerAttr::get(u256IntType, 32));
+                        Value offs = rewriter.create<sir::ConstOp>(
+                            loc, u256Type,
+                            mlir::IntegerAttr::get(u256IntType, ora::adt_helpers::kAdtPayloadOffset));
                         Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
                         payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
                     }
@@ -3217,8 +3219,8 @@ namespace
             c.retVal = cast.getOperand(0);
     }
 
-    // Wide ora.error_union (non-narrow or force-wide). Lowers to a pair-store
-    // ABI return: malloc 64, store tag at +0, payload at +32.
+    // Wide ora.error_union (non-narrow or force-wide). Lowers to the shared
+    // two-word ADT/error-union carrier: tag at +0, payload at +payload_offset.
     static ReturnHandlerResult returnWideErrorUnion(ReturnCtx &c)
     {
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
