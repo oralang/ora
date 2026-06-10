@@ -1,6 +1,7 @@
 #include "patterns/ControlFlow.h"
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/LoweringHelpers.h"
 #include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
@@ -680,13 +681,10 @@ static std::optional<Value> materializeNarrowErrorUnionPackedValue(
 
         if (castOp.getNumOperands() == 2)
         {
-            auto u256Type = sir::U256Type::get(rewriter.getContext());
-            auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
             Value tag = coerceToU256(rewriter, loc, castOp.getOperand(0));
             Value payload = coerceToU256(rewriter, loc, castOp.getOperand(1));
-            Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, 1));
-            Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, payload);
-            return rewriter.create<sir::OrOp>(loc, u256Type, shifted, tag).getResult();
+            return ora::error_union_helpers::packNarrowCarrier(
+                rewriter, loc, tag, payload);
         }
     }
 
@@ -763,10 +761,8 @@ static LogicalResult appendSplitPackedErrorUnionValue(
 {
     if (!llvm::isa<sir::U256Type>(packed.getType()))
         return failure();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value one = mlir::ora::lowering::constU256(rewriter, loc, 1);
-    Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
-    Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+    auto [tag, payload] = ora::error_union_helpers::splitNarrowPackedCarrier(
+        rewriter, loc, packed);
     out.push_back(tag);
     out.push_back(payload);
     return success();
@@ -4483,11 +4479,8 @@ namespace
         if (c.input.getType() == u256Ty && payloadType == u256Ty)
         {
             Value packed = coerceToU256(c.rewriter, c.loc, c.input);
-            auto u256IntTy = mlir::IntegerType::get(c.rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-            Value one = c.rewriter.create<sir::ConstOp>(c.loc, u256Ty,
-                                                        mlir::IntegerAttr::get(u256IntTy, 1));
-            Value tag = c.rewriter.create<sir::AndOp>(c.loc, u256Ty, packed, one);
-            Value payload = c.rewriter.create<sir::ShrOp>(c.loc, u256Ty, one, packed);
+            auto [tag, payload] = ora::error_union_helpers::splitNarrowPackedCarrier(
+                c.rewriter, c.loc, packed);
             c.rewriter.replaceOp(c.op, {tag, payload});
             return success();
         }
@@ -4656,13 +4649,10 @@ namespace
             return std::nullopt;
         if (!isNarrowErrorUnion(errType))
             return failure();
-        auto u256Ty = sir::U256Type::get(c.rewriter.getContext());
-        auto u256IntTy = mlir::IntegerType::get(c.rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
         Value tag = coerceToU256(c.rewriter, c.loc, adaptor.getOperands()[0]);
         Value payload = coerceToU256(c.rewriter, c.loc, adaptor.getOperands()[1]);
-        Value one = c.rewriter.create<sir::ConstOp>(c.loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
-        Value shifted = c.rewriter.create<sir::ShlOp>(c.loc, u256Ty, one, payload);
-        Value packed = c.rewriter.create<sir::OrOp>(c.loc, u256Ty, shifted, tag);
+        Value packed = ora::error_union_helpers::packNarrowCarrier(
+            c.rewriter, c.loc, tag, payload);
         c.rewriter.replaceOp(c.op, packed);
         return success();
     }

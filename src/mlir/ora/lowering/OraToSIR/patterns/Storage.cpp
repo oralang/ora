@@ -1,6 +1,7 @@
 #include "patterns/Storage.h"
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
@@ -1079,13 +1080,7 @@ static std::pair<Value, Value> splitPackedErrorUnionForStorage(
     Location loc,
     Value packed)
 {
-    auto ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, 1));
-    Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
-    Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
-    return {tag, payload};
+    return ora::error_union_helpers::splitNarrowPackedCarrier(rewriter, loc, packed);
 }
 
 static FailureOr<std::pair<Value, Value>> getErrorUnionPartsForStorage(
