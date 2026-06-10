@@ -205,6 +205,12 @@ namespace mlir::ora::abi_lowering
         }
     };
 
+    enum class AbiLayoutSyntax
+    {
+        CanonicalAbi,
+        LayoutDsl,
+    };
+
     inline bool parseAbiType(StringRef s, AbiType &out)
     {
         out = AbiType();
@@ -413,6 +419,8 @@ namespace mlir::ora::abi_lowering
         return -1;
     }
 
+    namespace detail
+    {
     inline bool parseCanonicalAbiLayout(StringRef text, size_t &pos, AbiLayoutNode &out)
     {
         while (pos < text.size() && llvm::isSpace(text[pos]))
@@ -494,15 +502,6 @@ namespace mlir::ora::abi_lowering
     {
     public:
         explicit AbiLayoutDslParser(StringRef text) : text(text) {}
-
-        bool parse(SmallVectorImpl<AbiStaticLeaf> &leaves)
-        {
-            AbiLayoutNode root;
-            if (!parse(root))
-                return false;
-            root.collectStaticLeaves(leaves);
-            return true;
-        }
 
         bool parse(AbiLayoutNode &root)
         {
@@ -734,6 +733,32 @@ namespace mlir::ora::abi_lowering
             return false;
         }
     };
+    } // namespace detail
+
+    inline bool parseAbiLayout(
+        StringRef text,
+        AbiLayoutNode &out,
+        AbiLayoutSyntax syntax,
+        unsigned *operandCount = nullptr)
+    {
+        switch (syntax)
+        {
+        case AbiLayoutSyntax::CanonicalAbi:
+            if (operandCount)
+                *operandCount = 0;
+            return detail::parseCanonicalAbiLayout(text, out);
+        case AbiLayoutSyntax::LayoutDsl:
+        {
+            detail::AbiLayoutDslParser parser(text);
+            if (!parser.parse(out))
+                return false;
+            if (operandCount)
+                *operandCount = parser.getOperandCount();
+            return true;
+        }
+        }
+        return false;
+    }
 
     inline Value abiAggregateSlotValue(PatternRewriter &rewriter, Location loc, Value aggregate, unsigned slotIndex)
     {

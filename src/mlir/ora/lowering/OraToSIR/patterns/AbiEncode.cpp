@@ -1022,10 +1022,10 @@ namespace
             return rewriter.notifyMatchFailure(op, "missing ABI layout attr");
 
         AbiLayoutNode root;
-        AbiLayoutDslParser parser(layoutAttr.getValue());
-        if (!parser.parse(root))
+        unsigned operandCount = 0;
+        if (!parseAbiLayout(layoutAttr.getValue(), root, AbiLayoutSyntax::LayoutDsl, &operandCount))
             return rewriter.notifyMatchFailure(op, "unsupported or malformed ABI layout attr");
-        if (parser.getOperandCount() != adaptor.getOperands().size())
+        if (operandCount != adaptor.getOperands().size())
             return rewriter.notifyMatchFailure(op, "ABI layout operand count does not match converted operands");
 
         const uint64_t selectorBytes = selectorAttr.has_value() ? 4 : 0;
@@ -1121,8 +1121,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     if (!encodedLayout)
         return rewriter.notifyMatchFailure(op, "missing layout on ora.abi_encode_with_selector");
     AbiLayoutNode calldataRoot;
-    AbiLayoutDslParser calldataParser(encodedLayout.getValue());
-    if (!calldataParser.parse(calldataRoot))
+    if (!parseAbiLayout(encodedLayout.getValue(), calldataRoot, AbiLayoutSyntax::LayoutDsl))
         return rewriter.notifyMatchFailure(op, "unsupported ABI calldata layout");
 
     Value calldataPayloadLen = nullptr;

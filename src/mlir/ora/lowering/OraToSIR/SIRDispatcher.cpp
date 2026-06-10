@@ -47,7 +47,8 @@ namespace mlir
             using abi_lowering::isDynamicU256ArrayAbiNode;
             using abi_lowering::isStaticBoolAbiNode;
             using abi_lowering::parseAbiType;
-            using abi_lowering::parseCanonicalAbiLayout;
+            using abi_lowering::AbiLayoutSyntax;
+            using abi_lowering::parseAbiLayout;
 
             static std::optional<uint32_t> extractTaggedStmtId(Location loc, StringRef prefix)
             {
@@ -1123,7 +1124,7 @@ namespace mlir
                                 if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
                                 {
                                     AbiLayoutNode layout;
-                                    if (!parseCanonicalAbiLayout(info.abiParamLayouts[i], layout))
+                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
                                     {
                                         func.emitError("invalid tuple ABI param layout");
                                         signalPassFailure();
@@ -2923,7 +2924,7 @@ namespace mlir
                                     return;
                                 }
                                 AbiLayoutNode layout;
-                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     info.func.emitError("invalid Result input ABI layout");
                                     signalPassFailure();
@@ -2962,7 +2963,7 @@ namespace mlir
                                     return;
                                 }
                                 AbiLayoutNode layout;
-                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
@@ -3052,7 +3053,7 @@ namespace mlir
                                     return;
                                 }
                                 AbiLayoutNode layout;
-                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
@@ -3155,7 +3156,7 @@ namespace mlir
                             else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
                             {
                                 AbiLayoutNode layout;
-                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
+                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     info.func.emitError("invalid tuple ABI param layout");
                                     signalPassFailure();
@@ -3357,7 +3358,7 @@ namespace mlir
                             else if (!info.abiReturnLayout.empty())
                             {
                                 AbiLayoutNode layout;
-                                if (!parseCanonicalAbiLayout(info.abiReturnLayout, layout))
+                                if (!parseAbiLayout(info.abiReturnLayout, layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     info.func.emitError("invalid ora.abi_return_layout");
                                     signalPassFailure();

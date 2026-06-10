@@ -1143,8 +1143,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     auto decodeModeAttr = op->getAttrOfType<mlir::StringAttr>("decode_mode");
     const bool permissive = decodeModeAttr && decodeModeAttr.getValue() == "permissive";
     AbiLayoutNode root;
-    AbiLayoutDslParser parser(layoutAttr.getValue());
-    if (!parser.parse(root))
+    if (!parseAbiLayout(layoutAttr.getValue(), root, AbiLayoutSyntax::LayoutDsl))
         return rewriter.notifyMatchFailure(op, "unsupported or malformed ABI decode layout attr");
 
     if (sourceAttr.getValue() == "memory" && failureModeAttr.getValue() == "result")
