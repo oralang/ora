@@ -1,0 +1,16 @@
+error Failure;
+
+contract ResultMemRefScalar {
+    pub fn run(flag: bool, value: u256) -> u256 {
+        var values: [Result<u256, Failure>; 2] = [Ok(0), Err(Failure())];
+        if (flag) {
+            values[0] = Ok(value);
+        } else {
+            values[0] = Err(Failure());
+        }
+        return match (values[0]) {
+            Ok(inner) => inner,
+            Err(_) => 99,
+        };
+    }
+}

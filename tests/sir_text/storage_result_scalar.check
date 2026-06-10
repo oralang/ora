@@ -1,0 +1,27 @@
+// INPUT: tests/conformance/storage_result_scalar.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn __ora_user_init:
+// CHECK: slot_marker = const 0x2
+// CHECK: slot_saved = const 0x0
+// CHECK: sstore slot_saved
+// CHECK: sstore {{.*}} c7
+// CHECK: sstore slot_marker c99
+
+// CHECK-LABEL: fn set_ok:
+// CHECK: slot_saved = const 0x0
+// CHECK: sstore slot_saved
+// CHECK: sstore {{.*}} v0
+
+// CHECK-LABEL: fn set_err:
+// CHECK: slot_saved = const 0x0
+// CHECK: const 0xFF7E9F57
+// CHECK: sstore slot_saved
+// CHECK: sstore
+
+// CHECK-LABEL: fn get:
+// CHECK: slot_saved = const 0x0
+// CHECK: sload slot_saved
+// CHECK: sload
+// CHECK: and
+// CHECK: eq

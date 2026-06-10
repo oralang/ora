@@ -218,6 +218,37 @@
       ]
     },
     {
+      "id": "error_union.storage_scalar_result_carrier",
+      "tier": "M4",
+      "area": "Storage/ErrorUnionEncoding",
+      "conversion": "Scalar Result storage carrier encoding: tag word at base slot, payload/error-id word at base+1, and storage-load tag/payload reconstruction",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/storage_result_scalar.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/storage_result_scalar.check#fn set_ok:",
+        "tests/sir_text/storage_result_scalar.check#const 0xFF7E9F57",
+        "tests/sir_text/storage_result_scalar.check#sload slot_saved"
+      ]
+    },
+    {
+      "id": "error_union.memref_scalar_result_carrier",
+      "tier": "M4",
+      "area": "MemRef/ErrorUnionEncoding",
+      "conversion": "Scalar Result memref carrier encoding: narrow packed (payload << 1) | tag stores, packed loads, tag checks, and payload extraction",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/result_memref_scalar.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/result_memref_scalar.check#fn run:",
+        "tests/sir_text/result_memref_scalar.check#shl c1",
+        "tests/sir_text/result_memref_scalar.check#elem4 = mload256",
+        "tests/sir_text/result_memref_scalar.check#shr"
+      ]
+    },
+    {
       "id": "storage.scalar_map_nested",
       "tier": "T0",
       "area": "Storage",

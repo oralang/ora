@@ -1,0 +1,30 @@
+// INPUT: tests/conformance/result_memref_scalar.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn run:
+// CHECK: alloc_size = const 0x40
+// CHECK: arr_base = malloc alloc_size
+// CHECK: mstore256 elem0_ptr
+// CHECK: const 0xFF7E9F57
+// CHECK: shl c1
+// CHECK: or
+// CHECK: mstore256 elem1_ptr
+
+// CHECK-LABEL:     bb0 {
+// CHECK: shl c1 v1
+// CHECK: or
+// CHECK: mstore256 elem2_ptr
+
+// CHECK-LABEL:     bb1 {
+// CHECK: const 0xFF7E9F57
+// CHECK: shl
+// CHECK: or
+// CHECK: mstore256 elem5_ptr
+
+// CHECK-LABEL:     bb2 {
+// CHECK: elem4 = mload256
+// CHECK: and elem4
+// CHECK: eq
+
+// CHECK-LABEL:     bb4
+// CHECK: shr
