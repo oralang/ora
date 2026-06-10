@@ -1563,8 +1563,7 @@ LogicalResult ConvertTryCatchOp::matchAndRewrite(
     {
         if (valueU256.getType() != u256Type)
             valueU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, valueU256);
-        Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-        isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+        isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, valueU256, one);
     }
 
     auto *parentBlock = op->getBlock();
@@ -1715,8 +1714,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
             {
                 Value tag = coerceToU256(rewriter, loc, tagLoad.getResult());
                 payloadU256 = coerceToU256(rewriter, loc, existing);
-                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
             }
         }
         if (!isErrU256)
@@ -1728,8 +1726,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
             {
                 Value tag = coerceToU256(rewriter, loc, wideParts[0]);
                 payloadU256 = coerceToU256(rewriter, loc, wideParts[1]);
-                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
             }
         }
         if (!isErrU256)
@@ -1738,8 +1735,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
             {
                 Value tag = coerceToU256(rewriter, loc, unwrap->getOperand(0));
                 payloadU256 = coerceToU256(rewriter, loc, unwrap->getOperand(1));
-                Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-                isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
             }
             else
             {
@@ -1761,8 +1757,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                         {
                             Value tag = coerceToU256(rewriter, loc, castParts[0]);
                             payloadU256 = coerceToU256(rewriter, loc, castParts[1]);
-                            Value maskedTag = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-                            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, maskedTag, one);
+                            isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
                         }
                     }
                 }
@@ -1787,13 +1782,11 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                         Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
                         payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
                     }
-                    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                    isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, valueU256, one);
                 }
                 if (!isErrU256)
                 {
-                    Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-                    isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                    isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, valueU256, one);
                     payloadU256 = rewriter.create<sir::ShrOp>(loc, u256Type, one, valueU256);
                 }
             }
@@ -2361,8 +2354,7 @@ static LogicalResult convertErrorIsError(
         if (operands.size() >= 2)
         {
             Value tag = coerceToU256(rewriter, loc, operands.front());
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-            Value isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+            Value isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
             isErrI1 = rewriter.create<sir::BitcastOp>(loc, rewriter.getI1Type(), isErrU256);
         }
         else if (operands.size() == 1)
@@ -2374,10 +2366,8 @@ static LogicalResult convertErrorIsError(
 
             auto oneI256Attr = mlir::IntegerAttr::get(i256Type, 1);
             Value oneI256 = rewriter.create<arith::ConstantOp>(loc, i256Type, oneI256Attr);
-            Value masked = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+            isErrI1 = ora::error_union_helpers::tagWordIsErrorI256WithMask(
                 rewriter, loc, rawI256, oneI256);
-            auto cmpPred = mlir::arith::CmpIPredicate::eq;
-            isErrI1 = rewriter.create<arith::CmpIOp>(loc, cmpPred, masked, oneI256);
         }
         else
         {
@@ -2390,8 +2380,7 @@ static LogicalResult convertErrorIsError(
                 wideParts.size() >= 1)
             {
                 Value tag = coerceToU256(rewriter, loc, wideParts[0]);
-                Value masked = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-                Value isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+                Value isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
                 isErrI1 = rewriter.create<sir::BitcastOp>(loc, rewriter.getI1Type(), isErrU256);
             }
             else
@@ -2401,10 +2390,8 @@ static LogicalResult convertErrorIsError(
                     return failure();
                 auto oneI256Attr = mlir::IntegerAttr::get(i256Type, 1);
                 Value oneI256 = rewriter.create<arith::ConstantOp>(loc, i256Type, oneI256Attr);
-                Value masked = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+                isErrI1 = ora::error_union_helpers::tagWordIsErrorI256WithMask(
                     rewriter, loc, rawI256, oneI256);
-                auto cmpPred = mlir::arith::CmpIPredicate::eq;
-                isErrI1 = rewriter.create<arith::CmpIOp>(loc, cmpPred, masked, oneI256);
             }
         }
 
@@ -2418,14 +2405,12 @@ static LogicalResult convertErrorIsError(
         if (operands.size() == 1)
         {
             Value valueU256 = coerceToU256(rewriter, loc, operands[0]);
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, valueU256, one);
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+            isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, valueU256, one);
         }
         else
         {
             Value tag = coerceToU256(rewriter, loc, operands[0]);
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+            isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
         }
     }
     else
@@ -2440,8 +2425,7 @@ static LogicalResult convertErrorIsError(
             wideParts.size() >= 1)
         {
             Value tag = coerceToU256(rewriter, loc, wideParts[0]);
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, tag, one);
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+            isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, tag, one);
         }
         else if (auto okOp = op.getValue().getDefiningOp<ora::ErrorOkOp>())
         {
@@ -2460,8 +2444,7 @@ static LogicalResult convertErrorIsError(
             Value packed = ora::createMaterializationCast(
                 rewriter, loc, i256Type, op.getValue(), mat_kind::kIntegerForward);
             Value packedU256 = coerceToU256(rewriter, loc, packed);
-            Value masked = rewriter.create<sir::AndOp>(loc, u256Type, packedU256, one);
-            isErrU256 = rewriter.create<sir::EqOp>(loc, u256Type, masked, one);
+            isErrU256 = ora::error_union_helpers::tagWordIsErrorWithMask(rewriter, loc, packedU256, one);
         }
     }
 

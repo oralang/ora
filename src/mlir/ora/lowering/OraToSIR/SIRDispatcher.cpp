@@ -6,6 +6,7 @@
 
 #include "OraToSIR.h"
 #include "patterns/AbiLoweringCommon.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/LoweringHelpers.h"
 
 #include "SIR/SIRDialect.h"
@@ -2949,7 +2950,7 @@ namespace mlir
                                 Value errId = getConst(builder, caseDecodeLoc, u256Type, i64Type, info.resultInputErrorIds[idx], constCache, caseBody);
                                 Value packedErrPayload = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, errId);
                                 Value packedErr = builder.create<sir::OrOp>(caseDecodeLoc, u256Type, packedErrPayload, one);
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 argVal = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, packedErr, packedOk);
                             }
                             else if (!info.abiParams.empty() &&
@@ -3034,7 +3035,7 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 Value zeroCarrier = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, caseBody, "zero");
                                 wideTag = tag;
                                 widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, zeroCarrier, okCarrier->payload);
@@ -3137,7 +3138,7 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 wideTag = tag;
                                 widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, errPayload->payload, okPayload->payload);
                                 if (canonicalAbiLayoutIsDynamic(layout))
@@ -3320,7 +3321,7 @@ namespace mlir
                             Value payload = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadPtr);
                             Value one = getConst(builder, caseErrorLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
                             Value maskedTag = builder.create<sir::AndOp>(caseErrorLoc, u256Type, tag, one);
-                            Value isError = builder.create<sir::EqOp>(caseErrorLoc, u256Type, maskedTag, one);
+                            Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseErrorLoc, maskedTag, one);
                             Value payloadScratchSize = getConst(builder, caseErrorLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
                             Value payloadScratchPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, payloadScratchSize);
                             builder.create<sir::StoreOp>(caseErrorLoc, payloadScratchPtr, payload);
