@@ -730,6 +730,111 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
     try testing.expect((try iter.next()) == null);
 }
 
+test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\error Failure;
+        \\
+        \\contract ResultStringMemRefDead {
+        \\    pub fn run() -> u256 {
+        \\        var values: [Result<string, Failure>; 1] = [Err(Failure())];
+        \\        values[0] = Ok("abc");
+        \\        return 7;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "local Result aggregate values currently require a scalar success payload") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "local Result aggregate values currently require a scalar success payload"));
+
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+}
+
+test "compiler build removes partial artifacts when native SIR lowering fails" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn take_pair(value: (u256, string)) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic tuple ABI type for dispatcher") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "unsupported dynamic tuple ABI type for dispatcher"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
+
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out", .{}));
+}
+
 test "compiler reports undefined type names at value resolution positions once" {
     const cases = [_]struct {
         name: []const u8,

@@ -14,5 +14,12 @@ returns = { u256 = 42 }
 fn = "run(bool,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
+args = [true, "0x8000000000000000000000000000000000000000000000000000000000000000"]
+returns = { u256 = "0x8000000000000000000000000000000000000000000000000000000000000000" }
+
+[[call]]
+fn = "run(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
 args = [false, 42]
 returns = { u256 = 99 }

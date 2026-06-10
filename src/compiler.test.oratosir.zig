@@ -2953,7 +2953,11 @@ test "compiler stores opaque Result values into local Result memrefs through Ora
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn choose:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "icall @choose"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "alloc_size = const 0x80"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256 elem4_ptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256 elem5_ptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "elem9 = mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "shl c1 v"));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 

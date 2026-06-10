@@ -3995,7 +3995,7 @@ fn runMlirEmitAdvanced(
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraMlirCanonicalizationFailed;
         }
         m.end();
     }
@@ -4051,7 +4051,7 @@ fn runMlirEmitAdvanced(
         if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraToSirConversionFailed;
         }
     }
 
@@ -4138,12 +4138,12 @@ fn runMlirEmitAdvanced(
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirDispatcherBuildFailed;
         }
         if (!c.oraLegalizeSIRText(ctx, final_module)) {
             try stdout.print("Error: SIR text legalizer failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirTextLegalizerFailed;
         }
 
         m.begin("sir text emission");
@@ -4155,7 +4155,7 @@ fn runMlirEmitAdvanced(
         if (sir_text_ref.data == null or sir_text_ref.length == 0) {
             m.end();
             try stdout.print("Failed to emit SIR text\n", .{});
-            return;
+            return error.SirTextEmissionFailed;
         }
         m.end();
 

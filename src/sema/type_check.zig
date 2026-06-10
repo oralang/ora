@@ -1506,15 +1506,41 @@ const TypeChecker = struct {
     }
 
     fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        try self.checkResultCarrierTypeSupport(range, ty, "storage Result values");
+    }
+
+    fn checkLocalResultAggregateTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
         const unwrapped = unwrapRefinement(ty);
-        if (unwrapped.kind() != .error_union) return;
+        switch (unwrapped) {
+            .array => |array| try self.checkResultCarrierTypeSupport(range, array.element_type.*, "local Result aggregate values"),
+            .tuple => |fields| for (fields) |field| try self.checkResultCarrierTypeSupport(range, field, "local Result aggregate values"),
+            .anonymous_struct => |anon| for (anon.fields) |field| try self.checkResultCarrierTypeSupport(range, field.ty, "local Result aggregate values"),
+            else => {},
+        }
+    }
+
+    fn checkResultCarrierTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type, subject: []const u8) !void {
+        const unwrapped = unwrapRefinement(ty);
+        switch (unwrapped) {
+            .array => |array| return self.checkResultCarrierTypeSupport(range, array.element_type.*, subject),
+            .tuple => |fields| {
+                for (fields) |field| try self.checkResultCarrierTypeSupport(range, field, subject);
+                return;
+            },
+            .anonymous_struct => |anon| {
+                for (anon.fields) |field| try self.checkResultCarrierTypeSupport(range, field.ty, subject);
+                return;
+            },
+            .error_union => {},
+            else => return,
+        }
 
         const error_union = unwrapped.error_union;
         if (storageResultPayloadNeedsPointer(error_union.payload_type.*)) {
             try self.emitRangeError(
                 range,
-                "storage Result values currently require a scalar success payload",
-                .{},
+                "{s} currently require a scalar success payload",
+                .{subject},
             );
             return;
         }
@@ -1530,8 +1556,8 @@ const TypeChecker = struct {
             if (error_item.ErrorDecl.parameters.len == 0) continue;
             try self.emitRangeError(
                 range,
-                "storage Result values currently require payloadless error types",
-                .{},
+                "{s} currently require payloadless error types",
+                .{subject},
             );
             return;
         }
@@ -2179,6 +2205,9 @@ const TypeChecker = struct {
                             }
                         }
                     }
+                }
+                if (decl.storage_class != .storage) {
+                    try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
             .Return => |ret| if (ret.value) |expr_id| {

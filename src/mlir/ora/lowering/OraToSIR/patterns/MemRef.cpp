@@ -948,9 +948,52 @@ static Value buildDynamicStorageMemRefSlot(ConversionPatternRewriter &rewriter,
     return rewriter.create<sir::AddOp>(loc, u256Type, dataBase, indexU256);
 }
 
-static mlir::MemRefType remapMemRefElementType(mlir::MemRefType type, Type elementType)
+static mlir::MemRefType remapMemRefElementTypeForWordCarrier(mlir::MemRefType type,
+                                                             Type elementType,
+                                                             uint64_t wordCount)
 {
-    return mlir::MemRefType::get(type.getShape(), elementType, type.getLayout(), type.getMemorySpace());
+    SmallVector<int64_t> shape(type.getShape().begin(), type.getShape().end());
+    if (wordCount > 1)
+    {
+        if (shape.empty())
+        {
+            shape.push_back(static_cast<int64_t>(wordCount));
+        }
+        else if (!ShapedType::isDynamic(shape.back()))
+        {
+            shape.back() *= static_cast<int64_t>(wordCount);
+        }
+    }
+    return mlir::MemRefType::get(shape, elementType, type.getLayout(), type.getMemorySpace());
+}
+
+static SmallVector<Value> buildWordCarrierIndices(PatternRewriter &rewriter,
+                                                  Location loc,
+                                                  ValueRange indices,
+                                                  uint64_t wordCount,
+                                                  uint64_t partIndex)
+{
+    SmallVector<Value> remapped(indices.begin(), indices.end());
+    Value part = rewriter.create<mlir::arith::ConstantIndexOp>(loc, static_cast<int64_t>(partIndex));
+    if (remapped.empty())
+    {
+        remapped.push_back(part);
+        return remapped;
+    }
+
+    Value last = remapped.back();
+    if (!last.getType().isIndex())
+        return {};
+
+    if (wordCount != 1)
+    {
+        Value words = rewriter.create<mlir::arith::ConstantIndexOp>(loc, static_cast<int64_t>(wordCount));
+        last = rewriter.create<mlir::arith::MulIOp>(loc, last, words);
+    }
+    if (partIndex != 0)
+        last = rewriter.create<mlir::arith::AddIOp>(loc, last, part);
+    remapped.back() = last;
+    return remapped;
 }
 
 static Value unwrapPackedErrorUnionCarrier(Value value)
@@ -1039,11 +1082,24 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
                      << " memrefType=" << memrefType << " resultType=" << op.getType() << "\n";
     }
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
-    auto packedMemRefType = remapMemRefElementType(memrefType, i256Type);
-    Value packedMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, packedMemRefType, op.getMemref()).getResult(0);
+    constexpr uint64_t kErrorUnionMemRefCarrierWords = 2;
+    auto carrierMemRefType = remapMemRefElementTypeForWordCarrier(
+        memrefType, i256Type, kErrorUnionMemRefCarrierWords);
+    Value carrierMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, carrierMemRefType, op.getMemref()).getResult(0);
 
-    auto packedLoad = rewriter.create<mlir::memref::LoadOp>(loc, packedMemRef, op.getIndices());
-    Value restored = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, op.getType(), packedLoad.getResult()).getResult(0);
+    SmallVector<Value> tagIndices = buildWordCarrierIndices(
+        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 0);
+    SmallVector<Value> payloadIndices = buildWordCarrierIndices(
+        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 1);
+    if (tagIndices.empty() || payloadIndices.empty())
+        return failure();
+
+    auto tagLoad = rewriter.create<mlir::memref::LoadOp>(loc, carrierMemRef, tagIndices);
+    auto payloadLoad = rewriter.create<mlir::memref::LoadOp>(loc, carrierMemRef, payloadIndices);
+    Value restored = ora::createMaterializationCast(
+        rewriter, loc, op.getType(),
+        ValueRange{tagLoad.getResult(), payloadLoad.getResult()},
+        ora::mat_kind::kNormalizedErrorUnion);
     rewriter.replaceOp(op, restored);
     return success();
 }
@@ -1089,108 +1145,154 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
         }
         return Value();
     };
-    auto packTagAndPayload = [&](Value tagValue, Value payloadValue) -> Value {
-        Value tag = ensureI256(tagValue);
-        Value payload = ensureI256(payloadValue);
-        if (!tag || !payload)
-            return Value();
-        Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
-        Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, payload, one);
-        return rewriter.create<mlir::arith::OrIOp>(loc, shifted, tag);
+    auto ensureTagI256 = [&](Value value) -> Value {
+        if (auto intType = llvm::dyn_cast<mlir::IntegerType>(value.getType()))
+        {
+            if (intType.getWidth() == 256)
+                return value;
+            if (intType.getWidth() == 1)
+                return rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, value);
+        }
+        return ensureI256(value);
     };
-    auto packedMemRefType = remapMemRefElementType(memrefType, i256Type);
-    Value packedMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, packedMemRefType, op.getMemref()).getResult(0);
-    Value packedValue = op.getValue();
+    auto ensurePayloadI256 = [&](Value payloadValue) -> Value {
+        Value payload = ensureI256(payloadValue);
+        if (payload)
+            return payload;
+        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);
+        if (auto materialized = ora::materializePtrCarrierFromOraValue(
+                rewriter, loc, ptrType, payloadValue))
+        {
+            return ensureI256(*materialized);
+        }
+        return Value();
+    };
+    auto zeroI256 = [&]() -> Value {
+        return rewriter.create<mlir::arith::ConstantOp>(
+            loc,
+            i256Type,
+            mlir::IntegerAttr::get(i256Type, 0));
+    };
+    auto oneI256 = [&]() -> Value {
+        return rewriter.create<mlir::arith::ConstantOp>(
+            loc,
+            i256Type,
+            mlir::IntegerAttr::get(i256Type, 1));
+    };
+    struct CarrierParts
+    {
+        Value tag;
+        Value payload;
+    };
+    auto splitPackedCarrier = [&](Value packedValue) -> CarrierParts {
+        Value packed = ensureI256(packedValue);
+        if (!packed)
+            return {};
+        Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
+        Value tag = rewriter.create<mlir::arith::AndIOp>(loc, packed, one);
+        Value payload = rewriter.create<mlir::arith::ShRUIOp>(loc, packed, one);
+        return {tag, payload};
+    };
+    constexpr uint64_t kErrorUnionMemRefCarrierWords = 2;
+    auto carrierMemRefType = remapMemRefElementTypeForWordCarrier(
+        memrefType, i256Type, kErrorUnionMemRefCarrierWords);
+    Value carrierMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, carrierMemRefType, op.getMemref()).getResult(0);
+    Value carrierValue = op.getValue();
     Operation *consumedCast = nullptr;
-    if (auto cast = packedValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    CarrierParts parts;
+    if (auto cast = carrierValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
     {
         if (cast.getNumOperands() == 2)
         {
             if (!narrowCarrier && !hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion))
                 return failure();
             consumedCast = cast;
-            Value payload = ensureI256(cast.getOperand(1));
-            if (!payload)
-            {
-                auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace*/ 1);
-                if (auto materialized = ora::materializePtrCarrierFromOraValue(
-                        rewriter, loc, ptrType, cast.getOperand(1)))
-                {
-                    payload = ensureI256(*materialized);
-                }
-            }
-            packedValue = packTagAndPayload(cast.getOperand(0), payload);
-            if (!packedValue)
+            parts.tag = ensureTagI256(cast.getOperand(0));
+            parts.payload = ensurePayloadI256(cast.getOperand(1));
+            if (!parts.tag || !parts.payload)
                 return failure();
         }
         else if (cast.getNumOperands() == 1)
         {
-            packedValue = cast.getOperand(0);
+            carrierValue = cast.getOperand(0);
         }
     }
-    packedValue = unwrapPackedErrorUnionCarrier(packedValue);
-    if (Operation *def = packedValue.getDefiningOp())
+    if (!parts.tag || !parts.payload)
     {
-        if (auto okOp = llvm::dyn_cast<ora::ErrorOkOp>(def))
+        carrierValue = unwrapPackedErrorUnionCarrier(carrierValue);
+        if (Operation *def = carrierValue.getDefiningOp())
         {
-            if (llvm::isa<mlir::NoneType>(okOp.getValue().getType()))
+            if (auto okOp = llvm::dyn_cast<ora::ErrorOkOp>(def))
             {
-                packedValue = rewriter.create<mlir::arith::ConstantOp>(
-                    loc,
-                    i256Type,
-                    mlir::IntegerAttr::get(i256Type, 0)
-                );
+                parts.tag = zeroI256();
+                if (llvm::isa<mlir::NoneType>(okOp.getValue().getType()))
+                {
+                    parts.payload = zeroI256();
+                }
+                else
+                {
+                    parts.payload = ensurePayloadI256(okOp.getValue());
+                    if (!parts.payload)
+                        return failure();
+                }
+            }
+            else if (def->getName().getStringRef() == "ora.error.return")
+            {
+                auto sym = def->getAttrOfType<mlir::StringAttr>("sym_name");
+                if (!sym)
+                    return failure();
+                auto errorId = findErrorIdByName(op, sym.getValue());
+                if (!errorId)
+                    return failure();
+
+                auto idVal = errorId.getValue().zextOrTrunc(256);
+                Value idConst = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, idVal));
+                idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
+                parts.tag = oneI256();
+                parts.payload = idConst;
             }
         }
-        if (def->getName().getStringRef() == "ora.error.return")
-        {
-            auto sym = def->getAttrOfType<mlir::StringAttr>("sym_name");
-            if (!sym)
-                return failure();
-            auto errorId = findErrorIdByName(op, sym.getValue());
-            if (!errorId)
-                return failure();
-
-            auto idVal = errorId.getValue().zextOrTrunc(256);
-            Value idConst = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, idVal));
-            idConst.getDefiningOp()->setAttr("ora.error_id", errorId);
-            Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
-            Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, idConst, one);
-            packedValue = rewriter.create<mlir::arith::OrIOp>(loc, shifted, one);
-        }
     }
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(packedValue.getType()))
+    if (!parts.tag || !parts.payload)
     {
-        if (isScalarErrorUnionMemRefCarrier(errType))
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(carrierValue.getType()))
         {
-            // Opaque scalar Result values, such as private helper returns, arrive
-            // here before call conversion has split them into tag/payload. Pack
-            // them into the existing local-memref carrier so constructor stores
-            // and opaque stores use the same representation.
-            Value tagI1 = rewriter.create<ora::ErrorIsErrorOp>(loc, rewriter.getI1Type(), packedValue);
-            Value tag = rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, tagI1);
-            Value payload = rewriter.create<ora::ErrorUnwrapOp>(loc, errType.getSuccessType(), packedValue);
-            packedValue = packTagAndPayload(tag, payload);
-            if (!packedValue)
-                return failure();
+            if (isScalarErrorUnionMemRefCarrier(errType))
+            {
+                // Opaque scalar Result values, such as private helper returns,
+                // arrive here before call conversion has split them into
+                // tag/payload. Store the normalized two-word carrier directly.
+                Value tagI1 = rewriter.create<ora::ErrorIsErrorOp>(loc, rewriter.getI1Type(), carrierValue);
+                parts.tag = rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, tagI1);
+                Value payload = rewriter.create<ora::ErrorUnwrapOp>(loc, errType.getSuccessType(), carrierValue);
+                parts.payload = ensurePayloadI256(payload);
+                if (!parts.payload)
+                    return failure();
+            }
         }
     }
-    if (llvm::isa<sir::U256Type>(packedValue.getType()))
-        packedValue = rewriter.create<sir::BitcastOp>(loc, i256Type, packedValue);
-    else if (llvm::isa<sir::PtrType>(packedValue.getType()))
-        packedValue = ensureI256(packedValue);
-    if (!llvm::isa<mlir::IntegerType>(packedValue.getType()) ||
-        llvm::cast<mlir::IntegerType>(packedValue.getType()).getWidth() != 256)
+    if (!parts.tag || !parts.payload)
+        parts = splitPackedCarrier(carrierValue);
+    if (!parts.tag || !parts.payload)
     {
         if (mlir::ora::isDebugEnabled())
         {
             llvm::errs() << "[OraToSIR] NormalizeNarrowErrorUnionMemRefStoreOp unsupported carrier loc=" << loc
-                         << " packedValueType=" << packedValue.getType() << "\n";
+                         << " carrierValueType=" << carrierValue.getType() << "\n";
         }
         return failure();
     }
 
-    rewriter.replaceOpWithNewOp<mlir::memref::StoreOp>(op, packedValue, packedMemRef, op.getIndices());
+    SmallVector<Value> tagIndices = buildWordCarrierIndices(
+        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 0);
+    SmallVector<Value> payloadIndices = buildWordCarrierIndices(
+        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 1);
+    if (tagIndices.empty() || payloadIndices.empty())
+        return failure();
+
+    rewriter.create<mlir::memref::StoreOp>(loc, parts.tag, carrierMemRef, tagIndices);
+    rewriter.create<mlir::memref::StoreOp>(loc, parts.payload, carrierMemRef, payloadIndices);
+    rewriter.eraseOp(op);
     if (consumedCast && consumedCast->use_empty())
         rewriter.eraseOp(consumedCast);
     return success();
@@ -1223,12 +1325,17 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
         Value length = ensureU256(rewriter, loc, op.getOperation(), adaptor.getDynamicSizes().front(), "dynamic memref length");
         if (!length)
             return failure();
+        uint64_t elementBytes = getMemRefElementWordCount(op.getOperation(), memrefType.getElementType()) * 32ULL;
         Value elementSize = rewriter.create<sir::ConstOp>(
             loc,
             u256Type,
-            mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32ULL));
+            mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), elementBytes));
         Value payloadSize = rewriter.create<sir::MulOp>(loc, u256Type, length, elementSize);
-        Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, payloadSize, elementSize);
+        Value headerSize = rewriter.create<sir::ConstOp>(
+            loc,
+            u256Type,
+            mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned), 32ULL));
+        Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, payloadSize, headerSize);
         Value mallocResult = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
         rewriter.create<sir::StoreOp>(loc, mallocResult, length);
         rewriter.replaceOp(op, mallocResult);
@@ -1236,17 +1343,13 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
         return success();
     }
 
-    // Get memref shape and element type
-    // Calculate total size: num_elements * element_size (32 bytes for u256)
-    int64_t numElements = 1;
-    for (int64_t dim : memrefType.getShape())
+    auto wordCount = getStaticMemRefWordCount(op.getOperation(), memrefType);
+    if (!wordCount)
     {
-        numElements *= dim;
+        DBG("ConvertMemRefAllocOp: unsupported static memref shape");
+        return failure();
     }
-
-    // Element size is always 32 bytes (256 bits) for SIR
-    const uint64_t elementSize = 32;
-    uint64_t totalSize = numElements * elementSize;
+    uint64_t totalSize = *wordCount * 32ULL;
 
     // Create distinct location for allocation block
     auto allocLoc = mlir::NameLoc::get(
@@ -1268,7 +1371,7 @@ LogicalResult ConvertMemRefAllocOp::matchAndRewrite(
     Value mallocResult = rewriter.create<sir::MallocOp>(allocLoc, ptrType, sizeConst);
 
     // Determine context: array allocation if numElements > 1
-    SIRNamingHelper::Context allocCtx = (numElements > 1)
+    SIRNamingHelper::Context allocCtx = (*wordCount > 1)
                                             ? SIRNamingHelper::Context::ArrayAllocation
                                             : SIRNamingHelper::Context::General;
     naming.nameMalloc(mallocResult.getDefiningOp(), 0, allocCtx);
