@@ -147,6 +147,137 @@ namespace mlir::ora::abi_lowering
         }
     };
 
+    enum class AbiBase
+    {
+        Uint,
+        Int,
+        Bool,
+        Address,
+        FixedBytes,
+        BytesDyn,
+        String,
+        Unknown,
+        Tuple
+    };
+
+    struct AbiType
+    {
+        AbiBase base = AbiBase::Unknown;
+        unsigned width = 256;
+        SmallVector<int64_t, 2> dims; // -1 for dynamic []
+
+        bool isArray() const { return !dims.empty(); }
+        bool baseIsDynamic() const { return base == AbiBase::BytesDyn || base == AbiBase::String || base == AbiBase::Tuple; }
+        bool isDynamic() const
+        {
+            if (baseIsDynamic())
+                return true;
+            for (int64_t d : dims)
+                if (d < 0)
+                    return true;
+            return false;
+        }
+        bool isStaticBase() const
+        {
+            return base == AbiBase::Uint || base == AbiBase::Int || base == AbiBase::Bool || base == AbiBase::Address || base == AbiBase::FixedBytes;
+        }
+        bool supportsStaticArray() const
+        {
+            return isStaticBase() && isArray() && dims.size() == 1 && dims.front() >= 0;
+        }
+        bool supportsDynamicArray() const
+        {
+            return isStaticBase() && isArray() && dims.size() == 1 && dims.front() < 0;
+        }
+        bool supportsNestedDynamicArray() const
+        {
+            return isStaticBase() && isArray() && dims.size() == 2 && dims[0] < 0 && dims[1] < 0;
+        }
+        int64_t headSlots() const
+        {
+            if (isDynamic())
+                return 1;
+            if (!isArray())
+                return 1;
+            if (!supportsStaticArray())
+                return -1;
+            return dims.front();
+        }
+    };
+
+    inline bool parseAbiType(StringRef s, AbiType &out)
+    {
+        out = AbiType();
+        if (s.empty())
+            return false;
+        if (s.front() == '(' || s == "tuple")
+        {
+            out.base = AbiBase::Tuple;
+            return true;
+        }
+
+        size_t baseEnd = s.find('[');
+        StringRef base = (baseEnd == StringRef::npos) ? s : s.take_front(baseEnd);
+        if (base.starts_with("uint"))
+        {
+            out.base = AbiBase::Uint;
+            StringRef digits = base.drop_front(4);
+            if (!digits.empty() && digits.getAsInteger(10, out.width))
+                return false;
+        }
+        else if (base.starts_with("int"))
+        {
+            out.base = AbiBase::Int;
+            StringRef digits = base.drop_front(3);
+            if (!digits.empty() && digits.getAsInteger(10, out.width))
+                return false;
+        }
+        else if (base == "bool")
+            out.base = AbiBase::Bool;
+        else if (base == "address")
+            out.base = AbiBase::Address;
+        else if (base == "bytes")
+            out.base = AbiBase::BytesDyn;
+        else if (base == "string")
+            out.base = AbiBase::String;
+        else
+            out.base = AbiBase::Unknown;
+
+        if (out.base == AbiBase::Unknown && base.starts_with("bytes") && base.size() > 5)
+        {
+            StringRef bytesDigits = base.drop_front(5);
+            unsigned bytesLen = 0;
+            if (!(bytesDigits.size() > 1 && bytesDigits.front() == '0') &&
+                !bytesDigits.getAsInteger(10, bytesLen) && bytesLen >= 1 && bytesLen <= 32)
+            {
+                out.base = AbiBase::FixedBytes;
+                out.width = bytesLen;
+            }
+        }
+
+        size_t pos = baseEnd;
+        while (pos != StringRef::npos && pos < s.size() && s[pos] == '[')
+        {
+            size_t close = s.find(']', pos);
+            if (close == StringRef::npos)
+                return false;
+            StringRef inner = s.slice(pos + 1, close);
+            if (inner.empty())
+            {
+                out.dims.push_back(-1);
+            }
+            else
+            {
+                int64_t val = 0;
+                if (inner.getAsInteger(10, val))
+                    return false;
+                out.dims.push_back(val);
+            }
+            pos = close + 1;
+        }
+        return out.base != AbiBase::Unknown;
+    }
+
     class AbiLayoutDslParser
     {
     public:
