@@ -239,13 +239,18 @@
       "conversion": "Scalar Result memref carrier encoding: narrow packed (payload << 1) | tag stores, packed loads, tag checks, and payload extraction",
       "high_churn": true,
       "executing_tests": [
-        "tests/conformance/result_memref_scalar.spec.toml"
+        "tests/conformance/result_memref_scalar.spec.toml",
+        "tests/conformance/result_memref_opaque.spec.toml",
+        "src/compiler.test.oratosir.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
       ],
       "sir_goldens": [
         "tests/sir_text/result_memref_scalar.check#fn run:",
         "tests/sir_text/result_memref_scalar.check#shl c1",
         "tests/sir_text/result_memref_scalar.check#elem4 = mload256",
-        "tests/sir_text/result_memref_scalar.check#shr"
+        "tests/sir_text/result_memref_scalar.check#shr",
+        "tests/sir_text/result_memref_opaque.check#icall @choose",
+        "tests/sir_text/result_memref_opaque.check#mstore256 elem2_ptr",
+        "tests/sir_text/result_memref_opaque.check#elem4 = mload256"
       ]
     },
     {

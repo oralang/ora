@@ -1,0 +1,19 @@
+error Failure;
+
+contract ResultMemRefOpaque {
+    fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(Failure());
+    }
+
+    pub fn run(flag: bool, value: u256) -> u256 {
+        var values: [Result<u256, Failure>; 2] = [Ok(0), Err(Failure())];
+        values[0] = choose(flag, value);
+        return match (values[0]) {
+            Ok(inner) => inner,
+            Err(_) => 99,
+        };
+    }
+}

@@ -1089,6 +1089,15 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
         }
         return Value();
     };
+    auto packTagAndPayload = [&](Value tagValue, Value payloadValue) -> Value {
+        Value tag = ensureI256(tagValue);
+        Value payload = ensureI256(payloadValue);
+        if (!tag || !payload)
+            return Value();
+        Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
+        Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, payload, one);
+        return rewriter.create<mlir::arith::OrIOp>(loc, shifted, tag);
+    };
     auto packedMemRefType = remapMemRefElementType(memrefType, i256Type);
     Value packedMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, packedMemRefType, op.getMemref()).getResult(0);
     Value packedValue = op.getValue();
@@ -1100,7 +1109,6 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
             if (!narrowCarrier && !hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion))
                 return failure();
             consumedCast = cast;
-            Value tag = ensureI256(cast.getOperand(0));
             Value payload = ensureI256(cast.getOperand(1));
             if (!payload)
             {
@@ -1111,11 +1119,9 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
                     payload = ensureI256(*materialized);
                 }
             }
-            if (!tag || !payload)
+            packedValue = packTagAndPayload(cast.getOperand(0), payload);
+            if (!packedValue)
                 return failure();
-            Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
-            Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, payload, one);
-            packedValue = rewriter.create<mlir::arith::OrIOp>(loc, shifted, tag);
         }
         else if (cast.getNumOperands() == 1)
         {
@@ -1151,6 +1157,22 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
             Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
             Value shifted = rewriter.create<mlir::arith::ShLIOp>(loc, idConst, one);
             packedValue = rewriter.create<mlir::arith::OrIOp>(loc, shifted, one);
+        }
+    }
+    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(packedValue.getType()))
+    {
+        if (isScalarErrorUnionMemRefCarrier(errType))
+        {
+            // Opaque scalar Result values, such as private helper returns, arrive
+            // here before call conversion has split them into tag/payload. Pack
+            // them into the existing local-memref carrier so constructor stores
+            // and opaque stores use the same representation.
+            Value tagI1 = rewriter.create<ora::ErrorIsErrorOp>(loc, rewriter.getI1Type(), packedValue);
+            Value tag = rewriter.create<mlir::arith::ExtUIOp>(loc, i256Type, tagI1);
+            Value payload = rewriter.create<ora::ErrorUnwrapOp>(loc, errType.getSuccessType(), packedValue);
+            packedValue = packTagAndPayload(tag, payload);
+            if (!packedValue)
+                return failure();
         }
     }
     if (llvm::isa<sir::U256Type>(packedValue.getType()))

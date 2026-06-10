@@ -2917,6 +2917,46 @@ test "compiler converts native string and bytes index access through OraToSIR" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler stores opaque Result values into local Result memrefs through OraToSIR" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract ResultMemRefOpaque {
+        \\    fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, value: u256) -> u256 {
+        \\        var values: [Result<u256, Failure>; 2] = [Ok(0), Err(Failure())];
+        \\        values[0] = choose(flag, value);
+        \\        return match (values[0]) {
+        \\            Ok(inner) => inner,
+        \\            Err(_) => 99,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn choose:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "icall @choose"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler resolves imported std bytes errors in type position and lowers them through OraToSIR" {
     const source_text =
         \\comptime const std = @import("std");
