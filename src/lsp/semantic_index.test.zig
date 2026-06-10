@@ -32,6 +32,10 @@ test "lsp semantic index: collects declarations and scope links" {
     defer index.deinit(testing.allocator);
 
     try testing.expect(index.parse_succeeded);
+    try testing.expectEqual(index.symbols.len, index.builderItemsBuilt());
+    try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
+    try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
+    try testing.expect(index.builderGrowthEvents() > 0);
 
     const wallet_idx = findSymbolIndex(index.symbols, "Wallet", .contract) orelse return error.TestExpectedEqual;
     const deposit_idx = findSymbolIndex(index.symbols, "deposit", .method) orelse return error.TestExpectedEqual;
@@ -64,6 +68,10 @@ test "lsp semantic index: parse failure returns no symbols" {
 
     try testing.expect(!index.parse_succeeded);
     try testing.expectEqual(@as(usize, 0), index.symbols.len);
+    try testing.expectEqual(@as(usize, 0), index.builderCapacityRequested());
+    try testing.expectEqual(@as(usize, 0), index.builderItemsBuilt());
+    try testing.expectEqual(@as(usize, 0), index.builderUnusedCapacity());
+    try testing.expectEqual(@as(usize, 0), index.builderGrowthEvents());
 }
 
 test "lsp semantic index: builds nested document symbols" {

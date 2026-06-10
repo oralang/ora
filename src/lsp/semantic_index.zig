@@ -1,6 +1,7 @@
 const std = @import("std");
 const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
+const phase_stats = @import("phase_stats.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -36,6 +37,10 @@ pub const Symbol = struct {
 pub const SemanticIndex = struct {
     symbols: []Symbol,
     parse_succeeded: bool,
+    builder_capacity_requested: usize = 0,
+    builder_items_built: usize = 0,
+    builder_unused_capacity: usize = 0,
+    builder_growth_events: usize = 0,
 
     pub fn deinit(self: *SemanticIndex, allocator: Allocator) void {
         for (self.symbols) |symbol| {
@@ -44,6 +49,32 @@ pub const SemanticIndex = struct {
             if (symbol.doc_comment) |doc| allocator.free(doc);
         }
         allocator.free(self.symbols);
+    }
+
+    pub fn estimatedByteSize(self: *const SemanticIndex) usize {
+        var total = mulSat(self.symbols.len, @sizeOf(Symbol));
+        for (self.symbols) |symbol| {
+            total = addSat(total, symbol.name.len);
+            if (symbol.detail) |detail| total = addSat(total, detail.len);
+            if (symbol.doc_comment) |doc| total = addSat(total, doc.len);
+        }
+        return total;
+    }
+
+    pub fn builderCapacityRequested(self: *const SemanticIndex) usize {
+        return self.builder_capacity_requested;
+    }
+
+    pub fn builderItemsBuilt(self: *const SemanticIndex) usize {
+        return self.builder_items_built;
+    }
+
+    pub fn builderUnusedCapacity(self: *const SemanticIndex) usize {
+        return self.builder_unused_capacity;
+    }
+
+    pub fn builderGrowthEvents(self: *const SemanticIndex) usize {
+        return self.builder_growth_events;
     }
 };
 
@@ -67,22 +98,77 @@ pub fn deinitDocumentSymbols(allocator: Allocator, symbols: []DocumentSymbol) vo
 }
 
 pub fn indexDocument(allocator: Allocator, source: []const u8) !SemanticIndex {
-    var builder = try SymbolBuilder.init(allocator, source);
+    return indexDocumentWithStats(allocator, source, null);
+}
+
+pub fn indexDocumentWithStats(allocator: Allocator, source: []const u8, stats: ?*phase_stats.Stats) !SemanticIndex {
+    return indexDocumentWithStatsAlloc(allocator, allocator, source, stats);
+}
+
+pub fn indexDocumentWithStatsAlloc(
+    result_allocator: Allocator,
+    scratch_allocator: Allocator,
+    source: []const u8,
+    stats: ?*phase_stats.Stats,
+) !SemanticIndex {
+    var builder = try SymbolBuilder.init(result_allocator, scratch_allocator, source);
     errdefer builder.deinit();
 
-    var parse_result = try compiler.syntax.parse(allocator, compiler.FileId.fromIndex(0), source);
+    phase_stats.record(stats, .parse);
+    var parse_result = try compiler.syntax.parse(scratch_allocator, compiler.FileId.fromIndex(0), source);
     defer parse_result.deinit();
 
-    var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
+    phase_stats.record(stats, .ast_lower);
+    var lower_result = try compiler.ast.lower(scratch_allocator, &parse_result.tree);
     defer lower_result.deinit();
 
     for (lower_result.file.root_items) |item_id| {
         try collectItem(&builder, &lower_result.file, item_id, null, false);
     }
 
+    const builder_capacity_requested = builder.symbols.capacity;
+    const builder_items_built = builder.symbols.items.len;
     return .{
         .symbols = try builder.finish(),
         .parse_succeeded = parse_result.diagnostics.isEmpty() and lower_result.diagnostics.isEmpty(),
+        .builder_capacity_requested = builder_capacity_requested,
+        .builder_items_built = builder_items_built,
+        .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
+        .builder_growth_events = builder.builder_growth_events,
+    };
+}
+
+pub fn indexAstFileWithSourceStoreAlloc(
+    result_allocator: Allocator,
+    scratch_allocator: Allocator,
+    sources: *const compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    source: []const u8,
+    ast_file: *const compiler.ast.AstFile,
+    parse_succeeded: bool,
+) !SemanticIndex {
+    var builder = SymbolBuilder.initBorrowedSources(
+        result_allocator,
+        scratch_allocator,
+        sources,
+        file_id,
+        source,
+    );
+    errdefer builder.deinit();
+
+    for (ast_file.root_items) |item_id| {
+        try collectItem(&builder, ast_file, item_id, null, false);
+    }
+
+    const builder_capacity_requested = builder.symbols.capacity;
+    const builder_items_built = builder.symbols.items.len;
+    return .{
+        .symbols = try builder.finish(),
+        .parse_succeeded = parse_succeeded,
+        .builder_capacity_requested = builder_capacity_requested,
+        .builder_items_built = builder_items_built,
+        .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
+        .builder_growth_events = builder.builder_growth_events,
     };
 }
 
@@ -177,25 +263,25 @@ fn collectItem(
         },
         .Function => |function_decl| {
             const function_kind: SymbolKind = if (in_contract) .method else .function;
-            const function_detail = try formatFunctionDetailAlloc(builder.allocator, file, function_decl);
+            const function_detail = try formatFunctionDetailAlloc(builder.result_allocator, file, function_decl);
             const function_index = try builder.addSymbol(function_decl.name, function_kind, function_decl.range, parent, function_detail);
             for (function_decl.parameters) |parameter| {
                 const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                 _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, function_index, parameter_type);
             }
         },
         .Field => |field_decl| {
             const variable_kind: SymbolKind = if (in_contract) .field else .variable;
             const variable_type = if (field_decl.type_expr) |type_expr|
-                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+                try formatTypeExprAlloc(builder.result_allocator, file, type_expr)
             else
                 null;
             _ = try builder.addSymbol(field_decl.name, variable_kind, field_decl.range, parent, variable_type);
         },
         .Constant => |constant_decl| {
             const constant_type = if (constant_decl.type_expr) |type_expr|
-                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+                try formatTypeExprAlloc(builder.result_allocator, file, type_expr)
             else
                 null;
             _ = try builder.addSymbol(constant_decl.name, .constant, constant_decl.range, parent, constant_type);
@@ -203,33 +289,33 @@ fn collectItem(
         .Struct => |struct_decl| {
             const struct_index = try builder.addSymbol(struct_decl.name, .struct_decl, struct_decl.range, parent, null);
             for (struct_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, struct_index, field_type);
             }
         },
         .Bitfield => |bitfield_decl| {
             const bitfield_index = try builder.addSymbol(bitfield_decl.name, .bitfield_decl, bitfield_decl.range, parent, null);
             for (bitfield_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, bitfield_index, field_type);
             }
         },
         .Enum => |enum_decl| {
-            const enum_detail = try formatEnumDetailAlloc(builder.allocator, file, enum_decl);
+            const enum_detail = try formatEnumDetailAlloc(builder.result_allocator, file, enum_decl);
             const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.range, parent, enum_detail);
             for (enum_decl.variants) |variant| {
-                const variant_detail = try formatEnumVariantDetailAlloc(builder.allocator, file, variant);
+                const variant_detail = try formatEnumVariantDetailAlloc(builder.result_allocator, file, variant);
                 _ = try builder.addSymbol(variant.name, .enum_member, variant.range, enum_index, variant_detail);
             }
         },
         .Trait => |trait_decl| {
             const trait_index = try builder.addSymbol(trait_decl.name, .trait_decl, trait_decl.range, parent, null);
             for (trait_decl.methods) |method| {
-                const method_detail = try formatTraitMethodDetailAlloc(builder.allocator, file, method);
+                const method_detail = try formatTraitMethodDetailAlloc(builder.result_allocator, file, method);
                 const method_index = try builder.addSymbol(method.name, .method, method.range, trait_index, method_detail);
                 for (method.parameters) |parameter| {
                     const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                    const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                    const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                     _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, method_index, parameter_type);
                 }
             }
@@ -238,38 +324,38 @@ fn collectItem(
             }
         },
         .Impl => |impl_decl| {
-            const impl_name = try std.fmt.allocPrint(builder.allocator, "impl {s} for {s}", .{ impl_decl.trait_name, impl_decl.target_name });
-            defer builder.allocator.free(impl_name);
-            const impl_detail = try std.fmt.allocPrint(builder.allocator, "for {s}", .{impl_decl.target_name});
+            const impl_name = try std.fmt.allocPrint(builder.scratch_allocator, "impl {s} for {s}", .{ impl_decl.trait_name, impl_decl.target_name });
+            defer builder.scratch_allocator.free(impl_name);
+            const impl_detail = try std.fmt.allocPrint(builder.result_allocator, "for {s}", .{impl_decl.target_name});
             const impl_index = try builder.addSymbolWithSelectionName(impl_name, impl_decl.trait_name, .impl_decl, impl_decl.range, parent, impl_detail);
             for (impl_decl.methods) |method_id| {
                 try collectItem(builder, file, method_id, impl_index, true);
             }
         },
         .TypeAlias => |alias_decl| {
-            const alias_detail = try formatTypeExprAlloc(builder.allocator, file, alias_decl.target_type);
+            const alias_detail = try formatTypeExprAlloc(builder.result_allocator, file, alias_decl.target_type);
             _ = try builder.addSymbol(alias_decl.name, .type_alias, alias_decl.range, parent, alias_detail);
         },
         .LogDecl => |log_decl| {
-            const log_detail = try formatLogDetailAlloc(builder.allocator, file, log_decl);
+            const log_detail = try formatLogDetailAlloc(builder.result_allocator, file, log_decl);
             const log_index = try builder.addSymbol(log_decl.name, .event, log_decl.range, parent, log_detail);
             for (log_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, log_index, field_type);
             }
         },
         .ErrorDecl => |error_decl| {
-            const error_detail = try formatErrorDetailAlloc(builder.allocator, file, error_decl);
+            const error_detail = try formatErrorDetailAlloc(builder.result_allocator, file, error_decl);
             const error_index = try builder.addSymbol(error_decl.name, .error_decl, error_decl.range, parent, error_detail);
             for (error_decl.parameters) |parameter| {
                 const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                 _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, error_index, parameter_type);
             }
         },
         .Import => |import_decl| {
             if (import_decl.alias) |alias| {
-                const detail = try std.fmt.allocPrint(builder.allocator, "import \"{s}\"", .{import_decl.path});
+                const detail = try std.fmt.allocPrint(builder.result_allocator, "import \"{s}\"", .{import_decl.path});
                 _ = try builder.addSymbol(alias, .variable, import_decl.range, parent, detail);
             }
         },
@@ -433,6 +519,14 @@ fn unaryOpText(op: compiler.ast.UnaryOp) []const u8 {
         .bit_not => "~",
         .try_ => "try ",
     };
+}
+
+fn addSat(a: usize, b: usize) usize {
+    return std.math.add(usize, a, b) catch std.math.maxInt(usize);
+}
+
+fn mulSat(a: usize, b: usize) usize {
+    return std.math.mul(usize, a, b) catch std.math.maxInt(usize);
 }
 
 fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, error_decl: compiler.ast.ErrorDeclItem) ![]u8 {
@@ -716,18 +810,22 @@ pub fn toLspKind(kind: SymbolKind) u8 {
 }
 
 const SymbolBuilder = struct {
-    allocator: Allocator,
+    result_allocator: Allocator,
+    scratch_allocator: Allocator,
     symbols: std.ArrayList(Symbol),
     sources: compiler.source.SourceStore,
+    borrowed_sources: ?*const compiler.source.SourceStore = null,
     file_id: compiler.FileId,
     source_text: []const u8,
+    builder_growth_events: usize = 0,
 
-    fn init(allocator: Allocator, source_text: []const u8) !SymbolBuilder {
-        var sources = compiler.source.SourceStore.init(allocator);
+    fn init(result_allocator: Allocator, scratch_allocator: Allocator, source_text: []const u8) !SymbolBuilder {
+        var sources = compiler.source.SourceStore.init(scratch_allocator);
         errdefer sources.deinit();
         const file_id = try sources.addFile("<lsp>", source_text);
         return .{
-            .allocator = allocator,
+            .result_allocator = result_allocator,
+            .scratch_allocator = scratch_allocator,
             .symbols = .{},
             .sources = sources,
             .file_id = file_id,
@@ -735,20 +833,40 @@ const SymbolBuilder = struct {
         };
     }
 
+    fn initBorrowedSources(
+        result_allocator: Allocator,
+        scratch_allocator: Allocator,
+        sources: *const compiler.source.SourceStore,
+        file_id: compiler.FileId,
+        source_text: []const u8,
+    ) SymbolBuilder {
+        return .{
+            .result_allocator = result_allocator,
+            .scratch_allocator = scratch_allocator,
+            .symbols = .{},
+            .sources = compiler.source.SourceStore.init(scratch_allocator),
+            .borrowed_sources = sources,
+            .file_id = file_id,
+            .source_text = source_text,
+        };
+    }
+
     fn deinit(self: *SymbolBuilder) void {
         for (self.symbols.items) |symbol| {
-            self.allocator.free(symbol.name);
-            if (symbol.detail) |detail| self.allocator.free(detail);
-            if (symbol.doc_comment) |doc| self.allocator.free(doc);
+            self.result_allocator.free(symbol.name);
+            if (symbol.detail) |detail| self.result_allocator.free(detail);
+            if (symbol.doc_comment) |doc| self.result_allocator.free(doc);
         }
-        self.symbols.deinit(self.allocator);
-        self.sources.deinit();
+        self.symbols.deinit(self.result_allocator);
+        if (self.borrowed_sources == null) self.sources.deinit();
     }
 
     fn finish(self: *SymbolBuilder) ![]Symbol {
-        const owned = try self.symbols.toOwnedSlice(self.allocator);
-        self.sources.deinit();
-        self.sources = compiler.source.SourceStore.init(self.allocator);
+        const owned = try self.symbols.toOwnedSlice(self.result_allocator);
+        if (self.borrowed_sources == null) {
+            self.sources.deinit();
+            self.sources = compiler.source.SourceStore.init(self.scratch_allocator);
+        }
         return owned;
     }
 
@@ -772,13 +890,15 @@ const SymbolBuilder = struct {
         parent: ?usize,
         detail: ?[]u8,
     ) !usize {
-        const name_copy = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(name_copy);
-        errdefer if (detail) |detail_text| self.allocator.free(detail_text);
+        const name_copy = try self.result_allocator.dupe(u8, name);
+        errdefer self.result_allocator.free(name_copy);
+        errdefer if (detail) |detail_text| self.result_allocator.free(detail_text);
 
         const doc = try self.extractDocComment(range);
+        errdefer if (doc) |doc_text| self.result_allocator.free(doc_text);
 
-        try self.symbols.append(self.allocator, .{
+        const capacity_before = self.symbols.capacity;
+        try self.symbols.append(self.result_allocator, .{
             .name = name_copy,
             .detail = detail,
             .doc_comment = doc,
@@ -787,12 +907,15 @@ const SymbolBuilder = struct {
             .selection_range = self.textRangeToSelectionRange(range, selection_name),
             .parent = parent,
         });
+        if (self.symbols.capacity > capacity_before) {
+            self.builder_growth_events += 1;
+        }
 
         return self.symbols.items.len - 1;
     }
 
-    /// Extract doc comments (// lines) immediately preceding a declaration.
-    /// Scans backwards from the declaration start to find contiguous comment lines.
+    /// Extract public doc comments (`///` lines) immediately preceding a declaration.
+    /// Plain `//` comments are internal notes and are not harvested for public docs.
     fn extractDocComment(self: *const SymbolBuilder, range: compiler.TextRange) !?[]u8 {
         const start: usize = @intCast(@min(range.start, self.source_text.len));
         if (start == 0) return null;
@@ -805,7 +928,7 @@ const SymbolBuilder = struct {
 
         // Now walk backwards through preceding comment lines.
         var comment_lines = std.ArrayList([]const u8){};
-        defer comment_lines.deinit(self.allocator);
+        defer comment_lines.deinit(self.scratch_allocator);
 
         var scan_pos = line_start;
         while (scan_pos > 0) {
@@ -822,13 +945,13 @@ const SymbolBuilder = struct {
             const line = self.source_text[prev_line_start..prev_line_end];
             const trimmed = std.mem.trimLeft(u8, line, " \t");
 
-            if (std.mem.startsWith(u8, trimmed, "//")) {
-                // Strip the // prefix and optional leading space.
-                var comment_text = trimmed[2..];
+            if (std.mem.startsWith(u8, trimmed, "///")) {
+                // Strip the /// prefix and optional leading space.
+                var comment_text = trimmed[3..];
                 if (comment_text.len > 0 and comment_text[0] == ' ') {
                     comment_text = comment_text[1..];
                 }
-                try comment_lines.append(self.allocator, comment_text);
+                try comment_lines.append(self.scratch_allocator, comment_text);
                 scan_pos = prev_line_start;
             } else if (trimmed.len == 0) {
                 // Empty line — stop collecting.
@@ -850,7 +973,7 @@ const SymbolBuilder = struct {
             if (i < comment_lines.items.len - 1) total_len += 1; // newline
         }
 
-        const result = try self.allocator.alloc(u8, total_len);
+        const result = try self.result_allocator.alloc(u8, total_len);
         var offset: usize = 0;
         for (comment_lines.items, 0..) |line, i| {
             @memcpy(result[offset .. offset + line.len], line);
@@ -865,11 +988,12 @@ const SymbolBuilder = struct {
     }
 
     fn textRangeToRange(self: *const SymbolBuilder, range: compiler.TextRange) frontend.Range {
-        const start = self.sources.lineColumn(.{
+        const sources = self.sourceStore();
+        const start = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.start, .end = range.start },
         });
-        const end = self.sources.lineColumn(.{
+        const end = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.end, .end = range.end },
         });
@@ -903,6 +1027,10 @@ const SymbolBuilder = struct {
         selection.end.line = selection.start.line;
         selection.end.character = std.math.add(u32, selection.start.character, name_len) catch std.math.maxInt(u32);
         return selection;
+    }
+
+    fn sourceStore(self: *const SymbolBuilder) *const compiler.source.SourceStore {
+        return self.borrowed_sources orelse &self.sources;
     }
 };
 

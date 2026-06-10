@@ -2,6 +2,8 @@ const std = @import("std");
 const lexer_mod = @import("ora_lexer");
 const frontend = @import("frontend.zig");
 const semantic_index = @import("semantic_index.zig");
+const phase_stats = @import("phase_stats.zig");
+const token_cache = @import("token_cache.zig");
 
 const Allocator = std.mem.Allocator;
 const TokenType = lexer_mod.TokenType;
@@ -80,23 +82,57 @@ pub const SemanticToken = struct {
 
 /// Tokenize source into semantic tokens for LSP.
 pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
+    return tokenizeWithStats(allocator, source, null);
+}
+
+pub fn tokenizeWithStats(allocator: Allocator, source: []const u8, stats: ?*phase_stats.Stats) ![]SemanticToken {
+    phase_stats.record(stats, .lex);
+    var tokens = try token_cache.Cache.init(allocator, source);
+    defer tokens.deinit(allocator);
+
+    // Phase 2: Build semantic index for identifier enrichment. Keep lexical tokens for
+    // diagnostic-bearing source, but do not hide fatal allocator failures.
+    var index = semantic_index.indexDocumentWithStats(allocator, source, stats) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+    defer if (index) |*idx| idx.deinit(allocator);
+
+    return tokenizeWithTokenSlice(allocator, source, tokens.tokens, index);
+}
+
+pub fn tokenizeWithIndex(
+    allocator: Allocator,
+    source: []const u8,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ![]SemanticToken {
+    var tokens = try token_cache.Cache.init(allocator, source);
+    defer tokens.deinit(allocator);
+
+    return tokenizeWithTokenSlice(allocator, source, tokens.tokens, maybe_index);
+}
+
+/// Build semantic tokens from a retained normalized lexer token cache.
+pub fn tokenizeCached(
+    allocator: Allocator,
+    source: []const u8,
+    tokens: []const token_cache.Token,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ![]SemanticToken {
+    return tokenizeWithTokenSlice(allocator, source, tokens, maybe_index);
+}
+
+fn tokenizeWithTokenSlice(
+    allocator: Allocator,
+    source: []const u8,
+    tokens: anytype,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ![]SemanticToken {
     var tokens_list = std.ArrayList(SemanticToken){};
     errdefer tokens_list.deinit(allocator);
 
-    // Phase 1: Lex source and classify tokens.
-    var lex = lexer_mod.Lexer.initWithRecovery(allocator, source);
-    defer lex.deinit();
-    const tokens = lex.scanTokens() catch return try tokens_list.toOwnedSlice(allocator);
-    defer allocator.free(tokens);
-
-    // Phase 2: Build semantic index for identifier enrichment.
-    var index = semantic_index.indexDocument(allocator, source) catch null;
-    defer if (index) |*idx| idx.deinit(allocator);
-
-    // Phase 3: Extract comment ranges from trivia.
     try extractComments(&tokens_list, allocator, tokens, source);
 
-    // Phase 4: Classify each lexer token.
     for (tokens) |token| {
         if (token.type == .Eof) continue;
         const len: u32 = @intCast(token.lexeme.len);
@@ -105,7 +141,7 @@ pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
         const tok_line = if (token.line > 0) token.line - 1 else 0;
         const tok_char = if (token.column > 0) token.column - 1 else 0;
 
-        if (classifyToken(token, index)) |classification| {
+        if (classifyToken(token, maybe_index)) |classification| {
             try tokens_list.append(allocator, .{
                 .line = tok_line,
                 .start_char = tok_char,
@@ -116,9 +152,7 @@ pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
         }
     }
 
-    // Sort by position (line, then character).
     std.sort.heap(SemanticToken, tokens_list.items, {}, lessThanSemanticToken);
-
     return tokens_list.toOwnedSlice(allocator);
 }
 
@@ -127,8 +161,12 @@ const Classification = struct {
     modifiers: u32,
 };
 
-fn classifyToken(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
+fn classifyToken(token: anytype, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
     const tt = token.type;
+
+    if (classifyKeywordLexeme(token)) |classification| {
+        return classification;
+    }
 
     // Keywords
     if (isVerificationKeyword(tt)) {
@@ -178,7 +216,18 @@ fn classifyToken(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIn
     return null;
 }
 
-fn classifyIdentifier(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIndex) Classification {
+fn classifyKeywordLexeme(token: anytype) ?Classification {
+    _ = lexer_mod.keywords.get(token.lexeme) orelse return null;
+    if (token.type == .Comptime) {
+        return .{ .kind = .macro, .modifiers = 0 };
+    }
+    if (isTypeKeyword(token.type)) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+    return .{ .kind = .keyword, .modifiers = 0 };
+}
+
+fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex) Classification {
     const idx = maybe_index orelse return .{ .kind = .variable, .modifiers = 0 };
     const tok_line = if (token.line > 0) token.line - 1 else 0;
     const tok_char = if (token.column > 0) token.column - 1 else 0;
@@ -239,7 +288,7 @@ fn symbolKindToModifiers(kind: semantic_index.SymbolKind) u32 {
 fn extractComments(
     tokens_list: *std.ArrayList(SemanticToken),
     allocator: Allocator,
-    tokens: []const lexer_mod.Token,
+    tokens: anytype,
     source: []const u8,
 ) !void {
     for (tokens) |token| {

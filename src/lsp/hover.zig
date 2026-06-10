@@ -17,6 +17,15 @@ pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Posi
     var index = try semantic_index.indexDocument(allocator, source);
     defer index.deinit(allocator);
 
+    return hoverAtIndex(allocator, source, position, &index);
+}
+
+pub fn hoverAtIndex(
+    allocator: Allocator,
+    source: []const u8,
+    position: frontend.Position,
+    index: *const semantic_index.SemanticIndex,
+) !?Hover {
     if (!index.parse_succeeded) return null;
 
     if (semantic_index.findSymbolAtPosition(index.symbols, position)) |symbol_index| {

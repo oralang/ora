@@ -724,6 +724,16 @@ pub fn build(b: *std.Build) void {
     const lsp_references_tests = b.addTest(.{ .root_module = lsp_references_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
 
+    const lsp_document_highlight_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_highlight.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_highlight_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_highlight_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_highlight_tests = b.addTest(.{ .root_module = lsp_document_highlight_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_highlight_tests).step);
+
     const lsp_rename_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/rename.test.zig"),
         .target = target,
@@ -742,6 +752,329 @@ pub fn build(b: *std.Build) void {
     lsp_completion_test_mod.addImport("ora_types", ora_types_mod);
     const lsp_completion_tests = b.addTest(.{ .root_module = lsp_completion_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+
+    const lsp_signature_help_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/signature_help.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_signature_help_test_mod.addImport("ora_root", lib_mod);
+    const lsp_signature_help_tests = b.addTest(.{ .root_module = lsp_signature_help_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_signature_help_tests).step);
+
+    const lsp_semantic_tokens_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/semantic_tokens.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_semantic_tokens_test_mod.addImport("ora_root", lib_mod);
+    const lsp_semantic_tokens_tests = b.addTest(.{ .root_module = lsp_semantic_tokens_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_tests).step);
+
+    const lsp_token_cache_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/token_cache.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_token_cache_test_mod.addImport("ora_root", lib_mod);
+    const lsp_token_cache_tests = b.addTest(.{ .root_module = lsp_token_cache_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_token_cache_tests).step);
+
+    const lsp_code_lens_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_lens.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_lens_test_mod.addImport("ora_root", lib_mod);
+    const lsp_code_lens_tests = b.addTest(.{ .root_module = lsp_code_lens_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_lens_tests).step);
+
+    const lsp_folding_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/folding.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_folding_test_mod.addImport("ora_root", lib_mod);
+    const lsp_folding_tests = b.addTest(.{ .root_module = lsp_folding_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_folding_tests).step);
+
+    const lsp_cache_stats_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/cache_stats_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_cache_stats_response_tests = b.addTest(.{ .root_module = lsp_cache_stats_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_cache_stats_response_tests).step);
+
+    const lsp_allocation_stats_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/allocation_stats.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_allocation_stats_test_mod.addImport("ora_root", lib_mod);
+    const lsp_allocation_stats_tests = b.addTest(.{ .root_module = lsp_allocation_stats_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_allocation_stats_tests).step);
+
+    const lsp_signature_help_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/signature_help_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_signature_help_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_signature_help_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_signature_help_response_tests = b.addTest(.{ .root_module = lsp_signature_help_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_signature_help_response_tests).step);
+
+    const lsp_builtin_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/builtin_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_builtin_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_builtin_docs_tests = b.addTest(.{ .root_module = lsp_builtin_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_builtin_docs_tests).step);
+
+    const lsp_keyword_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/keyword_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_keyword_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_keyword_docs_tests = b.addTest(.{ .root_module = lsp_keyword_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_keyword_docs_tests).step);
+
+    const lsp_std_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/std_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_std_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_std_docs_tests = b.addTest(.{ .root_module = lsp_std_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_std_docs_tests).step);
+
+    const lsp_call_hierarchy_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_test_mod.addImport("ora_root", lib_mod);
+    const lsp_call_hierarchy_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_tests).step);
+
+    const lsp_call_hierarchy_prepare_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy_prepare.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_prepare_test_mod.addImport("ora_root", lib_mod);
+    lsp_call_hierarchy_prepare_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_call_hierarchy_prepare_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_prepare_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_prepare_tests).step);
+
+    const lsp_call_hierarchy_calls_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy_calls.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_calls_test_mod.addImport("ora_root", lib_mod);
+    lsp_call_hierarchy_calls_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_call_hierarchy_calls_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_calls_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_calls_tests).step);
+
+    const lsp_code_action_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_action.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_action_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_code_action_tests = b.addTest(.{ .root_module = lsp_code_action_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_action_tests).step);
+
+    const lsp_code_lens_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_lens_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_lens_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_code_lens_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_code_lens_response_tests = b.addTest(.{ .root_module = lsp_code_lens_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_lens_response_tests).step);
+
+    const lsp_completion_items_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/completion_items.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_completion_items_test_mod.addImport("ora_root", lib_mod);
+    lsp_completion_items_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_completion_items_tests = b.addTest(.{ .root_module = lsp_completion_items_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_completion_items_tests).step);
+
+    const lsp_definition_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/definition_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_definition_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_definition_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_definition_response_tests = b.addTest(.{ .root_module = lsp_definition_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
+
+    const lsp_document_link_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_link.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_link_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_link_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_link_tests = b.addTest(.{ .root_module = lsp_document_link_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_link_tests).step);
+
+    const lsp_document_symbol_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_symbol.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_symbol_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_symbol_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_symbol_tests = b.addTest(.{ .root_module = lsp_document_symbol_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_symbol_tests).step);
+
+    const lsp_folding_ranges_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/folding_ranges_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_folding_ranges_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_folding_ranges_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_folding_ranges_response_tests = b.addTest(.{ .root_module = lsp_folding_ranges_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_folding_ranges_response_tests).step);
+
+    const lsp_formatting_edits_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/formatting_edits.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_formatting_edits_test_mod.addImport("ora_root", lib_mod);
+    lsp_formatting_edits_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_formatting_edits_tests = b.addTest(.{ .root_module = lsp_formatting_edits_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_formatting_edits_tests).step);
+
+    const lsp_hover_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/hover_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_hover_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_hover_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_hover_response_tests = b.addTest(.{ .root_module = lsp_hover_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_hover_response_tests).step);
+
+    const lsp_inlay_hint_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/inlay_hint_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_inlay_hint_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_inlay_hint_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_inlay_hint_response_tests = b.addTest(.{ .root_module = lsp_inlay_hint_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_inlay_hint_response_tests).step);
+
+    const lsp_inlay_hints_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/inlay_hints.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_inlay_hints_test_mod.addImport("ora_root", lib_mod);
+    const lsp_inlay_hints_tests = b.addTest(.{ .root_module = lsp_inlay_hints_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_inlay_hints_tests).step);
+
+    const lsp_line_index_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/line_index.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_line_index_test_mod.addImport("ora_root", lib_mod);
+    const lsp_line_index_tests = b.addTest(.{ .root_module = lsp_line_index_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_line_index_tests).step);
+
+    const lsp_protocol_ranges_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/protocol_ranges.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_protocol_ranges_test_mod.addImport("ora_root", lib_mod);
+    lsp_protocol_ranges_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_protocol_ranges_tests = b.addTest(.{ .root_module = lsp_protocol_ranges_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_protocol_ranges_tests).step);
+
+    const lsp_references_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/references_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_references_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_references_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_references_response_tests = b.addTest(.{ .root_module = lsp_references_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_references_response_tests).step);
+
+    const lsp_rename_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/rename_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_rename_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_rename_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_rename_response_tests = b.addTest(.{ .root_module = lsp_rename_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_rename_response_tests).step);
+
+    const lsp_selection_range_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/selection_range.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_selection_range_test_mod.addImport("ora_root", lib_mod);
+    lsp_selection_range_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_selection_range_tests = b.addTest(.{ .root_module = lsp_selection_range_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_selection_range_tests).step);
+
+    const lsp_semantic_tokens_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/semantic_tokens_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_semantic_tokens_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_semantic_tokens_response_tests = b.addTest(.{ .root_module = lsp_semantic_tokens_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
+
+    const lsp_uri_ranges_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/uri_ranges.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_uri_ranges_test_mod.addImport("ora_root", lib_mod);
+    lsp_uri_ranges_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_uri_ranges_tests = b.addTest(.{ .root_module = lsp_uri_ranges_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+
+    const lsp_workspace_index_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_index.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_index_test_mod.addImport("ora_root", lib_mod);
+    const lsp_workspace_index_tests = b.addTest(.{ .root_module = lsp_workspace_index_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_index_tests).step);
+
+    const lsp_workspace_symbol_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_symbol_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_symbol_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_workspace_symbol_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_workspace_symbol_response_tests = b.addTest(.{ .root_module = lsp_workspace_symbol_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_symbol_response_tests).step);
 
     const lsp_formatting_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/formatting.test.zig"),
@@ -821,9 +1154,82 @@ pub fn build(b: *std.Build) void {
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_hover_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_highlight_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_signature_help_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_token_cache_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_lens_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_folding_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_cache_stats_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_allocation_stats_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_signature_help_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_builtin_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_keyword_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_std_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_prepare_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_calls_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_action_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_lens_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_items_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_link_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_symbol_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_folding_ranges_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_edits_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_hover_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_inlay_hint_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_inlay_hints_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_line_index_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_protocol_ranges_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_references_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_selection_range_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_index_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_symbol_response_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
+
+    const lsp_smoke_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-smoke.py",
+    });
+    lsp_smoke_cmd.addArtifactArg(lsp_exe);
+    const lsp_smoke_step = b.step("lsp-smoke", "Run LSP JSON-RPC smoke test");
+    lsp_smoke_step.dependOn(&lsp_smoke_cmd.step);
+
+    const lsp_build_mode = optimizeModeName(optimize);
+
+    const lsp_bench_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-benchmark.py",
+        "--profile",
+        "quick",
+        "--build-mode",
+        lsp_build_mode,
+        "--strict-future-gates",
+    });
+    lsp_bench_cmd.addArtifactArg(lsp_exe);
+    const lsp_bench_step = b.step("lsp-bench", "Run LSP JSON-RPC benchmark");
+    lsp_bench_step.dependOn(&lsp_bench_cmd.step);
+
+    const lsp_bench_release_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-benchmark.py",
+        "--profile",
+        "release",
+        "--build-mode",
+        lsp_build_mode,
+        "--require-build-mode",
+        "ReleaseFast",
+        "--strict-future-gates",
+    });
+    lsp_bench_release_cmd.addArtifactArg(lsp_exe);
+    const lsp_bench_release_step = b.step("lsp-bench-release", "Run LSP JSON-RPC benchmark in ReleaseFast");
+    lsp_bench_release_step.dependOn(&lsp_bench_release_cmd.step);
 
     // zig build check-verifier-introspection
     const verifier_introspection_cmd = b.addSystemCommand(&[_][]const u8{
@@ -1982,6 +2388,15 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+fn optimizeModeName(optimize: std.builtin.OptimizeMode) []const u8 {
+    return switch (optimize) {
+        .Debug => "Debug",
+        .ReleaseSafe => "ReleaseSafe",
+        .ReleaseFast => "ReleaseFast",
+        .ReleaseSmall => "ReleaseSmall",
+    };
 }
 
 fn compilerTestFilters(b: *std.Build, option_filter: ?[]const u8) []const []const u8 {

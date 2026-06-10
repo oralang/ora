@@ -41,5 +41,6 @@ docs/
 
 tmp/
 artifacts/
+outside-pr/
 zig-out/
 .*/

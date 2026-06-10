@@ -83,6 +83,12 @@ pub const Graph = struct {
         return node.normalized_path;
     }
 
+    /// Returns open document URIs that directly import the given normalized path.
+    /// The returned slice and items are borrowed from graph storage.
+    pub fn directImporters(self: *const Graph, imported_path: []const u8) []const []const u8 {
+        return self.reverse_importers.get(imported_path) orelse &.{};
+    }
+
     /// Returns importer URIs that (transitively) depend on the given path.
     /// Returned slice must be freed by caller. Elements are borrowed from graph storage.
     pub fn collectDependents(self: *const Graph, allocator: Allocator, changed_path: []const u8) ![]const []const u8 {

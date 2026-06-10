@@ -1,6 +1,7 @@
 const std = @import("std");
 const lexer = @import("ora_lexer");
 const compiler = @import("../compiler.zig");
+const phase_stats = @import("phase_stats.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -54,6 +55,10 @@ pub const DocumentAnalysis = struct {
 };
 
 pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalysis {
+    return analyzeDocumentWithStats(allocator, source, null);
+}
+
+pub fn analyzeDocumentWithStats(allocator: Allocator, source: []const u8, stats: ?*phase_stats.Stats) !DocumentAnalysis {
     const file_id = compiler.FileId.fromIndex(0);
     var diagnostics = std.ArrayList(Diagnostic){};
     errdefer {
@@ -66,6 +71,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
     var lex = lexer.Lexer.initWithRecovery(allocator, source);
     defer lex.deinit();
 
+    phase_stats.record(stats, .lex);
     const tokens = try lex.scanTokens();
     defer allocator.free(tokens);
 
@@ -79,6 +85,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         });
     }
 
+    phase_stats.record(stats, .parse);
     var parse_result = try compiler.syntax.parse(allocator, file_id, source);
     defer parse_result.deinit();
 
@@ -94,6 +101,7 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
         });
     }
 
+    phase_stats.record(stats, .ast_lower);
     var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
     defer lower_result.deinit();
 
@@ -113,8 +121,10 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
     // region errors, effect errors, and refinement diagnostics.
     var sema_had_diagnostics = false;
     if (!parse_had_diagnostics and !lower_had_diagnostics) {
+        phase_stats.record(stats, .item_index);
         var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
         defer item_index.deinit();
+        phase_stats.record(stats, .resolve);
         var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
         defer resolution.deinit();
         for (resolution.diagnostics.items.items) |diag| {
@@ -128,9 +138,11 @@ pub fn analyzeDocument(allocator: Allocator, source: []const u8) !DocumentAnalys
             });
         }
 
+        phase_stats.record(stats, .const_eval);
         var const_eval_result = try compiler.comptime_eval.constEval(allocator, &lower_result.file, .{});
         defer const_eval_result.deinit();
 
+        phase_stats.record(stats, .type_check);
         var typecheck_result = try compiler.sema.typeCheck(
             allocator,
             compiler.ModuleId.fromIndex(0),

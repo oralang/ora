@@ -4,6 +4,8 @@ const ora_root = @import("ora_root");
 
 const references = ora_root.lsp.references;
 const frontend = ora_root.lsp.frontend;
+const definition = ora_root.lsp.definition;
+const token_cache = ora_root.lsp.token_cache;
 
 fn positionOfNth(source: []const u8, needle: []const u8, nth: usize) !frontend.Position {
     var from: usize = 0;
@@ -102,4 +104,62 @@ test "lsp references: parse failure returns empty" {
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 0), ranges.len);
+}
+
+test "lsp references: occurrence index reports builder telemetry" {
+    const source =
+        \\pub fn helper(x: u256) -> u256 { return x; }
+        \\pub fn main() -> u256 {
+        \\    let a: u256 = helper(1);
+        \\    return helper(a);
+        \\}
+    ;
+
+    var analysis = (try definition.Analysis.init(testing.allocator, source)) orelse return error.TestExpectedEqual;
+    defer analysis.deinit();
+
+    var tokens = try token_cache.Cache.init(testing.allocator, source);
+    defer tokens.deinit(testing.allocator);
+
+    var index = try references.OccurrenceIndex.init(testing.allocator, source, tokens.tokens, &analysis);
+    defer index.deinit(testing.allocator);
+
+    try testing.expect(index.occurrences.len > 0);
+    try testing.expectEqual(index.occurrences.len, index.builderItemsBuilt());
+    try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
+    try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
+    try testing.expect(index.builderGrowthEvents() > 0);
+}
+
+test "lsp references: imported member index records alias member uses" {
+    const source =
+        \\const Lib = @import("./lib.ora");
+        \\const Other = @import("./other.ora");
+        \\
+        \\pub fn run() -> u256 {
+        \\    return Lib.helper(1) + Other.helper(2) + Lib.value();
+        \\}
+    ;
+    const imports = [_]references.ImportBinding{
+        .{ .alias = "Lib", .resolved_path = "/tmp/lib.ora" },
+        .{ .alias = "Other", .resolved_path = "/tmp/other.ora" },
+    };
+
+    var index = try references.buildImportedMemberIndex(testing.allocator, source, imports[0..]);
+    defer references.deinitImportedMemberIndex(testing.allocator, &index);
+
+    try testing.expectEqual(@as(usize, 3), index.occurrences.len);
+    try testing.expect(index.estimatedByteSize() > 0);
+    try testing.expectEqual(index.occurrences.len, index.builderItemsBuilt());
+    try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
+    try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
+    try testing.expect(index.builderGrowthEvents() > 0);
+
+    const ranges = try references.importedMemberReferencesTo(testing.allocator, &index, "/tmp/lib.ora", "helper");
+    defer testing.allocator.free(ranges);
+
+    try testing.expectEqual(@as(usize, 1), ranges.len);
+    const expected = try positionOfNth(source, "helper", 0);
+    try testing.expectEqual(expected.line, ranges[0].start.line);
+    try testing.expectEqual(expected.character, ranges[0].start.character);
 }

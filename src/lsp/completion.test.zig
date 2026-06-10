@@ -5,6 +5,9 @@ const ora_types = @import("ora_types");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
+const keyword_docs = ora_root.lsp.keyword_docs;
+const lexer = ora_root.lexer;
+const semantic_index = ora_root.lsp.semantic_index;
 const refinements = ora_types.refinement_semantics;
 
 fn hasLabel(items: []const completion.Item, label: []const u8) bool {
@@ -68,6 +71,23 @@ test "lsp completion: includes symbols from semantic index" {
     try testing.expect(hasLabel(items, "helper"));
 }
 
+test "lsp completion: indexed path uses caller-owned semantic index" {
+    const source =
+        \\pub fn helper(x: u256) -> u256 { return x; }
+        \\pub fn run() -> u256 { return hel; }
+    ;
+
+    var index = try semantic_index.indexDocument(testing.allocator, source);
+    defer index.deinit(testing.allocator);
+
+    const position = try positionAfterNth(source, "hel", 0);
+
+    const items = try completion.completionAtIndex(testing.allocator, source, position, null, &index);
+    defer completion.deinitItems(testing.allocator, items);
+
+    try testing.expect(hasLabel(items, "helper"));
+}
+
 test "lsp completion: non-matching prefix returns empty" {
     const source =
         \\pub fn helper(x: u256) -> u256 { return x; }
@@ -102,6 +122,27 @@ test "lsp completion: includes current language keywords and types" {
     try testing.expect(hasLabel(items, "bytes"));
     try testing.expect(hasLabel(items, "slice"));
     try testing.expect(hasLabel(items, "result"));
+}
+
+test "lsp completion: offers every lexer and contextual keyword" {
+    const source =
+        \\pub fn run() {
+        \\
+        \\}
+    ;
+
+    const position: frontend.Position = .{ .line = 1, .character = 0 };
+
+    const items = try completion.completionAt(testing.allocator, source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    const keyword_keys = lexer.keywords.kvs.keys[0..lexer.keywords.kvs.len];
+    for (keyword_keys) |keyword| {
+        try testing.expect(hasLabel(items, keyword));
+    }
+    for (keyword_docs.contextual_keywords) |keyword| {
+        try testing.expect(hasLabel(items, keyword));
+    }
 }
 
 test "lsp completion: includes registry-backed refinement types" {
