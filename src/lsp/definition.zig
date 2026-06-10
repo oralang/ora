@@ -25,13 +25,18 @@ const file_origin: frontend.Range = .{
 };
 
 pub const Analysis = struct {
+    allocator: Allocator,
     sources: compiler.source.SourceStore,
+    borrowed_sources: ?*const compiler.source.SourceStore = null,
     file_id: compiler.FileId,
     module_id: compiler.ModuleId,
-    parse_result: compiler.syntax.ParseResult,
-    lower_result: compiler.ast.LowerResult,
-    item_index: compiler.sema.ItemIndexResult,
-    resolution: compiler.sema.NameResolutionResult,
+    parse_result: ?compiler.syntax.ParseResult = null,
+    lower_result: ?compiler.ast.LowerResult = null,
+    item_index: ?compiler.sema.ItemIndexResult = null,
+    resolution_result: ?compiler.sema.NameResolutionResult = null,
+    borrowed_file: ?*const compiler.ast.AstFile = null,
+    borrowed_item_index: ?*const compiler.sema.ItemIndexResult = null,
+    borrowed_resolution: ?*const compiler.sema.NameResolutionResult = null,
     source_text: []const u8,
 
     pub fn init(allocator: Allocator, source_text: []const u8) !?Analysis {
@@ -49,35 +54,60 @@ pub const Analysis = struct {
 
         var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
         errdefer item_index.deinit();
-        var resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
-        errdefer resolution.deinit();
+        var name_resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
+        errdefer name_resolution.deinit();
 
         return .{
+            .allocator = allocator,
             .sources = sources,
             .file_id = file_id,
             .module_id = module_id,
             .parse_result = parse_result,
             .lower_result = lower_result,
             .item_index = item_index,
-            .resolution = resolution,
+            .resolution_result = name_resolution,
+            .source_text = source_text,
+        };
+    }
+
+    pub fn initBorrowed(
+        allocator: Allocator,
+        sources: *const compiler.source.SourceStore,
+        file_id: compiler.FileId,
+        module_id: compiler.ModuleId,
+        source_text: []const u8,
+        ast_file: *const compiler.ast.AstFile,
+        item_index: *const compiler.sema.ItemIndexResult,
+        resolution: *const compiler.sema.NameResolutionResult,
+    ) Analysis {
+        return .{
+            .allocator = allocator,
+            .sources = compiler.source.SourceStore.init(allocator),
+            .borrowed_sources = sources,
+            .file_id = file_id,
+            .module_id = module_id,
+            .borrowed_file = ast_file,
+            .borrowed_item_index = item_index,
+            .borrowed_resolution = resolution,
             .source_text = source_text,
         };
     }
 
     pub fn deinit(self: *Analysis) void {
-        self.resolution.deinit();
-        self.item_index.deinit();
-        self.lower_result.deinit();
-        self.parse_result.deinit();
-        self.sources.deinit();
+        if (self.resolution_result) |*name_resolution| name_resolution.deinit();
+        if (self.item_index) |*item_index| item_index.deinit();
+        if (self.lower_result) |*lower_result| lower_result.deinit();
+        if (self.parse_result) |*parse_result| parse_result.deinit();
+        if (self.borrowed_sources == null) self.sources.deinit();
     }
 
     fn textRangeToRange(self: *const Analysis, range: compiler.TextRange) frontend.Range {
-        const start = self.sources.lineColumn(.{
+        const sources = self.sourceStore();
+        const start = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.start, .end = range.start },
         });
-        const end = self.sources.lineColumn(.{
+        const end = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.end, .end = range.end },
         });
@@ -93,8 +123,16 @@ pub const Analysis = struct {
         };
     }
 
-    fn file(self: *const Analysis) *const compiler.ast.AstFile {
-        return &self.lower_result.file;
+    fn astFile(self: *const Analysis) *const compiler.ast.AstFile {
+        return self.borrowed_file orelse &self.lower_result.?.file;
+    }
+
+    fn resolutionView(self: *const Analysis) *const compiler.sema.NameResolutionResult {
+        return self.borrowed_resolution orelse &self.resolution_result.?;
+    }
+
+    fn sourceStore(self: *const Analysis) *const compiler.source.SourceStore {
+        return self.borrowed_sources orelse &self.sources;
     }
 
     fn selectionRange(self: *const Analysis, range: compiler.TextRange, name: []const u8) frontend.Range {
@@ -121,7 +159,7 @@ const Resolver = struct {
     found: ?Definition = null,
 
     fn run(self: *Resolver) anyerror!?Definition {
-        for (self.analysis.file().root_items) |item_id| {
+        for (self.analysis.astFile().root_items) |item_id| {
             if (try self.visitItem(item_id)) break;
         }
         return self.found;
@@ -129,7 +167,7 @@ const Resolver = struct {
 
     fn visitItem(self: *Resolver, item_id: compiler.ast.ItemId) anyerror!bool {
         if (self.found != null) return true;
-        const item = self.analysis.file().item(item_id).*;
+        const item = self.analysis.astFile().item(item_id).*;
 
         if (self.matchItemDeclaration(item_id)) return true;
 
@@ -213,7 +251,7 @@ const Resolver = struct {
     }
 
     fn visitBody(self: *Resolver, body_id: compiler.ast.BodyId) anyerror!bool {
-        const body = self.analysis.file().body(body_id).*;
+        const body = self.analysis.astFile().body(body_id).*;
         for (body.statements) |stmt_id| {
             if (try self.visitStmt(stmt_id)) return true;
         }
@@ -222,7 +260,7 @@ const Resolver = struct {
 
     fn visitStmt(self: *Resolver, stmt_id: compiler.ast.StmtId) anyerror!bool {
         if (self.found != null) return true;
-        switch (self.analysis.file().statement(stmt_id).*) {
+        switch (self.analysis.astFile().statement(stmt_id).*) {
             .VariableDecl => |decl| {
                 if (decl.value) |expr_id| {
                     if (try self.visitExpr(expr_id)) return true;
@@ -305,7 +343,7 @@ const Resolver = struct {
     }
 
     fn visitPatternUses(self: *Resolver, pattern_id: compiler.ast.PatternId) anyerror!bool {
-        switch (self.analysis.file().pattern(pattern_id).*) {
+        switch (self.analysis.astFile().pattern(pattern_id).*) {
             .Field => |field| return self.visitPatternUses(field.base),
             .Index => |index| {
                 if (try self.visitPatternUses(index.base)) return true;
@@ -324,7 +362,7 @@ const Resolver = struct {
 
     fn visitExpr(self: *Resolver, expr_id: compiler.ast.ExprId) anyerror!bool {
         if (self.found != null) return true;
-        const expr = self.analysis.file().expression(expr_id).*;
+        const expr = self.analysis.astFile().expression(expr_id).*;
         switch (expr) {
             .Name => |name| {
                 if (self.touchesNameRange(name.range, name.name)) {
@@ -431,7 +469,7 @@ const Resolver = struct {
     }
 
     fn resolveExprBinding(self: *Resolver, expr_id: compiler.ast.ExprId) anyerror!bool {
-        const binding = self.analysis.resolution.expr_bindings[expr_id.index()] orelse return false;
+        const binding = self.analysis.resolutionView().expr_bindings[expr_id.index()] orelse return false;
         self.found = try self.definitionForBinding(binding);
         return self.found != null;
     }
@@ -461,7 +499,7 @@ const Resolver = struct {
     }
 
     fn importAliasItemByName(self: *Resolver, alias: []const u8) ?compiler.ast.ItemId {
-        for (self.analysis.file().root_items) |item_id| {
+        for (self.analysis.astFile().root_items) |item_id| {
             const item_alias = self.itemImportAliasName(item_id) orelse continue;
             if (std.mem.eql(u8, item_alias, alias)) return item_id;
         }
@@ -469,11 +507,11 @@ const Resolver = struct {
     }
 
     fn itemImportAliasName(self: *Resolver, item_id: compiler.ast.ItemId) ?[]const u8 {
-        const item = self.analysis.file().item(item_id).*;
+        const item = self.analysis.astFile().item(item_id).*;
         return switch (item) {
             .Import => |import_item| import_item.alias,
             .Constant => |constant_item| blk: {
-                switch (self.analysis.file().expression(constant_item.value).*) {
+                switch (self.analysis.astFile().expression(constant_item.value).*) {
                     .Builtin => |builtin| if (std.mem.eql(u8, builtin.name, "import")) break :blk constant_item.name,
                     else => {},
                 }
@@ -494,10 +532,10 @@ const Resolver = struct {
     }
 
     fn resolveCrossFileField(self: *Resolver, expr_id: compiler.ast.ExprId, field: compiler.ast.FieldExpr) anyerror!bool {
-        const binding = switch (self.analysis.file().expression(field.base).*) {
-            .Name => self.analysis.resolution.expr_bindings[field.base.index()],
-            .Group => |group| switch (self.analysis.file().expression(group.expr).*) {
-                .Name => self.analysis.resolution.expr_bindings[group.expr.index()],
+        const binding = switch (self.analysis.astFile().expression(field.base).*) {
+            .Name => self.analysis.resolutionView().expr_bindings[field.base.index()],
+            .Group => |group| switch (self.analysis.astFile().expression(group.expr).*) {
+                .Name => self.analysis.resolutionView().expr_bindings[group.expr.index()],
                 else => null,
             },
             else => null,
@@ -507,14 +545,14 @@ const Resolver = struct {
             .item => |item_id| item_id,
             .pattern => return false,
         };
-        const item = self.analysis.file().item(item_id).*;
+        const item = self.analysis.astFile().item(item_id).*;
         if (item != .Import) return false;
 
         const alias = item.Import.alias orelse return false;
         const import_binding = findImportBinding(self.cross_file, alias) orelse return false;
 
         if (import_binding.target_source) |target_source| {
-            if (try findTopLevelDeclarationInSource(self.analysis.sources.allocator, target_source, field.name)) |range| {
+            if (try findTopLevelDeclarationInSource(self.analysis.allocator, target_source, field.name)) |range| {
                 self.found = .{
                     .uri = import_binding.target_uri,
                     .range = range,
@@ -557,7 +595,7 @@ const Resolver = struct {
     }
 
     fn itemSelectionRange(self: *Resolver, item_id: compiler.ast.ItemId) ?frontend.Range {
-        const item = self.analysis.file().item(item_id).*;
+        const item = self.analysis.astFile().item(item_id).*;
         const pair: ?struct { range: compiler.TextRange, name: []const u8 } = switch (item) {
             .Import => |import_item| if (import_item.alias) |alias|
                 .{ .range = import_item.range, .name = alias }
@@ -581,7 +619,7 @@ const Resolver = struct {
     }
 
     fn patternSelectionRange(self: *Resolver, pattern_id: compiler.ast.PatternId) ?frontend.Range {
-        const pattern = self.analysis.file().pattern(pattern_id).*;
+        const pattern = self.analysis.astFile().pattern(pattern_id).*;
         return switch (pattern) {
             .Name => |name| self.analysis.selectionRange(name.range, name.name),
             .StructDestructure => |destructure| self.analysis.textRangeToRange(destructure.range),
@@ -633,7 +671,7 @@ fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend
             }
         }
 
-        for (analysis.file().root_items) |item_id| {
+        for (analysis.astFile().root_items) |item_id| {
             var alias_resolver = Resolver{
                 .analysis = &analysis,
                 .query_position = position,
@@ -665,8 +703,8 @@ fn findTopLevelDeclarationInSource(allocator: Allocator, source_text: []const u8
     var analysis = (try Analysis.init(allocator, source_text)) orelse return null;
     defer analysis.deinit();
 
-    for (analysis.file().root_items) |item_id| {
-        const item = analysis.file().item(item_id).*;
+    for (analysis.astFile().root_items) |item_id| {
+        const item = analysis.astFile().item(item_id).*;
         const pair: ?struct { range: compiler.TextRange, symbol: []const u8 } = switch (item) {
             .Contract => |contract_decl| .{ .range = contract_decl.range, .symbol = contract_decl.name },
             .Function => |function_decl| .{ .range = function_decl.range, .symbol = function_decl.name },
@@ -752,8 +790,8 @@ fn isIdentifierChar(byte: u8) bool {
 }
 
 fn hasTopLevelDeclarationNamed(analysis: *const Analysis, name: []const u8) bool {
-    for (analysis.file().root_items) |item_id| {
-        const item = analysis.file().item(item_id).*;
+    for (analysis.astFile().root_items) |item_id| {
+        const item = analysis.astFile().item(item_id).*;
         const item_name: ?[]const u8 = switch (item) {
             .Import => |import_item| import_item.alias,
             .Contract => |contract_decl| contract_decl.name,
