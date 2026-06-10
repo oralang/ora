@@ -10,6 +10,11 @@ const text_edits = ora_root.lsp.text_edits;
 const Allocator = std.mem.Allocator;
 const types = lsp.types;
 
+pub const BuildResult = struct {
+    items: ?[]types.CodeLens,
+    string_bytes: usize,
+};
+
 pub fn build(
     arena: Allocator,
     source: []const u8,
@@ -17,10 +22,23 @@ pub fn build(
     encoding: text_edits.PositionEncoding,
     lenses: []const code_lens.VerificationLens,
 ) !?[]types.CodeLens {
-    if (lenses.len == 0) return null;
+    return (try buildWithStats(arena, source, lines, encoding, lenses)).items;
+}
+
+pub fn buildWithStats(
+    arena: Allocator,
+    source: []const u8,
+    lines: *const line_index.LineIndex,
+    encoding: text_edits.PositionEncoding,
+    lenses: []const code_lens.VerificationLens,
+) !BuildResult {
+    if (lenses.len == 0) return .{ .items = null, .string_bytes = 0 };
 
     const result = try arena.alloc(types.CodeLens, lenses.len);
+    var string_bytes: usize = 0;
     for (lenses, 0..) |lens, index| {
+        string_bytes = addSat(string_bytes, lens.title.len);
+        string_bytes = addSat(string_bytes, "ora.verify".len);
         result[index] = .{
             .range = protocol_ranges.byteRangeToLspOrRaw(source, lines, encoding, lens.range),
             .command = .{
@@ -30,5 +48,9 @@ pub fn build(
         };
     }
 
-    return result;
+    return .{ .items = result, .string_bytes = string_bytes };
+}
+
+fn addSat(a: usize, b: usize) usize {
+    return std.math.add(usize, a, b) catch std.math.maxInt(usize);
 }

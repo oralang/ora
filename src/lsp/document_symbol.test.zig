@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 
 const line_index = ora_root.lsp.line_index;
 const semantic_index = ora_root.lsp.semantic_index;
+const test_analysis = @import("test_analysis.zig");
 
 test "lsp document symbol: builds nested LSP document symbols" {
     const source =
@@ -18,7 +19,7 @@ test "lsp document symbol: builds nested LSP document symbols" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(std.testing.allocator, source);
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
@@ -41,7 +42,7 @@ test "lsp document symbol: builds nested LSP document symbols" {
 test "lsp document symbol: converts byte ranges to utf16" {
     const source = "/* é */ pub fn helper() -> u256 { return 1; }";
 
-    var index = try semantic_index.indexDocument(std.testing.allocator, source);
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);

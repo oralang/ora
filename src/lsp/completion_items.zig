@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
+const protocol_helpers = @import("protocol_helpers.zig");
 
 const Allocator = std.mem.Allocator;
 const types = lsp.types;
@@ -29,6 +30,12 @@ const snippets = [_]Snippet{
     .{ .label = "event", .body = "log ${1:Name}(${2:param}: ${3:u256});", .detail = "Event/log declaration" },
 };
 
+pub const BuildResult = struct {
+    items: []types.CompletionItem,
+    string_bytes: usize,
+    markdown_bytes: usize,
+};
+
 pub fn build(
     arena: Allocator,
     source: []const u8,
@@ -36,22 +43,40 @@ pub fn build(
     trigger_char: ?[]const u8,
     items: []const completion.Item,
 ) ![]types.CompletionItem {
-    const snippet_count: usize = if (isAtLineStart(source, byte_position) and trigger_char == null) snippets.len else 0;
+    return (try buildWithStats(arena, source, byte_position, trigger_char, items)).items;
+}
+
+pub fn buildWithStats(
+    arena: Allocator,
+    source: []const u8,
+    byte_position: frontend.Position,
+    trigger_char: ?[]const u8,
+    items: []const completion.Item,
+) !BuildResult {
+    const snippet_count: usize = if (protocol_helpers.isAtLineStart(source, byte_position) and trigger_char == null) snippets.len else 0;
     const result = try arena.alloc(types.CompletionItem, items.len + snippet_count);
+    var string_bytes: usize = 0;
+    var markdown_bytes: usize = 0;
 
     for (items, 0..) |item, i| {
+        string_bytes = addSat(string_bytes, item.label.len);
+        if (item.detail) |detail| string_bytes = addSat(string_bytes, detail.len);
+        if (item.documentation) |doc| markdown_bytes = addSat(markdown_bytes, doc.len);
         result[i] = .{
-            .label = item.label,
-            .kind = kindToLsp(item.kind),
-            .detail = item.detail,
+            .label = try arena.dupe(u8, item.label),
+            .kind = protocol_helpers.completionKindToLsp(item.kind),
+            .detail = if (item.detail) |detail| try arena.dupe(u8, detail) else null,
             .documentation = if (item.documentation) |doc| .{ .MarkupContent = .{
                 .kind = .markdown,
-                .value = doc,
+                .value = try arena.dupe(u8, doc),
             } } else null,
         };
     }
 
     for (snippets[0..snippet_count], items.len..) |snippet, i| {
+        string_bytes = addSat(string_bytes, snippet.label.len);
+        string_bytes = addSat(string_bytes, snippet.detail.len);
+        string_bytes = addSat(string_bytes, snippet.body.len);
         result[i] = .{
             .label = snippet.label,
             .kind = .Snippet,
@@ -61,46 +86,13 @@ pub fn build(
         };
     }
 
-    return result;
-}
-
-fn isAtLineStart(source: []const u8, position: frontend.Position) bool {
-    var line: u32 = 0;
-    var line_start: usize = 0;
-    for (source, 0..) |c, i| {
-        if (line == position.line) {
-            const prefix = source[line_start..@min(line_start + position.character, source.len)];
-            for (prefix) |ch| {
-                if (ch != ' ' and ch != '\t') return false;
-            }
-            return true;
-        }
-        if (c == '\n') {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-    return line == position.line;
-}
-
-fn kindToLsp(kind: completion.Kind) types.CompletionItemKind {
-    return switch (kind) {
-        .keyword => .Keyword,
-        .contract => .Class,
-        .function => .Function,
-        .method => .Method,
-        .variable => .Variable,
-        .field => .Field,
-        .constant => .Constant,
-        .parameter => .Variable,
-        .struct_decl => .Struct,
-        .bitfield_decl => .Struct,
-        .enum_decl => .Enum,
-        .enum_member => .EnumMember,
-        .trait_decl => .Interface,
-        .impl_decl => .Class,
-        .type_alias => .Struct,
-        .event => .Event,
-        .error_decl => .Class,
+    return .{
+        .items = result,
+        .string_bytes = string_bytes,
+        .markdown_bytes = markdown_bytes,
     };
+}
+
+fn addSat(a: usize, b: usize) usize {
+    return std.math.add(usize, a, b) catch std.math.maxInt(usize);
 }

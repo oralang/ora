@@ -14,42 +14,6 @@ pub const VerificationLens = struct {
     }
 };
 
-/// Scan source for functions/contracts with verification annotations and return
-/// code lenses showing their spec clause summary.
-pub fn findVerificationLenses(allocator: Allocator, source: []const u8) ![]VerificationLens {
-    var lenses = std.ArrayList(VerificationLens){};
-    errdefer {
-        for (lenses.items) |*lens| lens.deinit(allocator);
-        lenses.deinit(allocator);
-    }
-
-    var sources = compiler.source.SourceStore.init(allocator);
-    defer sources.deinit();
-    const file_id = try sources.addFile("<lsp>", source);
-
-    var parse_result = compiler.syntax.parse(allocator, file_id, source) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return try lenses.toOwnedSlice(allocator),
-    };
-    defer parse_result.deinit();
-
-    var lower_result = compiler.ast.lower(allocator, &parse_result.tree) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return try lenses.toOwnedSlice(allocator),
-    };
-    defer lower_result.deinit();
-
-    const range_context: RangeContext = .{ .source_store = .{
-        .sources = &sources,
-        .file_id = file_id,
-    } };
-    for (lower_result.file.root_items) |item_id| {
-        try collectLenses(&lenses, allocator, &lower_result.file, item_id, range_context);
-    }
-
-    return lenses.toOwnedSlice(allocator);
-}
-
 pub fn findVerificationLensesInAst(
     allocator: Allocator,
     source: []const u8,
@@ -79,10 +43,6 @@ pub fn deinitLenses(allocator: Allocator, lenses: []VerificationLens) void {
 }
 
 const RangeContext = union(enum) {
-    source_store: struct {
-        sources: *const compiler.source.SourceStore,
-        file_id: compiler.FileId,
-    },
     line_index: struct {
         source: []const u8,
         index: *const line_index_api.LineIndex,
@@ -90,7 +50,6 @@ const RangeContext = union(enum) {
 
     fn textRangeToFrontendRange(self: RangeContext, range: compiler.TextRange) frontend.Range {
         return switch (self) {
-            .source_store => |ctx| sourceStoreRangeToFrontendRange(ctx.sources, ctx.file_id, range),
             .line_index => |ctx| ctx.index.textRangeToRange(ctx.source, range, .utf8),
         };
     }
@@ -191,25 +150,4 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
     }
 
     return buffer.toOwnedSlice(allocator);
-}
-
-fn sourceStoreRangeToFrontendRange(sources: *const compiler.source.SourceStore, file_id: compiler.FileId, range: compiler.TextRange) frontend.Range {
-    const start = sources.lineColumn(.{
-        .file_id = file_id,
-        .range = .{ .start = range.start, .end = range.start },
-    });
-    const end = sources.lineColumn(.{
-        .file_id = file_id,
-        .range = .{ .start = range.end, .end = range.end },
-    });
-    return .{
-        .start = .{
-            .line = if (start.line > 0) start.line - 1 else 0,
-            .character = if (start.column > 0) start.column - 1 else 0,
-        },
-        .end = .{
-            .line = if (end.line > 0) end.line - 1 else 0,
-            .character = if (end.column > 0) end.column - 1 else 0,
-        },
-    };
 }

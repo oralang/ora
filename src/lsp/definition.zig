@@ -9,10 +9,15 @@ pub const Definition = struct {
     range: frontend.Range,
 };
 
+pub const ResolvedName = struct {
+    name: []const u8,
+    range: frontend.Range,
+    definition_range: frontend.Range,
+};
+
 pub const ImportBinding = struct {
     alias: []const u8,
     target_uri: []const u8,
-    target_source: ?[]const u8,
 };
 
 pub const CrossFileContext = struct {
@@ -26,49 +31,12 @@ const file_origin: frontend.Range = .{
 
 pub const Analysis = struct {
     allocator: Allocator,
-    sources: compiler.source.SourceStore,
-    borrowed_sources: ?*const compiler.source.SourceStore = null,
+    sources: *const compiler.source.SourceStore,
     file_id: compiler.FileId,
     module_id: compiler.ModuleId,
-    parse_result: ?compiler.syntax.ParseResult = null,
-    lower_result: ?compiler.ast.LowerResult = null,
-    item_index: ?compiler.sema.ItemIndexResult = null,
-    resolution_result: ?compiler.sema.NameResolutionResult = null,
-    borrowed_file: ?*const compiler.ast.AstFile = null,
-    borrowed_item_index: ?*const compiler.sema.ItemIndexResult = null,
-    borrowed_resolution: ?*const compiler.sema.NameResolutionResult = null,
+    ast_file: *const compiler.ast.AstFile,
+    resolution: *const compiler.sema.NameResolutionResult,
     source_text: []const u8,
-
-    pub fn init(allocator: Allocator, source_text: []const u8) !?Analysis {
-        var sources = compiler.source.SourceStore.init(allocator);
-        errdefer sources.deinit();
-        const file_id = try sources.addFile("<lsp>", source_text);
-        const package_id = try sources.addPackage("main");
-        const module_id = try sources.addModule(package_id, file_id, "lsp");
-
-        var parse_result = try compiler.syntax.parse(allocator, file_id, source_text);
-        errdefer parse_result.deinit();
-
-        var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
-        errdefer lower_result.deinit();
-
-        var item_index = try compiler.sema.buildItemIndex(allocator, &lower_result.file);
-        errdefer item_index.deinit();
-        var name_resolution = try compiler.sema.resolveNames(allocator, file_id, &lower_result.file, &item_index);
-        errdefer name_resolution.deinit();
-
-        return .{
-            .allocator = allocator,
-            .sources = sources,
-            .file_id = file_id,
-            .module_id = module_id,
-            .parse_result = parse_result,
-            .lower_result = lower_result,
-            .item_index = item_index,
-            .resolution_result = name_resolution,
-            .source_text = source_text,
-        };
-    }
 
     pub fn initBorrowed(
         allocator: Allocator,
@@ -80,25 +48,20 @@ pub const Analysis = struct {
         item_index: *const compiler.sema.ItemIndexResult,
         resolution: *const compiler.sema.NameResolutionResult,
     ) Analysis {
+        _ = item_index;
         return .{
             .allocator = allocator,
-            .sources = compiler.source.SourceStore.init(allocator),
-            .borrowed_sources = sources,
+            .sources = sources,
             .file_id = file_id,
             .module_id = module_id,
-            .borrowed_file = ast_file,
-            .borrowed_item_index = item_index,
-            .borrowed_resolution = resolution,
+            .ast_file = ast_file,
+            .resolution = resolution,
             .source_text = source_text,
         };
     }
 
     pub fn deinit(self: *Analysis) void {
-        if (self.resolution_result) |*name_resolution| name_resolution.deinit();
-        if (self.item_index) |*item_index| item_index.deinit();
-        if (self.lower_result) |*lower_result| lower_result.deinit();
-        if (self.parse_result) |*parse_result| parse_result.deinit();
-        if (self.borrowed_sources == null) self.sources.deinit();
+        self.* = undefined;
     }
 
     fn textRangeToRange(self: *const Analysis, range: compiler.TextRange) frontend.Range {
@@ -124,15 +87,15 @@ pub const Analysis = struct {
     }
 
     fn astFile(self: *const Analysis) *const compiler.ast.AstFile {
-        return self.borrowed_file orelse &self.lower_result.?.file;
+        return self.ast_file;
     }
 
     fn resolutionView(self: *const Analysis) *const compiler.sema.NameResolutionResult {
-        return self.borrowed_resolution orelse &self.resolution_result.?;
+        return self.resolution;
     }
 
     fn sourceStore(self: *const Analysis) *const compiler.source.SourceStore {
-        return self.borrowed_sources orelse &self.sources;
+        return self.sources;
     }
 
     fn selectionRange(self: *const Analysis, range: compiler.TextRange, name: []const u8) frontend.Range {
@@ -421,9 +384,6 @@ const Resolver = struct {
                 }
             },
             .Field => |field| {
-                if (self.touchesNameRange(field.range, field.name)) {
-                    if (try self.resolveCrossFileField(expr_id, field)) return true;
-                }
                 if (try self.visitExpr(field.base)) return true;
             },
             .Index => |index| {
@@ -531,44 +491,6 @@ const Resolver = struct {
         return .{ .range = range };
     }
 
-    fn resolveCrossFileField(self: *Resolver, expr_id: compiler.ast.ExprId, field: compiler.ast.FieldExpr) anyerror!bool {
-        const binding = switch (self.analysis.astFile().expression(field.base).*) {
-            .Name => self.analysis.resolutionView().expr_bindings[field.base.index()],
-            .Group => |group| switch (self.analysis.astFile().expression(group.expr).*) {
-                .Name => self.analysis.resolutionView().expr_bindings[group.expr.index()],
-                else => null,
-            },
-            else => null,
-        } orelse return false;
-
-        const item_id = switch (binding) {
-            .item => |item_id| item_id,
-            .pattern => return false,
-        };
-        const item = self.analysis.astFile().item(item_id).*;
-        if (item != .Import) return false;
-
-        const alias = item.Import.alias orelse return false;
-        const import_binding = findImportBinding(self.cross_file, alias) orelse return false;
-
-        if (import_binding.target_source) |target_source| {
-            if (try findTopLevelDeclarationInSource(self.analysis.allocator, target_source, field.name)) |range| {
-                self.found = .{
-                    .uri = import_binding.target_uri,
-                    .range = range,
-                };
-                return true;
-            }
-        }
-
-        self.found = .{
-            .uri = import_binding.target_uri,
-            .range = file_origin,
-        };
-        _ = expr_id;
-        return true;
-    }
-
     fn matchItemDeclaration(self: *Resolver, item_id: compiler.ast.ItemId) bool {
         const range = self.itemSelectionRange(item_id) orelse return false;
         if (!rangeContainsPosition(range, self.query_position)) return false;
@@ -595,6 +517,11 @@ const Resolver = struct {
     }
 
     fn itemSelectionRange(self: *Resolver, item_id: compiler.ast.ItemId) ?frontend.Range {
+        const pair = self.itemSelectionPair(item_id) orelse return null;
+        return pair.range;
+    }
+
+    fn itemSelectionPair(self: *Resolver, item_id: compiler.ast.ItemId) ?struct { range: frontend.Range, name: []const u8 } {
         const item = self.analysis.astFile().item(item_id).*;
         const pair: ?struct { range: compiler.TextRange, name: []const u8 } = switch (item) {
             .Import => |import_item| if (import_item.alias) |alias|
@@ -614,26 +541,296 @@ const Resolver = struct {
             .Constant => |constant_decl| .{ .range = constant_decl.range, .name = constant_decl.name },
             else => null,
         };
-        if (pair) |p| return self.analysis.selectionRange(p.range, p.name);
+        if (pair) |p| return .{ .range = self.analysis.selectionRange(p.range, p.name), .name = p.name };
         return null;
     }
 
     fn patternSelectionRange(self: *Resolver, pattern_id: compiler.ast.PatternId) ?frontend.Range {
+        const pair = self.patternSelectionPair(pattern_id) orelse return null;
+        return pair.range;
+    }
+
+    fn patternSelectionPair(self: *Resolver, pattern_id: compiler.ast.PatternId) ?struct { range: frontend.Range, name: ?[]const u8 } {
         const pattern = self.analysis.astFile().pattern(pattern_id).*;
         return switch (pattern) {
-            .Name => |name| self.analysis.selectionRange(name.range, name.name),
-            .StructDestructure => |destructure| self.analysis.textRangeToRange(destructure.range),
+            .Name => |name| .{ .range = self.analysis.selectionRange(name.range, name.name), .name = name.name },
+            .StructDestructure => |destructure| .{ .range = self.analysis.textRangeToRange(destructure.range), .name = null },
             else => null,
         };
     }
 };
 
-pub fn definitionAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Definition {
-    return definitionAtImpl(allocator, source, position, null);
-}
+const DefinitionCollector = struct {
+    allocator: Allocator,
+    resolver: Resolver,
+    names: std.ArrayList(ResolvedName) = .{},
 
-pub fn definitionAtCrossFile(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: CrossFileContext) !?Definition {
-    return definitionAtImpl(allocator, source, position, cross_file);
+    fn init(allocator: Allocator, analysis: *const Analysis) DefinitionCollector {
+        return .{
+            .allocator = allocator,
+            .resolver = .{
+                .analysis = analysis,
+                .query_position = .{ .line = 0, .character = 0 },
+                .cross_file = null,
+            },
+        };
+    }
+
+    fn run(self: *DefinitionCollector) ![]ResolvedName {
+        errdefer self.names.deinit(self.allocator);
+        for (self.resolver.analysis.astFile().root_items) |item_id| {
+            try self.visitItem(item_id);
+        }
+        return self.names.toOwnedSlice(self.allocator);
+    }
+
+    fn visitItem(self: *DefinitionCollector, item_id: compiler.ast.ItemId) anyerror!void {
+        try self.appendItemDeclaration(item_id);
+        const item = self.resolver.analysis.astFile().item(item_id).*;
+
+        switch (item) {
+            .Contract => |contract_decl| {
+                for (contract_decl.invariants) |expr_id| try self.visitExpr(expr_id);
+                for (contract_decl.members) |member_id| try self.visitItem(member_id);
+            },
+            .Function => |function_decl| {
+                for (function_decl.parameters) |parameter| try self.appendPatternDeclaration(parameter.pattern);
+                for (function_decl.clauses) |clause| try self.visitExpr(clause.expr);
+                try self.visitBody(function_decl.body);
+            },
+            .Field => |field_decl| {
+                if (field_decl.value) |value| try self.visitExpr(value);
+            },
+            .Constant => |constant_decl| try self.visitExpr(constant_decl.value),
+            .Trait => |trait_decl| {
+                for (trait_decl.methods) |method| {
+                    try self.appendSelfNameRange(method.range, method.name);
+                    for (method.parameters) |parameter| try self.appendPatternDeclaration(parameter.pattern);
+                    for (method.clauses) |clause| try self.visitExpr(clause.expr);
+                }
+                if (trait_decl.ghost_block) |ghost_id| try self.visitItem(ghost_id);
+            },
+            .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
+            .Struct => |struct_decl| {
+                for (struct_decl.fields) |field| try self.appendSelfNameRange(field.range, field.name);
+            },
+            .Bitfield => |bitfield_decl| {
+                for (bitfield_decl.fields) |field| try self.appendSelfNameRange(field.range, field.name);
+            },
+            .Enum => |enum_decl| {
+                for (enum_decl.variants) |variant| try self.appendSelfNameRange(variant.range, variant.name);
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.fields) |field| try self.appendSelfNameRange(field.range, field.name);
+            },
+            .ErrorDecl => |error_decl| {
+                for (error_decl.parameters) |parameter| try self.appendPatternDeclaration(parameter.pattern);
+            },
+            .Impl => |impl_decl| {
+                for (impl_decl.methods) |method_id| try self.visitItem(method_id);
+            },
+            else => {},
+        }
+    }
+
+    fn visitBody(self: *DefinitionCollector, body_id: compiler.ast.BodyId) anyerror!void {
+        const body = self.resolver.analysis.astFile().body(body_id).*;
+        for (body.statements) |stmt_id| try self.visitStmt(stmt_id);
+    }
+
+    fn visitStmt(self: *DefinitionCollector, stmt_id: compiler.ast.StmtId) anyerror!void {
+        switch (self.resolver.analysis.astFile().statement(stmt_id).*) {
+            .VariableDecl => |decl| {
+                if (decl.value) |expr_id| try self.visitExpr(expr_id);
+                try self.appendPatternDeclaration(decl.pattern);
+            },
+            .Return => |ret| if (ret.value) |expr_id| try self.visitExpr(expr_id),
+            .If => |if_stmt| {
+                try self.visitExpr(if_stmt.condition);
+                try self.visitBody(if_stmt.then_body);
+                if (if_stmt.else_body) |else_body| try self.visitBody(else_body);
+            },
+            .While => |while_stmt| {
+                try self.visitExpr(while_stmt.condition);
+                for (while_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                try self.visitBody(while_stmt.body);
+            },
+            .For => |for_stmt| {
+                try self.visitExpr(for_stmt.iterable);
+                try self.appendPatternDeclaration(for_stmt.item_pattern);
+                if (for_stmt.index_pattern) |index_pattern| try self.appendPatternDeclaration(index_pattern);
+                for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
+                try self.visitBody(for_stmt.body);
+            },
+            .Switch => |switch_stmt| {
+                try self.visitExpr(switch_stmt.condition);
+                for (switch_stmt.arms) |arm| {
+                    try self.visitSwitchPattern(arm.pattern);
+                    try self.visitBody(arm.body);
+                }
+                if (switch_stmt.else_body) |else_body| try self.visitBody(else_body);
+            },
+            .Try => |try_stmt| {
+                try self.visitBody(try_stmt.try_body);
+                if (try_stmt.catch_clause) |catch_clause| {
+                    if (catch_clause.error_pattern) |pattern_id| try self.appendPatternDeclaration(pattern_id);
+                    try self.visitBody(catch_clause.body);
+                }
+            },
+            .Log => |log_stmt| {
+                for (log_stmt.args) |arg| try self.visitExpr(arg);
+            },
+            .Lock => |lock_stmt| try self.visitExpr(lock_stmt.path),
+            .Unlock => |unlock_stmt| try self.visitExpr(unlock_stmt.path),
+            .Assert => |assert_stmt| try self.visitExpr(assert_stmt.condition),
+            .Assume => |assume_stmt| try self.visitExpr(assume_stmt.condition),
+            .Break => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
+            .Continue => |jump| if (jump.value) |expr_id| try self.visitExpr(expr_id),
+            .Assign => |assign| {
+                try self.appendPatternDeclaration(assign.target);
+                try self.visitPatternUses(assign.target);
+                try self.visitExpr(assign.value);
+            },
+            .Expr => |expr_stmt| try self.visitExpr(expr_stmt.expr),
+            .Block => |block| try self.visitBody(block.body),
+            .LabeledBlock => |block| try self.visitBody(block.body),
+            else => {},
+        }
+    }
+
+    fn visitPatternUses(self: *DefinitionCollector, pattern_id: compiler.ast.PatternId) anyerror!void {
+        switch (self.resolver.analysis.astFile().pattern(pattern_id).*) {
+            .Field => |field| try self.visitPatternUses(field.base),
+            .Index => |index| {
+                try self.visitPatternUses(index.base);
+                try self.visitExpr(index.index);
+            },
+            .StructDestructure => |destructure| {
+                for (destructure.fields) |field| {
+                    try self.appendSelfNameRange(field.range, field.name);
+                    try self.visitPatternUses(field.binding);
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn visitExpr(self: *DefinitionCollector, expr_id: compiler.ast.ExprId) anyerror!void {
+        const expr = self.resolver.analysis.astFile().expression(expr_id).*;
+        switch (expr) {
+            .Name => |name| try self.appendExprName(expr_id, name.range, name.name),
+            .Unary => |unary| try self.visitExpr(unary.operand),
+            .Binary => |binary| {
+                try self.visitExpr(binary.lhs);
+                try self.visitExpr(binary.rhs);
+            },
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| try self.visitExpr(element);
+            },
+            .ArrayLiteral => |array| {
+                for (array.elements) |element| try self.visitExpr(element);
+            },
+            .StructLiteral => |struct_literal| {
+                for (struct_literal.fields) |field| {
+                    try self.appendSelfNameRange(field.range, field.name);
+                    try self.visitExpr(field.value);
+                }
+            },
+            .Switch => |switch_expr| {
+                try self.visitExpr(switch_expr.condition);
+                for (switch_expr.arms) |arm| {
+                    try self.visitSwitchPattern(arm.pattern);
+                    try self.visitExpr(arm.value);
+                }
+                if (switch_expr.else_expr) |else_expr| try self.visitExpr(else_expr);
+            },
+            .Comptime => |comptime_expr| try self.visitBody(comptime_expr.body),
+            .ErrorReturn => |error_return| {
+                for (error_return.args) |arg| try self.visitExpr(arg);
+            },
+            .Call => |call| {
+                try self.visitExpr(call.callee);
+                for (call.args) |arg| try self.visitExpr(arg);
+            },
+            .Builtin => |builtin| {
+                for (builtin.args) |arg| try self.visitExpr(arg);
+            },
+            .Field => |field| try self.visitExpr(field.base),
+            .Index => |index| {
+                try self.visitExpr(index.base);
+                try self.visitExpr(index.index);
+            },
+            .Group => |group| try self.visitExpr(group.expr),
+            .Old => |old| try self.visitExpr(old.expr),
+            .Quantified => |quantified| {
+                try self.appendPatternDeclaration(quantified.pattern);
+                if (quantified.condition) |condition| try self.visitExpr(condition);
+                try self.visitExpr(quantified.body);
+            },
+            else => {},
+        }
+    }
+
+    fn visitSwitchPattern(self: *DefinitionCollector, pattern: compiler.ast.SwitchPattern) anyerror!void {
+        switch (pattern) {
+            .Expr => |expr_id| try self.visitExpr(expr_id),
+            .Range => |range_pattern| {
+                try self.visitExpr(range_pattern.start);
+                try self.visitExpr(range_pattern.end);
+            },
+            .NamedError => |named_error| {
+                try self.visitExpr(named_error.callee);
+                for (named_error.bindings) |pattern_id| try self.appendPatternDeclaration(pattern_id);
+            },
+            .Or => |or_pattern| {
+                for (or_pattern.alternatives) |alternative| try self.visitSwitchPattern(alternative);
+            },
+            .Ok, .Err => |pattern_id| try self.appendPatternDeclaration(pattern_id),
+            .Else => {},
+        }
+    }
+
+    fn appendItemDeclaration(self: *DefinitionCollector, item_id: compiler.ast.ItemId) !void {
+        const pair = self.resolver.itemSelectionPair(item_id) orelse return;
+        try self.appendResolvedName(pair.name, pair.range, pair.range);
+    }
+
+    fn appendPatternDeclaration(self: *DefinitionCollector, pattern_id: compiler.ast.PatternId) !void {
+        const pair = self.resolver.patternSelectionPair(pattern_id) orelse return;
+        const name = pair.name orelse return;
+        try self.appendResolvedName(name, pair.range, pair.range);
+    }
+
+    fn appendSelfNameRange(self: *DefinitionCollector, range: compiler.TextRange, name: []const u8) !void {
+        const selection = self.resolver.analysis.selectionRange(range, name);
+        try self.appendResolvedName(name, selection, selection);
+    }
+
+    fn appendExprName(self: *DefinitionCollector, expr_id: compiler.ast.ExprId, range: compiler.TextRange, name: []const u8) !void {
+        const selection = self.resolver.analysis.selectionRange(range, name);
+        const resolved = if (self.resolver.importAliasItemByName(name)) |item_id|
+            try self.resolver.definitionForItem(item_id)
+        else blk: {
+            const binding = self.resolver.analysis.resolutionView().expr_bindings[expr_id.index()] orelse break :blk null;
+            break :blk try self.resolver.definitionForBinding(binding);
+        };
+        const definition = resolved orelse return;
+        try self.appendResolvedName(name, selection, definition.range);
+    }
+
+    fn appendResolvedName(self: *DefinitionCollector, name: []const u8, range: frontend.Range, definition_range: frontend.Range) !void {
+        try self.names.append(self.allocator, .{
+            .name = name,
+            .range = range,
+            .definition_range = definition_range,
+        });
+    }
+};
+
+/// Collect all same-file identifier definitions in one AST/name-resolution pass.
+pub fn collectDefinitionsCached(allocator: Allocator, analysis: *const Analysis) ![]ResolvedName {
+    var collector = DefinitionCollector.init(allocator, analysis);
+    return collector.run();
 }
 
 /// Resolve definition using a pre-built analysis (avoids re-parsing).
@@ -645,45 +842,8 @@ pub fn definitionAtCachedCrossFile(analysis: *Analysis, source: []const u8, posi
     return definitionAtAnalysis(analysis, source, position, cross_file);
 }
 
-fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
-    var analysis = (try Analysis.init(allocator, source)) orelse return null;
-    defer analysis.deinit();
-
-    return definitionAtAnalysis(&analysis, source, position, cross_file);
-}
-
 fn definitionAtAnalysis(analysis: *Analysis, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
-    if (identifierAtPosition(source, position)) |name| {
-        if (findImportBinding(cross_file, name)) |binding| {
-            if (hasTopLevelDeclarationNamed(analysis, name)) {
-                if (binding.target_source) |target_source| {
-                    if (nextFieldIdentifier(source, position)) |member_name| {
-                        if (try findTopLevelDeclarationInSource(analysis.allocator, target_source, member_name)) |range| {
-                            return .{
-                                .uri = binding.target_uri,
-                                .range = range,
-                            };
-                        }
-                    }
-                }
-                return .{
-                    .uri = binding.target_uri,
-                    .range = file_origin,
-                };
-            }
-        }
-
-        for (analysis.astFile().root_items) |item_id| {
-            var alias_resolver = Resolver{
-                .analysis = analysis,
-                .query_position = position,
-                .cross_file = cross_file,
-            };
-            const alias = alias_resolver.itemImportAliasName(item_id) orelse continue;
-            if (!std.mem.eql(u8, alias, name)) continue;
-            return try alias_resolver.definitionForItem(item_id);
-        }
-    }
+    _ = source;
 
     var resolver = Resolver{
         .analysis = analysis,
@@ -701,36 +861,6 @@ fn findImportBinding(cross_file: ?CrossFileContext, name: []const u8) ?ImportBin
     return null;
 }
 
-fn findTopLevelDeclarationInSource(allocator: Allocator, source_text: []const u8, name: []const u8) !?frontend.Range {
-    var analysis = (try Analysis.init(allocator, source_text)) orelse return null;
-    defer analysis.deinit();
-
-    for (analysis.astFile().root_items) |item_id| {
-        const item = analysis.astFile().item(item_id).*;
-        const pair: ?struct { range: compiler.TextRange, symbol: []const u8 } = switch (item) {
-            .Contract => |contract_decl| .{ .range = contract_decl.range, .symbol = contract_decl.name },
-            .Function => |function_decl| .{ .range = function_decl.range, .symbol = function_decl.name },
-            .Field => |field_decl| .{ .range = field_decl.range, .symbol = field_decl.name },
-            .Constant => |constant_decl| .{ .range = constant_decl.range, .symbol = constant_decl.name },
-            .Struct => |struct_decl| .{ .range = struct_decl.range, .symbol = struct_decl.name },
-            .Bitfield => |bitfield_decl| .{ .range = bitfield_decl.range, .symbol = bitfield_decl.name },
-            .Enum => |enum_decl| .{ .range = enum_decl.range, .symbol = enum_decl.name },
-            .Trait => |trait_decl| .{ .range = trait_decl.range, .symbol = trait_decl.name },
-            .TypeAlias => |alias_decl| .{ .range = alias_decl.range, .symbol = alias_decl.name },
-            .LogDecl => |log_decl| .{ .range = log_decl.range, .symbol = log_decl.name },
-            .ErrorDecl => |error_decl| .{ .range = error_decl.range, .symbol = error_decl.name },
-            else => null,
-        };
-        if (pair) |p| {
-            if (std.mem.eql(u8, p.symbol, name)) {
-                return analysis.selectionRange(p.range, p.symbol);
-            }
-        }
-    }
-
-    return null;
-}
-
 fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {
     if (positionLessThan(position, range.start)) return false;
     if (!positionLessThan(position, range.end)) return false;
@@ -741,77 +871,4 @@ fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
     if (lhs.line < rhs.line) return true;
     if (lhs.line > rhs.line) return false;
     return lhs.character < rhs.character;
-}
-
-fn identifierAtPosition(source_text: []const u8, position: frontend.Position) ?[]const u8 {
-    const byte_index = byteIndexFromPosition(source_text, position) orelse return null;
-    if (byte_index >= source_text.len) return null;
-    if (!isIdentifierChar(source_text[byte_index])) return null;
-
-    var start = byte_index;
-    while (start > 0 and isIdentifierChar(source_text[start - 1])) start -= 1;
-
-    var end = byte_index;
-    while (end < source_text.len and isIdentifierChar(source_text[end])) end += 1;
-
-    return source_text[start..end];
-}
-
-fn nextFieldIdentifier(source_text: []const u8, position: frontend.Position) ?[]const u8 {
-    const byte_index = byteIndexFromPosition(source_text, position) orelse return null;
-    if (byte_index >= source_text.len or !isIdentifierChar(source_text[byte_index])) return null;
-
-    var end = byte_index;
-    while (end < source_text.len and isIdentifierChar(source_text[end])) end += 1;
-    if (end >= source_text.len or source_text[end] != '.') return null;
-    const member_start = end + 1;
-    if (member_start >= source_text.len or !isIdentifierChar(source_text[member_start])) return null;
-    var member_end = member_start;
-    while (member_end < source_text.len and isIdentifierChar(source_text[member_end])) member_end += 1;
-    return source_text[member_start..member_end];
-}
-
-fn byteIndexFromPosition(source_text: []const u8, position: frontend.Position) ?usize {
-    var line: u32 = 0;
-    var character: u32 = 0;
-    for (source_text, 0..) |byte, index| {
-        if (line == position.line and character == position.character) return index;
-        if (byte == '\n') {
-            line += 1;
-            character = 0;
-        } else {
-            character += 1;
-        }
-    }
-    if (line == position.line and character == position.character) return source_text.len;
-    return null;
-}
-
-fn isIdentifierChar(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_';
-}
-
-fn hasTopLevelDeclarationNamed(analysis: *const Analysis, name: []const u8) bool {
-    for (analysis.astFile().root_items) |item_id| {
-        const item = analysis.astFile().item(item_id).*;
-        const item_name: ?[]const u8 = switch (item) {
-            .Import => |import_item| import_item.alias,
-            .Contract => |contract_decl| contract_decl.name,
-            .Function => |function_decl| function_decl.name,
-            .Field => |field_decl| field_decl.name,
-            .Constant => |constant_decl| constant_decl.name,
-            .Struct => |struct_decl| struct_decl.name,
-            .Bitfield => |bitfield_decl| bitfield_decl.name,
-            .Enum => |enum_decl| enum_decl.name,
-            .Trait => |trait_decl| trait_decl.name,
-            .TypeAlias => |alias_decl| alias_decl.name,
-            .LogDecl => |log_decl| log_decl.name,
-            .ErrorDecl => |error_decl| error_decl.name,
-            else => null,
-        };
-        if (item_name) |item_name_slice| {
-            if (std.mem.eql(u8, item_name_slice, name)) return true;
-        }
-    }
-    return false;
 }

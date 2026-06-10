@@ -44,6 +44,43 @@ test "lsp completion items: maps semantic items to protocol items" {
     }
 }
 
+test "lsp completion items: owns semantic strings and reports byte totals" {
+    var label = [_]u8{ 'r', 'e', 't', 'u', 'r', 'n' };
+    var detail = [_]u8{ 'k', 'e', 'y', 'w', 'o', 'r', 'd' };
+    var doc = [_]u8{ 'R', 'e', 't', 'u', 'r', 'n', 's' };
+    const items = [_]completion.Item{.{
+        .label = label[0..],
+        .detail = detail[0..],
+        .documentation = doc[0..],
+        .kind = .keyword,
+    }};
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const result = try completion_items.buildWithStats(
+        arena_state.allocator(),
+        "let value = 1;",
+        position(0, 4),
+        ".",
+        &items,
+    );
+
+    label[0] = 'x';
+    detail[0] = 'x';
+    doc[0] = 'x';
+
+    try std.testing.expectEqual(@as(usize, 1), result.items.len);
+    try std.testing.expectEqualStrings("return", result.items[0].label);
+    try std.testing.expectEqualStrings("keyword", result.items[0].detail.?);
+    switch (result.items[0].documentation orelse return error.ExpectedDocumentation) {
+        .MarkupContent => |markup| try std.testing.expectEqualStrings("Returns", markup.value),
+        else => return error.ExpectedMarkupDocumentation,
+    }
+    try std.testing.expectEqual(@as(usize, "return".len + "keyword".len), result.string_bytes);
+    try std.testing.expectEqual(@as(usize, "Returns".len), result.markdown_bytes);
+}
+
 test "lsp completion items: adds snippets at line start without trigger" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -60,6 +97,23 @@ test "lsp completion items: adds snippets at line start without trigger" {
     try std.testing.expectEqualStrings("contract", result[0].label);
     try std.testing.expectEqual(types.CompletionItemKind.Snippet, result[0].kind.?);
     try std.testing.expectEqual(types.InsertTextFormat.Snippet, result[0].insertTextFormat.?);
+}
+
+test "lsp completion items: includes snippet strings in byte totals" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    const result = try completion_items.buildWithStats(
+        arena_state.allocator(),
+        "    ",
+        position(0, 4),
+        null,
+        &.{},
+    );
+
+    try std.testing.expect(result.items.len > 0);
+    try std.testing.expect(result.string_bytes > 0);
+    try std.testing.expectEqual(@as(usize, 0), result.markdown_bytes);
 }
 
 test "lsp completion items: suppresses snippets away from line start or with trigger" {

@@ -21,6 +21,8 @@ pub const Snapshot = struct {
     workspace_discovery_cache_rebuilds: usize = 0,
     workspace_discovery_max_files: usize = 0,
     diagnostic_cache_builds: usize = 0,
+    diagnostic_fast_builds: usize = 0,
+    diagnostic_full_builds: usize = 0,
     cache_builder_capacity_requested: usize = 0,
     cache_builder_items_built: usize = 0,
     cache_builder_unused_capacity: usize = 0,
@@ -77,14 +79,27 @@ pub const Snapshot = struct {
     dependent_diagnostic_publish_runs: usize = 0,
     dependent_diagnostic_published_documents: usize = 0,
     dependent_diagnostic_publish_skips: usize = 0,
+    diagnostic_debounce_pending: usize = 0,
+    diagnostic_debounce_scheduled: usize = 0,
+    diagnostic_debounce_canceled: usize = 0,
+    diagnostic_debounce_flushed: usize = 0,
+    diagnostic_debounce_cleared: usize = 0,
     stale_document_change_skips: usize = 0,
+    edit_diagnostic_fast_publishes: usize = 0,
+    edit_diagnostic_full_skips: usize = 0,
     cold_documents: usize = 0,
+    cold_document_max_count: usize = 0,
+    cold_document_evictions: usize = 0,
+    cold_document_refresh_checks: usize = 0,
+    cold_document_refreshes: usize = 0,
+    cold_document_stale_removals: usize = 0,
     workspace_index_entries: usize = 0,
     workspace_index_bytes: usize = 0,
     workspace_index_max_bytes: usize = 0,
     workspace_index_evictions: usize = 0,
     open_source_bytes: usize = 0,
     cold_source_bytes: usize = 0,
+    cold_source_max_bytes: usize = 0,
     open_token_count: usize = 0,
     open_token_diagnostic_count: usize = 0,
     open_symbol_count: usize = 0,
@@ -177,6 +192,8 @@ pub fn build(arena: Allocator, snapshot: Snapshot) !std.json.ObjectMap {
     try putJsonInt(&object, "workspaceDiscoveryCacheRebuilds", snapshot.workspace_discovery_cache_rebuilds);
     try putJsonInt(&object, "workspaceDiscoveryMaxFiles", snapshot.workspace_discovery_max_files);
     try putJsonInt(&object, "diagnosticCacheBuilds", snapshot.diagnostic_cache_builds);
+    try putJsonInt(&object, "diagnosticFastBuilds", snapshot.diagnostic_fast_builds);
+    try putJsonInt(&object, "diagnosticFullBuilds", snapshot.diagnostic_full_builds);
     try putJsonInt(&object, "cacheBuilderCapacityRequested", snapshot.cache_builder_capacity_requested);
     try putJsonInt(&object, "cacheBuilderItemsBuilt", snapshot.cache_builder_items_built);
     try putJsonInt(&object, "cacheBuilderUnusedCapacity", snapshot.cache_builder_unused_capacity);
@@ -233,14 +250,27 @@ pub fn build(arena: Allocator, snapshot: Snapshot) !std.json.ObjectMap {
     try putJsonInt(&object, "dependentDiagnosticPublishRuns", snapshot.dependent_diagnostic_publish_runs);
     try putJsonInt(&object, "dependentDiagnosticPublishedDocuments", snapshot.dependent_diagnostic_published_documents);
     try putJsonInt(&object, "dependentDiagnosticPublishSkips", snapshot.dependent_diagnostic_publish_skips);
+    try putJsonInt(&object, "diagnosticDebouncePending", snapshot.diagnostic_debounce_pending);
+    try putJsonInt(&object, "diagnosticDebounceScheduled", snapshot.diagnostic_debounce_scheduled);
+    try putJsonInt(&object, "diagnosticDebounceCanceled", snapshot.diagnostic_debounce_canceled);
+    try putJsonInt(&object, "diagnosticDebounceFlushed", snapshot.diagnostic_debounce_flushed);
+    try putJsonInt(&object, "diagnosticDebounceCleared", snapshot.diagnostic_debounce_cleared);
     try putJsonInt(&object, "staleDocumentChangeSkips", snapshot.stale_document_change_skips);
+    try putJsonInt(&object, "editDiagnosticFastPublishes", snapshot.edit_diagnostic_fast_publishes);
+    try putJsonInt(&object, "editDiagnosticFullSkips", snapshot.edit_diagnostic_full_skips);
     try putJsonInt(&object, "coldDocuments", snapshot.cold_documents);
+    try putJsonInt(&object, "coldDocumentMaxCount", snapshot.cold_document_max_count);
+    try putJsonInt(&object, "coldDocumentEvictions", snapshot.cold_document_evictions);
+    try putJsonInt(&object, "coldDocumentRefreshChecks", snapshot.cold_document_refresh_checks);
+    try putJsonInt(&object, "coldDocumentRefreshes", snapshot.cold_document_refreshes);
+    try putJsonInt(&object, "coldDocumentStaleRemovals", snapshot.cold_document_stale_removals);
     try putJsonInt(&object, "workspaceIndexEntries", snapshot.workspace_index_entries);
     try putJsonInt(&object, "workspaceIndexBytes", snapshot.workspace_index_bytes);
     try putJsonInt(&object, "workspaceIndexMaxBytes", snapshot.workspace_index_max_bytes);
     try putJsonInt(&object, "workspaceIndexEvictions", snapshot.workspace_index_evictions);
     try putJsonInt(&object, "openSourceBytes", snapshot.open_source_bytes);
     try putJsonInt(&object, "coldSourceBytes", snapshot.cold_source_bytes);
+    try putJsonInt(&object, "coldSourceMaxBytes", snapshot.cold_source_max_bytes);
     try putJsonInt(&object, "openTokenCount", snapshot.open_token_count);
     try putJsonInt(&object, "openTokenDiagnosticCount", snapshot.open_token_diagnostic_count);
     try putJsonInt(&object, "openSymbolCount", snapshot.open_symbol_count);

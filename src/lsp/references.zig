@@ -11,8 +11,14 @@ pub const Occurrence = struct {
     definition_range: frontend.Range,
 };
 
+const RangeIndexEntry = struct {
+    range: frontend.Range,
+    item_index: u32,
+};
+
 pub const OccurrenceIndex = struct {
     occurrences: []const Occurrence,
+    range_indexes: []const RangeIndexEntry = &.{},
     builder_capacity_requested: usize = 0,
     builder_items_built: usize = 0,
     builder_unused_capacity: usize = 0,
@@ -24,6 +30,12 @@ pub const OccurrenceIndex = struct {
         tokens: []const token_cache.Token,
         analysis: *definition.Analysis,
     ) !OccurrenceIndex {
+        _ = source;
+        _ = tokens;
+
+        const resolved_names = try definition.collectDefinitionsCached(allocator, analysis);
+        defer allocator.free(resolved_names);
+
         var occurrences = std.ArrayList(Occurrence){};
         var builder_growth_events: usize = 0;
         errdefer {
@@ -31,45 +43,58 @@ pub const OccurrenceIndex = struct {
             occurrences.deinit(allocator);
         }
 
-        for (tokens) |token| {
-            if (token.type != .Identifier) continue;
-
-            const token_range = tokenSelectionRange(token);
-            const maybe_def = definition.definitionAtCached(analysis, source, token_range.start);
-            if (maybe_def == null) continue;
-
-            const name_copy = try allocator.dupe(u8, token.lexeme);
-            errdefer allocator.free(name_copy);
-
-            const capacity_before = occurrences.capacity;
-            try occurrences.append(allocator, .{
-                .name = name_copy,
-                .range = token_range,
-                .definition_range = maybe_def.?.range,
-            });
-            if (occurrences.capacity > capacity_before) {
-                builder_growth_events += 1;
-            }
+        const occurrence_capacity_before = occurrences.capacity;
+        try occurrences.ensureTotalCapacity(allocator, resolved_names.len);
+        if (occurrences.capacity > occurrence_capacity_before) {
+            builder_growth_events += 1;
         }
 
-        const builder_capacity_requested = occurrences.capacity;
-        const builder_items_built = occurrences.items.len;
+        for (resolved_names) |resolved| {
+            const name_copy = try allocator.dupe(u8, resolved.name);
+            errdefer allocator.free(name_copy);
+
+            occurrences.appendAssumeCapacity(.{
+                .name = name_copy,
+                .range = resolved.range,
+                .definition_range = resolved.definition_range,
+            });
+        }
+
+        const range_index_builder = try buildRangeIndexes(allocator, occurrences.items);
+        errdefer allocator.free(range_index_builder.items);
+
+        const occurrences_capacity_requested = occurrences.capacity;
+        const occurrence_items_built = occurrences.items.len;
+        const occurrence_slice = try occurrences.toOwnedSlice(allocator);
+        errdefer {
+            deinitOccurrences(allocator, occurrence_slice);
+            allocator.free(occurrence_slice);
+        }
+
+        const builder_capacity_requested = addSat(occurrences_capacity_requested, range_index_builder.capacity_requested);
+        const builder_items_built = addSat(occurrence_items_built, range_index_builder.items.len);
         return .{
-            .occurrences = try occurrences.toOwnedSlice(allocator),
+            .occurrences = occurrence_slice,
+            .range_indexes = range_index_builder.items,
             .builder_capacity_requested = builder_capacity_requested,
             .builder_items_built = builder_items_built,
             .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
-            .builder_growth_events = builder_growth_events,
+            .builder_growth_events = builder_growth_events + range_index_builder.growth_events,
         };
     }
 
     pub fn deinit(self: *OccurrenceIndex, allocator: Allocator) void {
         deinitOccurrences(allocator, self.occurrences);
         allocator.free(self.occurrences);
+        allocator.free(self.range_indexes);
         self.* = undefined;
     }
 
     pub fn occurrenceAt(self: *const OccurrenceIndex, position: frontend.Position) ?Occurrence {
+        if (self.range_indexes.len == self.occurrences.len) {
+            const index = occurrenceIndexAtPosition(self.occurrences, self.range_indexes, position) orelse return null;
+            return self.occurrences[index];
+        }
         for (self.occurrences) |occurrence| {
             if (positionInRange(position, occurrence.range)) return occurrence;
         }
@@ -77,7 +102,10 @@ pub const OccurrenceIndex = struct {
     }
 
     pub fn estimatedByteSize(self: *const OccurrenceIndex) usize {
-        var total: usize = self.occurrences.len * @sizeOf(Occurrence);
+        var total: usize = addSat(
+            self.occurrences.len * @sizeOf(Occurrence),
+            self.range_indexes.len * @sizeOf(RangeIndexEntry),
+        );
         for (self.occurrences) |occurrence| {
             total = addSat(total, occurrence.name.len);
         }
@@ -147,22 +175,6 @@ pub const ImportBinding = struct {
     resolved_path: []const u8,
 };
 
-pub fn referencesAt(
-    allocator: Allocator,
-    source: []const u8,
-    position: frontend.Position,
-    include_declaration: bool,
-) ![]frontend.Range {
-    var analysis = (try definition.Analysis.init(allocator, source)) orelse
-        return try allocator.alloc(frontend.Range, 0);
-    defer analysis.deinit();
-
-    var tokens = try token_cache.Cache.init(allocator, source);
-    defer tokens.deinit(allocator);
-
-    return referencesAtCached(allocator, source, position, include_declaration, tokens.tokens, &analysis);
-}
-
 pub fn referencesAtCached(
     allocator: Allocator,
     source: []const u8,
@@ -171,33 +183,17 @@ pub fn referencesAtCached(
     tokens: []const token_cache.Token,
     analysis: *definition.Analysis,
 ) ![]frontend.Range {
-    const target_range = blk: {
-        const def = definition.definitionAtCached(analysis, source, position) orelse
-            return try allocator.alloc(frontend.Range, 0);
-        break :blk def.range;
-    };
+    var index = try OccurrenceIndex.init(allocator, source, tokens, analysis);
+    defer index.deinit(allocator);
 
-    var ranges = std.ArrayList(frontend.Range){};
-    errdefer ranges.deinit(allocator);
-
-    for (tokens) |token| {
-        if (token.type != .Identifier) continue;
-
-        const token_range = tokenSelectionRange(token);
-        const maybe_def = definition.definitionAtCached(analysis, source, token_range.start);
-        if (maybe_def == null) continue;
-
-        if (!rangesEqual(maybe_def.?.range, target_range)) continue;
-        if (!include_declaration and rangesEqual(token_range, target_range)) continue;
-
-        try appendUniqueRange(allocator, &ranges, token_range);
-    }
-
-    if (include_declaration) {
-        try appendUniqueRange(allocator, &ranges, target_range);
-    }
-
-    return ranges.toOwnedSlice(allocator);
+    const target = index.occurrenceAt(position) orelse return try allocator.alloc(frontend.Range, 0);
+    return referencesAtOccurrenceIndex(
+        allocator,
+        &index,
+        target.name,
+        target.definition_range,
+        include_declaration,
+    );
 }
 
 pub fn referencesAtOccurrenceIndex(
@@ -319,6 +315,77 @@ pub fn importedMemberReferencesTo(
     return ranges.toOwnedSlice(allocator);
 }
 
+const RangeIndexBuilder = struct {
+    items: []RangeIndexEntry,
+    capacity_requested: usize,
+    growth_events: usize,
+};
+
+fn buildRangeIndexes(allocator: Allocator, occurrences: []const Occurrence) !RangeIndexBuilder {
+    var indexes = std.ArrayList(RangeIndexEntry){};
+    var growth_events: usize = 0;
+    errdefer indexes.deinit(allocator);
+
+    const capacity_before = indexes.capacity;
+    try indexes.ensureTotalCapacity(allocator, occurrences.len);
+    if (indexes.capacity > capacity_before) growth_events += 1;
+
+    for (occurrences, 0..) |occurrence, index| {
+        const item_index = std.math.cast(u32, index) orelse return error.IndexTooLarge;
+        indexes.appendAssumeCapacity(.{
+            .range = occurrence.range,
+            .item_index = item_index,
+        });
+    }
+
+    std.mem.sort(RangeIndexEntry, indexes.items, {}, lessRangeIndexStart);
+    const capacity_requested = indexes.capacity;
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .capacity_requested = capacity_requested,
+        .growth_events = growth_events,
+    };
+}
+
+fn occurrenceIndexAtPosition(
+    occurrences: []const Occurrence,
+    indexes: []const RangeIndexEntry,
+    position: frontend.Position,
+) ?usize {
+    if (indexes.len == 0) return null;
+    var cursor = upperBoundRangeStart(indexes, position);
+    while (cursor > 0) {
+        cursor -= 1;
+        const entry = indexes[cursor];
+        const item_index: usize = entry.item_index;
+        if (item_index >= occurrences.len) continue;
+        const occurrence = occurrences[item_index];
+        if (positionInRange(position, occurrence.range)) return item_index;
+        if (positionLessThan(occurrence.range.end, position)) break;
+    }
+    return null;
+}
+
+fn upperBoundRangeStart(indexes: []const RangeIndexEntry, position: frontend.Position) usize {
+    var low: usize = 0;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (!positionLessThan(position, indexes[mid].range.start)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn lessRangeIndexStart(_: void, lhs: RangeIndexEntry, rhs: RangeIndexEntry) bool {
+    if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
+    if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs.item_index < rhs.item_index;
+}
+
 fn tokenSelectionRange(token: anytype) frontend.Range {
     const start_line = if (token.line > 0) token.line - 1 else 0;
     const start_char = if (token.column > 0) token.column - 1 else 0;
@@ -405,6 +472,12 @@ fn positionInRange(pos: frontend.Position, range: frontend.Range) bool {
     if (pos.line == range.start.line and pos.character < range.start.character) return false;
     if (pos.line == range.end.line and pos.character > range.end.character) return false;
     return true;
+}
+
+fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
+    if (lhs.line < rhs.line) return true;
+    if (lhs.line > rhs.line) return false;
+    return lhs.character < rhs.character;
 }
 
 fn addSat(a: usize, b: usize) usize {

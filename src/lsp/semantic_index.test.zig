@@ -3,6 +3,7 @@ const testing = std.testing;
 const ora_root = @import("ora_root");
 
 const semantic_index = ora_root.lsp.semantic_index;
+const test_analysis = @import("test_analysis.zig");
 
 fn findSymbolIndex(
     symbols: []const semantic_index.Symbol,
@@ -28,10 +29,12 @@ test "lsp semantic index: collects declarations and scope links" {
         \\enum Mode { Off, On }
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     try testing.expect(index.parse_succeeded);
+    try testing.expectEqual(index.symbols.len, index.symbol_depths.len);
+    try testing.expectEqual(index.symbols.len, index.symbol_position_order.len);
     try testing.expectEqual(index.symbols.len, index.builderItemsBuilt());
     try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
     try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
@@ -58,16 +61,21 @@ test "lsp semantic index: collects declarations and scope links" {
     try testing.expectEqual(@as(?usize, point_idx), index.symbols[point_x_idx].parent);
     try testing.expectEqual(@as(?usize, null), index.symbols[mode_idx].parent);
     try testing.expectEqual(@as(?usize, mode_idx), index.symbols[mode_off_idx].parent);
+
+    const found_amount = semantic_index.findSymbolAtPosition(&index, index.symbols[amount_idx].selection_range.start) orelse return error.TestExpectedEqual;
+    try testing.expectEqual(amount_idx, found_amount);
 }
 
 test "lsp semantic index: parse failure returns no symbols" {
     const source = "@import(\"std\");";
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     try testing.expect(!index.parse_succeeded);
     try testing.expectEqual(@as(usize, 0), index.symbols.len);
+    try testing.expectEqual(@as(usize, 0), index.symbol_depths.len);
+    try testing.expectEqual(@as(usize, 0), index.symbol_position_order.len);
     try testing.expectEqual(@as(usize, 0), index.builderCapacityRequested());
     try testing.expectEqual(@as(usize, 0), index.builderItemsBuilt());
     try testing.expectEqual(@as(usize, 0), index.builderUnusedCapacity());
@@ -81,7 +89,7 @@ test "lsp semantic index: builds nested document symbols" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     try testing.expect(index.parse_succeeded);
@@ -116,7 +124,7 @@ test "lsp semantic index: collects traits impls aliases and ADT variant details"
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     try testing.expect(index.parse_succeeded);

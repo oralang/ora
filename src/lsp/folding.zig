@@ -12,39 +12,6 @@ pub const FoldingRange = struct {
     pub const Kind = enum { region, comment, imports };
 };
 
-pub fn foldingRanges(allocator: Allocator, source: []const u8) ![]FoldingRange {
-    var ranges = std.ArrayList(FoldingRange){};
-    errdefer ranges.deinit(allocator);
-
-    try collectCommentFolds(&ranges, allocator, source);
-
-    var sources = compiler.source.SourceStore.init(allocator);
-    defer sources.deinit();
-    const file_id = try sources.addFile("<lsp>", source);
-
-    var parse_result = compiler.syntax.parse(allocator, file_id, source) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return ranges.toOwnedSlice(allocator),
-    };
-    defer parse_result.deinit();
-
-    var lower_result = compiler.ast.lower(allocator, &parse_result.tree) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return ranges.toOwnedSlice(allocator),
-    };
-    defer lower_result.deinit();
-
-    const position_context: PositionContext = .{ .source_store = .{
-        .sources = &sources,
-        .file_id = file_id,
-    } };
-    for (lower_result.file.root_items) |item_id| {
-        try collectItemFolds(&ranges, allocator, &lower_result.file, item_id, position_context);
-    }
-
-    return ranges.toOwnedSlice(allocator);
-}
-
 pub fn foldingRangesInAst(
     allocator: Allocator,
     source: []const u8,
@@ -72,10 +39,6 @@ pub fn deinitRanges(allocator: Allocator, ranges: []FoldingRange) void {
 }
 
 const PositionContext = union(enum) {
-    source_store: struct {
-        sources: *const compiler.source.SourceStore,
-        file_id: compiler.FileId,
-    },
     line_index: struct {
         source: []const u8,
         index: *const line_index_api.LineIndex,
@@ -83,13 +46,6 @@ const PositionContext = union(enum) {
 
     fn lineForOffset(self: PositionContext, offset: u32) u32 {
         return switch (self) {
-            .source_store => |ctx| blk: {
-                const lc = ctx.sources.lineColumn(.{
-                    .file_id = ctx.file_id,
-                    .range = .{ .start = offset, .end = offset },
-                });
-                break :blk if (lc.line > 0) lc.line - 1 else 0;
-            },
             .line_index => |ctx| ctx.index.offsetToPosition(ctx.source, offset, .utf8).line,
         };
     }

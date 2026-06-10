@@ -20,7 +20,7 @@ pub fn build(
     position: types.Position,
 ) !?[]types.CallHierarchyItem {
     const byte_position = protocol_ranges.lspPositionToBytePosition(source, line_index, encoding, position) orelse return null;
-    const symbol_index = semantic_index.findSymbolAtPosition(index.symbols, byte_position) orelse return null;
+    const symbol_index = semantic_index.findSymbolAtPosition(index, byte_position) orelse return null;
     const symbol = index.symbols[symbol_index];
     if (symbol.kind != .function and symbol.kind != .method) return null;
 

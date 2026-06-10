@@ -53,6 +53,16 @@ pub const Import = struct {
     resolved_path: []const u8,
 };
 
+const SymbolNameIndexEntry = struct {
+    name: []const u8,
+    symbol_index: u32,
+};
+
+const RangeIndexEntry = struct {
+    range: frontend.Range,
+    item_index: u32,
+};
+
 pub const FileEntry = struct {
     arena: std.heap.ArenaAllocator,
     uri: []const u8,
@@ -64,8 +74,12 @@ pub const FileEntry = struct {
     symbols: []Symbol,
     root_symbol_indexes: []u32,
     callable_symbol_indexes: []u32,
+    root_symbol_name_indexes: []SymbolNameIndexEntry = &.{},
+    callable_symbol_name_indexes: []SymbolNameIndexEntry = &.{},
+    callable_symbol_range_indexes: []RangeIndexEntry = &.{},
     imports: []Import,
     occurrences: []references.Occurrence,
+    occurrence_range_indexes: []RangeIndexEntry = &.{},
     imported_members: []references.ImportedMemberOccurrence,
     call_edges: []call_hierarchy.CallEdge,
     interned_string_bytes: usize = 0,
@@ -114,11 +128,19 @@ pub const FileEntry = struct {
         const root_symbol_indexes = root_symbol_index_builder.items;
         const callable_symbol_index_builder = try buildCallableSymbolIndexes(entry_allocator, symbols);
         const callable_symbol_indexes = callable_symbol_index_builder.items;
+        const root_symbol_name_index_builder = try buildSymbolNameIndexes(entry_allocator, symbols, root_symbol_indexes);
+        const root_symbol_name_indexes = root_symbol_name_index_builder.items;
+        const callable_symbol_name_index_builder = try buildSymbolNameIndexes(entry_allocator, symbols, callable_symbol_indexes);
+        const callable_symbol_name_indexes = callable_symbol_name_index_builder.items;
+        const callable_symbol_range_index_builder = try buildSymbolRangeIndexes(entry_allocator, symbols, callable_symbol_indexes);
+        const callable_symbol_range_indexes = callable_symbol_range_index_builder.items;
         const imports = try copyImports(entry_allocator, &interner, resolved_imports);
         const occurrences = if (features.occurrences)
             try copyOccurrences(entry_allocator, &interner, occurrence_index.?.occurrences)
         else
             try entry_allocator.alloc(references.Occurrence, 0);
+        const occurrence_range_index_builder = try buildOccurrenceRangeIndexes(entry_allocator, occurrences);
+        const occurrence_range_indexes = occurrence_range_index_builder.items;
         const imported_members = if (features.imported_members)
             try copyImportedMembers(entry_allocator, &interner, imported_member_index.?.occurrences)
         else
@@ -132,8 +154,12 @@ pub const FileEntry = struct {
             symbols,
             root_symbol_indexes,
             callable_symbol_indexes,
+            root_symbol_name_indexes,
+            callable_symbol_name_indexes,
+            callable_symbol_range_indexes,
             imports,
             occurrences,
+            occurrence_range_indexes,
             imported_members,
             call_edges,
             interner.unique_bytes,
@@ -143,8 +169,12 @@ pub const FileEntry = struct {
             symbols,
             root_symbol_index_builder,
             callable_symbol_index_builder,
+            root_symbol_name_index_builder,
+            callable_symbol_name_index_builder,
+            callable_symbol_range_index_builder,
             imports,
             occurrences,
+            occurrence_range_index_builder,
             imported_members,
             call_edges,
         );
@@ -153,13 +183,25 @@ pub const FileEntry = struct {
             symbols,
             root_symbol_indexes,
             callable_symbol_indexes,
+            root_symbol_name_indexes,
+            callable_symbol_name_indexes,
+            callable_symbol_range_indexes,
             imports,
             occurrences,
+            occurrence_range_indexes,
             imported_members,
             call_edges,
         );
-        const side_map_capacity_requested = addSat(root_symbol_index_builder.capacity_requested, callable_symbol_index_builder.capacity_requested);
-        const side_map_items_built = addSat(root_symbol_indexes.len, callable_symbol_indexes.len);
+        var side_map_capacity_requested = addSat(root_symbol_index_builder.capacity_requested, callable_symbol_index_builder.capacity_requested);
+        side_map_capacity_requested = addSat(side_map_capacity_requested, root_symbol_name_index_builder.capacity_requested);
+        side_map_capacity_requested = addSat(side_map_capacity_requested, callable_symbol_name_index_builder.capacity_requested);
+        side_map_capacity_requested = addSat(side_map_capacity_requested, callable_symbol_range_index_builder.capacity_requested);
+        side_map_capacity_requested = addSat(side_map_capacity_requested, occurrence_range_index_builder.capacity_requested);
+        var side_map_items_built = addSat(root_symbol_indexes.len, callable_symbol_indexes.len);
+        side_map_items_built = addSat(side_map_items_built, root_symbol_name_indexes.len);
+        side_map_items_built = addSat(side_map_items_built, callable_symbol_name_indexes.len);
+        side_map_items_built = addSat(side_map_items_built, callable_symbol_range_indexes.len);
+        side_map_items_built = addSat(side_map_items_built, occurrence_range_indexes.len);
 
         return .{
             .arena = arena,
@@ -172,8 +214,12 @@ pub const FileEntry = struct {
             .symbols = symbols,
             .root_symbol_indexes = root_symbol_indexes,
             .callable_symbol_indexes = callable_symbol_indexes,
+            .root_symbol_name_indexes = root_symbol_name_indexes,
+            .callable_symbol_name_indexes = callable_symbol_name_indexes,
+            .callable_symbol_range_indexes = callable_symbol_range_indexes,
             .imports = imports,
             .occurrences = occurrences,
+            .occurrence_range_indexes = occurrence_range_indexes,
             .imported_members = imported_members,
             .call_edges = call_edges,
             .interned_string_bytes = interner.unique_bytes,
@@ -186,11 +232,25 @@ pub const FileEntry = struct {
             .builder_capacity_requested = builder_capacity_requested,
             .builder_items_built = builder_items_built,
             .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
-            .builder_growth_events = addSat(root_symbol_index_builder.growth_events, callable_symbol_index_builder.growth_events),
+            .builder_growth_events = sumBuilderGrowthEvents(&.{
+                root_symbol_index_builder.growth_events,
+                callable_symbol_index_builder.growth_events,
+                root_symbol_name_index_builder.growth_events,
+                callable_symbol_name_index_builder.growth_events,
+                callable_symbol_range_index_builder.growth_events,
+                occurrence_range_index_builder.growth_events,
+            }),
             .side_map_capacity_requested = side_map_capacity_requested,
             .side_map_items_built = side_map_items_built,
             .side_map_unused_capacity = if (side_map_capacity_requested > side_map_items_built) side_map_capacity_requested - side_map_items_built else 0,
-            .side_map_growth_events = addSat(root_symbol_index_builder.growth_events, callable_symbol_index_builder.growth_events),
+            .side_map_growth_events = sumBuilderGrowthEvents(&.{
+                root_symbol_index_builder.growth_events,
+                callable_symbol_index_builder.growth_events,
+                root_symbol_name_index_builder.growth_events,
+                callable_symbol_name_index_builder.growth_events,
+                callable_symbol_range_index_builder.growth_events,
+                occurrence_range_index_builder.growth_events,
+            }),
             .byte_size = byte_size,
         };
     }
@@ -201,6 +261,10 @@ pub const FileEntry = struct {
     }
 
     pub fn occurrenceAt(self: *const FileEntry, position: frontend.Position) ?references.Occurrence {
+        if (self.occurrence_range_indexes.len == self.occurrences.len) {
+            const index = occurrenceIndexAtPosition(self.occurrences, self.occurrence_range_indexes, position) orelse return null;
+            return self.occurrences[index];
+        }
         for (self.occurrences) |occurrence| {
             if (positionInRange(position, occurrence.range)) return occurrence;
         }
@@ -212,6 +276,7 @@ pub const FileEntry = struct {
     }
 
     pub fn rootSymbolNamed(self: *const FileEntry, name: []const u8) ?*const Symbol {
+        if (symbolNamed(self.symbols, self.root_symbol_name_indexes, name)) |symbol| return symbol;
         for (self.root_symbol_indexes) |raw_index| {
             const symbol_index: usize = raw_index;
             const symbol = &self.symbols[symbol_index];
@@ -225,6 +290,7 @@ pub const FileEntry = struct {
     }
 
     pub fn callableSymbolIndexByRange(self: *const FileEntry, range: frontend.Range) ?usize {
+        if (symbolIndexByRange(self.symbols, self.callable_symbol_range_indexes, range)) |symbol_index| return symbol_index;
         for (self.callable_symbol_indexes) |raw_index| {
             const symbol_index: usize = raw_index;
             const symbol = self.symbols[symbol_index];
@@ -234,6 +300,7 @@ pub const FileEntry = struct {
     }
 
     pub fn callableSymbolNamed(self: *const FileEntry, name: []const u8) ?*const Symbol {
+        if (symbolNamed(self.symbols, self.callable_symbol_name_indexes, name)) |symbol| return symbol;
         for (self.callable_symbol_indexes) |raw_index| {
             const symbol_index: usize = raw_index;
             const symbol = &self.symbols[symbol_index];
@@ -305,7 +372,7 @@ pub const FileEntry = struct {
 
 pub const Index = struct {
     allocator: Allocator,
-    entries: std.StringHashMap(FileEntry),
+    entries: std.StringHashMap(*FileEntry),
     max_bytes: usize,
     current_bytes: usize = 0,
     access_clock: u64 = 0,
@@ -318,7 +385,7 @@ pub const Index = struct {
     pub fn initWithBudget(allocator: Allocator, max_bytes: usize) Index {
         return .{
             .allocator = allocator,
-            .entries = std.StringHashMap(FileEntry).init(allocator),
+            .entries = std.StringHashMap(*FileEntry).init(allocator),
             .max_bytes = max_bytes,
         };
     }
@@ -326,7 +393,8 @@ pub const Index = struct {
     pub fn deinit(self: *Index) void {
         var it = self.entries.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.deinit();
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
         }
         self.entries.deinit();
         self.current_bytes = 0;
@@ -336,21 +404,22 @@ pub const Index = struct {
 
     pub fn invalidate(self: *Index, uri: []const u8) void {
         if (self.entries.fetchRemove(uri)) |removed| {
-            var entry = removed.value;
+            const entry = removed.value;
             self.subtractBytes(entry.byte_size);
             entry.deinit();
+            self.allocator.destroy(entry);
         }
     }
 
     pub fn getFresh(self: *Index, uri: []const u8, version: i32, generation: u64, required: FeatureSet) ?*const FileEntry {
-        const entry = self.entries.getPtr(uri) orelse return null;
+        const entry = self.entries.get(uri) orelse return null;
         if (entry.version != version or entry.generation != generation) return null;
         if (!entry.features.covers(required)) return null;
         return self.touch(entry);
     }
 
     pub fn getFreshAny(self: *Index, uri: []const u8, version: i32, generation: u64) ?*const FileEntry {
-        const entry = self.entries.getPtr(uri) orelse return null;
+        const entry = self.entries.get(uri) orelse return null;
         if (entry.version != version or entry.generation != generation) return null;
         return self.touch(entry);
     }
@@ -360,15 +429,21 @@ pub const Index = struct {
         self.access_clock +%= 1;
         incoming.last_access = self.access_clock;
 
+        const entry_ptr = try self.allocator.create(FileEntry);
+        errdefer self.allocator.destroy(entry_ptr);
+        entry_ptr.* = incoming;
+        errdefer entry_ptr.deinit();
+
         try self.entries.ensureUnusedCapacity(1);
-        if (self.entries.fetchRemove(incoming.uri)) |removed| {
-            var old_entry = removed.value;
+        if (self.entries.fetchRemove(entry_ptr.uri)) |removed| {
+            const old_entry = removed.value;
             self.subtractBytes(old_entry.byte_size);
             old_entry.deinit();
+            self.allocator.destroy(old_entry);
         }
-        self.current_bytes = addSat(self.current_bytes, incoming.byte_size);
-        self.entries.putAssumeCapacity(incoming.uri, incoming);
-        self.evictToBudget(incoming.uri);
+        self.current_bytes = addSat(self.current_bytes, entry_ptr.byte_size);
+        self.entries.putAssumeCapacity(entry_ptr.uri, entry_ptr);
+        self.evictToBudget(entry_ptr.uri);
     }
 
     fn touch(self: *Index, entry: *FileEntry) *const FileEntry {
@@ -391,8 +466,10 @@ pub const Index = struct {
         var it = self.entries.iterator();
         while (it.next()) |entry| {
             if (std.mem.eql(u8, entry.key_ptr.*, protected_uri)) continue;
-            if (entry.value_ptr.last_access < oldest_access) {
-                oldest_access = entry.value_ptr.last_access;
+            const value = entry.value_ptr.*;
+            if (!value.is_cold) continue;
+            if (value.last_access < oldest_access) {
+                oldest_access = value.last_access;
                 oldest_uri = entry.key_ptr.*;
             }
         }
@@ -402,9 +479,10 @@ pub const Index = struct {
 
     fn evict(self: *Index, uri: []const u8) void {
         if (self.entries.fetchRemove(uri)) |removed| {
-            var entry = removed.value;
+            const entry = removed.value;
             self.subtractBytes(entry.byte_size);
             entry.deinit();
+            self.allocator.destroy(entry);
             self.evictions += 1;
         }
     }
@@ -417,7 +495,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.builderCapacityRequested());
+            total = addSat(total, entry.*.builderCapacityRequested());
         }
         return total;
     }
@@ -426,7 +504,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.builderItemsBuilt());
+            total = addSat(total, entry.*.builderItemsBuilt());
         }
         return total;
     }
@@ -435,7 +513,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.builderUnusedCapacity());
+            total = addSat(total, entry.*.builderUnusedCapacity());
         }
         return total;
     }
@@ -444,7 +522,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.builderGrowthEvents());
+            total = addSat(total, entry.*.builderGrowthEvents());
         }
         return total;
     }
@@ -453,7 +531,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.sideMapCapacityRequested());
+            total = addSat(total, entry.*.sideMapCapacityRequested());
         }
         return total;
     }
@@ -462,7 +540,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.sideMapItemsBuilt());
+            total = addSat(total, entry.*.sideMapItemsBuilt());
         }
         return total;
     }
@@ -471,7 +549,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.sideMapUnusedCapacity());
+            total = addSat(total, entry.*.sideMapUnusedCapacity());
         }
         return total;
     }
@@ -480,7 +558,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.sideMapGrowthEvents());
+            total = addSat(total, entry.*.sideMapGrowthEvents());
         }
         return total;
     }
@@ -489,7 +567,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, 1);
+            if (entry.*.is_cold) total = addSat(total, 1);
         }
         return total;
     }
@@ -498,7 +576,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.byte_size);
+            if (entry.*.is_cold) total = addSat(total, entry.*.byte_size);
         }
         return total;
     }
@@ -507,7 +585,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.interned_string_bytes);
+            if (entry.*.is_cold) total = addSat(total, entry.*.interned_string_bytes);
         }
         return total;
     }
@@ -516,7 +594,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.interned_string_count);
+            if (entry.*.is_cold) total = addSat(total, entry.*.interned_string_count);
         }
         return total;
     }
@@ -525,7 +603,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.duplicate_string_bytes_saved);
+            if (entry.*.is_cold) total = addSat(total, entry.*.duplicate_string_bytes_saved);
         }
         return total;
     }
@@ -534,7 +612,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.internedStringCapacityRequested());
+            total = addSat(total, entry.*.internedStringCapacityRequested());
         }
         return total;
     }
@@ -543,7 +621,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.internedStringItemsBuilt());
+            total = addSat(total, entry.*.internedStringItemsBuilt());
         }
         return total;
     }
@@ -552,7 +630,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.internedStringUnusedCapacity());
+            total = addSat(total, entry.*.internedStringUnusedCapacity());
         }
         return total;
     }
@@ -561,7 +639,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            total = addSat(total, entry.internedStringGrowthEvents());
+            total = addSat(total, entry.*.internedStringGrowthEvents());
         }
         return total;
     }
@@ -570,7 +648,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.internedStringCapacityRequested());
+            if (entry.*.is_cold) total = addSat(total, entry.*.internedStringCapacityRequested());
         }
         return total;
     }
@@ -579,7 +657,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.internedStringItemsBuilt());
+            if (entry.*.is_cold) total = addSat(total, entry.*.internedStringItemsBuilt());
         }
         return total;
     }
@@ -588,7 +666,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.internedStringUnusedCapacity());
+            if (entry.*.is_cold) total = addSat(total, entry.*.internedStringUnusedCapacity());
         }
         return total;
     }
@@ -597,7 +675,7 @@ pub const Index = struct {
         var total: usize = 0;
         var iterator = self.entries.valueIterator();
         while (iterator.next()) |entry| {
-            if (entry.is_cold) total = addSat(total, entry.internedStringGrowthEvents());
+            if (entry.*.is_cold) total = addSat(total, entry.*.internedStringGrowthEvents());
         }
         return total;
     }
@@ -673,6 +751,18 @@ const BuiltIndexSlice = struct {
     growth_events: usize = 0,
 };
 
+const BuiltSymbolNameIndex = struct {
+    items: []SymbolNameIndexEntry,
+    capacity_requested: usize,
+    growth_events: usize = 0,
+};
+
+const BuiltRangeIndex = struct {
+    items: []RangeIndexEntry,
+    capacity_requested: usize,
+    growth_events: usize = 0,
+};
+
 fn buildRootSymbolIndexes(allocator: Allocator, symbols: []const Symbol) !BuiltIndexSlice {
     var indexes = std.ArrayList(u32){};
     errdefer indexes.deinit(allocator);
@@ -699,6 +789,74 @@ fn buildCallableSymbolIndexes(allocator: Allocator, symbols: []const Symbol) !Bu
         if (!isCallableSymbol(symbol.kind)) continue;
         indexes.appendAssumeCapacity(try symbolIndexU32(index));
     }
+
+    const capacity_requested = indexes.capacity;
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .capacity_requested = capacity_requested,
+    };
+}
+
+fn buildSymbolNameIndexes(
+    allocator: Allocator,
+    symbols: []const Symbol,
+    symbol_indexes: []const u32,
+) !BuiltSymbolNameIndex {
+    var indexes = std.ArrayList(SymbolNameIndexEntry){};
+    errdefer indexes.deinit(allocator);
+    try indexes.ensureTotalCapacity(allocator, symbol_indexes.len);
+
+    for (symbol_indexes) |symbol_index| {
+        indexes.appendAssumeCapacity(.{
+            .name = symbols[symbol_index].name,
+            .symbol_index = symbol_index,
+        });
+    }
+    std.mem.sort(SymbolNameIndexEntry, indexes.items, {}, lessSymbolNameIndex);
+
+    const capacity_requested = indexes.capacity;
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .capacity_requested = capacity_requested,
+    };
+}
+
+fn buildSymbolRangeIndexes(
+    allocator: Allocator,
+    symbols: []const Symbol,
+    symbol_indexes: []const u32,
+) !BuiltRangeIndex {
+    var indexes = std.ArrayList(RangeIndexEntry){};
+    errdefer indexes.deinit(allocator);
+    try indexes.ensureTotalCapacity(allocator, symbol_indexes.len);
+
+    for (symbol_indexes) |symbol_index| {
+        indexes.appendAssumeCapacity(.{
+            .range = symbols[symbol_index].range,
+            .item_index = symbol_index,
+        });
+    }
+    std.mem.sort(RangeIndexEntry, indexes.items, {}, lessRangeIndex);
+
+    const capacity_requested = indexes.capacity;
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .capacity_requested = capacity_requested,
+    };
+}
+
+fn buildOccurrenceRangeIndexes(allocator: Allocator, occurrences: []const references.Occurrence) !BuiltRangeIndex {
+    var indexes = std.ArrayList(RangeIndexEntry){};
+    errdefer indexes.deinit(allocator);
+    try indexes.ensureTotalCapacity(allocator, occurrences.len);
+
+    for (occurrences, 0..) |occurrence, index| {
+        indexes.appendAssumeCapacity(.{
+            .range = occurrence.range,
+            .item_index = try symbolIndexU32(index),
+        });
+    }
+    std.mem.sort(RangeIndexEntry, indexes.items, {}, lessRangeIndex);
 
     const capacity_requested = indexes.capacity;
     return .{
@@ -769,8 +927,12 @@ fn estimateByteSize(
     symbols: []const Symbol,
     root_symbol_indexes: []const u32,
     callable_symbol_indexes: []const u32,
+    root_symbol_name_indexes: []const SymbolNameIndexEntry,
+    callable_symbol_name_indexes: []const SymbolNameIndexEntry,
+    callable_symbol_range_indexes: []const RangeIndexEntry,
     imports: []const Import,
     occurrences: []const references.Occurrence,
+    occurrence_range_indexes: []const RangeIndexEntry,
     imported_members: []const references.ImportedMemberOccurrence,
     call_edges: []const call_hierarchy.CallEdge,
     interned_string_bytes: usize,
@@ -780,8 +942,12 @@ fn estimateByteSize(
     total = addSat(total, symbols.len * @sizeOf(Symbol));
     total = addSat(total, root_symbol_indexes.len * @sizeOf(u32));
     total = addSat(total, callable_symbol_indexes.len * @sizeOf(u32));
+    total = addSat(total, root_symbol_name_indexes.len * @sizeOf(SymbolNameIndexEntry));
+    total = addSat(total, callable_symbol_name_indexes.len * @sizeOf(SymbolNameIndexEntry));
+    total = addSat(total, callable_symbol_range_indexes.len * @sizeOf(RangeIndexEntry));
     total = addSat(total, imports.len * @sizeOf(Import));
     total = addSat(total, occurrences.len * @sizeOf(references.Occurrence));
+    total = addSat(total, occurrence_range_indexes.len * @sizeOf(RangeIndexEntry));
     total = addSat(total, imported_members.len * @sizeOf(references.ImportedMemberOccurrence));
     total = addSat(total, call_edges.len * @sizeOf(call_hierarchy.CallEdge));
 
@@ -793,8 +959,12 @@ fn workspaceEntryBuilderCapacityRequested(
     symbols: []const Symbol,
     root_symbol_indexes: BuiltIndexSlice,
     callable_symbol_indexes: BuiltIndexSlice,
+    root_symbol_name_indexes: BuiltSymbolNameIndex,
+    callable_symbol_name_indexes: BuiltSymbolNameIndex,
+    callable_symbol_range_indexes: BuiltRangeIndex,
     imports: []const Import,
     occurrences: []const references.Occurrence,
+    occurrence_range_indexes: BuiltRangeIndex,
     imported_members: []const references.ImportedMemberOccurrence,
     call_edges: []const call_hierarchy.CallEdge,
 ) usize {
@@ -802,8 +972,12 @@ fn workspaceEntryBuilderCapacityRequested(
     total = addSat(total, symbols.len);
     total = addSat(total, root_symbol_indexes.capacity_requested);
     total = addSat(total, callable_symbol_indexes.capacity_requested);
+    total = addSat(total, root_symbol_name_indexes.capacity_requested);
+    total = addSat(total, callable_symbol_name_indexes.capacity_requested);
+    total = addSat(total, callable_symbol_range_indexes.capacity_requested);
     total = addSat(total, imports.len);
     total = addSat(total, occurrences.len);
+    total = addSat(total, occurrence_range_indexes.capacity_requested);
     total = addSat(total, imported_members.len);
     total = addSat(total, call_edges.len);
     return total;
@@ -814,8 +988,12 @@ fn workspaceEntryBuilderItemsBuilt(
     symbols: []const Symbol,
     root_symbol_indexes: []const u32,
     callable_symbol_indexes: []const u32,
+    root_symbol_name_indexes: []const SymbolNameIndexEntry,
+    callable_symbol_name_indexes: []const SymbolNameIndexEntry,
+    callable_symbol_range_indexes: []const RangeIndexEntry,
     imports: []const Import,
     occurrences: []const references.Occurrence,
+    occurrence_range_indexes: []const RangeIndexEntry,
     imported_members: []const references.ImportedMemberOccurrence,
     call_edges: []const call_hierarchy.CallEdge,
 ) usize {
@@ -823,8 +1001,12 @@ fn workspaceEntryBuilderItemsBuilt(
     total = addSat(total, symbols.len);
     total = addSat(total, root_symbol_indexes.len);
     total = addSat(total, callable_symbol_indexes.len);
+    total = addSat(total, root_symbol_name_indexes.len);
+    total = addSat(total, callable_symbol_name_indexes.len);
+    total = addSat(total, callable_symbol_range_indexes.len);
     total = addSat(total, imports.len);
     total = addSat(total, occurrences.len);
+    total = addSat(total, occurrence_range_indexes.len);
     total = addSat(total, imported_members.len);
     total = addSat(total, call_edges.len);
     return total;
@@ -842,6 +1024,90 @@ fn positionInRange(pos: frontend.Position, range: frontend.Range) bool {
     return true;
 }
 
+fn symbolNamed(symbols: []const Symbol, indexes: []const SymbolNameIndexEntry, name: []const u8) ?*const Symbol {
+    var index = lowerBoundSymbolName(indexes, name);
+    while (index < indexes.len and std.mem.eql(u8, indexes[index].name, name)) : (index += 1) {
+        return &symbols[indexes[index].symbol_index];
+    }
+    return null;
+}
+
+fn symbolIndexByRange(symbols: []const Symbol, indexes: []const RangeIndexEntry, range: frontend.Range) ?usize {
+    var index = lowerBoundRangeStart(indexes, range.start);
+    while (index < indexes.len and positionsEqual(indexes[index].range.start, range.start)) : (index += 1) {
+        const symbol_index: usize = indexes[index].item_index;
+        if (frontendRangesEqual(symbols[symbol_index].range, range)) return symbol_index;
+    }
+    return null;
+}
+
+fn occurrenceIndexAtPosition(
+    occurrences: []const references.Occurrence,
+    indexes: []const RangeIndexEntry,
+    position: frontend.Position,
+) ?usize {
+    var index = upperBoundRangeStart(indexes, position);
+    if (index == 0) return null;
+    index -= 1;
+    const occurrence_index: usize = indexes[index].item_index;
+    if (positionInRange(position, occurrences[occurrence_index].range)) return occurrence_index;
+    return null;
+}
+
+fn lowerBoundSymbolName(indexes: []const SymbolNameIndexEntry, name: []const u8) usize {
+    var low: usize = 0;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (std.mem.lessThan(u8, indexes[mid].name, name)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn lowerBoundRangeStart(indexes: []const RangeIndexEntry, start: frontend.Position) usize {
+    var low: usize = 0;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (positionLessThan(indexes[mid].range.start, start)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn upperBoundRangeStart(indexes: []const RangeIndexEntry, position: frontend.Position) usize {
+    var low: usize = 0;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (!positionLessThan(position, indexes[mid].range.start)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn lessSymbolNameIndex(_: void, lhs: SymbolNameIndexEntry, rhs: SymbolNameIndexEntry) bool {
+    if (std.mem.lessThan(u8, lhs.name, rhs.name)) return true;
+    if (std.mem.lessThan(u8, rhs.name, lhs.name)) return false;
+    return lhs.symbol_index < rhs.symbol_index;
+}
+
+fn lessRangeIndex(_: void, lhs: RangeIndexEntry, rhs: RangeIndexEntry) bool {
+    if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
+    if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs.item_index < rhs.item_index;
+}
+
 fn isCallableSymbol(kind: semantic_index.SymbolKind) bool {
     return kind == .function or kind == .method;
 }
@@ -851,4 +1117,20 @@ fn frontendRangesEqual(a: frontend.Range, b: frontend.Range) bool {
         a.start.character == b.start.character and
         a.end.line == b.end.line and
         a.end.character == b.end.character;
+}
+
+fn positionsEqual(a: frontend.Position, b: frontend.Position) bool {
+    return a.line == b.line and a.character == b.character;
+}
+
+fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
+    if (lhs.line < rhs.line) return true;
+    if (lhs.line > rhs.line) return false;
+    return lhs.character < rhs.character;
+}
+
+fn sumBuilderGrowthEvents(events: []const usize) usize {
+    var total: usize = 0;
+    for (events) |event_count| total = addSat(total, event_count);
+    return total;
 }

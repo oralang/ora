@@ -1,8 +1,8 @@
 const std = @import("std");
 const lexer_mod = @import("ora_lexer");
+const refinements = @import("ora_refinements");
 const frontend = @import("frontend.zig");
 const semantic_index = @import("semantic_index.zig");
-const phase_stats = @import("phase_stats.zig");
 const token_cache = @import("token_cache.zig");
 
 const Allocator = std.mem.Allocator;
@@ -79,38 +79,6 @@ pub const SemanticToken = struct {
     kind: SemanticTokenKind,
     modifiers: u32,
 };
-
-/// Tokenize source into semantic tokens for LSP.
-pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
-    return tokenizeWithStats(allocator, source, null);
-}
-
-pub fn tokenizeWithStats(allocator: Allocator, source: []const u8, stats: ?*phase_stats.Stats) ![]SemanticToken {
-    phase_stats.record(stats, .lex);
-    var tokens = try token_cache.Cache.init(allocator, source);
-    defer tokens.deinit(allocator);
-
-    // Phase 2: Build semantic index for identifier enrichment. Keep lexical tokens for
-    // diagnostic-bearing source, but do not hide fatal allocator failures.
-    var index = semantic_index.indexDocumentWithStats(allocator, source, stats) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
-    defer if (index) |*idx| idx.deinit(allocator);
-
-    return tokenizeWithTokenSlice(allocator, source, tokens.tokens, index);
-}
-
-pub fn tokenizeWithIndex(
-    allocator: Allocator,
-    source: []const u8,
-    maybe_index: ?semantic_index.SemanticIndex,
-) ![]SemanticToken {
-    var tokens = try token_cache.Cache.init(allocator, source);
-    defer tokens.deinit(allocator);
-
-    return tokenizeWithTokenSlice(allocator, source, tokens.tokens, maybe_index);
-}
 
 /// Build semantic tokens from a retained normalized lexer token cache.
 pub fn tokenizeCached(
@@ -228,6 +196,10 @@ fn classifyKeywordLexeme(token: anytype) ?Classification {
 }
 
 fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex) Classification {
+    if (refinements.entryForName(token.lexeme) != null) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+
     const idx = maybe_index orelse return .{ .kind = .variable, .modifiers = 0 };
     const tok_line = if (token.line > 0) token.line - 1 else 0;
     const tok_char = if (token.column > 0) token.column - 1 else 0;

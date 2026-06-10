@@ -81,6 +81,17 @@ COLD_WORKSPACE_INTERNER_COUNTER_KEYS = (
     "coldWorkspaceIndexInternedStringGrowthEvents",
 )
 
+COLD_DOCUMENT_COUNTER_KEYS = (
+    "coldDocuments",
+    "coldDocumentMaxCount",
+    "coldDocumentEvictions",
+    "coldDocumentRefreshChecks",
+    "coldDocumentRefreshes",
+    "coldDocumentStaleRemovals",
+    "coldSourceBytes",
+    "coldSourceMaxBytes",
+)
+
 PROFILE_P95_BUDGET_MS = {
     "quick": {
         ("bench", "completion.cache_hit"): 1.0,
@@ -100,10 +111,15 @@ PROFILE_P95_BUDGET_MS = {
         ("bench", "signatureHelp.cache_hit"): 1.0,
         ("bench", "workspaceSymbol.cache_hit"): 1.0,
         ("code_action", "codeAction.quickfix.cache_hit"): 1.0,
+        ("cold", "callHierarchy.incoming.cold_imported_member.first_build"): 150.0,
         ("cold", "callHierarchy.incoming.cold_imported_member.cache_hit"): 2.0,
+        ("cold", "callHierarchy.incoming.recursive_cold_imported_member.first_build"): 150.0,
         ("cold", "callHierarchy.incoming.recursive_cold_imported_member.cache_hit"): 1.0,
+        ("cold", "callHierarchy.outgoing.cold_imported_target.first_build"): 150.0,
         ("cold", "callHierarchy.outgoing.cold_imported_target.cache_hit"): 1.0,
+        ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.first_build"): 150.0,
         ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.cache_hit"): 1.0,
+        ("cold", "references.cold_imported_member.first_build"): 150.0,
         ("cold", "references.cold_imported_member.cache_hit"): 1.5,
         ("cold", "rename.cold_imported_member.cache_hit"): 1.5,
         ("contractsuite", "callHierarchy.incoming.cache_hit"): 1.0,
@@ -155,10 +171,15 @@ PROFILE_P95_BUDGET_MS = {
         ("bench", "signatureHelp.cache_hit"): 0.2,
         ("bench", "workspaceSymbol.cache_hit"): 0.2,
         ("code_action", "codeAction.quickfix.cache_hit"): 0.2,
+        ("cold", "callHierarchy.incoming.cold_imported_member.first_build"): 50.0,
         ("cold", "callHierarchy.incoming.cold_imported_member.cache_hit"): 1.5,
+        ("cold", "callHierarchy.incoming.recursive_cold_imported_member.first_build"): 50.0,
         ("cold", "callHierarchy.incoming.recursive_cold_imported_member.cache_hit"): 0.3,
+        ("cold", "callHierarchy.outgoing.cold_imported_target.first_build"): 50.0,
         ("cold", "callHierarchy.outgoing.cold_imported_target.cache_hit"): 0.25,
+        ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.first_build"): 50.0,
         ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.cache_hit"): 0.25,
+        ("cold", "references.cold_imported_member.first_build"): 50.0,
         ("cold", "references.cold_imported_member.cache_hit"): 0.6,
         ("cold", "rename.cold_imported_member.cache_hit"): 0.6,
         ("contractsuite", "callHierarchy.incoming.cache_hit"): 0.2,
@@ -317,6 +338,14 @@ COLD_IMPORTED_MEMBER_ROWS = (
     ("cold", "rename.cold_imported_member.cache_hit"),
     ("cold", "callHierarchy.incoming.cold_imported_member.cache_hit"),
     ("cold", "callHierarchy.incoming.recursive_cold_imported_member.cache_hit"),
+)
+
+COLD_FIRST_BUILD_ROWS = (
+    ("cold", "references.cold_imported_member.first_build"),
+    ("cold", "callHierarchy.incoming.cold_imported_member.first_build"),
+    ("cold", "callHierarchy.incoming.recursive_cold_imported_member.first_build"),
+    ("cold", "callHierarchy.outgoing.cold_imported_target.first_build"),
+    ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.first_build"),
 )
 
 POSITION_LOOKUP_ROWS = tuple(
@@ -488,6 +517,18 @@ DELTA_COUNTER_KEYS = (
     "workspaceDiscoveryCacheHits",
     "lineIndexBytes",
     "diagnosticCacheBuilds",
+    "diagnosticFastBuilds",
+    "diagnosticFullBuilds",
+    "editDiagnosticFastPublishes",
+    "editDiagnosticFullSkips",
+    "dependentDiagnosticPublishRuns",
+    "dependentDiagnosticPublishedDocuments",
+    "dependentDiagnosticPublishSkips",
+    "diagnosticDebouncePending",
+    "diagnosticDebounceScheduled",
+    "diagnosticDebounceCanceled",
+    "diagnosticDebounceFlushed",
+    "diagnosticDebounceCleared",
     FORMATTER_COUNTER_KEY,
     "serverAllocatorAllocCalls",
     "serverAllocatorResizeCalls",
@@ -1243,33 +1284,36 @@ def main() -> int:
                 cold_incoming_items = request_text_document(client, "textDocument/prepareCallHierarchy", cold_target_uri, {"position": cold_shared_decl})
                 require(bool(cold_incoming_items), "cold incoming prepare call hierarchy did not return target method")
                 cold_incoming_item = cold_incoming_items[0]
-                cold_incoming_warm = client.request("callHierarchy/incomingCalls", {"item": cold_incoming_item})
-                require(has_incoming_call_from_uri(cold_incoming_warm, cold_importer_uri), "warm cold incoming call hierarchy did not include unopened importer")
-                cold_importer_item = incoming_call_from_item(cold_incoming_warm, cold_importer_uri, "use_cold_0")
-                require(isinstance(cold_importer_item, dict), "warm cold incoming call hierarchy did not return the recursive importer item")
-                cold_recursive_incoming_warm = client.request("callHierarchy/incomingCalls", {"item": cold_importer_item})
-                require(has_incoming_call_from_uri(cold_recursive_incoming_warm, cold_upstream_uri), "warm recursive cold incoming call hierarchy did not include unopened upstream importer")
-                cold_incoming = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.cold_imported_member.cache_hit", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_incoming_item}))
-                require(has_incoming_call_from_uri(cold_incoming, cold_importer_uri), "timed cold incoming call hierarchy did not include unopened importer")
-                cold_recursive_incoming = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.recursive_cold_imported_member.cache_hit", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_importer_item}))
-                require(has_incoming_call_from_uri(cold_recursive_incoming, cold_upstream_uri), "timed recursive cold incoming call hierarchy did not include unopened upstream importer")
-                cold_refs_warm = request_text_document(client, "textDocument/references", cold_target_uri, {"position": cold_shared_decl, "context": {"includeDeclaration": True}})
-                require(has_location_uri(cold_refs_warm, cold_importer_uri), "warm cold references did not include unopened importer")
+
+                cold_refs_first = timed(samples, counter_deltas, client, "cold", "references.cold_imported_member.first_build", lambda: request_text_document(client, "textDocument/references", cold_target_uri, {"position": cold_shared_decl, "context": {"includeDeclaration": True}}))
+                require(has_location_uri(cold_refs_first, cold_importer_uri), "first-build cold references did not include unopened importer")
                 cold_refs = timed(samples, counter_deltas, client, "cold", "references.cold_imported_member.cache_hit", lambda: request_text_document(client, "textDocument/references", cold_target_uri, {"position": cold_shared_decl, "context": {"includeDeclaration": True}}))
                 require(has_location_uri(cold_refs, cold_importer_uri), "timed cold references did not include unopened importer")
                 cold_rename_warm = request_text_document(client, "textDocument/rename", cold_target_uri, {"position": cold_shared_decl, "newName": "coldSharedRenamed"})
                 require(has_change_uri(cold_rename_warm, cold_importer_uri), "warm cold rename did not include unopened importer edit")
                 cold_rename = timed(samples, counter_deltas, client, "cold", "rename.cold_imported_member.cache_hit", lambda: request_text_document(client, "textDocument/rename", cold_target_uri, {"position": cold_shared_decl, "newName": "coldSharedRenamed"}))
                 require(has_change_uri(cold_rename, cold_importer_uri), "timed cold rename did not include unopened importer edit")
+
+                cold_incoming_first = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.cold_imported_member.first_build", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_incoming_item}))
+                require(has_incoming_call_from_uri(cold_incoming_first, cold_importer_uri), "first-build cold incoming call hierarchy did not include unopened importer")
+                cold_importer_item = incoming_call_from_item(cold_incoming_first, cold_importer_uri, "use_cold_0")
+                require(isinstance(cold_importer_item, dict), "first-build cold incoming call hierarchy did not return the recursive importer item")
+                cold_recursive_incoming_first = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.recursive_cold_imported_member.first_build", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_importer_item}))
+                require(has_incoming_call_from_uri(cold_recursive_incoming_first, cold_upstream_uri), "first-build recursive cold incoming call hierarchy did not include unopened upstream importer")
+                cold_incoming = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.cold_imported_member.cache_hit", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_incoming_item}))
+                require(has_incoming_call_from_uri(cold_incoming, cold_importer_uri), "timed cold incoming call hierarchy did not include unopened importer")
+                cold_recursive_incoming = timed(samples, counter_deltas, client, "cold", "callHierarchy.incoming.recursive_cold_imported_member.cache_hit", lambda: client.request("callHierarchy/incomingCalls", {"item": cold_importer_item}))
+                require(has_incoming_call_from_uri(cold_recursive_incoming, cold_upstream_uri), "timed recursive cold incoming call hierarchy did not include unopened upstream importer")
+
                 cold_call_items = request_text_document(client, "textDocument/prepareCallHierarchy", cold_call_importer_uri, {"position": cold_call_method_decl})
                 require(bool(cold_call_items), "cold outgoing prepare call hierarchy did not return importer method")
                 cold_call_item = cold_call_items[0]
-                cold_outgoing_warm = client.request("callHierarchy/outgoingCalls", {"item": cold_call_item})
-                require(has_call_target_uri(cold_outgoing_warm, cold_call_target_uri), "warm cold outgoing call hierarchy did not include unopened target")
-                cold_call_target_item = call_target_item(cold_outgoing_warm, cold_call_target_uri)
-                require(isinstance(cold_call_target_item, dict), "warm cold outgoing call hierarchy did not return a target item")
-                cold_recursive_outgoing_warm = client.request("callHierarchy/outgoingCalls", {"item": cold_call_target_item})
-                require(has_call_target_uri(cold_recursive_outgoing_warm, cold_call_leaf_uri), "warm recursive cold outgoing call hierarchy did not include unopened leaf")
+                cold_outgoing_first = timed(samples, counter_deltas, client, "cold", "callHierarchy.outgoing.cold_imported_target.first_build", lambda: client.request("callHierarchy/outgoingCalls", {"item": cold_call_item}))
+                require(has_call_target_uri(cold_outgoing_first, cold_call_target_uri), "first-build cold outgoing call hierarchy did not include unopened target")
+                cold_call_target_item = call_target_item(cold_outgoing_first, cold_call_target_uri)
+                require(isinstance(cold_call_target_item, dict), "first-build cold outgoing call hierarchy did not return a target item")
+                cold_recursive_outgoing_first = timed(samples, counter_deltas, client, "cold", "callHierarchy.outgoing.recursive_cold_imported_target.first_build", lambda: client.request("callHierarchy/outgoingCalls", {"item": cold_call_target_item}))
+                require(has_call_target_uri(cold_recursive_outgoing_first, cold_call_leaf_uri), "first-build recursive cold outgoing call hierarchy did not include unopened leaf")
                 cold_outgoing = timed(samples, counter_deltas, client, "cold", "callHierarchy.outgoing.cold_imported_target.cache_hit", lambda: client.request("callHierarchy/outgoingCalls", {"item": cold_call_item}))
                 require(has_call_target_uri(cold_outgoing, cold_call_target_uri), "timed cold outgoing call hierarchy did not include unopened target")
                 cold_recursive_outgoing = timed(samples, counter_deltas, client, "cold", "callHierarchy.outgoing.recursive_cold_imported_target.cache_hit", lambda: client.request("callHierarchy/outgoingCalls", {"item": cold_call_target_item}))
@@ -1390,9 +1434,31 @@ def main() -> int:
     if tracked_total_bytes > args.max_tracked_total_bytes:
         byte_failures.append("trackedTotalBytes %d > %d" % (tracked_total_bytes, args.max_tracked_total_bytes))
     byte_ok = len(byte_failures) == 0
+    cache_stats_available = len(stats) > 0
+    cold_document_failures = []
+    if cache_stats_available:
+        for key in COLD_DOCUMENT_COUNTER_KEYS:
+            if key not in stats:
+                cold_document_failures.append("%s:missing" % key)
+        cold_documents = stat_int(stats, "coldDocuments")
+        cold_document_max_count = stat_int(stats, "coldDocumentMaxCount")
+        cold_source_max_bytes = stat_int(stats, "coldSourceMaxBytes")
+        cold_refresh_checks = stat_int(stats, "coldDocumentRefreshChecks")
+        if cold_documents <= 0:
+            cold_document_failures.append("coldDocuments<=0")
+        if cold_document_max_count <= 0:
+            cold_document_failures.append("coldDocumentMaxCount<=0")
+        if cold_source_max_bytes <= 0:
+            cold_document_failures.append("coldSourceMaxBytes<=0")
+        if cold_document_max_count > 0 and cold_documents > cold_document_max_count:
+            cold_document_failures.append("coldDocuments %d > %d" % (cold_documents, cold_document_max_count))
+        if cold_source_max_bytes > 0 and cold_source_bytes > cold_source_max_bytes:
+            cold_document_failures.append("coldSourceBytes %d > coldSourceMaxBytes %d" % (cold_source_bytes, cold_source_max_bytes))
+        if cold_refresh_checks <= 0:
+            cold_document_failures.append("coldDocumentRefreshChecks<=0")
+    cold_document_ok = cache_stats_available and len(cold_document_failures) == 0
     coverage_fixtures = ("bench", "contractsuite", "importfanout", "importfanin", "cold", "positionsmall", "positionlarge", "stress", "code_action")
     coverage_ok = all(any(key[0] == fixture for key in samples.keys()) for fixture in coverage_fixtures)
-    cache_stats_available = len(stats) > 0
     profile_byte_failures = []
     if not args.skip_profile_byte_budgets:
         profile_byte_budgets = PROFILE_BYTE_BUDGETS[args.profile]
@@ -1651,6 +1717,58 @@ def main() -> int:
                 if sum(values) != 0 or (max(values) if values else 0) != 0:
                     cold_cache_failures.append("%s.%s:%s" % (fixture, operation, key))
     cold_cache_ok = cache_stats_available and len(cold_cache_failures) == 0
+    cold_first_build_failures = []
+    if cache_stats_available:
+        for fixture, operation in COLD_FIRST_BUILD_ROWS:
+            if (fixture, operation) not in samples:
+                cold_first_build_failures.append("%s.%s:missing-samples" % (fixture, operation))
+                continue
+            build_values = counter_deltas.get((fixture, operation, "coldWorkspaceIndexBuilds"), [])
+            if sum(build_values) <= 0:
+                cold_first_build_failures.append("%s.%s:coldWorkspaceIndexBuilds<=0" % (fixture, operation))
+    cold_first_build_ok = cache_stats_available and len(cold_first_build_failures) == 0
+    edit_diagnostic_boundary_failures = []
+    if cache_stats_available:
+        edit_positive_keys = (
+            "diagnosticCacheBuilds",
+            "diagnosticFastBuilds",
+            "editDiagnosticFastPublishes",
+            "editDiagnosticFullSkips",
+            "dependentDiagnosticPublishSkips",
+            "diagnosticDebounceScheduled",
+            "diagnosticDebouncePending",
+        )
+        for key in edit_positive_keys:
+            values = counter_deltas.get(("bench", "didChange.diagnostics", key), [])
+            if sum(values) <= 0:
+                edit_diagnostic_boundary_failures.append("%s<=0" % key)
+
+        edit_zero_keys = (
+            "itemIndexBuilds",
+            "resolveBuilds",
+            "constEvalBuilds",
+            "typeCheckBuilds",
+            "semanticIndexBuilds",
+            "occurrenceIndexBuilds",
+            "importedMemberIndexBuilds",
+            "callEdgeIndexBuilds",
+            "workspaceIndexBuilds",
+            "coldWorkspaceIndexBuilds",
+            "incomingCallTargetIndexBuilds",
+            "diagnosticFullBuilds",
+            "dependentDiagnosticPublishRuns",
+            "dependentDiagnosticPublishedDocuments",
+            "diagnosticDebounceFlushed",
+            "diagnosticDebounceCleared",
+        )
+        for key in edit_zero_keys:
+            values = counter_deltas.get(("bench", "didChange.diagnostics", key), [])
+            if sum(values) != 0 or (max(values) if values else 0) != 0:
+                edit_diagnostic_boundary_failures.append("%s=%s" % (key, ",".join(str(v) for v in values)))
+        cancel_values = counter_deltas.get(("bench", "didChange.diagnostics", "diagnosticDebounceCanceled"), [])
+        if len(cancel_values) > 1 and sum(cancel_values) <= 0:
+            edit_diagnostic_boundary_failures.append("diagnosticDebounceCanceled<=0")
+    edit_diagnostic_boundary_ok = cache_stats_available and len(edit_diagnostic_boundary_failures) == 0
 
     print("gate request_p95_budget ok %d max_p95_ms %.3f" % (1 if request_ok else 0, args.max_request_p95_ms))
     print("gate edit_diagnostics_p95_budget ok %d max_p95_ms %.3f" % (1 if edit_ok else 0, args.max_edit_diagnostics_p95_ms))
@@ -1708,6 +1826,10 @@ def main() -> int:
             1 if cold_workspace_interner_ok else 0,
             ",".join(cold_workspace_interner_failures) if cold_workspace_interner_failures else "-",
         ))
+        print("gate cold_document_telemetry ok %d failures %s" % (
+            1 if cold_document_ok else 0,
+            ",".join(cold_document_failures) if cold_document_failures else "-",
+        ))
         print("gate server_allocator_counter_coverage ok %d missing %s" % (
             1 if allocator_counter_ok else 0,
             ",".join(allocator_counter_failures) if allocator_counter_failures else "-",
@@ -1740,6 +1862,15 @@ def main() -> int:
             1 if cold_cache_ok else 0,
             ",".join(cold_cache_failures) if cold_cache_failures else "-",
         ))
+        print("%s cold_workspace_first_build ok %d deltas %s" % (
+            response_gate_label,
+            1 if cold_first_build_ok else 0,
+            ",".join(cold_first_build_failures) if cold_first_build_failures else "-",
+        ))
+        print("gate edit_diagnostics_phase_boundary ok %d deltas %s" % (
+            1 if edit_diagnostic_boundary_ok else 0,
+            ",".join(edit_diagnostic_boundary_failures) if edit_diagnostic_boundary_failures else "-",
+        ))
     else:
         print("info response_builder_coverage skipped cache_stats_unavailable")
         print("info response_string_byte_coverage skipped cache_stats_unavailable")
@@ -1751,6 +1882,7 @@ def main() -> int:
         print("info cache_side_map_telemetry skipped cache_stats_unavailable")
         print("info workspace_interner_telemetry skipped cache_stats_unavailable")
         print("info cold_workspace_interner_telemetry skipped cache_stats_unavailable")
+        print("info cold_document_telemetry skipped cache_stats_unavailable")
         print("info server_allocator_counter_coverage skipped cache_stats_unavailable")
         print("info scoped_allocator_counter_coverage skipped cache_stats_unavailable")
         print("info allocator_attribution_budget skipped cache_stats_unavailable")
@@ -1758,6 +1890,8 @@ def main() -> int:
         print("info db_backed_read_phase_cache_hit skipped cache_stats_unavailable")
         print("info position_lookup_scaling skipped cache_stats_unavailable")
         print("info cold_imported_member_cache_hit skipped cache_stats_unavailable")
+        print("info cold_workspace_first_build skipped cache_stats_unavailable")
+        print("info edit_diagnostics_phase_boundary skipped cache_stats_unavailable")
     print("gate source_bytes_budget ok %d max_total_source_bytes %d observed_total_source_bytes %d" % (1 if source_ok else 0, args.max_total_source_bytes, source_bytes))
     print("gate tracked_cache_bytes ok %d max_open_source_bytes %d max_cold_source_bytes %d max_tracked_cache_bytes %d max_tracked_total_bytes %d failures %s" % (
         1 if byte_ok else 0,
@@ -1772,7 +1906,7 @@ def main() -> int:
         1 if profile_byte_ok else 0,
         ";".join(profile_byte_failures) if profile_byte_failures else "-",
     ))
-    future_gates_ok = response_coverage_ok and response_string_ok and response_markdown_ok and selection_phase_ok and db_phase_ok and position_lookup_ok and cold_cache_ok
+    future_gates_ok = response_coverage_ok and response_string_ok and response_markdown_ok and selection_phase_ok and db_phase_ok and position_lookup_ok and cold_cache_ok and cold_first_build_ok
     return 0 if (
         request_ok and
         edit_ok and
@@ -1789,6 +1923,9 @@ def main() -> int:
         cache_side_map_ok and
         workspace_interner_ok and
         cold_workspace_interner_ok and
+        cold_document_ok and
+        cold_first_build_ok and
+        edit_diagnostic_boundary_ok and
         allocator_counter_ok and
         scoped_allocator_ok and
         allocation_attribution_ok and

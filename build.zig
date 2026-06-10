@@ -303,6 +303,99 @@ pub fn build(b: *std.Build) void {
         .root_module = lsp_exe_mod,
     });
 
+    const lsp_release_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const lsp_release_refinements_mod = b.createModule(.{
+        .root_source_file = b.path("src/refinements/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_types_mod.addImport("ora_refinements", lsp_release_refinements_mod);
+
+    const lsp_release_lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/lexer.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_lexer_mod.addImport("ora_types", lsp_release_types_mod);
+
+    const lsp_release_stdlib_embedded_mod = b.createModule(.{
+        .root_source_file = b.path("src/stdlib_embedded.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_imports_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/mod.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_imports_mod.addImport("ora_lexer", lsp_release_lexer_mod);
+    lsp_release_imports_mod.addImport("stdlib_embedded", lsp_release_stdlib_embedded_mod);
+
+    const lsp_release_mlir_c_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/c.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
+    if (native_sanitize.enabled()) {
+        lsp_release_mlir_c_mod.addIncludePath(b.path(b.fmt("{s}/include", .{nativeMlirInstallPrefix(b, native_sanitize)})));
+    }
+    lsp_release_mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
+    lsp_release_mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
+
+    const lsp_release_mlir_helpers_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/helpers.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_mlir_helpers_mod.addImport("mlir_c_api", lsp_release_mlir_c_mod);
+    lsp_release_mlir_helpers_mod.addImport("ora_types", lsp_release_types_mod);
+
+    const lsp_release_log_mod = b.createModule(.{
+        .root_source_file = b.path("src/logging.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_lib_mod.addImport("mlir_c_api", lsp_release_mlir_c_mod);
+    lsp_release_lib_mod.addImport("mlir_helpers", lsp_release_mlir_helpers_mod);
+    lsp_release_lib_mod.addImport("log", lsp_release_log_mod);
+    lsp_release_lib_mod.addImport("ora_types", lsp_release_types_mod);
+    lsp_release_lib_mod.addImport("ora_refinements", lsp_release_refinements_mod);
+    lsp_release_lib_mod.addImport("ora_lexer", lsp_release_lexer_mod);
+    lsp_release_lib_mod.addImport("ora_imports", lsp_release_imports_mod);
+
+    const lsp_release_fmt_mod = b.createModule(.{
+        .root_source_file = b.path("src/fmt/mod.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_fmt_mod.addImport("ora_lib", lsp_release_lib_mod);
+
+    const lsp_release_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/main.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_exe_mod.addImport("ora_root", lsp_release_lib_mod);
+    lsp_release_exe_mod.addImport("ora_lib", lsp_release_lib_mod);
+    lsp_release_exe_mod.addImport("ora_fmt", lsp_release_fmt_mod);
+    lsp_release_exe_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+
+    const lsp_release_exe = b.addExecutable(.{
+        .name = "ora-lsp-release",
+        .root_module = lsp_release_exe_mod,
+    });
+
     // add MLIR build options as compile-time constants
     const mlir_options = b.addOptions();
     mlir_options.addOption(bool, "mlir_debug", enable_mlir_debug);
@@ -316,6 +409,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addOptions("build_options", mlir_options);
     lib_mod.addOptions("build_options", mlir_options);
+    lsp_release_lib_mod.addOptions("build_options", mlir_options);
 
     // add include paths
     exe.addIncludePath(b.path("src"));
@@ -920,6 +1014,24 @@ pub fn build(b: *std.Build) void {
     const lsp_definition_response_tests = b.addTest(.{ .root_module = lsp_definition_response_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
 
+    const lsp_diagnostics_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/diagnostics_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_diagnostics_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_diagnostics_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_diagnostics_response_tests = b.addTest(.{ .root_module = lsp_diagnostics_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_diagnostics_response_tests).step);
+
+    const lsp_diagnostic_debounce_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/diagnostic_debounce.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_diagnostic_debounce_tests = b.addTest(.{ .root_module = lsp_diagnostic_debounce_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_diagnostic_debounce_tests).step);
+
     const lsp_document_link_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/document_link.test.zig"),
         .target = target,
@@ -1043,6 +1155,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lsp_semantic_tokens_response_test_mod.addImport("ora_root", lib_mod);
     lsp_semantic_tokens_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
     const lsp_semantic_tokens_response_tests = b.addTest(.{ .root_module = lsp_semantic_tokens_response_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
@@ -1056,6 +1169,15 @@ pub fn build(b: *std.Build) void {
     lsp_uri_ranges_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
     const lsp_uri_ranges_tests = b.addTest(.{ .root_module = lsp_uri_ranges_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+
+    const lsp_workspace_discovery_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_discovery.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_discovery_test_mod.addImport("ora_root", lib_mod);
+    const lsp_workspace_discovery_tests = b.addTest(.{ .root_module = lsp_workspace_discovery_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_discovery_tests).step);
 
     const lsp_workspace_index_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/workspace_index.test.zig"),
@@ -1175,6 +1297,8 @@ pub fn build(b: *std.Build) void {
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_lens_response_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_items_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_diagnostics_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_diagnostic_debounce_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_link_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_symbol_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_folding_ranges_response_tests).step);
@@ -1189,6 +1313,7 @@ pub fn build(b: *std.Build) void {
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_selection_range_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_discovery_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_index_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_symbol_response_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
@@ -1222,12 +1347,12 @@ pub fn build(b: *std.Build) void {
         "--profile",
         "release",
         "--build-mode",
-        lsp_build_mode,
+        optimizeModeName(lsp_release_optimize),
         "--require-build-mode",
         "ReleaseFast",
         "--strict-future-gates",
     });
-    lsp_bench_release_cmd.addArtifactArg(lsp_exe);
+    lsp_bench_release_cmd.addArtifactArg(lsp_release_exe);
     const lsp_bench_release_step = b.step("lsp-bench-release", "Run LSP JSON-RPC benchmark in ReleaseFast");
     lsp_bench_release_step.dependOn(&lsp_bench_release_cmd.step);
 

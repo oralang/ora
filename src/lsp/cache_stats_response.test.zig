@@ -9,6 +9,9 @@ test "lsp cache stats response: builds expected integer fields" {
         .open_documents = 2,
         .core_builds = 3,
         .semantic_index_builds = 14,
+        .diagnostic_cache_builds = 3,
+        .diagnostic_fast_builds = 4,
+        .diagnostic_full_builds = 5,
         .workspace_discovery_cache_hits = 4,
         .cache_builder_capacity_requested = 30,
         .cache_builder_items_built = 24,
@@ -66,9 +69,24 @@ test "lsp cache stats response: builds expected integer fields" {
         .dependent_diagnostic_publish_runs = 2,
         .dependent_diagnostic_published_documents = 3,
         .dependent_diagnostic_publish_skips = 4,
+        .diagnostic_debounce_pending = 1,
+        .diagnostic_debounce_scheduled = 2,
+        .diagnostic_debounce_canceled = 1,
+        .diagnostic_debounce_flushed = 1,
+        .diagnostic_debounce_cleared = 1,
         .stale_document_change_skips = 5,
+        .edit_diagnostic_fast_publishes = 6,
+        .edit_diagnostic_full_skips = 7,
+        .cold_documents = 6,
+        .cold_document_max_count = 512,
+        .cold_document_evictions = 7,
+        .cold_document_refresh_checks = 8,
+        .cold_document_refreshes = 9,
+        .cold_document_stale_removals = 10,
         .workspace_index_bytes = 1024,
         .open_source_bytes = 2048,
+        .cold_source_bytes = 4096,
+        .cold_source_max_bytes = 67108864,
         .open_token_count = 11,
         .open_token_diagnostic_count = 1,
         .open_symbol_count = 7,
@@ -127,6 +145,9 @@ test "lsp cache stats response: builds expected integer fields" {
 
     try expectInt(object, "openDocuments", 2);
     try expectInt(object, "coreBuilds", 3);
+    try expectInt(object, "diagnosticCacheBuilds", 3);
+    try expectInt(object, "diagnosticFastBuilds", 4);
+    try expectInt(object, "diagnosticFullBuilds", 5);
     try expectInt(object, "workspaceDiscoveryCacheHits", 4);
     try expectInt(object, "cacheBuilderCapacityRequested", 30);
     try expectInt(object, "cacheBuilderItemsBuilt", 24);
@@ -184,9 +205,24 @@ test "lsp cache stats response: builds expected integer fields" {
     try expectInt(object, "dependentDiagnosticPublishRuns", 2);
     try expectInt(object, "dependentDiagnosticPublishedDocuments", 3);
     try expectInt(object, "dependentDiagnosticPublishSkips", 4);
+    try expectInt(object, "diagnosticDebouncePending", 1);
+    try expectInt(object, "diagnosticDebounceScheduled", 2);
+    try expectInt(object, "diagnosticDebounceCanceled", 1);
+    try expectInt(object, "diagnosticDebounceFlushed", 1);
+    try expectInt(object, "diagnosticDebounceCleared", 1);
     try expectInt(object, "staleDocumentChangeSkips", 5);
+    try expectInt(object, "editDiagnosticFastPublishes", 6);
+    try expectInt(object, "editDiagnosticFullSkips", 7);
+    try expectInt(object, "coldDocuments", 6);
+    try expectInt(object, "coldDocumentMaxCount", 512);
+    try expectInt(object, "coldDocumentEvictions", 7);
+    try expectInt(object, "coldDocumentRefreshChecks", 8);
+    try expectInt(object, "coldDocumentRefreshes", 9);
+    try expectInt(object, "coldDocumentStaleRemovals", 10);
     try expectInt(object, "workspaceIndexBytes", 1024);
     try expectInt(object, "openSourceBytes", 2048);
+    try expectInt(object, "coldSourceBytes", 4096);
+    try expectInt(object, "coldSourceMaxBytes", 67108864);
     try expectInt(object, "openTokenCount", 11);
     try expectInt(object, "openTokenDiagnosticCount", 1);
     try expectInt(object, "openSymbolCount", 7);

@@ -3,8 +3,19 @@ const testing = std.testing;
 const ora_root = @import("ora_root");
 
 const code_lens = ora_root.lsp.code_lens;
-const compiler = ora_root.compiler;
 const line_index = ora_root.lsp.line_index;
+const test_analysis = @import("test_analysis.zig");
+
+fn cachedLenses(allocator: std.mem.Allocator, source: []const u8) ![]code_lens.VerificationLens {
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(allocator, source);
+    defer fixture.deinit();
+
+    var lines = try line_index.LineIndex.init(allocator, source);
+    defer lines.deinit(allocator);
+
+    return code_lens.findVerificationLensesInAst(allocator, source, fixture.analysis.ast_file, &lines);
+}
 
 test "lsp code lens: reports verification clauses" {
     const source =
@@ -21,7 +32,7 @@ test "lsp code lens: reports verification clauses" {
         \\}
     ;
 
-    const lenses = try code_lens.findVerificationLenses(testing.allocator, source);
+    const lenses = try cachedLenses(testing.allocator, source);
     defer code_lens.deinitLenses(testing.allocator, lenses);
 
     try testing.expectEqual(@as(usize, 2), lenses.len);
@@ -44,16 +55,14 @@ test "lsp code lens: cached AST path reports verification clauses" {
         \\}
     ;
 
-    var parse_result = try compiler.syntax.parse(testing.allocator, compiler.FileId.fromIndex(0), source);
-    defer parse_result.deinit();
-
-    var lower_result = try compiler.ast.lower(testing.allocator, &parse_result.tree);
-    defer lower_result.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(testing.allocator, source);
+    defer fixture.deinit();
 
     var lines = try line_index.LineIndex.init(testing.allocator, source);
     defer lines.deinit(testing.allocator);
 
-    const lenses = try code_lens.findVerificationLensesInAst(testing.allocator, source, &lower_result.file, &lines);
+    const lenses = try code_lens.findVerificationLensesInAst(testing.allocator, source, fixture.analysis.ast_file, &lines);
     defer code_lens.deinitLenses(testing.allocator, lenses);
 
     try testing.expectEqual(@as(usize, 2), lenses.len);
@@ -77,7 +86,7 @@ test "lsp code lens: propagates allocator failures instead of returning empty le
         var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
         const allocator = failing.allocator();
 
-        if (code_lens.findVerificationLenses(allocator, source)) |lenses| {
+        if (cachedLenses(allocator, source)) |lenses| {
             code_lens.deinitLenses(allocator, lenses);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;

@@ -42,18 +42,21 @@ fn expectExampleParses(entry: builtin_docs.Entry) !void {
     );
     defer std.testing.allocator.free(source);
 
-    var parse_result = try compiler.syntax.parse(std.testing.allocator, compiler.FileId.fromIndex(0), source);
-    defer parse_result.deinit();
-    if (!parse_result.diagnostics.isEmpty()) {
+    var db = compiler.CompilerDb.init(std.testing.allocator);
+    defer db.deinitFrontendOnly();
+
+    const file_id = try db.addSourceFile("<builtin-doc-example>", source);
+    _ = try db.astFile(file_id);
+
+    if (!(try db.syntaxDiagnostics(file_id)).isEmpty()) {
         std.debug.print("builtin example parse failed for @{s}: {s}\n", .{ entry.name, entry.example });
         return error.TestUnexpectedResult;
     }
 
-    var lower_result = try compiler.ast.lower(std.testing.allocator, &parse_result.tree);
-    defer lower_result.deinit();
-    if (!lower_result.diagnostics.isEmpty()) {
+    const ast_diagnostics = try db.astDiagnostics(file_id);
+    if (!ast_diagnostics.isEmpty()) {
         std.debug.print("builtin example lowering failed for @{s}: {s}\n", .{ entry.name, entry.example });
-        for (lower_result.diagnostics.items.items) |diagnostic| {
+        for (ast_diagnostics.items.items) |diagnostic| {
             std.debug.print("  {s}\n", .{diagnostic.message});
         }
         return error.TestUnexpectedResult;

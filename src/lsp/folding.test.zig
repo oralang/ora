@@ -2,9 +2,20 @@ const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
 
-const compiler = ora_root.compiler;
 const folding = ora_root.lsp.folding;
 const line_index = ora_root.lsp.line_index;
+const test_analysis = @import("test_analysis.zig");
+
+fn cachedFoldingRanges(allocator: std.mem.Allocator, source: []const u8) ![]folding.FoldingRange {
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(allocator, source);
+    defer fixture.deinit();
+
+    var lines = try line_index.LineIndex.init(allocator, source);
+    defer lines.deinit(allocator);
+
+    return folding.foldingRangesInAst(allocator, source, fixture.analysis.ast_file, &lines);
+}
 
 test "lsp folding: returns comment and AST region folds" {
     const source =
@@ -17,7 +28,7 @@ test "lsp folding: returns comment and AST region folds" {
         \\}
     ;
 
-    const ranges = try folding.foldingRanges(testing.allocator, source);
+    const ranges = try cachedFoldingRanges(testing.allocator, source);
     defer folding.deinitRanges(testing.allocator, ranges);
 
     var found_comment = false;
@@ -51,16 +62,14 @@ test "lsp folding: cached AST path returns comment and AST region folds" {
         \\}
     ;
 
-    var parse_result = try compiler.syntax.parse(testing.allocator, compiler.FileId.fromIndex(0), source);
-    defer parse_result.deinit();
-
-    var lower_result = try compiler.ast.lower(testing.allocator, &parse_result.tree);
-    defer lower_result.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(testing.allocator, source);
+    defer fixture.deinit();
 
     var lines = try line_index.LineIndex.init(testing.allocator, source);
     defer lines.deinit(testing.allocator);
 
-    const ranges = try folding.foldingRangesInAst(testing.allocator, source, &lower_result.file, &lines);
+    const ranges = try folding.foldingRangesInAst(testing.allocator, source, fixture.analysis.ast_file, &lines);
     defer folding.deinitRanges(testing.allocator, ranges);
 
     var found_comment = false;
@@ -100,7 +109,7 @@ test "lsp folding: propagates allocator failures instead of returning partial fo
         var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
         const allocator = failing.allocator();
 
-        if (folding.foldingRanges(allocator, source)) |ranges| {
+        if (cachedFoldingRanges(allocator, source)) |ranges| {
             folding.deinitRanges(allocator, ranges);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;

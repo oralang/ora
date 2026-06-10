@@ -26,7 +26,8 @@ test "lsp code lens response: maps verification lenses to protocol lenses" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
 
-    const response = (try code_lens_response.build(arena_state.allocator(), source, &lines, .utf16, &lenses)) orelse return error.ExpectedCodeLens;
+    const result = try code_lens_response.buildWithStats(arena_state.allocator(), source, &lines, .utf16, &lenses);
+    const response = result.items orelse return error.ExpectedCodeLens;
     const expected_start = lines.offsetToPosition(source, @intCast(fn_offset), .utf16);
 
     try std.testing.expectEqual(@as(usize, 1), response.len);
@@ -34,6 +35,7 @@ test "lsp code lens response: maps verification lenses to protocol lenses" {
     const command = response[0].command orelse return error.ExpectedCommand;
     try std.testing.expectEqualStrings("1 verification clause", command.title);
     try std.testing.expectEqualStrings("ora.verify", command.command);
+    try std.testing.expectEqual(@as(usize, "1 verification clause".len + "ora.verify".len), result.string_bytes);
 }
 
 test "lsp code lens response: empty input returns null" {

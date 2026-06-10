@@ -4,8 +4,19 @@ const ora_root = @import("ora_root");
 
 const lexer = ora_root.lexer;
 const semantic_tokens = ora_root.lsp.semantic_tokens;
+const token_cache = ora_root.lsp.token_cache;
 
-test "semantic tokens: standalone tokenizer handles parse diagnostics without hiding errors" {
+fn cachedTokens(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    maybe_index: ?ora_root.lsp.semantic_index.SemanticIndex,
+) ![]semantic_tokens.SemanticToken {
+    var cache = try token_cache.Cache.init(allocator, source);
+    defer cache.deinit(allocator);
+    return semantic_tokens.tokenizeCached(allocator, source, cache.tokens, maybe_index);
+}
+
+test "semantic tokens: cached tokenizer handles syntax-broken source lexically" {
     const source =
         \\contract Broken {
         \\    pub fn value() -> u256 {
@@ -14,7 +25,7 @@ test "semantic tokens: standalone tokenizer handles parse diagnostics without hi
         \\}
     ;
 
-    const tokens = try semantic_tokens.tokenize(testing.allocator, source);
+    const tokens = try cachedTokens(testing.allocator, source, null);
     defer testing.allocator.free(tokens);
 
     try testing.expect(tokens.len > 0);
@@ -28,7 +39,7 @@ test "semantic tokens: standalone tokenizer handles parse diagnostics without hi
 test "semantic tokens: every lexer keyword lexeme classifies" {
     const keyword_keys = lexer.keywords.kvs.keys[0..lexer.keywords.kvs.len];
     for (keyword_keys) |keyword| {
-        const tokens = try semantic_tokens.tokenizeWithIndex(testing.allocator, keyword, null);
+        const tokens = try cachedTokens(testing.allocator, keyword, null);
         defer testing.allocator.free(tokens);
 
         try expectSemanticTokenForLexeme(keyword, tokens, keyword, null);
@@ -37,7 +48,7 @@ test "semantic tokens: every lexer keyword lexeme classifies" {
 
 test "semantic tokens: keyword classification follows lexer lexemes" {
     const source = "and && or || comptime u160 void return";
-    const tokens = try semantic_tokens.tokenizeWithIndex(testing.allocator, source, null);
+    const tokens = try cachedTokens(testing.allocator, source, null);
     defer testing.allocator.free(tokens);
 
     try expectSemanticTokenForLexeme(source, tokens, "and", .keyword);
@@ -50,7 +61,24 @@ test "semantic tokens: keyword classification follows lexer lexemes" {
     try expectSemanticTokenForLexeme(source, tokens, "return", .keyword);
 }
 
-test "semantic tokens: standalone tokenizer propagates allocator failure" {
+test "semantic tokens: refinement type names classify as default library types" {
+    const source = "NonZeroAddress MinValue";
+    const tokens = try cachedTokens(testing.allocator, source, null);
+    defer testing.allocator.free(tokens);
+
+    try expectSemanticTokenForLexeme(source, tokens, "NonZeroAddress", .type);
+    try expectSemanticTokenForLexeme(source, tokens, "MinValue", .type);
+
+    for (tokens) |token| {
+        if (token.line == 0 and token.start_char == 0) {
+            try testing.expect((token.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+            return;
+        }
+    }
+    return error.TestExpectedEqual;
+}
+
+test "semantic tokens: cached tokenizer propagates allocator failure" {
     const source =
         \\contract Wallet {
         \\    storage var balance: u256;
@@ -69,7 +97,7 @@ test "semantic tokens: standalone tokenizer propagates allocator failure" {
         var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
         const allocator = failing.allocator();
 
-        if (semantic_tokens.tokenize(allocator, source)) |tokens| {
+        if (cachedTokens(allocator, source, null)) |tokens| {
             allocator.free(tokens);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;

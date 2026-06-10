@@ -221,6 +221,11 @@ pub const CompilerDb = struct {
         self.invalidateFileFrontendOnly(file_id);
     }
 
+    pub fn releaseSourceFileFrontendOnly(self: *CompilerDb, file_id: source.FileId) void {
+        self.invalidateFileFrontendOnly(file_id);
+        self.sources.releaseFileText(file_id);
+    }
+
     pub fn sourceText(self: *const CompilerDb, file_id: source.FileId) []const u8 {
         return self.sources.sourceText(file_id);
     }

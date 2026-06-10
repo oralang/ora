@@ -1,4 +1,5 @@
 const std = @import("std");
+const compiler = @import("../compiler.zig");
 const embedded_stdlib = @import("ora_imports").embedded_stdlib;
 const frontend = @import("frontend.zig");
 const semantic_index = @import("semantic_index.zig");
@@ -28,6 +29,93 @@ const Module = struct {
     index: semantic_index.SemanticIndex,
 };
 
+const zero_range: frontend.Range = .{
+    .start = .{ .line = 0, .character = 0 },
+    .end = .{ .line = 0, .character = 0 },
+};
+
+const SyntheticNamespace = struct {
+    name: []const u8,
+    documentation: []const u8,
+};
+
+const SyntheticMember = struct {
+    namespace: []const u8,
+    name: []const u8,
+    detail: []const u8,
+    documentation: []const u8,
+};
+
+const synthetic_namespaces = [_]SyntheticNamespace{
+    .{
+        .name = "msg",
+        .documentation = "Message-scoped EVM environment values for the current call.",
+    },
+    .{
+        .name = "transaction",
+        .documentation = "Transaction-scoped EVM environment values. `sender` is an alias of `std.msg.sender`.",
+    },
+    .{
+        .name = "tx",
+        .documentation = "Transaction-origin environment values.",
+    },
+    .{
+        .name = "block",
+        .documentation = "Current block environment values.",
+    },
+};
+
+const synthetic_members = [_]SyntheticMember{
+    .{
+        .namespace = "msg",
+        .name = "sender",
+        .detail = "address",
+        .documentation = "Address of the immediate caller. This value is trusted as non-zero and can flow into `NonZeroAddress`.",
+    },
+    .{
+        .namespace = "msg",
+        .name = "value",
+        .detail = "u256",
+        .documentation = "Wei value sent with the current call.",
+    },
+    .{
+        .namespace = "transaction",
+        .name = "sender",
+        .detail = "address",
+        .documentation = "Address of the immediate caller. Alias of `std.msg.sender`; trusted as non-zero.",
+    },
+    .{
+        .namespace = "transaction",
+        .name = "gasprice",
+        .detail = "u256",
+        .documentation = "Gas price for the current transaction.",
+    },
+    .{
+        .namespace = "tx",
+        .name = "origin",
+        .detail = "address",
+        .documentation = "Original externally owned account that started the transaction.",
+    },
+    .{
+        .namespace = "block",
+        .name = "timestamp",
+        .detail = "u256",
+        .documentation = "Timestamp of the current block.",
+    },
+    .{
+        .namespace = "block",
+        .name = "number",
+        .detail = "u256",
+        .documentation = "Number of the current block.",
+    },
+    .{
+        .namespace = "block",
+        .name = "coinbase",
+        .detail = "address",
+        .documentation = "Address of the current block beneficiary.",
+    },
+};
+
 pub const Index = struct {
     arena: std.heap.ArenaAllocator,
     modules: []Module,
@@ -41,11 +129,32 @@ pub const Index = struct {
         const modules = try arena_allocator.alloc(Module, embedded.len);
         var built: usize = 0;
         for (embedded) |embedded_module| {
+            const index = blk: {
+                var db = compiler.CompilerDb.init(arena_allocator);
+                defer db.deinitFrontendOnly();
+
+                const file_id = try db.addSourceFile(embedded_module.resolved_path, embedded_module.source);
+                const ast_file = try db.astFile(file_id);
+                const parse_succeeded =
+                    (try db.syntaxDiagnostics(file_id)).isEmpty() and
+                    (try db.astDiagnostics(file_id)).isEmpty();
+
+                break :blk try semantic_index.indexAstFileWithSourceStoreAlloc(
+                    arena_allocator,
+                    arena_allocator,
+                    &db.sources,
+                    file_id,
+                    embedded_module.source,
+                    ast_file,
+                    parse_succeeded,
+                );
+            };
+
             modules[built] = .{
                 .logical_path = embedded_module.logical_path,
                 .resolved_path = embedded_module.resolved_path,
                 .source = embedded_module.source,
-                .index = try semantic_index.indexDocument(arena_allocator, embedded_module.source),
+                .index = index,
             };
             built += 1;
         }
@@ -126,6 +235,10 @@ pub fn hoverAt(
 ) !?Hover {
     const word = wordAtPosition(source, position) orelse return null;
     const chain = accessChainEndingAt(source, word) orelse return null;
+    if (try syntheticHoverAtChain(allocator, aliases, chain)) |value| {
+        return .{ .contents = value, .range = word.range };
+    }
+
     const resolved = resolveChain(index, aliases, chain) orelse return null;
 
     const value = try formatHoverValueAlloc(allocator, resolved.symbol);
@@ -155,18 +268,39 @@ pub fn completionCandidatesAt(
     index: *const Index,
     aliases: []const ImportAlias,
 ) ![]semantic_index.Symbol {
-    const target_module = moduleForCompletionChain(source, cursor_offset, prefix, index, aliases) orelse
-        return try allocator.alloc(semantic_index.Symbol, 0);
-
     var symbols = std.ArrayList(semantic_index.Symbol){};
     errdefer symbols.deinit(allocator);
-    for (target_module.index.symbols) |symbol| {
-        if (!isExportedCompletionSymbol(symbol)) continue;
-        if (!std.mem.startsWith(u8, symbol.name, prefix)) continue;
-        try symbols.append(allocator, symbol);
+
+    const chain = completionChainForPrefix(source, cursor_offset, prefix) orelse
+        return symbols.toOwnedSlice(allocator);
+
+    if (isStdRootCompletionChain(aliases, chain)) {
+        if (index.module("std")) |root_module| {
+            try appendModuleCompletionCandidates(allocator, &symbols, root_module, prefix);
+        }
+        try appendSyntheticNamespaceCandidates(allocator, &symbols, prefix);
+    } else if (stdSyntheticNamespaceCompletion(aliases, chain)) |namespace| {
+        try appendSyntheticMemberCandidates(allocator, &symbols, namespace, prefix);
+    } else {
+        const target_module = moduleForCompletionChain(index, aliases, chain) orelse
+            return symbols.toOwnedSlice(allocator);
+        try appendModuleCompletionCandidates(allocator, &symbols, target_module, prefix);
     }
+
     std.sort.heap(semantic_index.Symbol, symbols.items, {}, lessSymbolByName);
     return symbols.toOwnedSlice(allocator);
+}
+
+pub fn completionCandidatesAtPosition(
+    allocator: Allocator,
+    source: []const u8,
+    position: frontend.Position,
+    index: *const Index,
+    aliases: []const ImportAlias,
+) ![]semantic_index.Symbol {
+    const cursor_offset = positionToByteOffsetOnLine(source, position);
+    const prefix = identifierPrefixAtOffset(source, cursor_offset);
+    return completionCandidatesAt(allocator, source, cursor_offset, prefix, index, aliases);
 }
 
 const Word = struct {
@@ -202,6 +336,28 @@ const ResolvedTarget = struct {
     symbol_name: []const u8,
 };
 
+fn syntheticHoverAtChain(allocator: Allocator, aliases: []const ImportAlias, chain: Chain) !?[]u8 {
+    if (chain.len < 2) return null;
+    const first_alias = findAlias(aliases, chain.at(0)) orelse return null;
+    if (!std.mem.eql(u8, first_alias.logical_path, "std")) return null;
+
+    if (chain.len == 2) {
+        const namespace = syntheticNamespace(chain.at(1)) orelse return null;
+        return try std.fmt.allocPrint(
+            allocator,
+            "```ora\nstd.{s}\n```\n---\n{s}",
+            .{ namespace.name, namespace.documentation },
+        );
+    }
+
+    if (chain.len == 3) {
+        const member = syntheticMember(chain.at(1), chain.at(2)) orelse return null;
+        return try syntheticMemberMarkdownAlloc(allocator, member);
+    }
+
+    return null;
+}
+
 fn resolveChain(index: *const Index, aliases: []const ImportAlias, chain: Chain) ?ResolvedSymbol {
     if (chain.len < 2) return null;
 
@@ -217,18 +373,59 @@ fn resolveChain(index: *const Index, aliases: []const ImportAlias, chain: Chain)
     return .{ .module = module, .symbol = symbol };
 }
 
+fn syntheticNamespace(name: []const u8) ?SyntheticNamespace {
+    for (synthetic_namespaces) |namespace| {
+        if (std.mem.eql(u8, namespace.name, name)) return namespace;
+    }
+    return null;
+}
+
+fn syntheticMember(namespace: []const u8, name: []const u8) ?SyntheticMember {
+    for (synthetic_members) |member| {
+        if (std.mem.eql(u8, member.namespace, namespace) and
+            std.mem.eql(u8, member.name, name))
+        {
+            return member;
+        }
+    }
+    return null;
+}
+
+fn syntheticNamespaceSymbol(namespace: SyntheticNamespace) semantic_index.Symbol {
+    return .{
+        .name = namespace.name,
+        .detail = "std namespace",
+        .doc_comment = namespace.documentation,
+        .kind = .variable,
+        .range = zero_range,
+        .selection_range = zero_range,
+    };
+}
+
+fn syntheticMemberSymbol(member: SyntheticMember) semantic_index.Symbol {
+    return .{
+        .name = member.name,
+        .detail = member.detail,
+        .doc_comment = member.documentation,
+        .kind = .constant,
+        .range = zero_range,
+        .selection_range = zero_range,
+    };
+}
+
+fn syntheticMemberMarkdownAlloc(allocator: Allocator, member: SyntheticMember) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "```ora\nstd.{s}.{s}: {s}\n```\n---\n{s}",
+        .{ member.namespace, member.name, member.detail, member.documentation },
+    );
+}
+
 fn moduleForCompletionChain(
-    source: []const u8,
-    cursor_offset: usize,
-    prefix: []const u8,
     index: *const Index,
     aliases: []const ImportAlias,
+    chain: Chain,
 ) ?*const Module {
-    if (cursor_offset < prefix.len) return null;
-    const prefix_start = cursor_offset - prefix.len;
-    if (prefix_start == 0 or source[prefix_start - 1] != '.') return null;
-
-    const chain = accessChainBeforeDot(source, prefix_start - 1) orelse return null;
     const first_alias = findAlias(aliases, chain.at(0)) orelse return null;
 
     if (chain.len == 1) {
@@ -241,6 +438,63 @@ fn moduleForCompletionChain(
     }
 
     return null;
+}
+
+fn completionChainForPrefix(source: []const u8, cursor_offset: usize, prefix: []const u8) ?Chain {
+    if (cursor_offset < prefix.len) return null;
+    const prefix_start = cursor_offset - prefix.len;
+    if (prefix_start == 0 or source[prefix_start - 1] != '.') return null;
+    return accessChainBeforeDot(source, prefix_start - 1);
+}
+
+fn isStdRootCompletionChain(aliases: []const ImportAlias, chain: Chain) bool {
+    if (chain.len != 1) return false;
+    const first_alias = findAlias(aliases, chain.at(0)) orelse return false;
+    return std.mem.eql(u8, first_alias.logical_path, "std");
+}
+
+fn stdSyntheticNamespaceCompletion(aliases: []const ImportAlias, chain: Chain) ?[]const u8 {
+    if (chain.len != 2) return null;
+    const first_alias = findAlias(aliases, chain.at(0)) orelse return null;
+    if (!std.mem.eql(u8, first_alias.logical_path, "std")) return null;
+    return if (syntheticNamespace(chain.at(1)) != null) chain.at(1) else null;
+}
+
+fn appendModuleCompletionCandidates(
+    allocator: Allocator,
+    symbols: *std.ArrayList(semantic_index.Symbol),
+    module: *const Module,
+    prefix: []const u8,
+) !void {
+    for (module.index.symbols) |symbol| {
+        if (!isExportedCompletionSymbol(symbol)) continue;
+        if (!std.mem.startsWith(u8, symbol.name, prefix)) continue;
+        try symbols.append(allocator, symbol);
+    }
+}
+
+fn appendSyntheticNamespaceCandidates(
+    allocator: Allocator,
+    symbols: *std.ArrayList(semantic_index.Symbol),
+    prefix: []const u8,
+) !void {
+    for (synthetic_namespaces) |namespace| {
+        if (!std.mem.startsWith(u8, namespace.name, prefix)) continue;
+        try symbols.append(allocator, syntheticNamespaceSymbol(namespace));
+    }
+}
+
+fn appendSyntheticMemberCandidates(
+    allocator: Allocator,
+    symbols: *std.ArrayList(semantic_index.Symbol),
+    namespace: []const u8,
+    prefix: []const u8,
+) !void {
+    for (synthetic_members) |member| {
+        if (!std.mem.eql(u8, member.namespace, namespace)) continue;
+        if (!std.mem.startsWith(u8, member.name, prefix)) continue;
+        try symbols.append(allocator, syntheticMemberSymbol(member));
+    }
 }
 
 fn findAlias(aliases: []const ImportAlias, alias_name: []const u8) ?ImportAlias {
@@ -371,6 +625,33 @@ fn wordAtPosition(source: []const u8, position: frontend.Position) ?Word {
         .start_offset = start,
         .end_offset = end,
     };
+}
+
+fn identifierPrefixAtOffset(source: []const u8, cursor_offset: usize) []const u8 {
+    const cursor = @min(cursor_offset, source.len);
+    var start = cursor;
+    while (start > 0 and source[start - 1] != '\n' and isIdentifierContinue(source[start - 1])) {
+        start -= 1;
+    }
+    return source[start..cursor];
+}
+
+fn positionToByteOffsetOnLine(source: []const u8, position: frontend.Position) usize {
+    var cursor: usize = 0;
+    var current_line: u32 = 0;
+
+    while (cursor < source.len and current_line < position.line) : (cursor += 1) {
+        if (source[cursor] == '\n') current_line += 1;
+    }
+
+    if (current_line != position.line) return source.len;
+
+    const line_start = cursor;
+    while (cursor < source.len and source[cursor] != '\n') : (cursor += 1) {}
+    const line_end = cursor;
+
+    const requested_col: usize = @intCast(position.character);
+    return @min(line_start + requested_col, line_end);
 }
 
 fn formatHoverValueAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {

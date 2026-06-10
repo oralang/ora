@@ -22,19 +22,6 @@ pub const SignatureInfo = struct {
     }
 };
 
-/// Given source and a cursor position (typically after `(` or `,`), find the
-/// function being called and return its signature with the active parameter.
-pub fn signatureAt(
-    allocator: Allocator,
-    source: []const u8,
-    position: frontend.Position,
-) !?SignatureInfo {
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
-    return signatureAtIndex(allocator, source, position, &index);
-}
-
 pub fn signatureAtIndex(
     allocator: Allocator,
     source: []const u8,

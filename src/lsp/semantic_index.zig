@@ -1,7 +1,6 @@
 const std = @import("std");
 const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
-const phase_stats = @import("phase_stats.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -36,6 +35,8 @@ pub const Symbol = struct {
 
 pub const SemanticIndex = struct {
     symbols: []Symbol,
+    symbol_depths: []u16 = &.{},
+    symbol_position_order: []u32 = &.{},
     parse_succeeded: bool,
     builder_capacity_requested: usize = 0,
     builder_items_built: usize = 0,
@@ -43,16 +44,15 @@ pub const SemanticIndex = struct {
     builder_growth_events: usize = 0,
 
     pub fn deinit(self: *SemanticIndex, allocator: Allocator) void {
-        for (self.symbols) |symbol| {
-            allocator.free(symbol.name);
-            if (symbol.detail) |detail| allocator.free(detail);
-            if (symbol.doc_comment) |doc| allocator.free(doc);
-        }
-        allocator.free(self.symbols);
+        deinitSymbols(allocator, self.symbols);
+        allocator.free(self.symbol_depths);
+        allocator.free(self.symbol_position_order);
     }
 
     pub fn estimatedByteSize(self: *const SemanticIndex) usize {
         var total = mulSat(self.symbols.len, @sizeOf(Symbol));
+        total = addSat(total, mulSat(self.symbol_depths.len, @sizeOf(u16)));
+        total = addSat(total, mulSat(self.symbol_position_order.len, @sizeOf(u32)));
         for (self.symbols) |symbol| {
             total = addSat(total, symbol.name.len);
             if (symbol.detail) |detail| total = addSat(total, detail.len);
@@ -97,47 +97,6 @@ pub fn deinitDocumentSymbols(allocator: Allocator, symbols: []DocumentSymbol) vo
     allocator.free(symbols);
 }
 
-pub fn indexDocument(allocator: Allocator, source: []const u8) !SemanticIndex {
-    return indexDocumentWithStats(allocator, source, null);
-}
-
-pub fn indexDocumentWithStats(allocator: Allocator, source: []const u8, stats: ?*phase_stats.Stats) !SemanticIndex {
-    return indexDocumentWithStatsAlloc(allocator, allocator, source, stats);
-}
-
-pub fn indexDocumentWithStatsAlloc(
-    result_allocator: Allocator,
-    scratch_allocator: Allocator,
-    source: []const u8,
-    stats: ?*phase_stats.Stats,
-) !SemanticIndex {
-    var builder = try SymbolBuilder.init(result_allocator, scratch_allocator, source);
-    errdefer builder.deinit();
-
-    phase_stats.record(stats, .parse);
-    var parse_result = try compiler.syntax.parse(scratch_allocator, compiler.FileId.fromIndex(0), source);
-    defer parse_result.deinit();
-
-    phase_stats.record(stats, .ast_lower);
-    var lower_result = try compiler.ast.lower(scratch_allocator, &parse_result.tree);
-    defer lower_result.deinit();
-
-    for (lower_result.file.root_items) |item_id| {
-        try collectItem(&builder, &lower_result.file, item_id, null, false);
-    }
-
-    const builder_capacity_requested = builder.symbols.capacity;
-    const builder_items_built = builder.symbols.items.len;
-    return .{
-        .symbols = try builder.finish(),
-        .parse_succeeded = parse_result.diagnostics.isEmpty() and lower_result.diagnostics.isEmpty(),
-        .builder_capacity_requested = builder_capacity_requested,
-        .builder_items_built = builder_items_built,
-        .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
-        .builder_growth_events = builder.builder_growth_events,
-    };
-}
-
 pub fn indexAstFileWithSourceStoreAlloc(
     result_allocator: Allocator,
     scratch_allocator: Allocator,
@@ -162,8 +121,16 @@ pub fn indexAstFileWithSourceStoreAlloc(
 
     const builder_capacity_requested = builder.symbols.capacity;
     const builder_items_built = builder.symbols.items.len;
+    const symbols = try builder.finish();
+    errdefer deinitSymbols(result_allocator, symbols);
+    const symbol_depths = try buildSymbolDepths(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_depths);
+    const symbol_position_order = try buildSymbolPositionOrder(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_position_order);
     return .{
-        .symbols = try builder.finish(),
+        .symbols = symbols,
+        .symbol_depths = symbol_depths,
+        .symbol_position_order = symbol_position_order,
         .parse_succeeded = parse_succeeded,
         .builder_capacity_requested = builder_capacity_requested,
         .builder_items_built = builder_items_built,
@@ -244,6 +211,44 @@ fn buildDocumentSymbolRecursive(
         .selectionRange = symbol.selection_range,
         .children = children,
     };
+}
+
+fn deinitSymbols(allocator: Allocator, symbols: []Symbol) void {
+    for (symbols) |symbol| {
+        allocator.free(symbol.name);
+        if (symbol.detail) |detail| allocator.free(detail);
+        if (symbol.doc_comment) |doc| allocator.free(doc);
+    }
+    allocator.free(symbols);
+}
+
+fn buildSymbolDepths(allocator: Allocator, symbols: []const Symbol) ![]u16 {
+    const depths = try allocator.alloc(u16, symbols.len);
+    for (symbols, 0..) |_, index| {
+        depths[index] = @intCast(@min(symbolDepth(symbols, index), std.math.maxInt(u16)));
+    }
+    return depths;
+}
+
+fn buildSymbolPositionOrder(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    const order = try allocator.alloc(u32, symbols.len);
+    for (order, 0..) |*slot, index| {
+        slot.* = try symbolIndexU32(index);
+    }
+    std.mem.sort(u32, order, symbols, lessSymbolStart);
+    return order;
+}
+
+fn symbolIndexU32(index: usize) !u32 {
+    return std.math.cast(u32, index) orelse error.SymbolIndexOverflow;
+}
+
+fn lessSymbolStart(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool {
+    const lhs = symbols[lhs_index];
+    const rhs = symbols[rhs_index];
+    if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
+    if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs_index < rhs_index;
 }
 
 fn collectItem(
@@ -363,7 +368,14 @@ fn collectItem(
     }
 }
 
-pub fn findSymbolAtPosition(symbols: []const Symbol, position: frontend.Position) ?usize {
+pub fn findSymbolAtPosition(index: *const SemanticIndex, position: frontend.Position) ?usize {
+    if (index.symbol_depths.len == index.symbols.len and index.symbol_position_order.len == index.symbols.len) {
+        return findSymbolAtPositionIndexed(index.symbols, index.symbol_depths, index.symbol_position_order, position);
+    }
+    return findSymbolAtPositionLinear(index.symbols, position);
+}
+
+pub fn findSymbolAtPositionLinear(symbols: []const Symbol, position: frontend.Position) ?usize {
     var best_index: ?usize = null;
     var best_in_selection = false;
     var best_depth: usize = 0;
@@ -390,6 +402,63 @@ pub fn findSymbolAtPosition(symbols: []const Symbol, position: frontend.Position
     }
 
     return best_index;
+}
+
+fn findSymbolAtPositionIndexed(
+    symbols: []const Symbol,
+    symbol_depths: []const u16,
+    symbol_position_order: []const u32,
+    position: frontend.Position,
+) ?usize {
+    var best_index: ?usize = null;
+    var best_in_selection = false;
+    var best_depth: usize = 0;
+    var best_span: u64 = std.math.maxInt(u64);
+
+    var i = upperBoundSymbolStart(symbols, symbol_position_order, position);
+    while (i > 0) {
+        i -= 1;
+        const symbol_index: usize = symbol_position_order[i];
+        const symbol = symbols[symbol_index];
+        const in_selection = rangeContainsPosition(symbol.selection_range, position);
+        const in_range = in_selection or rangeContainsPosition(symbol.range, position);
+        if (!in_range) continue;
+
+        const depth: usize = symbol_depths[symbol_index];
+        const span = rangeSize(symbol.range);
+
+        if (best_index == null or
+            (in_selection and !best_in_selection) or
+            (in_selection == best_in_selection and depth > best_depth) or
+            (in_selection == best_in_selection and depth == best_depth and span < best_span))
+        {
+            best_index = symbol_index;
+            best_in_selection = in_selection;
+            best_depth = depth;
+            best_span = span;
+        }
+    }
+
+    return best_index;
+}
+
+fn upperBoundSymbolStart(
+    symbols: []const Symbol,
+    symbol_position_order: []const u32,
+    position: frontend.Position,
+) usize {
+    var low: usize = 0;
+    var high: usize = symbol_position_order.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const symbol = symbols[symbol_position_order[mid]];
+        if (!positionLessThan(position, symbol.range.start)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, function_decl: compiler.ast.FunctionItem) ![]u8 {
@@ -813,25 +882,10 @@ const SymbolBuilder = struct {
     result_allocator: Allocator,
     scratch_allocator: Allocator,
     symbols: std.ArrayList(Symbol),
-    sources: compiler.source.SourceStore,
-    borrowed_sources: ?*const compiler.source.SourceStore = null,
+    sources: *const compiler.source.SourceStore,
     file_id: compiler.FileId,
     source_text: []const u8,
     builder_growth_events: usize = 0,
-
-    fn init(result_allocator: Allocator, scratch_allocator: Allocator, source_text: []const u8) !SymbolBuilder {
-        var sources = compiler.source.SourceStore.init(scratch_allocator);
-        errdefer sources.deinit();
-        const file_id = try sources.addFile("<lsp>", source_text);
-        return .{
-            .result_allocator = result_allocator,
-            .scratch_allocator = scratch_allocator,
-            .symbols = .{},
-            .sources = sources,
-            .file_id = file_id,
-            .source_text = source_text,
-        };
-    }
 
     fn initBorrowedSources(
         result_allocator: Allocator,
@@ -844,8 +898,7 @@ const SymbolBuilder = struct {
             .result_allocator = result_allocator,
             .scratch_allocator = scratch_allocator,
             .symbols = .{},
-            .sources = compiler.source.SourceStore.init(scratch_allocator),
-            .borrowed_sources = sources,
+            .sources = sources,
             .file_id = file_id,
             .source_text = source_text,
         };
@@ -858,16 +911,10 @@ const SymbolBuilder = struct {
             if (symbol.doc_comment) |doc| self.result_allocator.free(doc);
         }
         self.symbols.deinit(self.result_allocator);
-        if (self.borrowed_sources == null) self.sources.deinit();
     }
 
     fn finish(self: *SymbolBuilder) ![]Symbol {
-        const owned = try self.symbols.toOwnedSlice(self.result_allocator);
-        if (self.borrowed_sources == null) {
-            self.sources.deinit();
-            self.sources = compiler.source.SourceStore.init(self.scratch_allocator);
-        }
-        return owned;
+        return self.symbols.toOwnedSlice(self.result_allocator);
     }
 
     fn addSymbol(
@@ -1030,7 +1077,7 @@ const SymbolBuilder = struct {
     }
 
     fn sourceStore(self: *const SymbolBuilder) *const compiler.source.SourceStore {
-        return self.borrowed_sources orelse &self.sources;
+        return self.sources;
     }
 };
 

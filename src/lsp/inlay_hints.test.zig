@@ -2,13 +2,34 @@ const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
 
-const compiler = ora_root.compiler;
 const frontend = ora_root.lsp.frontend;
 const inlay_hints = ora_root.lsp.inlay_hints;
 const line_index = ora_root.lsp.line_index;
-const semantic_index = ora_root.lsp.semantic_index;
+const test_analysis = @import("test_analysis.zig");
 
-test "inlay hints: standalone helper handles parse diagnostics without hidden failures" {
+fn cachedHints(allocator: std.mem.Allocator, source: []const u8, range: frontend.Range) ![]inlay_hints.InlayHint {
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(allocator, source);
+    defer fixture.deinit();
+
+    var index = try fixture.buildSemanticIndex(allocator, source);
+    defer index.deinit(allocator);
+
+    var lines = try line_index.LineIndex.init(allocator, source);
+    defer lines.deinit(allocator);
+
+    return inlay_hints.hintsInRangeCached(
+        allocator,
+        source,
+        range,
+        &lines,
+        .utf8,
+        fixture.analysis.ast_file,
+        &index,
+    );
+}
+
+test "inlay hints: cached helper handles parse diagnostics without hidden failures" {
     const source =
         \\contract Broken {
         \\    pub fn value() -> u256 {
@@ -17,7 +38,7 @@ test "inlay hints: standalone helper handles parse diagnostics without hidden fa
         \\}
     ;
 
-    const hints = try inlay_hints.hintsInRange(testing.allocator, source, frontend.Range{
+    const hints = try cachedHints(testing.allocator, source, frontend.Range{
         .start = .{ .line = 0, .character = 0 },
         .end = .{ .line = 5, .character = 0 },
     });
@@ -36,7 +57,7 @@ test "inlay hints: parameter hints resolve callable through semantic name map" {
         \\}
     ;
 
-    const hints = try inlay_hints.hintsInRange(testing.allocator, source, frontend.Range{
+    const hints = try cachedHints(testing.allocator, source, frontend.Range{
         .start = .{ .line = 0, .character = 0 },
         .end = .{ .line = 6, .character = 0 },
     });
@@ -59,17 +80,11 @@ test "inlay hints: cached entrypoint reuses parsed AST and semantic index" {
         \\}
     ;
 
-    var sources = compiler.source.SourceStore.init(testing.allocator);
-    defer sources.deinit();
-    const file_id = try sources.addFile("<cached-inlay>", source);
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(testing.allocator, source);
+    defer fixture.deinit();
 
-    var parse_result = try compiler.syntax.parse(testing.allocator, file_id, source);
-    defer parse_result.deinit();
-
-    var lower_result = try compiler.ast.lower(testing.allocator, &parse_result.tree);
-    defer lower_result.deinit();
-
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try fixture.buildSemanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     var lines = try line_index.LineIndex.init(testing.allocator, source);
@@ -84,7 +99,7 @@ test "inlay hints: cached entrypoint reuses parsed AST and semantic index" {
         },
         &lines,
         .utf16,
-        &lower_result.file,
+        fixture.analysis.ast_file,
         &index,
     );
     defer inlay_hints.deinitHints(testing.allocator, hints);
@@ -119,7 +134,7 @@ test "inlay hints: propagates parameter-name allocation failures" {
         var failing = testing.FailingAllocator.init(backing_arena.allocator(), .{ .fail_index = fail_index });
         const allocator = failing.allocator();
 
-        if (inlay_hints.hintsInRange(allocator, source, range)) |hints| {
+        if (cachedHints(allocator, source, range)) |hints| {
             inlay_hints.deinitHints(allocator, hints);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;

@@ -3,11 +3,11 @@ const lsp = @import("lsp");
 const document_highlight = @import("document_highlight.zig");
 const ora_root = @import("ora_root");
 
-const definition = ora_root.lsp.definition;
 const frontend = ora_root.lsp.frontend;
 const line_index = ora_root.lsp.line_index;
 const references = ora_root.lsp.references;
 const token_cache = ora_root.lsp.token_cache;
+const test_analysis = @import("test_analysis.zig");
 
 fn positionOfNth(source: []const u8, needle: []const u8, nth: usize) !frontend.Position {
     var from: usize = 0;
@@ -42,13 +42,14 @@ test "lsp document highlight: builds highlights from occurrence index" {
         \\}
     ;
 
-    var analysis = (try definition.Analysis.init(std.testing.allocator, source)).?;
-    defer analysis.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(std.testing.allocator, source);
+    defer fixture.deinit();
 
     var cache = try token_cache.Cache.init(std.testing.allocator, source);
     defer cache.deinit(std.testing.allocator);
 
-    var index = try references.OccurrenceIndex.init(std.testing.allocator, source, cache.tokens, &analysis);
+    var index = try references.OccurrenceIndex.init(std.testing.allocator, source, cache.tokens, &fixture.analysis);
     defer index.deinit(std.testing.allocator);
 
     const query = try positionOfNth(source, "amount", 2);
@@ -75,13 +76,14 @@ test "lsp document highlight: converts byte ranges to utf16" {
         \\}
     ;
 
-    var analysis = (try definition.Analysis.init(std.testing.allocator, source)).?;
-    defer analysis.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(std.testing.allocator, source);
+    defer fixture.deinit();
 
     var cache = try token_cache.Cache.init(std.testing.allocator, source);
     defer cache.deinit(std.testing.allocator);
 
-    var index = try references.OccurrenceIndex.init(std.testing.allocator, source, cache.tokens, &analysis);
+    var index = try references.OccurrenceIndex.init(std.testing.allocator, source, cache.tokens, &fixture.analysis);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);

@@ -3,40 +3,8 @@ const lsp = @import("lsp");
 const selection_range = @import("selection_range.zig");
 const ora_root = @import("ora_root");
 
-const compiler = ora_root.compiler;
 const line_index = ora_root.lsp.line_index;
-
-const Parsed = struct {
-    sources: compiler.source.SourceStore,
-    parse_result: compiler.syntax.ParseResult,
-    lower_result: compiler.ast.LowerResult,
-    file_id: compiler.FileId,
-
-    fn deinit(self: *Parsed) void {
-        self.lower_result.deinit();
-        self.parse_result.deinit();
-        self.sources.deinit();
-    }
-};
-
-fn parseSource(source: []const u8) !Parsed {
-    var sources = compiler.source.SourceStore.init(std.testing.allocator);
-    errdefer sources.deinit();
-
-    const file_id = try sources.addFile("<selection-range-test>", source);
-    var parse_result = try compiler.syntax.parse(std.testing.allocator, file_id, source);
-    errdefer parse_result.deinit();
-
-    var lower_result = try compiler.ast.lower(std.testing.allocator, &parse_result.tree);
-    errdefer lower_result.deinit();
-
-    return .{
-        .sources = sources,
-        .parse_result = parse_result,
-        .lower_result = lower_result,
-        .file_id = file_id,
-    };
-}
+const test_analysis = @import("test_analysis.zig");
 
 fn lspPositionAt(source: []const u8, lines: *const line_index.LineIndex, needle: []const u8, encoding: ora_root.lsp.text_edits.PositionEncoding) !lsp.types.Position {
     const offset = std.mem.indexOf(u8, source, needle) orelse return error.ExpectedNeedle;
@@ -54,8 +22,9 @@ test "lsp selection range: builds nested statement parents" {
         \\}
     ;
 
-    var parsed = try parseSource(source);
-    defer parsed.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(std.testing.allocator, source);
+    defer fixture.deinit();
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
     defer lines.deinit(std.testing.allocator);
@@ -65,7 +34,7 @@ test "lsp selection range: builds nested statement parents" {
     var response_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer response_arena.deinit();
 
-    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf8, &parsed.lower_result.file, &positions);
+    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf8, fixture.analysis.ast_file, &positions);
 
     try std.testing.expectEqual(@as(usize, 1), ranges.len);
     try std.testing.expectEqual(@as(u32, 2), ranges[0].range.start.line);
@@ -85,8 +54,9 @@ test "lsp selection range: converts parent ranges to utf16" {
         \\}
     ;
 
-    var parsed = try parseSource(source);
-    defer parsed.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(std.testing.allocator, source);
+    defer fixture.deinit();
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
     defer lines.deinit(std.testing.allocator);
@@ -96,7 +66,7 @@ test "lsp selection range: converts parent ranges to utf16" {
     var response_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer response_arena.deinit();
 
-    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf16, &parsed.lower_result.file, &positions);
+    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf16, fixture.analysis.ast_file, &positions);
 
     const pub_offset = std.mem.indexOf(u8, source, "pub fn") orelse return error.ExpectedFunction;
     const expected_start = lines.offsetToPosition(source, @intCast(pub_offset), .utf16);
@@ -114,8 +84,9 @@ test "lsp selection range: returns zero range outside selectable ast ranges" {
         \\// trailing comment
     ;
 
-    var parsed = try parseSource(source);
-    defer parsed.deinit();
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(std.testing.allocator, source);
+    defer fixture.deinit();
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
     defer lines.deinit(std.testing.allocator);
@@ -125,7 +96,7 @@ test "lsp selection range: returns zero range outside selectable ast ranges" {
     var response_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer response_arena.deinit();
 
-    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf8, &parsed.lower_result.file, &positions);
+    const ranges = try selection_range.build(response_arena.allocator(), source, &lines, .utf8, fixture.analysis.ast_file, &positions);
 
     try std.testing.expectEqual(@as(usize, 1), ranges.len);
     try std.testing.expectEqual(@as(u32, 0), ranges[0].range.start.line);

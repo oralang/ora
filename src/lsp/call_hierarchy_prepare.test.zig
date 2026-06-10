@@ -5,6 +5,7 @@ const ora_root = @import("ora_root");
 
 const line_index = ora_root.lsp.line_index;
 const semantic_index = ora_root.lsp.semantic_index;
+const test_analysis = @import("test_analysis.zig");
 
 fn lspPositionAt(source: []const u8, lines: *const line_index.LineIndex, needle: []const u8, encoding: ora_root.lsp.text_edits.PositionEncoding) !lsp.types.Position {
     const offset = std.mem.indexOf(u8, source, needle) orelse return error.ExpectedNeedle;
@@ -19,7 +20,7 @@ test "lsp call hierarchy prepare: returns callable item" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(std.testing.allocator, source);
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
@@ -40,7 +41,7 @@ test "lsp call hierarchy prepare: returns callable item" {
 test "lsp call hierarchy prepare: converts item ranges to utf16" {
     const source = "/* é */ pub fn helper() -> u256 { return 1; }";
 
-    var index = try semantic_index.indexDocument(std.testing.allocator, source);
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);
@@ -69,7 +70,7 @@ test "lsp call hierarchy prepare: returns null outside callable symbols" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(std.testing.allocator, source);
+    var index = try test_analysis.semanticIndex(std.testing.allocator, source);
     defer index.deinit(std.testing.allocator);
 
     var lines = try line_index.LineIndex.init(std.testing.allocator, source);

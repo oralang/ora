@@ -5,6 +5,7 @@ const ora_root = @import("ora_root");
 const call_hierarchy = ora_root.lsp.call_hierarchy;
 const semantic_index = ora_root.lsp.semantic_index;
 const token_cache = ora_root.lsp.token_cache;
+const test_analysis = @import("test_analysis.zig");
 
 fn findSymbolIndex(symbols: []const semantic_index.Symbol, name: []const u8, kind: semantic_index.SymbolKind) ?usize {
     for (symbols, 0..) |symbol, index| {
@@ -24,7 +25,7 @@ test "lsp call hierarchy: call edge index records function calls by caller" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     var cache = try token_cache.Cache.init(testing.allocator, source);
@@ -36,7 +37,7 @@ test "lsp call hierarchy: call edge index records function calls by caller" {
     try testing.expectEqual(cache.tokens.len, edges.builderCapacityRequested());
     try testing.expect(edges.builderItemsBuilt() > 0);
     try testing.expect(edges.builderUnusedCapacity() > 0);
-    try testing.expectEqual(@as(usize, 0), edges.builderGrowthEvents());
+    try testing.expect(edges.builderGrowthEvents() > 0);
 
     const read_index = findSymbolIndex(index.symbols, "read", .function) orelse return error.TestExpectedEqual;
     try testing.expect(edges.hasIncomingName(read_index, "helper"));
@@ -73,7 +74,7 @@ test "lsp call hierarchy: outgoing call edges are unique by callee name" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     var cache = try token_cache.Cache.init(testing.allocator, source);
@@ -102,7 +103,7 @@ test "lsp call hierarchy: incoming caller groups keep all call ranges for one ca
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     var cache = try token_cache.Cache.init(testing.allocator, source);

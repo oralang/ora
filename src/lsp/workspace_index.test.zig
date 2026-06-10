@@ -126,19 +126,60 @@ test "workspace index evicts least-recently-used entries by byte budget" {
     var index = workspace_index.Index.initWithBudget(allocator, std.math.maxInt(usize));
     defer index.deinit();
 
-    _ = try upsertSymbolEntry(&index, allocator, "file:///tmp/a.ora", "alpha", 1);
-    _ = try upsertSymbolEntry(&index, allocator, "file:///tmp/b.ora", "beta", 1);
+    _ = try upsertColdSymbolEntry(&index, allocator, "file:///tmp/a.ora", "alpha", 1);
+    _ = try upsertColdSymbolEntry(&index, allocator, "file:///tmp/b.ora", "beta", 1);
 
     index.max_bytes = index.current_bytes;
 
     try std.testing.expect(index.getFresh("file:///tmp/a.ora", 1, 1, .{}) != null);
-    _ = try upsertSymbolEntry(&index, allocator, "file:///tmp/c.ora", "beta", 1);
+    _ = try upsertColdSymbolEntry(&index, allocator, "file:///tmp/c.ora", "beta", 1);
 
     try std.testing.expect(index.getFresh("file:///tmp/a.ora", 1, 1, .{}) != null);
     try std.testing.expect(index.getFresh("file:///tmp/b.ora", 1, 1, .{}) == null);
     try std.testing.expect(index.getFresh("file:///tmp/c.ora", 1, 1, .{}) != null);
     try std.testing.expectEqual(@as(usize, 1), index.evictions);
     try std.testing.expect(index.current_bytes <= index.max_bytes);
+}
+
+test "workspace index keeps open entries out of cold budget eviction" {
+    const allocator = std.testing.allocator;
+
+    var index = workspace_index.Index.initWithBudget(allocator, std.math.maxInt(usize));
+    defer index.deinit();
+
+    const open_bytes = try upsertSymbolEntry(&index, allocator, "file:///tmp/open.ora", "open_symbol", 1);
+    _ = try upsertColdSymbolEntry(&index, allocator, "file:///tmp/cold-old.ora", "old_symbol", 1);
+
+    index.max_bytes = open_bytes;
+    _ = try upsertColdSymbolEntry(&index, allocator, "file:///tmp/cold-new.ora", "new_symbol", 1);
+
+    try std.testing.expect(index.getFresh("file:///tmp/open.ora", 1, 1, .{}) != null);
+    try std.testing.expect(index.getFresh("file:///tmp/cold-old.ora", 1, 1, .{}) == null);
+    try std.testing.expect(index.getFresh("file:///tmp/cold-new.ora", 1, 1, .{}) != null);
+    try std.testing.expectEqual(@as(usize, 1), index.evictions);
+}
+
+test "workspace index keeps returned entry pointers stable across map growth" {
+    const allocator = std.testing.allocator;
+
+    var index = workspace_index.Index.initWithBudget(allocator, std.math.maxInt(usize));
+    defer index.deinit();
+
+    _ = try upsertSymbolEntry(&index, allocator, "file:///tmp/root.ora", "root_symbol", 1);
+    const first = index.getFresh("file:///tmp/root.ora", 1, 1, .{}).?;
+    const first_ptr = @intFromPtr(first);
+
+    var i: usize = 0;
+    while (i < 128) : (i += 1) {
+        var uri_buf: [64]u8 = undefined;
+        const uri = try std.fmt.bufPrint(&uri_buf, "file:///tmp/cold-{d}.ora", .{i});
+        var name_buf: [64]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "cold_symbol_{d}", .{i});
+        _ = try upsertColdSymbolEntry(&index, allocator, uri, name, 1);
+    }
+
+    const after_growth = index.getFresh("file:///tmp/root.ora", 1, 1, .{}).?;
+    try std.testing.expectEqual(first_ptr, @intFromPtr(after_growth));
 }
 
 test "workspace index keeps newest entry when one entry exceeds byte budget" {
@@ -298,6 +339,27 @@ fn upsertSymbolEntry(
     name: []const u8,
     version: i32,
 ) !usize {
+    return upsertSymbolEntryWithCold(index, allocator, uri, name, version, false);
+}
+
+fn upsertColdSymbolEntry(
+    index: *workspace_index.Index,
+    allocator: std.mem.Allocator,
+    uri: []const u8,
+    name: []const u8,
+    version: i32,
+) !usize {
+    return upsertSymbolEntryWithCold(index, allocator, uri, name, version, true);
+}
+
+fn upsertSymbolEntryWithCold(
+    index: *workspace_index.Index,
+    allocator: std.mem.Allocator,
+    uri: []const u8,
+    name: []const u8,
+    version: i32,
+    is_cold: bool,
+) !usize {
     const semantic_symbols = [_]semantic_index.Symbol{
         .{
             .name = name,
@@ -314,7 +376,7 @@ fn upsertSymbolEntry(
         uri,
         version,
         1,
-        false,
+        is_cold,
         workspace_index.FeatureSet.symbols_only,
         &lines,
         &semantic_symbols,

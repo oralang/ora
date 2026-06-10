@@ -24,59 +24,6 @@ pub const InlayHint = struct {
     }
 };
 
-/// Find inlay hints in the given range of source.
-pub fn hintsInRange(
-    allocator: Allocator,
-    source: []const u8,
-    range: frontend.Range,
-) ![]InlayHint {
-    var hints = std.ArrayList(InlayHint){};
-    errdefer {
-        for (hints.items) |*h| h.deinit(allocator);
-        hints.deinit(allocator);
-    }
-
-    var sources = compiler.source.SourceStore.init(allocator);
-    defer sources.deinit();
-    const file_id = try sources.addFile("<lsp>", source);
-
-    var parse_result = compiler.syntax.parse(allocator, file_id, source) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return try hints.toOwnedSlice(allocator),
-    };
-    defer parse_result.deinit();
-
-    var lower_result = compiler.ast.lower(allocator, &parse_result.tree) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return try hints.toOwnedSlice(allocator),
-    };
-    defer lower_result.deinit();
-
-    var index = semantic_index.indexDocument(allocator, source) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
-    defer if (index) |*idx| idx.deinit(allocator);
-
-    const position_resolver = PositionResolver{ .source_store = .{
-        .sources = &sources,
-        .file_id = file_id,
-    } };
-    for (lower_result.file.root_items) |item_id| {
-        try collectHintsFromItem(
-            &hints,
-            allocator,
-            &lower_result.file,
-            item_id,
-            &position_resolver,
-            range,
-            if (index) |*idx| idx else null,
-        );
-    }
-
-    return hints.toOwnedSlice(allocator);
-}
-
 pub fn hintsInRangeCached(
     allocator: Allocator,
     source: []const u8,
@@ -112,10 +59,6 @@ pub fn deinitHints(allocator: Allocator, items: []InlayHint) void {
 const HintError = Allocator.Error;
 
 const PositionResolver = union(enum) {
-    source_store: struct {
-        sources: *const compiler.source.SourceStore,
-        file_id: compiler.FileId,
-    },
     line_index: struct {
         source: []const u8,
         line_index: *const line_index_api.LineIndex,
@@ -124,7 +67,6 @@ const PositionResolver = union(enum) {
 
     fn offsetToPosition(self: *const PositionResolver, offset: u32) frontend.Position {
         return switch (self.*) {
-            .source_store => |store| textRangeToPosition(store.sources, store.file_id, offset),
             .line_index => |index| index.line_index.offsetToPosition(index.source, offset, index.encoding),
         };
     }
@@ -384,17 +326,6 @@ fn getExprRange(file: *const compiler.ast.AstFile, expr_id: compiler.ast.ExprId)
         .ExternalProxy => |e| e.range,
         .ErrorReturn => |e| e.range,
         .Error => |e| e.range,
-    };
-}
-
-fn textRangeToPosition(sources: *const compiler.source.SourceStore, file_id: compiler.FileId, offset: u32) frontend.Position {
-    const lc = sources.lineColumn(.{
-        .file_id = file_id,
-        .range = .{ .start = offset, .end = offset },
-    });
-    return .{
-        .line = if (lc.line > 0) lc.line - 1 else 0,
-        .character = if (lc.column > 0) lc.column - 1 else 0,
     };
 }
 

@@ -5,6 +5,7 @@ const ora_root = @import("ora_root");
 const line_index = ora_root.lsp.line_index;
 const semantic_index = ora_root.lsp.semantic_index;
 const signature_help = ora_root.lsp.signature_help;
+const test_analysis = @import("test_analysis.zig");
 
 test "lsp signature help: resolves callable through semantic name map" {
     const source =
@@ -16,7 +17,7 @@ test "lsp signature help: resolves callable through semantic name map" {
         \\}
     ;
 
-    var index = try semantic_index.indexDocument(testing.allocator, source);
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
     defer index.deinit(testing.allocator);
 
     var lines = try line_index.LineIndex.init(testing.allocator, source);

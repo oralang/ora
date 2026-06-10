@@ -16,6 +16,12 @@ pub const IncomingCallerRanges = struct {
     ranges: []frontend.Range,
 };
 
+const CallableRangeIndexEntry = struct {
+    symbol_index: usize,
+    range: frontend.Range,
+    selection_range: frontend.Range,
+};
+
 pub const CallEdgeIndex = struct {
     edges: []CallEdge = &.{},
     reserved_capacity: usize = 0,
@@ -26,35 +32,39 @@ pub const CallEdgeIndex = struct {
         tokens: []const token_cache.Token,
         symbols: []const semantic_index.Symbol,
     ) !CallEdgeIndex {
+        var callable_ranges = try buildCallableRangeIndex(allocator, symbols);
+        defer callable_ranges.deinit(allocator);
+
         var edges = std.ArrayList(CallEdge){};
         errdefer edges.deinit(allocator);
         const reserved_capacity = tokens.len;
+        var builder_growth_events: usize = 0;
+        const edge_capacity_before = edges.capacity;
         try edges.ensureTotalCapacity(allocator, reserved_capacity);
+        if (edges.capacity > edge_capacity_before) builder_growth_events += 1;
 
-        for (symbols, 0..) |symbol, symbol_index| {
-            if (!isCallable(symbol.kind)) continue;
+        var callable_cursor: usize = 0;
+        var token_index: usize = 0;
+        while (token_index < tokens.len) : (token_index += 1) {
+            const token = tokens[token_index];
+            if (token.type != .Identifier) continue;
+            if (token_index + 1 >= tokens.len or tokens[token_index + 1].type != .LeftParen) continue;
 
-            var token_index: usize = 0;
-            while (token_index < tokens.len) : (token_index += 1) {
-                const token = tokens[token_index];
-                if (token.type != .Identifier) continue;
-                if (token_index + 1 >= tokens.len or tokens[token_index + 1].type != .LeftParen) continue;
+            const range = tokenSelectionRange(token);
+            const caller = callableAtPosition(callable_ranges.items, &callable_cursor, range.start) orelse continue;
+            if (positionInRange(range.start, caller.selection_range)) continue;
 
-                const range = tokenSelectionRange(token);
-                if (!positionInRange(range.start, symbol.range)) continue;
-                if (positionInRange(range.start, symbol.selection_range)) continue;
-
-                edges.appendAssumeCapacity(.{
-                    .caller_symbol_index = symbol_index,
-                    .callee_name = token.lexeme,
-                    .range = range,
-                });
-            }
+            edges.appendAssumeCapacity(.{
+                .caller_symbol_index = caller.symbol_index,
+                .callee_name = token.lexeme,
+                .range = range,
+            });
         }
 
         return .{
             .edges = try edges.toOwnedSlice(allocator),
             .reserved_capacity = reserved_capacity,
+            .builder_growth_events = builder_growth_events + callable_ranges.growth_events,
         };
     }
 
@@ -203,6 +213,76 @@ const IncomingCount = struct {
     filled: usize = 0,
 };
 
+const CallableRangeIndex = struct {
+    items: []CallableRangeIndexEntry,
+    growth_events: usize,
+
+    fn deinit(self: *CallableRangeIndex, allocator: Allocator) void {
+        allocator.free(self.items);
+        self.* = .{ .items = &.{}, .growth_events = 0 };
+    }
+};
+
+fn buildCallableRangeIndex(
+    allocator: Allocator,
+    symbols: []const semantic_index.Symbol,
+) !CallableRangeIndex {
+    var indexes = std.ArrayList(CallableRangeIndexEntry){};
+    errdefer indexes.deinit(allocator);
+
+    var callable_count: usize = 0;
+    for (symbols) |symbol| {
+        if (isCallable(symbol.kind)) callable_count += 1;
+    }
+
+    var growth_events: usize = 0;
+    const capacity_before = indexes.capacity;
+    try indexes.ensureTotalCapacity(allocator, callable_count);
+    if (indexes.capacity > capacity_before) growth_events += 1;
+
+    for (symbols, 0..) |symbol, symbol_index| {
+        if (!isCallable(symbol.kind)) continue;
+        indexes.appendAssumeCapacity(.{
+            .symbol_index = symbol_index,
+            .range = symbol.range,
+            .selection_range = symbol.selection_range,
+        });
+    }
+
+    std.mem.sort(CallableRangeIndexEntry, indexes.items, {}, lessCallableRangeStart);
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .growth_events = growth_events,
+    };
+}
+
+fn callableAtPosition(
+    indexes: []const CallableRangeIndexEntry,
+    cursor: *usize,
+    position: frontend.Position,
+) ?CallableRangeIndexEntry {
+    if (indexes.len == 0) return null;
+    if (cursor.* >= indexes.len) cursor.* = indexes.len - 1;
+
+    while (cursor.* + 1 < indexes.len and !positionLessThan(position, indexes[cursor.* + 1].range.start)) {
+        cursor.* += 1;
+    }
+    while (cursor.* < indexes.len and positionLessThan(indexes[cursor.*].range.end, position)) {
+        cursor.* += 1;
+        if (cursor.* >= indexes.len) return null;
+    }
+
+    const candidate = indexes[cursor.*];
+    if (positionInRange(position, candidate.range)) return candidate;
+    return null;
+}
+
+fn lessCallableRangeStart(_: void, lhs: CallableRangeIndexEntry, rhs: CallableRangeIndexEntry) bool {
+    if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
+    if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs.symbol_index < rhs.symbol_index;
+}
+
 fn findIncomingCount(counts: []const IncomingCount, caller_symbol_index: usize) ?usize {
     for (counts, 0..) |count, index| {
         if (count.caller_symbol_index == caller_symbol_index) return index;
@@ -246,6 +326,12 @@ fn positionInRange(pos: frontend.Position, range: frontend.Range) bool {
     if (pos.line == range.start.line and pos.character < range.start.character) return false;
     if (pos.line == range.end.line and pos.character > range.end.character) return false;
     return true;
+}
+
+fn positionLessThan(lhs: frontend.Position, rhs: frontend.Position) bool {
+    if (lhs.line < rhs.line) return true;
+    if (lhs.line > rhs.line) return false;
+    return lhs.character < rhs.character;
 }
 
 fn bytesFor(comptime T: type, len: usize) usize {

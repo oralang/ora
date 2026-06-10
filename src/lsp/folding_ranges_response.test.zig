@@ -14,9 +14,11 @@ test "lsp folding ranges response: maps folding ranges to protocol ranges" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
 
-    const response = (try folding_ranges_response.build(arena_state.allocator(), &ranges)) orelse return error.ExpectedFoldingRanges;
+    const result = try folding_ranges_response.buildWithStats(arena_state.allocator(), &ranges);
+    const response = result.items orelse return error.ExpectedFoldingRanges;
 
     try std.testing.expectEqual(@as(usize, 3), response.len);
+    try std.testing.expectEqual(@as(usize, 3), result.item_count);
     try std.testing.expectEqual(@as(u32, 0), response[0].startLine);
     try std.testing.expectEqual(@as(u32, 3), response[0].endLine);
     try std.testing.expectEqual(.region, response[0].kind.?);
@@ -32,4 +34,11 @@ test "lsp folding ranges response: empty input returns null" {
         arena_state.allocator(),
         &[_]folding.FoldingRange{},
     )) == null);
+
+    const result = try folding_ranges_response.buildWithStats(
+        arena_state.allocator(),
+        &[_]folding.FoldingRange{},
+    );
+    try std.testing.expect(result.items == null);
+    try std.testing.expectEqual(@as(usize, 0), result.item_count);
 }

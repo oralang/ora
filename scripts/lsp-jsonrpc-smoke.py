@@ -16,10 +16,16 @@ from lsp_jsonrpc import (
 )
 
 
-VALID_SOURCE = """// Internal note that must not become public docs.
+VALID_SOURCE = """comptime const std = @import("std");
+
+// Internal note that must not become public docs.
 /// Returns `value` unchanged.
 pub fn helper(value: u256) -> u256 {
     return value;
+}
+
+pub fn caller() -> address {
+    return std.transaction.sender;
 }
 
 pub fn run(amount: u256) -> u256 {
@@ -32,6 +38,7 @@ contract Wallet {
 
     pub fn deposit(amount: u256) -> u256
         requires(amount > 0)
+        requires(amount <= std.constants.U256_MAX)
         ensures(result >= amount)
     {
         return amount;
@@ -137,6 +144,21 @@ def main() -> int:
                 "ora.cacheStats did not count stale didChange skips",
             )
 
+            edited_valid_source = VALID_SOURCE + "\n// fresh edit that should use fast diagnostics\n"
+            did_change_full(client, valid_uri, edited_valid_source, version=2)
+            edited_diagnostics = wait_diagnostics(client, valid_uri)
+            require(
+                not any(diag.get("severity") == 1 for diag in edited_diagnostics),
+                "fresh edit produced error diagnostics",
+            )
+            edited_valid_source_2 = edited_valid_source + "// second fresh edit should cancel the pending full diagnostics\n"
+            did_change_full(client, valid_uri, edited_valid_source_2, version=3)
+            edited_diagnostics_2 = wait_diagnostics(client, valid_uri)
+            require(
+                not any(diag.get("severity") == 1 for diag in edited_diagnostics_2),
+                "second fresh edit produced error diagnostics",
+            )
+
             symbols = client.request("textDocument/documentSymbol", {"textDocument": {"uri": valid_uri}})
             require(symbols and len(symbols) >= 2, "documentSymbol returned no top-level symbols")
 
@@ -148,6 +170,14 @@ def main() -> int:
             require("Returns `value` unchanged." in hover_text, "/// public doc missing from hover markdown")
             require("Internal note" not in hover_text, "// internal comment leaked into hover markdown")
 
+            std_hover = client.request(
+                "textDocument/hover",
+                {"textDocument": {"uri": valid_uri}, "position": position_of(VALID_SOURCE, "sender;", 0)},
+            )
+            std_hover_text = std_hover.get("contents", {}).get("value", "") if isinstance(std_hover, dict) else ""
+            require("std.transaction.sender: address" in std_hover_text, "std.transaction.sender hover missing type")
+            require("Alias of `std.msg.sender`" in std_hover_text, "std.transaction.sender hover missing docs")
+
             completion = client.request(
                 "textDocument/completion",
                 {
@@ -158,11 +188,31 @@ def main() -> int:
             )
             require(has_label(completion, "helper"), "completion did not include helper symbol")
 
+            std_completion = client.request(
+                "textDocument/completion",
+                {
+                    "textDocument": {"uri": valid_uri},
+                    "position": position_of(VALID_SOURCE, "std.transaction.sender", 0, len("std.transaction.")),
+                    "context": {"triggerKind": 2, "triggerCharacter": "."},
+                },
+            )
+            require(has_label(std_completion, "sender"), "std.transaction completion did not include sender")
+
             definition = client.request(
                 "textDocument/definition",
                 {"textDocument": {"uri": valid_uri}, "position": position_of(VALID_SOURCE, "helper(amount)", 0)},
             )
             require(definition is not None, "definition returned null")
+
+            std_definition = client.request(
+                "textDocument/definition",
+                {"textDocument": {"uri": valid_uri}, "position": position_of(VALID_SOURCE, "U256_MAX", 0)},
+            )
+            require(std_definition is not None, "std constants definition returned null")
+            require(
+                std_definition.get("uri") == "embedded://std/constants.ora",
+                f"std constants definition returned wrong uri: {std_definition.get('uri')!r}",
+            )
 
             references = client.request(
                 "textDocument/references",
@@ -263,6 +313,12 @@ def main() -> int:
             cold_cache_stats = client.request("workspace/executeCommand", {"command": "ora.cacheStats", "arguments": []})
             require(cold_cache_stats.get("coldDocuments", 0) > 0, "ora.cacheStats missing cold document count")
             require(cold_cache_stats.get("coldSourceBytes", 0) > 0, "ora.cacheStats missing cold source bytes")
+            require(cold_cache_stats.get("coldDocumentMaxCount", 0) > 0, "ora.cacheStats missing cold document count limit")
+            require(cold_cache_stats.get("coldSourceMaxBytes", 0) > 0, "ora.cacheStats missing cold source byte limit")
+            require("coldDocumentEvictions" in cold_cache_stats, "ora.cacheStats missing cold document eviction count")
+            require("coldDocumentRefreshChecks" in cold_cache_stats, "ora.cacheStats missing cold document refresh check count")
+            require("coldDocumentRefreshes" in cold_cache_stats, "ora.cacheStats missing cold document refresh count")
+            require("coldDocumentStaleRemovals" in cold_cache_stats, "ora.cacheStats missing cold document stale removal count")
             require(cold_cache_stats.get("coldWorkspaceIndexBuilds", 0) > 0, "ora.cacheStats missing cold workspace index builds")
             require(cold_cache_stats.get("coldWorkspaceIndexEntries", 0) > 0, "ora.cacheStats missing cold workspace index entries")
             require(cold_cache_stats.get("coldWorkspaceIndexBytes", 0) > 0, "ora.cacheStats missing cold workspace index bytes")
@@ -361,6 +417,16 @@ def main() -> int:
             require(cache_stats.get("workspaceDiscoveryCacheHits", 0) > 0, "ora.cacheStats missing workspace discovery cache hits")
             require(cache_stats.get("importResolutionBytes", 0) > 0, "ora.cacheStats missing import-resolution cache bytes")
             require(cache_stats.get("staleDocumentChangeSkips", 0) > 0, "ora.cacheStats missing stale didChange skip count")
+            require(cache_stats.get("diagnosticFastBuilds", 0) > 0, "ora.cacheStats missing fast diagnostic builds")
+            require(cache_stats.get("diagnosticFullBuilds", 0) > 0, "ora.cacheStats missing full diagnostic builds")
+            require(cache_stats.get("editDiagnosticFastPublishes", 0) > 0, "ora.cacheStats missing edit fast diagnostic publishes")
+            require(cache_stats.get("editDiagnosticFullSkips", 0) > 0, "ora.cacheStats missing edit full diagnostic skips")
+            require(cache_stats.get("dependentDiagnosticPublishSkips", 0) > 0, "ora.cacheStats missing dependent diagnostic skips")
+            require(cache_stats.get("diagnosticDebouncePending", 0) > 0, "ora.cacheStats missing pending debounced diagnostics")
+            require(cache_stats.get("diagnosticDebounceScheduled", 0) >= 2, "ora.cacheStats missing debounced diagnostic schedules")
+            require(cache_stats.get("diagnosticDebounceCanceled", 0) > 0, "ora.cacheStats missing debounced diagnostic cancellations")
+            require("diagnosticDebounceFlushed" in cache_stats, "ora.cacheStats missing debounced diagnostic flushes")
+            require("diagnosticDebounceCleared" in cache_stats, "ora.cacheStats missing debounced diagnostic clears")
             phase_keys = (
                 "lexBuilds",
                 "parseBuilds",

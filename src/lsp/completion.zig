@@ -4,6 +4,7 @@ const lexer = @import("ora_lexer");
 const refinements = @import("ora_refinements");
 const semantic_index = @import("semantic_index.zig");
 const keyword_docs = @import("keyword_docs.zig");
+const refinement_docs = @import("refinement_docs.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -40,18 +41,6 @@ pub const Item = struct {
     }
 };
 
-pub fn completionAt(
-    allocator: Allocator,
-    source: []const u8,
-    position: frontend.Position,
-    trigger_char: ?[]const u8,
-) ![]Item {
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
-    return completionAtIndex(allocator, source, position, trigger_char, &index);
-}
-
 pub fn completionAtIndex(
     allocator: Allocator,
     source: []const u8,
@@ -87,10 +76,13 @@ pub fn completionAtIndex(
         if (!matchesPrefix(entry.name, prefix)) continue;
         if (seen.contains(entry.name)) continue;
 
+        const docs = refinement_docs.entryForName(entry.name);
         try seen.put(entry.name, {});
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, entry.name),
-            .kind = .keyword,
+            .detail = if (docs) |doc| try allocator.dupe(u8, doc.signature) else null,
+            .documentation = if (docs) |doc| try refinement_docs.markdownAlloc(allocator, doc) else null,
+            .kind = .type_alias,
         });
     }
 
