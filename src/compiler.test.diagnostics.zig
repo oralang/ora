@@ -530,6 +530,42 @@ test "compiler accepts defined error-union errors and preserves lowering" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.error_selector"));
 }
 
+test "compiler reports unsupported storage Result payload shapes" {
+    const dynamic_payload_source =
+        \\error Failure;
+        \\
+        \\contract Vault {
+        \\    storage var saved: Result<bytes, Failure>;
+        \\}
+    ;
+
+    var dynamic_payload = try compileText(dynamic_payload_source);
+    defer dynamic_payload.deinit();
+
+    const dynamic_typecheck = try dynamic_payload.db.moduleTypeCheck(dynamic_payload.root_module_id);
+    try testing.expect(diagnosticMessagesContain(
+        &dynamic_typecheck.diagnostics,
+        "storage Result values currently require a scalar success payload",
+    ));
+
+    const error_payload_source =
+        \\error Failure(code: u256);
+        \\
+        \\contract Vault {
+        \\    storage var saved: Result<u256, Failure>;
+        \\}
+    ;
+
+    var error_payload = try compileText(error_payload_source);
+    defer error_payload.deinit();
+
+    const error_typecheck = try error_payload.db.moduleTypeCheck(error_payload.root_module_id);
+    try testing.expect(diagnosticMessagesContain(
+        &error_typecheck.diagnostics,
+        "storage Result values currently require payloadless error types",
+    ));
+}
+
 test "compiler abi emit barrier rejects undefined types without artifacts" {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,

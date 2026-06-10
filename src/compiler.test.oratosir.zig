@@ -2661,6 +2661,44 @@ test "compiler converts ADT storage load and store through carrier slots" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts scalar Result storage load and store through carrier slots" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract ResultStorage {
+        \\    storage var saved: Result<u256, Failure>;
+        \\
+        \\    pub fn set_ok(value: u256) {
+        \\        saved = Ok(value);
+        \\    }
+        \\
+        \\    pub fn set_err() {
+        \\        saved = Err(Failure());
+        \\    }
+        \\
+        \\    pub fn get() -> u256 {
+        \\        return match (saved) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sload"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts nested ADT fields through compiler-managed handle storage" {
     const source_text =
         \\struct Holder {

@@ -27,6 +27,7 @@ using namespace mlir;
 using namespace ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
+using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getElementWordCount;
 using mlir::ora::lowering::getStaticMemRefWordCount;
@@ -990,11 +991,221 @@ static LogicalResult storeAdtCarrierToStorage(ora::SStoreOp op,
     return success();
 }
 
+static bool errorUnionStoragePayloadUsesPointer(Type successType)
+{
+    return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                     ora::StringType, ora::BytesType, ora::AdtType, ora::MapType,
+                     mlir::MemRefType, mlir::UnrankedMemRefType>(successType);
+}
+
+static bool errorDeclHasPayload(Operation *anchor, StringRef name)
+{
+    ModuleOp module = anchor ? anchor->getParentOfType<ModuleOp>() : ModuleOp();
+    if (!module)
+        return true;
+
+    bool found = false;
+    bool hasPayload = true;
+    module.walk([&](ora::ErrorDeclOp decl) {
+        if (found)
+            return;
+        auto sym = decl->getAttrOfType<StringAttr>("sym_name");
+        if (!sym || sym.getValue() != name)
+            return;
+        found = true;
+        auto paramTypes = decl->getAttrOfType<ArrayAttr>("ora.param_types");
+        hasPayload = paramTypes && !paramTypes.empty();
+    });
+
+    // Unknown declarations should not be treated as payloadless at a storage boundary.
+    return !found || hasPayload;
+}
+
+static bool errorUnionStorageHasPayloadBearingErrors(ora::ErrorUnionType errorUnionType, Operation *anchor)
+{
+    for (Type errorType : errorUnionType.getErrorTypes())
+    {
+        auto structType = llvm::dyn_cast<ora::StructType>(errorType);
+        if (!structType || errorDeclHasPayload(anchor, structType.getName()))
+            return true;
+    }
+    return false;
+}
+
+static mlir::IntegerAttr lookupErrorIdAttr(Operation *anchor, StringRef name)
+{
+    ModuleOp module = anchor ? anchor->getParentOfType<ModuleOp>() : ModuleOp();
+    if (!module)
+        return {};
+
+    mlir::IntegerAttr foundId;
+    module.walk([&](Operation *decl) {
+        if (foundId)
+            return;
+        if (!isa<ora::ErrorDeclOp>(decl) && !isa<sir::ErrorDeclOp>(decl))
+            return;
+        auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
+        if (!sym || sym.getValue() != name)
+            return;
+        if (auto attr = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id"))
+            foundId = attr;
+        else if (auto attr = decl->getAttrOfType<mlir::IntegerAttr>("sir.error_id"))
+            foundId = attr;
+    });
+    return foundId;
+}
+
+static Value storageU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+    return rewriter.create<sir::ConstOp>(
+        loc, u256Type, mlir::IntegerAttr::get(u256IntType, value));
+}
+
+static Value storageU256Const(PatternRewriter &rewriter, Location loc, mlir::IntegerAttr value)
+{
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
+    auto normalized = value.getValue().zextOrTrunc(256);
+    auto attr = mlir::IntegerAttr::get(u256IntType, normalized);
+    Value result = rewriter.create<sir::ConstOp>(loc, u256Type, attr);
+    result.getDefiningOp()->setAttr("ora.error_id", value);
+    return result;
+}
+
+static std::pair<Value, Value> splitPackedErrorUnionForStorage(
+    PatternRewriter &rewriter,
+    Location loc,
+    Value packed)
+{
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
+    Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, 1));
+    Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
+    Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+    return {tag, payload};
+}
+
+static FailureOr<std::pair<Value, Value>> getErrorUnionPartsForStorage(
+    ora::SStoreOp op,
+    ora::ErrorUnionType errorUnionType,
+    PatternRewriter &rewriter)
+{
+    auto loc = op.getLoc();
+    if (errorUnionStoragePayloadUsesPointer(errorUnionType.getSuccessType()) ||
+        errorUnionStorageHasPayloadBearingErrors(errorUnionType, op.getOperation()))
+    {
+        return failure();
+    }
+
+    Value value = op.getValue();
+    if (auto ok = value.getDefiningOp<ora::ErrorOkOp>())
+        return std::pair<Value, Value>{storageU256Const(rewriter, loc, 0), coerceToU256(rewriter, loc, ok.getValue())};
+
+    if (auto err = value.getDefiningOp<ora::ErrorErrOp>())
+        return std::pair<Value, Value>{storageU256Const(rewriter, loc, 1), coerceToU256(rewriter, loc, err.getValue())};
+
+    if (auto ret = value.getDefiningOp<ora::ErrorReturnOp>())
+    {
+        if (ret.getNumOperands() != 0)
+            return failure();
+        auto errorId = lookupErrorIdAttr(op.getOperation(), ret.getSymName());
+        if (!errorId)
+            return failure();
+        return std::pair<Value, Value>{
+            storageU256Const(rewriter, loc, 1),
+            storageU256Const(rewriter, loc, errorId)};
+    }
+
+    if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (cast.getNumOperands() == 2)
+            return std::pair<Value, Value>{
+                coerceToU256(rewriter, loc, cast.getOperand(0)),
+                coerceToU256(rewriter, loc, cast.getOperand(1))};
+        if (cast.getNumOperands() == 1)
+            return splitPackedErrorUnionForStorage(
+                rewriter, loc, coerceToU256(rewriter, loc, cast.getOperand(0)));
+    }
+
+    return failure();
+}
+
+static LogicalResult storeErrorUnionCarrierToStorage(
+    ora::SStoreOp op,
+    ora::ErrorUnionType errorUnionType,
+    ArrayRef<Value> operands,
+    Value baseSlot,
+    PatternRewriter &rewriter)
+{
+    auto loc = op.getLoc();
+    if (errorUnionStoragePayloadUsesPointer(errorUnionType.getSuccessType()) ||
+        errorUnionStorageHasPayloadBearingErrors(errorUnionType, op.getOperation()))
+    {
+        return rewriter.notifyMatchFailure(
+            op, "Result storage with aggregate payload is not yet supported");
+    }
+
+    Value tag;
+    Value payload;
+    if (operands.size() == 2)
+    {
+        tag = ensureU256(rewriter, loc, op.getOperation(), operands[0], "Result storage tag");
+        payload = ensureU256(rewriter, loc, op.getOperation(), operands[1], "Result storage payload");
+        if (!tag || !payload)
+            return failure();
+    }
+    else if (operands.size() == 1)
+    {
+        Value packed = ensureU256(rewriter, loc, op.getOperation(), operands[0], "Result storage packed value");
+        if (!packed)
+            return failure();
+        auto parts = splitPackedErrorUnionForStorage(rewriter, loc, packed);
+        tag = parts.first;
+        payload = parts.second;
+    }
+    else
+    {
+        return rewriter.notifyMatchFailure(
+            op, "Result storage value must lower to one or two carrier words");
+    }
+
+    ora::adt_helpers::storeAdtPartsToStorageRoot(rewriter, loc, baseSlot, tag, payload);
+    rewriter.eraseOp(op);
+    return success();
+}
+
 LogicalResult NormalizeAdtSLoadOp::matchAndRewrite(
     ora::SLoadOp op,
     PatternRewriter &rewriter) const
 {
     Type resultType = op.getResult().getType();
+    if (auto errorUnionType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+    {
+        if (errorUnionStoragePayloadUsesPointer(errorUnionType.getSuccessType()) ||
+            errorUnionStorageHasPayloadBearingErrors(errorUnionType, op.getOperation()))
+        {
+            return rewriter.notifyMatchFailure(
+                op, "Result storage with aggregate payload is not yet supported");
+        }
+
+        auto slotIndexOpt = computeGlobalSlot(op.getGlobalName(), op.getOperation());
+        if (!slotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for Result sload");
+
+        Value slot = findOrCreateSlotConstant(op.getOperation(), *slotIndexOpt, op.getGlobalName(), rewriter);
+        if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+            setResultName(slotOp, 0, ("slot_" + op.getGlobalName()).str());
+
+        auto [tag, payload] = ora::adt_helpers::loadAdtPartsFromStorageRoot(rewriter, op.getLoc(), slot);
+        Value normalized = ora::createMaterializationCast(
+            rewriter, op.getLoc(), resultType, ValueRange{tag, payload}, ora::mat_kind::kNormalizedErrorUnion);
+        rewriter.replaceOp(op, normalized);
+        return success();
+    }
+
     if (!llvm::isa<ora::AdtType>(resultType))
         return failure();
 
@@ -1018,6 +1229,29 @@ LogicalResult NormalizeAdtSStoreOp::matchAndRewrite(
     ora::SStoreOp op,
     PatternRewriter &rewriter) const
 {
+    if (auto errorUnionType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
+    {
+        auto slotIndexOpt = computeGlobalSlot(op.getGlobalName(), op.getOperation());
+        if (!slotIndexOpt)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for Result sstore");
+
+        Value slot = findOrCreateSlotConstant(op.getOperation(), *slotIndexOpt, op.getGlobalName(), rewriter);
+        if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+            setResultName(slotOp, 0, ("slot_" + op.getGlobalName()).str());
+
+        auto parts = getErrorUnionPartsForStorage(op, errorUnionType, rewriter);
+        if (failed(parts))
+        {
+            return rewriter.notifyMatchFailure(
+                op, "Result storage with aggregate payload is not yet supported");
+        }
+
+        ora::adt_helpers::storeAdtPartsToStorageRoot(
+            rewriter, op.getLoc(), slot, parts->first, parts->second);
+        rewriter.eraseOp(op);
+        return success();
+    }
+
     if (!llvm::isa<ora::AdtType>(op.getValue().getType()))
         return failure();
 
@@ -1143,6 +1377,22 @@ LogicalResult ConvertSLoadOp::matchAndRewrite(
         return success();
     }
 
+    if (auto errorUnionType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
+    {
+        if (errorUnionStoragePayloadUsesPointer(errorUnionType.getSuccessType()) ||
+            errorUnionStorageHasPayloadBearingErrors(errorUnionType, op.getOperation()))
+        {
+            return rewriter.notifyMatchFailure(
+                op, "Result storage with aggregate payload is not yet supported");
+        }
+
+        auto [tag, payload] = ora::adt_helpers::loadAdtPartsFromStorageRoot(rewriter, loc, slotConst);
+        Value normalized = ora::createMaterializationCast(
+            rewriter, loc, resultType, ValueRange{tag, payload}, ora::mat_kind::kNormalizedErrorUnion);
+        rewriter.replaceOp(op, normalized);
+        return success();
+    }
+
     if (auto structType = llvm::dyn_cast<ora::StructType>(resultType))
     {
         FailureOr<Value> loaded = loadStructValueFromStorageRoot(
@@ -1251,6 +1501,12 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     {
         SmallVector<Value, 4> operands(adaptor.getOperands().begin(), adaptor.getOperands().end());
         return storeAdtCarrierToStorage(op, operands, slot, rewriter);
+    }
+
+    if (auto errorUnionType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
+    {
+        SmallVector<Value, 4> operands(adaptor.getOperands().begin(), adaptor.getOperands().end());
+        return storeErrorUnionCarrierToStorage(op, errorUnionType, operands, slot, rewriter);
     }
 
     if (auto structType = llvm::dyn_cast<ora::StructType>(op.getValue().getType()))

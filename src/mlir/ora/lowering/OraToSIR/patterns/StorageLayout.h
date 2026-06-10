@@ -101,6 +101,9 @@ namespace mlir::ora::lowering
 
     inline uint64_t getStorageWordCount(Operation *anchor, Type type)
     {
+        if (llvm::isa<ora::ErrorUnionType>(type))
+            return 2;
+
         if (auto structType = llvm::dyn_cast<ora::StructType>(type))
         {
             ArrayAttr fieldNamesAttr;

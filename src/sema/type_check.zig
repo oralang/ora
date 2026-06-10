@@ -583,7 +583,13 @@ pub fn typeCheck(
                     .{ .void = {} };
             },
             .Field => |field| {
-                if (field.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
+                if (field.type_expr) |type_expr| {
+                    const resolved_type = try typechecker.resolveTypeExpr(type_expr);
+                    item_types[index] = resolved_type;
+                    if (field.storage_class == .storage) {
+                        try typechecker.checkStorageResultTypeSupport(field.range, resolved_type);
+                    }
+                }
             },
             .Constant => |constant| {
                 if (constant.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
@@ -602,7 +608,11 @@ pub fn typeCheck(
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
-                pattern_types[decl.pattern.index()] = LocatedType.withRegion(try typechecker.resolveTypeExpr(type_expr), declarationRegion(decl.storage_class));
+                const resolved_type = try typechecker.resolveTypeExpr(type_expr);
+                pattern_types[decl.pattern.index()] = LocatedType.withRegion(resolved_type, declarationRegion(decl.storage_class));
+                if (decl.storage_class == .storage) {
+                    try typechecker.checkStorageResultTypeSupport(decl.range, resolved_type);
+                }
             }
         }
     }
@@ -1492,6 +1502,38 @@ const TypeChecker = struct {
                 function.name,
                 diagnosticTypeDisplayName(self, self.current_return_type.?),
             });
+        }
+    }
+
+    fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        const unwrapped = unwrapRefinement(ty);
+        if (unwrapped.kind() != .error_union) return;
+
+        const error_union = unwrapped.error_union;
+        if (storageResultPayloadNeedsPointer(error_union.payload_type.*)) {
+            try self.emitRangeError(
+                range,
+                "storage Result values currently require a scalar success payload",
+                .{},
+            );
+            return;
+        }
+
+        for (error_union.error_types) |error_type| {
+            const named = switch (error_type) {
+                .named => |named| named.name,
+                else => continue,
+            };
+            const error_item_id = self.lookupErrorItemInScope(named) orelse continue;
+            const error_item = self.file.item(error_item_id).*;
+            if (error_item != .ErrorDecl) continue;
+            if (error_item.ErrorDecl.parameters.len == 0) continue;
+            try self.emitRangeError(
+                range,
+                "storage Result values currently require payloadless error types",
+                .{},
+            );
+            return;
         }
     }
 
@@ -8639,6 +8681,25 @@ fn typeHasUnresolvedInteger(ty: Type) bool {
 
 fn unwrapRefinement(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
+fn storageResultPayloadNeedsPointer(ty: Type) bool {
+    return switch (unwrapRefinement(ty).kind()) {
+        .tuple,
+        .anonymous_struct,
+        .struct_,
+        .string,
+        .bytes,
+        .array,
+        .slice,
+        .map,
+        .error_union,
+        .function,
+        .external_proxy,
+        .contract,
+        => true,
+        else => false,
+    };
 }
 
 fn isGenericTypeParam(ty: Type) bool {
