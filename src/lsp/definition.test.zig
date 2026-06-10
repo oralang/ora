@@ -187,6 +187,34 @@ test "lsp definition: field access on import alias resolves member in target fil
     try testing.expectEqualStrings("file:///project/math.ora", def.uri.?);
 }
 
+test "lsp definition: cached cross-file analysis resolves imported member" {
+    const source =
+        \\const math = @import("./math.ora");
+        \\pub fn run() -> u256 { return math.add(1); }
+    ;
+
+    const target_source = "pub fn add(x: u256) -> u256 { return x; }";
+
+    const query = try positionOfWithOffset(source, "math.add", 0);
+
+    const bindings = [_]definition.ImportBinding{.{
+        .alias = "math",
+        .target_uri = "file:///project/math.ora",
+        .target_source = target_source,
+    }};
+    const cross_file = definition.CrossFileContext{ .bindings = &bindings };
+
+    var analysis = (try definition.Analysis.init(testing.allocator, source)) orelse return error.TestExpectedEqual;
+    defer analysis.deinit();
+
+    const maybe_def = try definition.definitionAtCachedCrossFile(&analysis, source, query, cross_file);
+    try testing.expect(maybe_def != null);
+
+    const def = maybe_def.?;
+    try testing.expect(def.uri != null);
+    try testing.expectEqualStrings("file:///project/math.ora", def.uri.?);
+}
+
 test "lsp definition: without cross-file context, import alias stays in-file" {
     const source =
         \\const math = @import("./math.ora");

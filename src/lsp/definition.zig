@@ -638,25 +638,27 @@ pub fn definitionAtCrossFile(allocator: Allocator, source: []const u8, position:
 
 /// Resolve definition using a pre-built analysis (avoids re-parsing).
 pub fn definitionAtCached(analysis: *Analysis, source: []const u8, position: frontend.Position) ?Definition {
-    var resolver = Resolver{
-        .analysis = analysis,
-        .query_position = position,
-        .cross_file = null,
-    };
-    _ = source;
-    return resolver.run() catch null;
+    return definitionAtAnalysis(analysis, source, position, null) catch null;
+}
+
+pub fn definitionAtCachedCrossFile(analysis: *Analysis, source: []const u8, position: frontend.Position, cross_file: CrossFileContext) !?Definition {
+    return definitionAtAnalysis(analysis, source, position, cross_file);
 }
 
 fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
     var analysis = (try Analysis.init(allocator, source)) orelse return null;
     defer analysis.deinit();
 
+    return definitionAtAnalysis(&analysis, source, position, cross_file);
+}
+
+fn definitionAtAnalysis(analysis: *Analysis, source: []const u8, position: frontend.Position, cross_file: ?CrossFileContext) !?Definition {
     if (identifierAtPosition(source, position)) |name| {
         if (findImportBinding(cross_file, name)) |binding| {
-            if (hasTopLevelDeclarationNamed(&analysis, name)) {
+            if (hasTopLevelDeclarationNamed(analysis, name)) {
                 if (binding.target_source) |target_source| {
                     if (nextFieldIdentifier(source, position)) |member_name| {
-                        if (try findTopLevelDeclarationInSource(allocator, target_source, member_name)) |range| {
+                        if (try findTopLevelDeclarationInSource(analysis.allocator, target_source, member_name)) |range| {
                             return .{
                                 .uri = binding.target_uri,
                                 .range = range,
@@ -673,7 +675,7 @@ fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend
 
         for (analysis.astFile().root_items) |item_id| {
             var alias_resolver = Resolver{
-                .analysis = &analysis,
+                .analysis = analysis,
                 .query_position = position,
                 .cross_file = cross_file,
             };
@@ -684,7 +686,7 @@ fn definitionAtImpl(allocator: Allocator, source: []const u8, position: frontend
     }
 
     var resolver = Resolver{
-        .analysis = &analysis,
+        .analysis = analysis,
         .query_position = position,
         .cross_file = cross_file,
     };
