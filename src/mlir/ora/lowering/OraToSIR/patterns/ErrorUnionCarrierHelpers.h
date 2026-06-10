@@ -1,5 +1,6 @@
 #pragma once
 
+#include "LoweringHelpers.h"
 #include "SIR/SIRDialect.h"
 #include "OraDialect.h"
 
@@ -208,21 +209,13 @@ namespace mlir
             inline ::mlir::Value narrowTagMaskConst(::mlir::OpBuilder &builder,
                                                     ::mlir::Location loc)
             {
-                auto u256Type = ::sir::U256Type::get(builder.getContext());
-                auto u256IntType = ::mlir::IntegerType::get(
-                    builder.getContext(), 256, ::mlir::IntegerType::Unsigned);
-                return builder.create<::sir::ConstOp>(
-                    loc, u256Type, ::mlir::IntegerAttr::get(u256IntType, 1));
+                return ::mlir::ora::lowering::constU256(builder, loc, 1);
             }
 
             inline ::mlir::Value narrowOkTagConst(::mlir::OpBuilder &builder,
                                                   ::mlir::Location loc)
             {
-                auto u256Type = ::sir::U256Type::get(builder.getContext());
-                auto u256IntType = ::mlir::IntegerType::get(
-                    builder.getContext(), 256, ::mlir::IntegerType::Unsigned);
-                return builder.create<::sir::ConstOp>(
-                    loc, u256Type, ::mlir::IntegerAttr::get(u256IntType, 0));
+                return ::mlir::ora::lowering::constU256(builder, loc, 0);
             }
 
             inline ::mlir::Value narrowErrTagConst(::mlir::OpBuilder &builder,
