@@ -329,13 +329,12 @@ static Value phase0PackErrorUnion(
     if (failed(payloadOr))
         return Value();
 
-    auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
-    auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);
-    auto one = rewriter.create<arith::ConstantOp>(loc, i256Type, oneAttr);
-    auto shifted = rewriter.create<arith::ShLIOp>(loc, *payloadOr, one);
-    Value packed = shifted.getResult();
-    if (isError)
-        packed = rewriter.create<arith::OrIOp>(loc, packed, one).getResult();
+    auto one = ora::error_union_helpers::narrowTagMaskI256Const(rewriter, loc);
+    Value tag = one;
+    if (!isError)
+        tag = ora::error_union_helpers::narrowOkTagI256Const(rewriter, loc);
+    Value packed = ora::error_union_helpers::packNarrowCarrierI256WithShift(
+        rewriter, loc, tag, *payloadOr, one);
 
     auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(
         loc,
@@ -500,7 +499,8 @@ static Value buildIsErrorFromTag(
 
     auto oneAttr = rewriter.getIntegerAttr(i256Type, 1);
     auto one = rewriter.create<arith::ConstantOp>(loc, i256Type, oneAttr);
-    auto tagMasked = rewriter.create<arith::AndIOp>(loc, *tagOr, one);
+    auto tagMasked = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+        rewriter, loc, *tagOr, one);
     auto cmp = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tagMasked, one);
 
     if (resultType == i1Type)
@@ -954,12 +954,7 @@ static bool isNarrowErrorUnion(ora::ErrorUnionType type);
 
 static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
 {
-    if (!ctx)
-        return Type();
-    if (llvm::isa<sir::PtrType, ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
-                  mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
-        return sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    return sir::U256Type::get(ctx);
+    return ora::error_union_helpers::getWideErrorUnionCarrierType(ctx, successType);
 }
 
 static LogicalResult materializeWideErrorUnion(
@@ -1052,8 +1047,8 @@ static LogicalResult materializeWideErrorUnion(
             if (isNormalizedErrorUnionCast(castOp))
             {
                 Value packed = toU256(castOp.getOperand(0));
-                Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
-                Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+                auto [tag, payload] = ora::error_union_helpers::splitNarrowPackedCarrierWithMask(
+                    rewriter, loc, packed, one);
                 outValues.push_back(tag);
                 return appendPayload(payload);
             }
@@ -1065,8 +1060,8 @@ static LogicalResult materializeWideErrorUnion(
         if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(operand))
         {
             Value packed = toU256(operand);
-            Value tag = rewriter.create<sir::AndOp>(loc, u256Type, packed, one);
-            Value payload = rewriter.create<sir::ShrOp>(loc, u256Type, one, packed);
+            auto [tag, payload] = ora::error_union_helpers::splitNarrowPackedCarrierWithMask(
+                rewriter, loc, packed, one);
             outValues.push_back(tag);
             return appendPayload(payload);
         }
@@ -1089,71 +1084,27 @@ static LogicalResult materializeWideErrorUnion(
 
 static std::optional<unsigned> getOraBitWidth(Type type)
 {
-    if (!type)
-        return std::nullopt;
-    if (llvm::isa<mlir::NoneType>(type))
-        return 0u;
-    if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
-        return builtinInt.getWidth();
-    if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
-        return intType.getWidth();
-    if (llvm::isa<ora::BoolType>(type))
-        return 1u;
-    if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
-        return 160u;
-    if (auto enumType = llvm::dyn_cast<ora::EnumType>(type))
-        return getOraBitWidth(enumType.getReprType());
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(type))
-        return getOraBitWidth(errType.getSuccessType());
-    if (auto minType = llvm::dyn_cast<ora::MinValueType>(type))
-        return getOraBitWidth(minType.getBaseType());
-    if (auto maxType = llvm::dyn_cast<ora::MaxValueType>(type))
-        return getOraBitWidth(maxType.getBaseType());
-    if (auto rangeType = llvm::dyn_cast<ora::InRangeType>(type))
-        return getOraBitWidth(rangeType.getBaseType());
-    if (auto scaledType = llvm::dyn_cast<ora::ScaledType>(type))
-        return getOraBitWidth(scaledType.getBaseType());
-    if (auto exactType = llvm::dyn_cast<ora::ExactType>(type))
-        return getOraBitWidth(exactType.getBaseType());
-    if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::MapType>(type))
-        return 256u;
-    return std::nullopt;
+    return ora::error_union_helpers::getOraBitWidth(type);
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type)
 {
-    auto widthOpt = getOraBitWidth(type.getSuccessType());
-    if (!widthOpt)
-        return false;
-    return *widthOpt <= 255;
+    return ora::error_union_helpers::isNarrowErrorUnion(type);
 }
 
 static bool hasForceWideErrorUnionAttr(Operation *op)
 {
-    if (!op)
-        return false;
-    if (auto attr = op->getAttrOfType<BoolAttr>("ora.force_wide_error_union"))
-        return attr.getValue();
-    if (auto func = op->getParentOfType<func::FuncOp>())
-    {
-        if (auto attr = func->getAttrOfType<BoolAttr>("ora.force_wide_error_union"))
-            return attr.getValue();
-    }
-    return false;
+    return ora::error_union_helpers::hasForceWideErrorUnionAttr(op);
 }
 
 static bool valueHasForceWideErrorUnion(Value value)
 {
-    if (!value)
-        return false;
-    if (Operation *def = value.getDefiningOp())
-        return hasForceWideErrorUnionAttr(def);
-    return false;
+    return ora::error_union_helpers::valueHasForceWideErrorUnion(value);
 }
 
 static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *op)
 {
-    return !isNarrowErrorUnion(type) || hasForceWideErrorUnionAttr(op);
+    return ora::error_union_helpers::shouldUseWideErrorUnionCarrier(type, op);
 }
 
 static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index)
@@ -2136,10 +2087,10 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
         }
         if (auto cst = value.getDefiningOp<sir::ConstOp>())
             cst->setAttr("ora.error_id", rewriter.getUnitAttr());
-        auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
-        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
-        Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, value);
-        rewriter.replaceOp(op, ValueRange{shifted});
+        Value tag = ora::error_union_helpers::narrowOkTagConst(rewriter, loc);
+        Value packed = ora::error_union_helpers::packNarrowCarrier(
+            rewriter, loc, tag, value);
+        rewriter.replaceOp(op, ValueRange{packed});
     }
     else
     {
@@ -2183,10 +2134,9 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     if (!isWide && resultTypes.size() == 1)
     {
         Value value = coerceToU256(rewriter, loc, adaptor.getValue());
-        auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
-        Value one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
-        Value shifted = rewriter.create<sir::ShlOp>(loc, u256Type, one, value);
-        Value packed = rewriter.create<sir::OrOp>(loc, u256Type, shifted, one);
+        Value tag = ora::error_union_helpers::narrowErrTagConst(rewriter, loc);
+        Value packed = ora::error_union_helpers::packNarrowCarrierWithShift(
+            rewriter, loc, tag, value, tag);
         rewriter.replaceOp(op, ValueRange{packed});
     }
     else
@@ -2424,7 +2374,8 @@ static LogicalResult convertErrorIsError(
 
             auto oneI256Attr = mlir::IntegerAttr::get(i256Type, 1);
             Value oneI256 = rewriter.create<arith::ConstantOp>(loc, i256Type, oneI256Attr);
-            Value masked = rewriter.create<arith::AndIOp>(loc, rawI256, oneI256);
+            Value masked = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+                rewriter, loc, rawI256, oneI256);
             auto cmpPred = mlir::arith::CmpIPredicate::eq;
             isErrI1 = rewriter.create<arith::CmpIOp>(loc, cmpPred, masked, oneI256);
         }
@@ -2450,7 +2401,8 @@ static LogicalResult convertErrorIsError(
                     return failure();
                 auto oneI256Attr = mlir::IntegerAttr::get(i256Type, 1);
                 Value oneI256 = rewriter.create<arith::ConstantOp>(loc, i256Type, oneI256Attr);
-                Value masked = rewriter.create<arith::AndIOp>(loc, rawI256, oneI256);
+                Value masked = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+                    rewriter, loc, rawI256, oneI256);
                 auto cmpPred = mlir::arith::CmpIPredicate::eq;
                 isErrI1 = rewriter.create<arith::CmpIOp>(loc, cmpPred, masked, oneI256);
             }
@@ -4132,7 +4084,8 @@ LogicalResult NormalizeErrorIsErrorOp::matchAndRewrite(
     if (!packedOr)
         return failure();
     auto packed = rewriter.create<sir::BitcastOp>(loc, i256Type, coerceToU256(rewriter, loc, *packedOr)).getResult();
-    auto tag = rewriter.create<arith::AndIOp>(loc, packed, one);
+    auto tag = ora::error_union_helpers::narrowPackedCarrierTagI256WithMask(
+        rewriter, loc, packed, one);
     auto cmp = rewriter.create<arith::CmpIOp>(loc, arith::CmpIPredicate::eq, tag, one);
     rewriter.replaceOp(op, cmp.getResult());
     return success();

@@ -1001,8 +1001,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             const op = switch (expr) {
                 .IntegerLiteral => |literal| blk: {
-                    const parsed = support.parseIntLiteral(literal.text) orelse 0;
-                    const value_attr = mlir.oraIntegerAttrCreateI64FromType(result_type, parsed);
+                    const parsed = support.parseUnsignedIntegerLiteral(u256, literal.text) orelse {
+                        try self.emitLoweringError(literal.range, "invalid integer literal '{s}'", .{literal.text});
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    };
+                    const value_attr = if (parsed <= std.math.maxInt(i64))
+                        mlir.oraIntegerAttrCreateI64FromType(result_type, @intCast(parsed))
+                    else attr: {
+                        var decimal_buf: [80]u8 = undefined;
+                        const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+                            try self.emitLoweringError(literal.range, "failed to materialize integer literal '{s}'", .{literal.text});
+                            break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                        };
+                        break :attr mlir.oraIntegerAttrGetFromString(result_type, strRef(decimal_text));
+                    };
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (mlir.oraOperationIsNull(created)) {
                         break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);

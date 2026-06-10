@@ -27,7 +27,6 @@ const lowerTypeDescriptor = support.lowerTypeDescriptor;
 const nullStringRef = support.nullStringRef;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
-const parseIntLiteral = support.parseIntLiteral;
 const parseUnsignedIntegerLiteral = support.parseUnsignedIntegerLiteral;
 const strRef = support.strRef;
 const stringType = support.stringType;
@@ -332,7 +331,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraTypeEqual(ty, addressType(self.parent.context))) {
                         break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
                     }
-                    break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), ty, parseIntLiteral(literal.text) orelse 0));
+                    const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                        break :blk try @This().loweringValueError(self, literal.range, ty, "invalid integer literal '{s}'", .{literal.text});
+                    break :blk try @This().createWideIntegerConstant(self, ty, parsed, false, literal.range);
                 },
                 .BoolLiteral => |literal| blk: {
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), boolType(self.parent.context), if (literal.value) 1 else 0));
@@ -556,15 +557,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
                     }
                     if (mlir.oraTypeIsAInteger(target_type)) {
-                        break :blk appendValueOp(
-                            self.block,
-                            createIntegerConstant(
-                                self.parent.context,
-                                self.parent.location(literal.range),
-                                target_type,
-                                parseIntLiteral(literal.text) orelse 0,
-                            ),
-                        );
+                        const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                            break :blk try @This().loweringValueError(self, literal.range, target_type, "invalid integer literal '{s}'", .{literal.text});
+                        break :blk try @This().createWideIntegerConstant(self, target_type, parsed, false, literal.range);
                     }
                     break :blk try self.lowerExpr(expr_id, locals);
                 },

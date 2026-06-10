@@ -1,6 +1,7 @@
 #include "OraToSIRTypeConverter.h"
 #include "OraMaterializationKinds.h"
 #include "patterns/AdtCarrierHelpers.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -43,58 +44,14 @@ namespace
         return cast.getResult(0);
     }
 
-    static std::optional<unsigned> getOraBitWidth(Type type)
-    {
-        if (!type)
-            return std::nullopt;
-        if (llvm::isa<mlir::NoneType>(type))
-            return 0u;
-
-        if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
-            return builtinInt.getWidth();
-        if (auto intType = llvm::dyn_cast<ora::IntegerType>(type))
-            return intType.getWidth();
-        if (llvm::isa<ora::BoolType>(type))
-            return 1u;
-        if (llvm::isa<ora::AddressType, ora::NonZeroAddressType>(type))
-            return 160u;
-        if (auto enumType = llvm::dyn_cast<ora::EnumType>(type))
-            return getOraBitWidth(enumType.getReprType());
-        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(type))
-            return getOraBitWidth(errType.getSuccessType());
-        if (auto minType = llvm::dyn_cast<ora::MinValueType>(type))
-            return getOraBitWidth(minType.getBaseType());
-        if (auto maxType = llvm::dyn_cast<ora::MaxValueType>(type))
-            return getOraBitWidth(maxType.getBaseType());
-        if (auto rangeType = llvm::dyn_cast<ora::InRangeType>(type))
-            return getOraBitWidth(rangeType.getBaseType());
-        if (auto scaledType = llvm::dyn_cast<ora::ScaledType>(type))
-            return getOraBitWidth(scaledType.getBaseType());
-        if (auto exactType = llvm::dyn_cast<ora::ExactType>(type))
-            return getOraBitWidth(exactType.getBaseType());
-
-        if (llvm::isa<ora::StringType, ora::BytesType, ora::StructType, ora::AnonymousStructType, ora::MapType>(type))
-            return 256u;
-
-        return std::nullopt;
-    }
-
     static bool isNarrowErrorUnion(ora::ErrorUnionType type)
     {
-        auto widthOpt = getOraBitWidth(type.getSuccessType());
-        if (!widthOpt)
-            return false;
-        return *widthOpt <= 255;
+        return ora::error_union_helpers::isNarrowErrorUnion(type);
     }
 
     static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
     {
-        if (!ctx)
-            return Type();
-        if (llvm::isa<sir::PtrType, ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
-                      mlir::MemRefType, mlir::UnrankedMemRefType>(successType))
-            return sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        return sir::U256Type::get(ctx);
+        return ora::error_union_helpers::getWideErrorUnionCarrierType(ctx, successType);
     }
 
     static Type getAdtPayloadCarrierType(MLIRContext *ctx)

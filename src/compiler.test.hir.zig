@@ -22,7 +22,6 @@ const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
 const findVariablePatternByName = h.findVariablePatternByName;
-const diagnosticMessagesContain = h.diagnosticMessagesContain;
 const countDiagnosticMessages = h.countDiagnosticMessages;
 const DiagnosticProbePhase = h.DiagnosticProbePhase;
 const expectDiagnosticProbeContains = h.expectDiagnosticProbeContains;
@@ -68,6 +67,31 @@ test "compiler lowers impl self methods and calls end to end" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.bump"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @CounterLike.Counter.bump"));
+}
+
+test "compiler lowers wide HIR integer literals without defaulting" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    let value: u256 = 9223372036854775808;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 0), hir_result.placeholder_count);
+    try testing.expect(hir_result.isEmittable());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "9223372036854775808"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 
 test "compiler lowers syntax into immutable AST items" {

@@ -1,4 +1,5 @@
 #include "patterns/MemRef.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/Naming.h"
 #include "patterns/Storage.h"
 #include "patterns/StorageLayout.h"
@@ -145,43 +146,22 @@ static bool storageStructCarrierPreservesField(Value carrier, size_t fieldIndex)
 
 static bool isNarrowErrorUnionType(Type type)
 {
-    auto errType = llvm::dyn_cast<mlir::ora::ErrorUnionType>(type);
-    if (!errType)
-        return false;
-    auto successType = errType.getSuccessType();
-    return llvm::isa<mlir::ora::IntegerType, mlir::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+    return mlir::ora::error_union_helpers::isScalarErrorUnionMemRefCarrier(type);
 }
 
 static bool hasForceWideErrorUnionAttr(Operation *op)
 {
-    if (!op)
-        return false;
-    if (auto attr = op->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
-        return attr.getValue();
-    if (auto func = op->getParentOfType<mlir::func::FuncOp>())
-    {
-        if (auto attr = func->getAttrOfType<mlir::BoolAttr>("ora.force_wide_error_union"))
-            return attr.getValue();
-    }
-    return false;
+    return mlir::ora::error_union_helpers::hasForceWideErrorUnionAttr(op);
 }
 
 static bool valueHasForceWideErrorUnion(Value value)
 {
-    if (!value)
-        return false;
-    if (Operation *def = value.getDefiningOp())
-        return hasForceWideErrorUnionAttr(def);
-    return false;
+    return mlir::ora::error_union_helpers::valueHasForceWideErrorUnion(value);
 }
 
 static bool isScalarErrorUnionMemRefCarrier(Type type)
 {
-    auto errType = llvm::dyn_cast<mlir::ora::ErrorUnionType>(type);
-    if (!errType)
-        return false;
-    auto successType = errType.getSuccessType();
-    return llvm::isa<mlir::IntegerType, mlir::ora::IntegerType, mlir::NoneType, mlir::ora::AddressType, mlir::ora::NonZeroAddressType>(successType);
+    return mlir::ora::error_union_helpers::isScalarErrorUnionMemRefCarrier(type);
 }
 
 static Value unwrapIndexCastInput(Value value)
@@ -1188,9 +1168,9 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
         Value packed = ensureI256(packedValue);
         if (!packed)
             return {};
-        Value one = rewriter.create<mlir::arith::ConstantOp>(loc, i256Type, mlir::IntegerAttr::get(i256Type, 1));
-        Value tag = rewriter.create<mlir::arith::AndIOp>(loc, packed, one);
-        Value payload = rewriter.create<mlir::arith::ShRUIOp>(loc, packed, one);
+        Value one = mlir::ora::error_union_helpers::narrowTagMaskI256Const(rewriter, loc);
+        auto [tag, payload] = mlir::ora::error_union_helpers::splitNarrowPackedCarrierI256WithMask(
+            rewriter, loc, packed, one);
         return {tag, payload};
     };
     constexpr uint64_t kErrorUnionMemRefCarrierWords = 2;
