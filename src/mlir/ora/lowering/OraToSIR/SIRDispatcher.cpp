@@ -23,7 +23,6 @@
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <vector>
 
 using namespace mlir;
 
@@ -34,8 +33,21 @@ namespace mlir
         namespace
         {
             using abi_lowering::AbiBase;
+            using abi_lowering::AbiLayoutKind;
+            using abi_lowering::AbiLayoutNode;
             using abi_lowering::AbiType;
+            using abi_lowering::canonicalAbiLayoutHeadSlots;
+            using abi_lowering::canonicalAbiLayoutIsDynamic;
+            using abi_lowering::canonicalAbiLayoutIsTupleLike;
+            using abi_lowering::canonicalAbiLayoutStaticElementWordCount;
+            using abi_lowering::canonicalAbiLayoutSupportsDynamicArray;
+            using abi_lowering::isDynamicAddressArrayAbiNode;
+            using abi_lowering::isDynamicBoolArrayAbiNode;
+            using abi_lowering::isDynamicFixedBytesArrayAbiNode;
+            using abi_lowering::isDynamicU256ArrayAbiNode;
+            using abi_lowering::isStaticBoolAbiNode;
             using abi_lowering::parseAbiType;
+            using abi_lowering::parseCanonicalAbiLayout;
 
             static std::optional<uint32_t> extractTaggedStmtId(Location loc, StringRef prefix)
             {
@@ -176,154 +188,6 @@ namespace mlir
                 if (!found)
                     return 0;
                 return (maxSlot + 1) * 32;
-            }
-
-            struct AbiLayout
-            {
-                AbiType abi;
-                std::vector<AbiLayout> fields;
-
-                bool isTupleLike() const { return !fields.empty(); }
-                bool hasDynamicArrayDim() const
-                {
-                    return abi.dims.size() == 1 && abi.dims.front() < 0;
-                }
-                int64_t staticElementWordCount() const
-                {
-                    if (isTupleLike())
-                    {
-                        int64_t total = 0;
-                        for (const AbiLayout &field : fields)
-                        {
-                            if (field.isDynamic())
-                                return -1;
-                            int64_t slots = field.headSlots();
-                            if (slots <= 0)
-                                return -1;
-                            total += slots;
-                        }
-                        return total;
-                    }
-                    if (!abi.isStaticBase())
-                        return -1;
-                    if (abi.dims.empty())
-                        return 1;
-                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
-                        return abi.dims.front();
-                    return -1;
-                }
-                bool supportsDynamicArray() const
-                {
-                    return hasDynamicArrayDim() && staticElementWordCount() > 0;
-                }
-                bool isDynamic() const
-                {
-                    if (supportsDynamicArray())
-                        return true;
-                    if (isTupleLike())
-                    {
-                        return llvm::any_of(fields, [](const AbiLayout &field) { return field.isDynamic(); });
-                    }
-                    return abi.isDynamic();
-                }
-                int64_t headSlots() const
-                {
-                    if (supportsDynamicArray())
-                        return 1;
-                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
-                    {
-                        int64_t elemWords = staticElementWordCount();
-                        if (elemWords <= 0)
-                            return -1;
-                        return elemWords * abi.dims.front();
-                    }
-                    if (isTupleLike())
-                    {
-                        int64_t total = 0;
-                        for (const AbiLayout &field : fields)
-                        {
-                            int64_t slots = field.isDynamic() ? 1 : field.headSlots();
-                            if (slots < 0)
-                                return -1;
-                            total += slots;
-                        }
-                        return total;
-                    }
-                    return abi.headSlots();
-                }
-            };
-
-            static bool parseAbiLayout(StringRef text, size_t &pos, AbiLayout &out)
-            {
-                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                    ++pos;
-                if (pos >= text.size())
-                    return false;
-
-                if (text[pos] == '(')
-                {
-                    ++pos;
-                    out = AbiLayout{};
-                    out.abi.base = AbiBase::Tuple;
-                    while (pos < text.size() && text[pos] != ')')
-                    {
-                        AbiLayout child;
-                        if (!parseAbiLayout(text, pos, child))
-                            return false;
-                        out.fields.push_back(std::move(child));
-                        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                            ++pos;
-                        if (pos < text.size() && text[pos] == ',')
-                            ++pos;
-                    }
-                    if (pos >= text.size() || text[pos] != ')')
-                        return false;
-                    ++pos;
-                }
-                else
-                {
-                    size_t start = pos;
-                    while (pos < text.size() && text[pos] != ',' && text[pos] != ')' && text[pos] != '[')
-                        ++pos;
-                    if (start == pos)
-                        return false;
-                    AbiType abi;
-                    if (!parseAbiType(text.substr(start, pos - start), abi))
-                        return false;
-                    out = AbiLayout{};
-                    out.abi = abi;
-                }
-
-                while (pos < text.size() && text[pos] == '[')
-                {
-                    size_t close = text.find(']', pos);
-                    if (close == StringRef::npos)
-                        return false;
-                    StringRef inner = text.slice(pos + 1, close);
-                    if (inner.empty())
-                    {
-                        out.abi.dims.push_back(-1);
-                    }
-                    else
-                    {
-                        int64_t val = 0;
-                        if (inner.getAsInteger(10, val))
-                            return false;
-                        out.abi.dims.push_back(val);
-                    }
-                    pos = close + 1;
-                }
-                return true;
-            }
-
-            static bool parseAbiLayout(StringRef text, AbiLayout &out)
-            {
-                size_t pos = 0;
-                if (!parseAbiLayout(text, pos, out))
-                    return false;
-                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                    ++pos;
-                return pos == text.size();
             }
 
             struct CalldataStaticDecode
@@ -704,31 +568,31 @@ namespace mlir
                 Location loc,
                 MLIRContext *ctx,
                 Value basePtr,
-                const AbiLayout &layout)
+                const AbiLayoutNode &layout)
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
                 auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
                 Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
 
-                if (layout.supportsDynamicArray())
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
                 {
                     Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.staticElementWordCount()));
+                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(layout)));
                     Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
                     Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
                     return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
                 }
 
-                if (!layout.isTupleLike())
+                if (!canonicalAbiLayoutIsTupleLike(layout))
                 {
-                    if (layout.abi.base == AbiBase::BytesDyn || layout.abi.base == AbiBase::String)
+                    if (layout.kind == AbiLayoutKind::DynamicBytes)
                     {
                         Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
                         Value padded = lowering::ceil32(builder, loc, length);
                         return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
                     }
-                    if (layout.abi.supportsDynamicArray())
+                    if (layout.kind == AbiLayoutKind::DynamicArray)
                     {
                         Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
                         Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, c32);
@@ -737,11 +601,12 @@ namespace mlir
                     return c32;
                 }
 
-                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.headSlots() * 32));
+                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
                 int64_t headOffset = 0;
-                for (const AbiLayout &field : layout.fields)
+                for (const auto &fieldPtr : layout.children)
                 {
-                    if (field.isDynamic())
+                    const AbiLayoutNode &field = *fieldPtr;
+                    if (canonicalAbiLayoutIsDynamic(field))
                     {
                         Value headOff = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, headOffset));
                         Value offPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, headOff);
@@ -753,7 +618,7 @@ namespace mlir
                     }
                     else
                     {
-                        headOffset += field.headSlots() * 32;
+                        headOffset += canonicalAbiLayoutHeadSlots(field) * 32;
                     }
                 }
                 return total;
@@ -1257,14 +1122,14 @@ namespace mlir
                                 int64_t slots = abi.headSlots();
                                 if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
                                 {
-                                    AbiLayout layout;
-                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout))
+                                    AbiLayoutNode layout;
+                                    if (!parseCanonicalAbiLayout(info.abiParamLayouts[i], layout))
                                     {
                                         func.emitError("invalid tuple ABI param layout");
                                         signalPassFailure();
                                         return;
                                     }
-                                    slots = layout.isDynamic() ? 1 : layout.headSlots();
+                                    slots = canonicalAbiLayoutIsDynamic(layout) ? 1 : canonicalAbiLayoutHeadSlots(layout);
                                 }
                                 if (slots < 0)
                                 {
@@ -2401,36 +2266,36 @@ namespace mlir
                                     bounds.nextExpectedOffset,
                                 };
                             };
-                            auto resultFieldDynamicKind = [&](const AbiLayout &fieldLayout, StrictDynamicCalldataKind &kind, unsigned &fixedBytesWidth) -> bool {
+                            auto resultFieldDynamicKind = [&](const AbiLayoutNode &fieldLayout, StrictDynamicCalldataKind &kind, unsigned &fixedBytesWidth) -> bool {
                                 fixedBytesWidth = 0;
-                                if (!fieldLayout.isDynamic())
+                                if (!canonicalAbiLayoutIsDynamic(fieldLayout))
                                     return false;
-                                if (fieldLayout.isTupleLike())
+                                if (canonicalAbiLayoutIsTupleLike(fieldLayout))
                                     return false;
-                                if (fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String)
+                                if (fieldLayout.kind == AbiLayoutKind::DynamicBytes)
                                 {
                                     kind = StrictDynamicCalldataKind::BytesLike;
                                     return true;
                                 }
-                                if (fieldLayout.abi.base == AbiBase::Uint && fieldLayout.abi.width == 256 && fieldLayout.abi.supportsDynamicArray())
+                                if (isDynamicU256ArrayAbiNode(fieldLayout))
                                 {
                                     kind = StrictDynamicCalldataKind::U256Array;
                                     return true;
                                 }
-                                if (fieldLayout.abi.base == AbiBase::Address && fieldLayout.abi.supportsDynamicArray())
+                                if (isDynamicAddressArrayAbiNode(fieldLayout))
                                 {
                                     kind = StrictDynamicCalldataKind::AddressArray;
                                     return true;
                                 }
-                                if (fieldLayout.abi.base == AbiBase::Bool && fieldLayout.abi.supportsDynamicArray())
+                                if (isDynamicBoolArrayAbiNode(fieldLayout))
                                 {
                                     kind = StrictDynamicCalldataKind::BoolArray;
                                     return true;
                                 }
-                                if (fieldLayout.abi.base == AbiBase::FixedBytes && fieldLayout.abi.supportsDynamicArray())
+                                if (isDynamicFixedBytesArrayAbiNode(fieldLayout))
                                 {
                                     kind = StrictDynamicCalldataKind::FixedBytesArray;
-                                    fixedBytesWidth = fieldLayout.abi.width;
+                                    fixedBytesWidth = fieldLayout.children.front()->width;
                                     return true;
                                 }
                                 return false;
@@ -2612,7 +2477,7 @@ namespace mlir
                                 return bounds.nextExpectedOffset;
                             };
 
-                            auto materializeResultCarrier = [&](const AbiLayout &fieldLayout,
+                            auto materializeResultCarrier = [&](const AbiLayoutNode &fieldLayout,
                                                                 Value tupleBaseOff,
                                                                 int64_t fieldHeadByteOffset,
                                                                 Value expectedDynamicOffset,
@@ -2625,11 +2490,11 @@ namespace mlir
                                     getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldHeadByteOffset, constCache, caseBody)
                                 );
 
-                                if (fieldLayout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(fieldLayout))
                                 {
-                                    if (fieldLayout.isTupleLike())
+                                    if (canonicalAbiLayoutIsTupleLike(fieldLayout))
                                     {
-                                        int64_t tupleHeadSlots = fieldLayout.headSlots();
+                                        int64_t tupleHeadSlots = canonicalAbiLayoutHeadSlots(fieldLayout);
                                         if (tupleHeadSlots <= 0)
                                             return failure();
 
@@ -2665,9 +2530,10 @@ namespace mlir
                                         Value nextFieldDynamicOffset = tupleHeadBytes;
                                         SmallVector<DynamicTupleChild, 2> dynamicChildren;
                                         int64_t childHeadByteOffset = 0;
-                                        for (const AbiLayout &childLayout : fieldLayout.fields)
+                                        for (const auto &childLayoutPtr : fieldLayout.children)
                                         {
-                                            if (childLayout.isDynamic())
+                                            const AbiLayoutNode &childLayout = *childLayoutPtr;
+                                            if (canonicalAbiLayoutIsDynamic(childLayout))
                                             {
                                                 StrictDynamicCalldataKind childKind;
                                                 unsigned fixedBytesWidth = 0;
@@ -2694,7 +2560,7 @@ namespace mlir
                                             }
                                             else
                                             {
-                                                int64_t slots = childLayout.headSlots();
+                                                int64_t slots = canonicalAbiLayoutHeadSlots(childLayout);
                                                 if (slots <= 0)
                                                     return failure();
                                                 childHeadByteOffset += slots * 32;
@@ -3026,7 +2892,7 @@ namespace mlir
                                     return StrictDynamicCalldataValue{payload, bounds.nextExpectedOffset};
                                 }
 
-                                int64_t words = fieldLayout.headSlots();
+                                int64_t words = canonicalAbiLayoutHeadSlots(fieldLayout);
                                 if (words <= 0)
                                     return failure();
                                 if (!expectsPtr && words != 1)
@@ -3056,15 +2922,18 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                AbiLayoutNode layout;
+                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
                                 {
                                     info.func.emitError("invalid Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                if (layout.isDynamic() || layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1 || layout.fields[1].isDynamic() || layout.fields[1].headSlots() != 1)
+                                if (canonicalAbiLayoutIsDynamic(layout) || layout.children.size() != 2 ||
+                                    !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1 ||
+                                    canonicalAbiLayoutIsDynamic(*layout.children[1]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[1]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires static layout (bool,payload)");
                                     signalPassFailure();
@@ -3092,15 +2961,15 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                AbiLayoutNode layout;
+                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
                                 {
                                     info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                if (layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1)
+                                if (layout.children.size() != 2 || !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires layout (bool,payload)");
                                     signalPassFailure();
@@ -3114,7 +2983,7 @@ namespace mlir
                                     return;
                                 }
 
-                                int64_t resultHeadSlots = layout.headSlots();
+                                int64_t resultHeadSlots = canonicalAbiLayoutHeadSlots(layout);
                                 if (resultHeadSlots <= 0)
                                 {
                                     info.func.emitError("public Result input currently requires carrier-compatible payload layout");
@@ -3124,7 +2993,7 @@ namespace mlir
                                 Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
                                 Value tupleBaseOff = offc;
                                 Value tagWord = head;
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                 {
                                     Block *resultOffsetOkBlock = mainFunc.addBlock();
                                     Block *resultHeadOkBlock = mainFunc.addBlock();
@@ -3157,7 +3026,7 @@ namespace mlir
                                 }
                                 Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
                                 Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
-                                FailureOr<StrictDynamicCalldataValue> okCarrier = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32, resultDynamicOffset);
+                                FailureOr<StrictDynamicCalldataValue> okCarrier = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
                                 if (failed(okCarrier))
                                 {
                                     info.func.emitError("public Result input currently requires a carrier-compatible payload layout");
@@ -3168,7 +3037,7 @@ namespace mlir
                                 Value zeroCarrier = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, caseBody, "zero");
                                 wideTag = tag;
                                 widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, zeroCarrier, okCarrier->payload);
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                     nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, okCarrier->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
@@ -3182,15 +3051,15 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                AbiLayoutNode layout;
+                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
                                 {
                                     info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                if (layout.fields.size() != 3 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1)
+                                if (layout.children.size() != 3 || !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires layout (bool,ok_payload,err_payload)");
                                     signalPassFailure();
@@ -3204,8 +3073,8 @@ namespace mlir
                                     return;
                                 }
 
-                                int64_t errFieldOffset = 32 + (layout.fields[1].isDynamic() ? 32 : layout.fields[1].headSlots() * 32);
-                                int64_t resultHeadSlots = layout.headSlots();
+                                int64_t errFieldOffset = 32 + (canonicalAbiLayoutIsDynamic(*layout.children[1]) ? 32 : canonicalAbiLayoutHeadSlots(*layout.children[1]) * 32);
+                                int64_t resultHeadSlots = canonicalAbiLayoutHeadSlots(layout);
                                 if (resultHeadSlots <= 0 || errFieldOffset <= 0)
                                 {
                                     info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
@@ -3215,7 +3084,7 @@ namespace mlir
                                 Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
                                 Value tupleBaseOff = offc;
                                 Value tagWord = head;
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                 {
                                     Block *resultOffsetOkBlock = mainFunc.addBlock();
                                     Block *resultHeadOkBlock = mainFunc.addBlock();
@@ -3248,7 +3117,7 @@ namespace mlir
                                 }
                                 Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
                                 Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
-                                FailureOr<StrictDynamicCalldataValue> okPayload = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32, resultDynamicOffset);
+                                FailureOr<StrictDynamicCalldataValue> okPayload = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
                                 if (failed(okPayload))
                                 {
                                     info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
@@ -3256,11 +3125,11 @@ namespace mlir
                                     return;
                                 }
                                 FailureOr<StrictDynamicCalldataValue> errPayload = materializeResultCarrier(
-                                    layout.fields[2],
+                                    *layout.children[2],
                                     tupleBaseOff,
                                     errFieldOffset,
                                     okPayload->nextExpectedOffset,
-                                    layout.fields[2].isDynamic() && !layout.fields[2].isTupleLike());
+                                    canonicalAbiLayoutIsDynamic(*layout.children[2]) && !canonicalAbiLayoutIsTupleLike(*layout.children[2]));
                                 if (failed(errPayload))
                                 {
                                     info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
@@ -3270,7 +3139,7 @@ namespace mlir
                                 Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
                                 wideTag = tag;
                                 widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, errPayload->payload, okPayload->payload);
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                     nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, errPayload->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
@@ -3285,20 +3154,20 @@ namespace mlir
                             }
                             else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
                             {
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                AbiLayoutNode layout;
+                                if (!parseCanonicalAbiLayout(info.abiParamLayouts[idx], layout))
                                 {
                                     info.func.emitError("invalid tuple ABI param layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                 {
                                     module.emitError("unsupported dynamic tuple ABI type for dispatcher");
                                     signalPassFailure();
                                     return;
                                 }
-                                int64_t words = layout.headSlots();
+                                int64_t words = canonicalAbiLayoutHeadSlots(layout);
                                 if (words <= 0)
                                 {
                                     module.emitError("unsupported tuple ABI type for dispatcher");
@@ -3487,8 +3356,8 @@ namespace mlir
                             }
                             else if (!info.abiReturnLayout.empty())
                             {
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiReturnLayout, layout))
+                                AbiLayoutNode layout;
+                                if (!parseCanonicalAbiLayout(info.abiReturnLayout, layout))
                                 {
                                     info.func.emitError("invalid ora.abi_return_layout");
                                     signalPassFailure();

@@ -278,6 +278,218 @@ namespace mlir::ora::abi_lowering
         return out.base != AbiBase::Unknown;
     }
 
+    inline bool abiTypeBaseToLayoutNode(const AbiType &abi, AbiLayoutNode &out)
+    {
+        out = AbiLayoutNode();
+        switch (abi.base)
+        {
+        case AbiBase::Uint:
+            out.kind = AbiLayoutKind::Static;
+            out.staticKind = AbiStaticKind::Uint;
+            out.width = abi.width;
+            return true;
+        case AbiBase::Int:
+            out.kind = AbiLayoutKind::Static;
+            out.staticKind = AbiStaticKind::Int;
+            out.width = abi.width;
+            return true;
+        case AbiBase::Bool:
+            out.kind = AbiLayoutKind::Static;
+            out.staticKind = AbiStaticKind::Bool;
+            out.width = 1;
+            return true;
+        case AbiBase::Address:
+            out.kind = AbiLayoutKind::Static;
+            out.staticKind = AbiStaticKind::Address;
+            out.width = 160;
+            return true;
+        case AbiBase::FixedBytes:
+            out.kind = AbiLayoutKind::Static;
+            out.staticKind = AbiStaticKind::FixedBytes;
+            out.width = abi.width;
+            return true;
+        case AbiBase::BytesDyn:
+        case AbiBase::String:
+            out.kind = AbiLayoutKind::DynamicBytes;
+            return true;
+        case AbiBase::Tuple:
+            out.kind = AbiLayoutKind::Tuple;
+            return true;
+        case AbiBase::Unknown:
+            return false;
+        }
+        return false;
+    }
+
+    inline bool canonicalAbiLayoutIsTupleLike(const AbiLayoutNode &node)
+    {
+        return node.kind == AbiLayoutKind::Tuple && !node.children.empty();
+    }
+
+    inline bool canonicalAbiLayoutSupportsDynamicArray(const AbiLayoutNode &node);
+    inline bool canonicalAbiLayoutIsDynamic(const AbiLayoutNode &node);
+    inline int64_t canonicalAbiLayoutHeadSlots(const AbiLayoutNode &node);
+    inline int64_t canonicalAbiLayoutStaticElementWordCount(const AbiLayoutNode &node);
+
+    inline bool canonicalAbiLayoutSupportsDynamicArray(const AbiLayoutNode &node)
+    {
+        return node.kind == AbiLayoutKind::DynamicArray &&
+               node.children.size() == 1 &&
+               canonicalAbiLayoutStaticElementWordCount(*node.children.front()) > 0;
+    }
+
+    inline bool canonicalAbiLayoutIsDynamic(const AbiLayoutNode &node)
+    {
+        if (canonicalAbiLayoutSupportsDynamicArray(node))
+            return true;
+        if (canonicalAbiLayoutIsTupleLike(node))
+        {
+            for (const auto &child : node.children)
+                if (canonicalAbiLayoutIsDynamic(*child))
+                    return true;
+            return false;
+        }
+        return node.isDynamic();
+    }
+
+    inline int64_t canonicalAbiLayoutStaticElementWordCount(const AbiLayoutNode &node)
+    {
+        if (canonicalAbiLayoutIsTupleLike(node))
+        {
+            int64_t total = 0;
+            for (const auto &child : node.children)
+            {
+                if (canonicalAbiLayoutIsDynamic(*child))
+                    return -1;
+                int64_t slots = canonicalAbiLayoutHeadSlots(*child);
+                if (slots <= 0)
+                    return -1;
+                total += slots;
+            }
+            return total;
+        }
+
+        switch (node.kind)
+        {
+        case AbiLayoutKind::Static:
+            return 1;
+        case AbiLayoutKind::FixedArray:
+            if (node.children.size() != 1)
+                return -1;
+            if (int64_t elementWords = canonicalAbiLayoutStaticElementWordCount(*node.children.front()); elementWords > 0)
+                return elementWords * static_cast<int64_t>(node.arrayLen);
+            return -1;
+        case AbiLayoutKind::Tuple:
+            return 1;
+        case AbiLayoutKind::DynamicBytes:
+        case AbiLayoutKind::DynamicArray:
+            return -1;
+        }
+        return -1;
+    }
+
+    inline int64_t canonicalAbiLayoutHeadSlots(const AbiLayoutNode &node)
+    {
+        if (canonicalAbiLayoutSupportsDynamicArray(node))
+            return 1;
+        if (node.kind == AbiLayoutKind::FixedArray)
+            return canonicalAbiLayoutStaticElementWordCount(node);
+        if (canonicalAbiLayoutIsTupleLike(node))
+        {
+            int64_t total = 0;
+            for (const auto &child : node.children)
+            {
+                int64_t slots = canonicalAbiLayoutIsDynamic(*child) ? 1 : canonicalAbiLayoutHeadSlots(*child);
+                if (slots < 0)
+                    return -1;
+                total += slots;
+            }
+            return total;
+        }
+        if (node.kind == AbiLayoutKind::Static || node.kind == AbiLayoutKind::DynamicBytes || node.kind == AbiLayoutKind::DynamicArray)
+            return 1;
+        if (node.kind == AbiLayoutKind::Tuple)
+            return 1;
+        return -1;
+    }
+
+    inline bool parseCanonicalAbiLayout(StringRef text, size_t &pos, AbiLayoutNode &out)
+    {
+        while (pos < text.size() && llvm::isSpace(text[pos]))
+            ++pos;
+        if (pos >= text.size())
+            return false;
+
+        if (text[pos] == '(')
+        {
+            ++pos;
+            out = AbiLayoutNode();
+            out.kind = AbiLayoutKind::Tuple;
+            while (pos < text.size() && text[pos] != ')')
+            {
+                auto child = std::make_unique<AbiLayoutNode>();
+                if (!parseCanonicalAbiLayout(text, pos, *child))
+                    return false;
+                out.children.push_back(std::move(child));
+                while (pos < text.size() && llvm::isSpace(text[pos]))
+                    ++pos;
+                if (pos < text.size() && text[pos] == ',')
+                    ++pos;
+            }
+            if (pos >= text.size() || text[pos] != ')')
+                return false;
+            ++pos;
+        }
+        else
+        {
+            size_t start = pos;
+            while (pos < text.size() && text[pos] != ',' && text[pos] != ')' && text[pos] != '[')
+                ++pos;
+            if (start == pos)
+                return false;
+            AbiType abi;
+            if (!parseAbiType(text.substr(start, pos - start), abi))
+                return false;
+            if (!abiTypeBaseToLayoutNode(abi, out))
+                return false;
+        }
+
+        while (pos < text.size() && text[pos] == '[')
+        {
+            size_t close = text.find(']', pos);
+            if (close == StringRef::npos)
+                return false;
+            StringRef inner = text.slice(pos + 1, close);
+            auto element = std::make_unique<AbiLayoutNode>(std::move(out));
+            out = AbiLayoutNode();
+            if (inner.empty())
+            {
+                out.kind = AbiLayoutKind::DynamicArray;
+            }
+            else
+            {
+                unsigned len = 0;
+                if (inner.getAsInteger(10, len))
+                    return false;
+                out.kind = AbiLayoutKind::FixedArray;
+                out.arrayLen = len;
+            }
+            out.children.push_back(std::move(element));
+            pos = close + 1;
+        }
+        return true;
+    }
+
+    inline bool parseCanonicalAbiLayout(StringRef text, AbiLayoutNode &out)
+    {
+        size_t pos = 0;
+        if (!parseCanonicalAbiLayout(text, pos, out))
+            return false;
+        while (pos < text.size() && llvm::isSpace(text[pos]))
+            ++pos;
+        return pos == text.size();
+    }
+
     class AbiLayoutDslParser
     {
     public:
