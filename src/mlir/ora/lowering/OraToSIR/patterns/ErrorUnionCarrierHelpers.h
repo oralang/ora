@@ -224,13 +224,21 @@ namespace mlir
                 return narrowTagMaskConst(builder, loc);
             }
 
+            inline ::mlir::Value maskedTagWordWithMask(::mlir::OpBuilder &builder,
+                                                       ::mlir::Location loc,
+                                                       ::mlir::Value tagWord,
+                                                       ::mlir::Value one)
+            {
+                auto u256Type = ::sir::U256Type::get(builder.getContext());
+                return builder.create<::sir::AndOp>(loc, u256Type, tagWord, one);
+            }
+
             inline ::mlir::Value narrowPackedCarrierTagWithMask(::mlir::OpBuilder &builder,
                                                                 ::mlir::Location loc,
                                                                 ::mlir::Value packed,
                                                                 ::mlir::Value one)
             {
-                auto u256Type = ::sir::U256Type::get(builder.getContext());
-                return builder.create<::sir::AndOp>(loc, u256Type, packed, one);
+                return maskedTagWordWithMask(builder, loc, packed, one);
             }
 
             inline ::mlir::Value tagWordIsErrorWithMask(::mlir::OpBuilder &builder,
@@ -239,7 +247,7 @@ namespace mlir
                                                         ::mlir::Value one)
             {
                 auto u256Type = ::sir::U256Type::get(builder.getContext());
-                ::mlir::Value tag = narrowPackedCarrierTagWithMask(builder, loc, tagWord, one);
+                ::mlir::Value tag = maskedTagWordWithMask(builder, loc, tagWord, one);
                 return builder.create<::sir::EqOp>(loc, u256Type, tag, one);
             }
 

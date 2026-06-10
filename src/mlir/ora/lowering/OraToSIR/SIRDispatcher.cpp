@@ -2943,7 +2943,7 @@ namespace mlir
                                 }
 
                                 Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, head, one);
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, head, one);
                                 Value payloadOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
                                 Value payload = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, payloadOff);
                                 Value packedOk = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, payload);
@@ -3026,7 +3026,7 @@ namespace mlir
                                     builder.setInsertionPointToEnd(resultHeadOkBlock);
                                     tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
                                 }
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, tagWord, one);
                                 Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
                                 FailureOr<StrictDynamicCalldataValue> okCarrier = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
                                 if (failed(okCarrier))
@@ -3117,7 +3117,7 @@ namespace mlir
                                     builder.setInsertionPointToEnd(resultHeadOkBlock);
                                     tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
                                 }
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, tagWord, one);
                                 Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
                                 FailureOr<StrictDynamicCalldataValue> okPayload = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
                                 if (failed(okPayload))
@@ -3320,7 +3320,7 @@ namespace mlir
                             Value payloadPtr = builder.create<sir::AddPtrOp>(caseErrorLoc, ptrType, ptr, c32_union);
                             Value payload = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadPtr);
                             Value one = getConst(builder, caseErrorLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                            Value maskedTag = builder.create<sir::AndOp>(caseErrorLoc, u256Type, tag, one);
+                            Value maskedTag = error_union_helpers::maskedTagWordWithMask(builder, caseErrorLoc, tag, one);
                             Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseErrorLoc, maskedTag, one);
                             Value payloadScratchSize = getConst(builder, caseErrorLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
                             Value payloadScratchPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, payloadScratchSize);
