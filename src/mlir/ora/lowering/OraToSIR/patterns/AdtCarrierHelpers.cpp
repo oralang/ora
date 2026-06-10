@@ -12,6 +12,7 @@
 
 using namespace mlir;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::constU256;
 
 namespace mlir
 {
@@ -121,13 +122,6 @@ namespace mlir
                 return failure();
             }
 
-            static Value makeU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
-            {
-                auto u256Type = sir::U256Type::get(rewriter.getContext());
-                auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned);
-                return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
-            }
-
             static FailureOr<Value> materializeAdtPayloadCarrier(
                 PatternRewriter &rewriter,
                 Location loc,
@@ -184,8 +178,8 @@ namespace mlir
                 if (failed(variantIndex))
                     return failure();
 
-                Value tag = makeU256Const(rewriter, loc, *variantIndex);
-                Value payload = makeU256Const(rewriter, loc, 0);
+                Value tag = constU256(rewriter, loc, *variantIndex);
+                Value payload = constU256(rewriter, loc, 0);
 
                 if (!payloadValues.empty())
                 {
