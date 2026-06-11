@@ -8,6 +8,7 @@ const Allocator = std.mem.Allocator;
 
 pub const LineIndex = struct {
     line_starts: []u32,
+    line_ascii: []bool,
     source_len: u32,
 
     pub fn init(allocator: Allocator, source: []const u8) !LineIndex {
@@ -15,30 +16,40 @@ pub const LineIndex = struct {
 
         var starts = std.ArrayList(u32){};
         errdefer starts.deinit(allocator);
+        var ascii = std.ArrayList(bool){};
+        errdefer ascii.deinit(allocator);
 
         try starts.append(allocator, 0);
+        try ascii.append(allocator, true);
+        var current_line: usize = 0;
         for (source, 0..) |byte, index| {
+            if (byte >= 0x80) ascii.items[current_line] = false;
             if (byte == '\n') {
                 try starts.append(allocator, @intCast(index + 1));
+                try ascii.append(allocator, true);
+                current_line += 1;
             }
         }
 
         return .{
             .line_starts = try starts.toOwnedSlice(allocator),
+            .line_ascii = try ascii.toOwnedSlice(allocator),
             .source_len = @intCast(source.len),
         };
     }
 
     pub fn deinit(self: *LineIndex, allocator: Allocator) void {
         allocator.free(self.line_starts);
+        allocator.free(self.line_ascii);
         self.* = .{
             .line_starts = &.{},
+            .line_ascii = &.{},
             .source_len = 0,
         };
     }
 
     pub fn estimatedByteSize(self: *const LineIndex) usize {
-        return self.line_starts.len * @sizeOf(u32);
+        return self.line_starts.len * @sizeOf(u32) + self.line_ascii.len * @sizeOf(bool);
     }
 
     pub fn positionToOffset(
@@ -59,6 +70,18 @@ pub const LineIndex = struct {
             const line_len = line_end - line_start;
             if (character > line_len) return null;
             return line_start + character;
+        }
+
+        const line_len = line_end - line_start;
+        if (self.line_ascii[line]) {
+            if (character > line_len) return null;
+            return line_start + character;
+        }
+        if (character <= line_len) {
+            const ascii_end = line_start + character;
+            if (isAsciiRange(source, line_start, ascii_end)) {
+                return ascii_end;
+            }
         }
 
         var cursor: u32 = line_start;
@@ -90,11 +113,11 @@ pub const LineIndex = struct {
         std.debug.assert(source.len == self.source_len);
 
         const clamped_offset = @min(offset, self.source_len);
-        const line_index = self.lineForOffset(clamped_offset);
-        const line_start = self.line_starts[line_index];
-        const character = countLineUnits(source, line_start, clamped_offset, encoding);
+        const line_no = self.lineForOffset(clamped_offset);
+        const line_start = self.line_starts[line_no];
+        const character = self.countLineUnits(source, line_no, line_start, clamped_offset, encoding);
         return .{
-            .line = @intCast(line_index),
+            .line = @intCast(line_no),
             .character = character,
         };
     }
@@ -134,36 +157,49 @@ pub const LineIndex = struct {
 
         return if (low == 0) 0 else low - 1;
     }
+
+    fn countLineUnits(
+        self: *const LineIndex,
+        source: []const u8,
+        line_no: usize,
+        line_start: u32,
+        offset: u32,
+        encoding: text_edits.PositionEncoding,
+    ) u32 {
+        if (encoding == .utf8 or self.line_ascii[line_no]) return offset - line_start;
+        if (isAsciiRange(source, line_start, offset)) return offset - line_start;
+
+        var cursor = line_start;
+        var units: u32 = 0;
+        while (cursor < offset) {
+            const byte_len = std.unicode.utf8ByteSequenceLength(source[cursor]) catch {
+                units += 1;
+                cursor += 1;
+                continue;
+            };
+            if (cursor + byte_len > offset) break;
+
+            const codepoint = std.unicode.utf8Decode(source[cursor .. cursor + byte_len]) catch {
+                units += 1;
+                cursor += 1;
+                continue;
+            };
+            units += unitsForCodepoint(codepoint, encoding);
+            cursor += @intCast(byte_len);
+        }
+
+        return units;
+    }
 };
 
-fn countLineUnits(
-    source: []const u8,
-    line_start: u32,
-    offset: u32,
-    encoding: text_edits.PositionEncoding,
-) u32 {
-    if (encoding == .utf8) return offset - line_start;
-
-    var cursor = line_start;
-    var units: u32 = 0;
-    while (cursor < offset) {
-        const byte_len = std.unicode.utf8ByteSequenceLength(source[cursor]) catch {
-            units += 1;
-            cursor += 1;
-            continue;
-        };
-        if (cursor + byte_len > offset) break;
-
-        const codepoint = std.unicode.utf8Decode(source[cursor .. cursor + byte_len]) catch {
-            units += 1;
-            cursor += 1;
-            continue;
-        };
-        units += unitsForCodepoint(codepoint, encoding);
-        cursor += @intCast(byte_len);
+fn isAsciiRange(source: []const u8, start: u32, end: u32) bool {
+    const clamped_start = @min(@as(usize, @intCast(start)), source.len);
+    const clamped_end = @min(@as(usize, @intCast(end)), source.len);
+    if (clamped_start > clamped_end) return false;
+    for (source[clamped_start..clamped_end]) |byte| {
+        if (byte >= 0x80) return false;
     }
-
-    return units;
+    return true;
 }
 
 fn unitsForCodepoint(codepoint: u21, encoding: text_edits.PositionEncoding) u32 {

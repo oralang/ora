@@ -4,6 +4,10 @@ const ora_root = @import("ora_root");
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
+const lexer = ora_root.lexer;
+const keyword_docs = ora_root.lsp.keyword_docs;
+const refinement_docs = ora_root.lsp.refinement_docs;
+const semantic_index = ora_root.lsp.semantic_index;
 const protocol_helpers = @import("protocol_helpers.zig");
 
 const Allocator = std.mem.Allocator;
@@ -91,6 +95,146 @@ pub fn buildWithStats(
         .string_bytes = string_bytes,
         .markdown_bytes = markdown_bytes,
     };
+}
+
+pub fn buildFromSemanticIndexWithStats(
+    arena: Allocator,
+    source: []const u8,
+    byte_position: frontend.Position,
+    trigger_char: ?[]const u8,
+    index: *const semantic_index.SemanticIndex,
+) !BuildResult {
+    const prefix = completion.identifierPrefixAtPosition(source, byte_position);
+    const snippet_count: usize = if (protocol_helpers.isAtLineStart(source, byte_position) and trigger_char == null) snippets.len else 0;
+
+    var result = std.ArrayList(types.CompletionItem){};
+    errdefer result.deinit(arena);
+
+    var string_bytes: usize = 0;
+    var markdown_bytes: usize = 0;
+
+    const keyword_keys = lexer.keywords.kvs.keys[0..lexer.keywords.kvs.len];
+    for (keyword_keys) |keyword| {
+        try appendBorrowedCompletion(arena, &result, &string_bytes, &markdown_bytes, prefix, keyword, null, keyword_docs.documentation(keyword), .keyword);
+    }
+    for (keyword_docs.contextual_keywords) |keyword| {
+        try appendBorrowedCompletion(arena, &result, &string_bytes, &markdown_bytes, prefix, keyword, null, keyword_docs.documentation(keyword), .keyword);
+    }
+
+    for (completion.refinement_entries) |entry| {
+        if (!matchesPrefix(entry.name, prefix)) continue;
+        if (containsCompletionLabel(result.items, entry.name)) continue;
+
+        const docs = refinement_docs.entryForName(entry.name);
+        const markdown = if (docs) |doc| try refinement_docs.markdownAlloc(arena, doc) else null;
+        try appendBorrowedCompletion(
+            arena,
+            &result,
+            &string_bytes,
+            &markdown_bytes,
+            prefix,
+            entry.name,
+            if (docs) |doc| doc.signature else null,
+            markdown,
+            .type_alias,
+        );
+    }
+
+    if (semantic_index.symbolIndexesWithNamePrefix(index, prefix)) |symbol_indexes| {
+        for (symbol_indexes) |symbol_index| {
+            const symbol = index.symbols[symbol_index];
+            try appendBorrowedCompletion(
+                arena,
+                &result,
+                &string_bytes,
+                &markdown_bytes,
+                prefix,
+                symbol.name,
+                symbol.detail,
+                symbol.doc_comment,
+                completion.symbolKindToCompletionKind(symbol.kind),
+            );
+        }
+    } else {
+        for (index.symbols) |symbol| {
+            try appendBorrowedCompletion(
+                arena,
+                &result,
+                &string_bytes,
+                &markdown_bytes,
+                prefix,
+                symbol.name,
+                symbol.detail,
+                symbol.doc_comment,
+                completion.symbolKindToCompletionKind(symbol.kind),
+            );
+        }
+    }
+
+    std.mem.sort(types.CompletionItem, result.items, {}, lessCompletionItemByLabel);
+    for (snippets[0..snippet_count]) |snippet| {
+        string_bytes = addSat(string_bytes, snippet.label.len);
+        string_bytes = addSat(string_bytes, snippet.detail.len);
+        string_bytes = addSat(string_bytes, snippet.body.len);
+        try result.append(arena, .{
+            .label = snippet.label,
+            .kind = .Snippet,
+            .detail = snippet.detail,
+            .insertTextFormat = .Snippet,
+            .insertText = snippet.body,
+        });
+    }
+
+    return .{
+        .items = try result.toOwnedSlice(arena),
+        .string_bytes = string_bytes,
+        .markdown_bytes = markdown_bytes,
+    };
+}
+
+fn appendBorrowedCompletion(
+    arena: Allocator,
+    result: *std.ArrayList(types.CompletionItem),
+    string_bytes: *usize,
+    markdown_bytes: *usize,
+    prefix: []const u8,
+    label: []const u8,
+    detail: ?[]const u8,
+    documentation: ?[]const u8,
+    kind: completion.Kind,
+) !void {
+    if (!matchesPrefix(label, prefix)) return;
+    if (containsCompletionLabel(result.items, label)) return;
+
+    string_bytes.* = addSat(string_bytes.*, label.len);
+    if (detail) |value| string_bytes.* = addSat(string_bytes.*, value.len);
+    if (documentation) |value| markdown_bytes.* = addSat(markdown_bytes.*, value.len);
+
+    try result.append(arena, .{
+        .label = label,
+        .kind = protocol_helpers.completionKindToLsp(kind),
+        .detail = detail,
+        .documentation = if (documentation) |doc| .{ .MarkupContent = .{
+            .kind = .markdown,
+            .value = doc,
+        } } else null,
+    });
+}
+
+fn containsCompletionLabel(items: []const types.CompletionItem, label: []const u8) bool {
+    for (items) |item| {
+        if (std.mem.eql(u8, item.label, label)) return true;
+    }
+    return false;
+}
+
+fn matchesPrefix(candidate: []const u8, prefix: []const u8) bool {
+    if (prefix.len == 0) return true;
+    return std.mem.startsWith(u8, candidate, prefix);
+}
+
+fn lessCompletionItemByLabel(_: void, a: types.CompletionItem, b: types.CompletionItem) bool {
+    return std.mem.lessThan(u8, a.label, b.label);
 }
 
 fn addSat(a: usize, b: usize) usize {

@@ -36,66 +36,122 @@ pub fn hoverAtIndex(
 }
 
 fn formatHoverValueAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {
-    const signature = try formatSignatureAlloc(allocator, symbol);
-    defer allocator.free(signature);
+    const value = try allocator.alloc(u8, hoverValueCapacity(symbol));
+    var cursor: usize = 0;
 
+    appendBytes(value, &cursor, "```ora\n");
+    appendSignature(value, &cursor, symbol);
+    appendBytes(value, &cursor, "\n```");
     if (symbol.doc_comment) |doc| {
-        return std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ signature, doc });
+        appendBytes(value, &cursor, "\n---\n");
+        appendBytes(value, &cursor, doc);
     }
 
-    return std.fmt.allocPrint(allocator, "```ora\n{s}\n```", .{signature});
+    std.debug.assert(cursor == value.len);
+    return value;
 }
 
-fn formatSignatureAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {
-    return switch (symbol.kind) {
-        .contract => std.fmt.allocPrint(allocator, "contract {s}", .{symbol.name}),
+fn appendSignature(buffer: []u8, cursor: *usize, symbol: semantic_index.Symbol) void {
+    switch (symbol.kind) {
+        .contract => {
+            appendBytes(buffer, cursor, "contract ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .function, .method => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "fn {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "fn ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "fn {s}()", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "fn ", symbol.name, "", "()"),
         .variable => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "var {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "var ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "var {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "var ", symbol.name, "", ""),
         .field => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "field {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "field ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "field {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "field ", symbol.name, "", ""),
         .constant => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "const {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "const ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "const {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "const ", symbol.name, "", ""),
         .parameter => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "{s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
-        .struct_decl => std.fmt.allocPrint(allocator, "struct {s}", .{symbol.name}),
-        .bitfield_decl => std.fmt.allocPrint(allocator, "bitfield {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "", symbol.name, "", ""),
+        .struct_decl => {
+            appendBytes(buffer, cursor, "struct ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
+        .bitfield_decl => {
+            appendBytes(buffer, cursor, "bitfield ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .enum_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "enum {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "enum ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "enum {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "enum ", symbol.name, "", ""),
         .enum_member => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "enum member {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "enum member ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "enum member {s}", .{symbol.name}),
-        .trait_decl => std.fmt.allocPrint(allocator, "trait {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "enum member ", symbol.name, "", ""),
+        .trait_decl => {
+            appendBytes(buffer, cursor, "trait ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .impl_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "{s} {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "", symbol.name, detail, " ")
         else
-            std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "", symbol.name, "", ""),
         .type_alias => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "type {s} = {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "type ", symbol.name, detail, " = ")
         else
-            std.fmt.allocPrint(allocator, "type {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "type ", symbol.name, "", ""),
         .event => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "log {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "log ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "log {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "log ", symbol.name, "", ""),
         .error_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "error {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "error ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "error {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "error ", symbol.name, "", ""),
+    }
+}
+
+fn appendNameDetail(buffer: []u8, cursor: *usize, prefix: []const u8, name: []const u8, detail: []const u8, separator: []const u8) void {
+    appendBytes(buffer, cursor, prefix);
+    appendBytes(buffer, cursor, name);
+    appendBytes(buffer, cursor, separator);
+    appendBytes(buffer, cursor, detail);
+}
+
+fn appendBytes(buffer: []u8, cursor: *usize, value: []const u8) void {
+    @memcpy(buffer[cursor.*..][0..value.len], value);
+    cursor.* += value.len;
+}
+
+fn hoverValueCapacity(symbol: semantic_index.Symbol) usize {
+    var total: usize = "```ora\n".len + "\n```".len + signatureCapacity(symbol);
+    if (symbol.doc_comment) |doc| total += "\n---\n".len + doc.len;
+    return total;
+}
+
+fn signatureCapacity(symbol: semantic_index.Symbol) usize {
+    const detail_len = if (symbol.detail) |detail| detail.len else 0;
+    return symbol.name.len + detail_len + switch (symbol.kind) {
+        .contract => "contract ".len,
+        .function, .method => "fn ".len + if (symbol.detail == null) "()".len else 0,
+        .variable => "var ".len + if (symbol.detail != null) ": ".len else 0,
+        .field => "field ".len + if (symbol.detail != null) ": ".len else 0,
+        .constant => "const ".len + if (symbol.detail != null) ": ".len else 0,
+        .parameter => if (symbol.detail != null) ": ".len else 0,
+        .struct_decl => "struct ".len,
+        .bitfield_decl => "bitfield ".len,
+        .enum_decl => "enum ".len,
+        .enum_member => "enum member ".len,
+        .trait_decl => "trait ".len,
+        .impl_decl => if (symbol.detail != null) " ".len else 0,
+        .type_alias => "type  = ".len,
+        .event => "log ".len,
+        .error_decl => "error ".len,
     };
 }
 

@@ -8,6 +8,8 @@ const refinement_docs = @import("refinement_docs.zig");
 
 const Allocator = std.mem.Allocator;
 
+pub const refinement_entries = refinements.entries;
+
 pub const Kind = enum {
     keyword,
     contract,
@@ -122,7 +124,7 @@ fn appendKeywordCompletion(
     });
 }
 
-fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
+pub fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
     if (trigger_char) |tc| {
         if (std.mem.eql(u8, tc, ".")) return true;
     }
@@ -235,12 +237,15 @@ fn findSymbolByName(symbols: []const semantic_index.Symbol, name: []const u8) ?u
     return null;
 }
 
-pub fn deinitItems(allocator: Allocator, items: []Item) void {
-    for (items) |*item| item.deinit(allocator);
-    allocator.free(items);
+pub fn deinitItems(allocator: Allocator, items: []const Item) void {
+    for (items) |item| {
+        var owned = item;
+        owned.deinit(allocator);
+    }
+    if (items.len != 0) allocator.free(@constCast(items));
 }
 
-fn symbolKindToCompletionKind(kind: semantic_index.SymbolKind) Kind {
+pub fn symbolKindToCompletionKind(kind: semantic_index.SymbolKind) Kind {
     return switch (kind) {
         .contract => .contract,
         .function => .function,
@@ -270,7 +275,7 @@ fn lessItemByLabel(_: void, a: Item, b: Item) bool {
     return std.mem.lessThan(u8, a.label, b.label);
 }
 
-fn identifierPrefixAtPosition(source: []const u8, position: frontend.Position) []const u8 {
+pub fn identifierPrefixAtPosition(source: []const u8, position: frontend.Position) []const u8 {
     const cursor = positionToByteOffsetOnLine(source, position);
 
     var start = cursor;

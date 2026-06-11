@@ -73,7 +73,7 @@ pub const Stats = struct {
     code_action_string_bytes: usize = 0,
     prepare_rename_string_bytes: usize = 0,
 
-    pub fn recordItems(self: *Stats, kind: Kind, comptime Item: type, count: usize) void {
+    pub fn recordItems(self: *Stats, comptime kind: Kind, comptime Item: type, count: usize) void {
         const bytes = mulSat(count, @sizeOf(Item));
         self.builder_items_built = addSat(self.builder_items_built, count);
         self.builder_capacity_bytes = addSat(self.builder_capacity_bytes, bytes);
@@ -100,7 +100,7 @@ pub const Stats = struct {
         }
     }
 
-    pub fn recordStringBytes(self: *Stats, kind: Kind, bytes: usize) void {
+    pub fn recordStringBytes(self: *Stats, comptime kind: Kind, bytes: usize) void {
         if (bytes == 0) return;
         self.string_bytes = addSat(self.string_bytes, bytes);
         switch (kind) {
@@ -123,7 +123,7 @@ pub const Stats = struct {
         }
     }
 
-    pub fn recordMarkdownBytes(self: *Stats, kind: Kind, bytes: usize) void {
+    pub fn recordMarkdownBytes(self: *Stats, comptime kind: Kind, bytes: usize) void {
         if (bytes == 0) return;
         self.recordStringBytes(kind, bytes);
         self.markdown_bytes = addSat(self.markdown_bytes, bytes);

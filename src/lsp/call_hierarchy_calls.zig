@@ -39,12 +39,12 @@ pub fn appendIncomingMatches(
 
         try calls.append(arena, .{
             .from = .{
-                .name = try arena.dupe(u8, sym.name),
+                .name = sym.name,
                 .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
-                .uri = try arena.dupe(u8, uri),
+                .uri = uri,
                 .range = try range_converter.byteRangeToLsp(uri, sym.range),
                 .selectionRange = try range_converter.byteRangeToLsp(uri, sym.selection_range),
-                .detail = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+                .detail = sym.detail,
             },
             .fromRanges = try range_converter.rangesToLsp(uri, caller_group.ranges),
         });
@@ -60,20 +60,33 @@ pub fn appendIncomingImportedMatches(
     target_name: []const u8,
     range_converter: anytype,
 ) !void {
+    var matches = std.ArrayList(MatchedIncomingCall){};
+    defer matches.deinit(arena);
+    try matches.ensureTotalCapacity(arena, entry.imported_members.len);
+
+    for (entry.imported_members) |imported_member| {
+        if (!std.mem.eql(u8, imported_member.imported_path, target_path)) continue;
+        if (!std.mem.eql(u8, imported_member.member_name, target_name)) continue;
+        const edge = callEdgeForImportedMember(entry, imported_member) orelse continue;
+        matches.appendAssumeCapacity(.{
+            .caller_symbol_index = edge.caller_symbol_index,
+            .range = edge.range,
+        });
+    }
+    if (matches.items.len == 0) return;
+
     var caller_counts = std.ArrayList(IncomingCallerCount){};
     defer {
         for (caller_counts.items) |count| arena.free(count.ranges);
         caller_counts.deinit(arena);
     }
 
-    for (entry.call_edges) |edge| {
-        if (importedMemberForCallPath(entry, edge, target_path, target_name) == null) continue;
-
-        if (findIncomingCallerCount(caller_counts.items, edge.caller_symbol_index)) |index| {
+    for (matches.items) |match| {
+        if (findIncomingCallerCount(caller_counts.items, match.caller_symbol_index)) |index| {
             caller_counts.items[index].count += 1;
         } else {
             try caller_counts.append(arena, .{
-                .caller_symbol_index = edge.caller_symbol_index,
+                .caller_symbol_index = match.caller_symbol_index,
                 .count = 1,
             });
         }
@@ -83,11 +96,10 @@ pub fn appendIncomingImportedMatches(
         caller_count.ranges = try arena.alloc(frontend.Range, caller_count.count);
     }
 
-    for (entry.call_edges) |edge| {
-        if (importedMemberForCallPath(entry, edge, target_path, target_name) == null) continue;
-        const count_index = findIncomingCallerCount(caller_counts.items, edge.caller_symbol_index) orelse continue;
+    for (matches.items) |match| {
+        const count_index = findIncomingCallerCount(caller_counts.items, match.caller_symbol_index) orelse continue;
         const caller_count = &caller_counts.items[count_index];
-        caller_count.ranges[caller_count.filled] = edge.range;
+        caller_count.ranges[caller_count.filled] = match.range;
         caller_count.filled += 1;
     }
 
@@ -99,12 +111,12 @@ pub fn appendIncomingImportedMatches(
 
         try calls.append(arena, .{
             .from = .{
-                .name = try arena.dupe(u8, sym.name),
+                .name = sym.name,
                 .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
-                .uri = try arena.dupe(u8, uri),
+                .uri = uri,
                 .range = try range_converter.byteRangeToLsp(uri, sym.range),
                 .selectionRange = try range_converter.byteRangeToLsp(uri, sym.selection_range),
-                .detail = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+                .detail = sym.detail,
             },
             .fromRanges = try range_converter.rangesToLsp(uri, caller_count.ranges[0..caller_count.filled]),
         });
@@ -164,12 +176,12 @@ pub fn outgoingCallsWithResolver(
         const from_ranges = try range_converter.rangesToLsp(caller_uri, &.{target.range});
         calls.appendAssumeCapacity(.{
             .to = .{
-                .name = try arena.dupe(u8, resolved.symbol.name),
+                .name = resolved.symbol.name,
                 .kind = @enumFromInt(semantic_index.toLspKind(resolved.symbol.kind)),
-                .uri = try arena.dupe(u8, resolved.uri),
+                .uri = resolved.uri,
                 .range = try range_converter.byteRangeToLsp(resolved.uri, resolved.symbol.range),
                 .selectionRange = try range_converter.byteRangeToLsp(resolved.uri, resolved.symbol.selection_range),
-                .detail = if (resolved.symbol.detail) |d| try arena.dupe(u8, d) else null,
+                .detail = resolved.symbol.detail,
             },
             .fromRanges = from_ranges,
         });
@@ -197,16 +209,21 @@ fn importedMemberForCall(
     return null;
 }
 
-fn importedMemberForCallPath(
+const MatchedIncomingCall = struct {
+    caller_symbol_index: usize,
+    range: frontend.Range,
+};
+
+fn callEdgeForImportedMember(
     entry: *const workspace_index.FileEntry,
-    target: call_hierarchy.CallEdge,
-    target_path: []const u8,
-    target_name: []const u8,
-) ?references.ImportedMemberOccurrence {
-    if (!std.mem.eql(u8, target.callee_name, target_name)) return null;
-    const imported_member = importedMemberForCall(entry, target) orelse return null;
-    if (!std.mem.eql(u8, imported_member.imported_path, target_path)) return null;
-    return imported_member;
+    imported_member: references.ImportedMemberOccurrence,
+) ?call_hierarchy.CallEdge {
+    for (entry.call_edges) |edge| {
+        if (!std.mem.eql(u8, edge.callee_name, imported_member.member_name)) continue;
+        if (!rangesEqual(edge.range, imported_member.range)) continue;
+        return edge;
+    }
+    return null;
 }
 
 const IncomingCallerCount = struct {

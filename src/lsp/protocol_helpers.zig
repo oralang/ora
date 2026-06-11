@@ -128,13 +128,12 @@ pub fn lspPositionToBytePosition(
     encoding: text_edits.PositionEncoding,
     position: frontend.Position,
 ) ?frontend.Position {
-    const offset = line_index.positionToOffset(
+    return protocol_ranges.lspPositionToBytePosition(
         source,
-        position.line,
-        position.character,
+        line_index,
         encoding,
-    ) orelse return null;
-    return line_index.offsetToPosition(source, offset, .utf8);
+        .{ .line = position.line, .character = position.character },
+    );
 }
 
 pub fn toLspPosition(pos: frontend.Position) types.Position {

@@ -14,6 +14,7 @@ pub fn initialize(
 ) !types.InitializeResult {
     try configureWorkspaceRoots(server, params);
     server.position_encoding = protocol_helpers.negotiatePositionEncoding(params);
+    server.supports_hierarchical_document_symbols = supportsHierarchicalDocumentSymbols(params.capabilities);
 
     const capabilities: types.ServerCapabilities = .{
         .positionEncoding = protocol_helpers.toLspPositionEncoding(server.position_encoding),
@@ -83,4 +84,10 @@ fn clearWorkspaceRoots(server: anytype) void {
     server.workspace_roots.clear();
     server.docs.clearImportResolutionCache();
     server.workspace_discovery.clear();
+}
+
+fn supportsHierarchicalDocumentSymbols(capabilities: types.ClientCapabilities) bool {
+    const text_document = capabilities.textDocument orelse return false;
+    const document_symbol = text_document.documentSymbol orelse return false;
+    return document_symbol.hierarchicalDocumentSymbolSupport orelse false;
 }

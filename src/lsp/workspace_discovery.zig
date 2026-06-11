@@ -142,18 +142,18 @@ pub const Cache = struct {
                 };
                 defer self.allocator.free(source);
 
-                var resolution = workspace.resolveDocumentImports(
+                const imports_target = workspace.sourceImportsTargetPath(
                     self.allocator,
                     importer_uri,
+                    normalized_path,
                     source,
                     .{ .workspace_roots = workspace_roots },
+                    target_path,
                 ) catch {
                     self.stats.skipped = addSat(self.stats.skipped, 1);
                     continue;
                 };
-                defer resolution.deinit(self.allocator);
-
-                if (!importsPath(resolution.imports, target_path)) continue;
+                if (!imports_target) continue;
 
                 try docs.putColdDocument(importer_uri, normalized_path, source);
                 try self.appendDiscoveredImporter(&importers, importer_uri, normalized_path);

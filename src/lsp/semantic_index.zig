@@ -35,8 +35,10 @@ pub const Symbol = struct {
 
 pub const SemanticIndex = struct {
     symbols: []Symbol,
+    root_symbol_indexes: []u32 = &.{},
     symbol_depths: []u16 = &.{},
     symbol_position_order: []u32 = &.{},
+    symbol_name_order: []u32 = &.{},
     parse_succeeded: bool,
     builder_capacity_requested: usize = 0,
     builder_items_built: usize = 0,
@@ -45,14 +47,18 @@ pub const SemanticIndex = struct {
 
     pub fn deinit(self: *SemanticIndex, allocator: Allocator) void {
         deinitSymbols(allocator, self.symbols);
+        allocator.free(self.root_symbol_indexes);
         allocator.free(self.symbol_depths);
         allocator.free(self.symbol_position_order);
+        allocator.free(self.symbol_name_order);
     }
 
     pub fn estimatedByteSize(self: *const SemanticIndex) usize {
         var total = mulSat(self.symbols.len, @sizeOf(Symbol));
+        total = addSat(total, mulSat(self.root_symbol_indexes.len, @sizeOf(u32)));
         total = addSat(total, mulSat(self.symbol_depths.len, @sizeOf(u16)));
         total = addSat(total, mulSat(self.symbol_position_order.len, @sizeOf(u32)));
+        total = addSat(total, mulSat(self.symbol_name_order.len, @sizeOf(u32)));
         for (self.symbols) |symbol| {
             total = addSat(total, symbol.name.len);
             if (symbol.detail) |detail| total = addSat(total, detail.len);
@@ -123,14 +129,20 @@ pub fn indexAstFileWithSourceStoreAlloc(
     const builder_items_built = builder.symbols.items.len;
     const symbols = try builder.finish();
     errdefer deinitSymbols(result_allocator, symbols);
+    const root_symbol_indexes = try buildRootSymbolIndexes(result_allocator, symbols);
+    errdefer result_allocator.free(root_symbol_indexes);
     const symbol_depths = try buildSymbolDepths(result_allocator, symbols);
     errdefer result_allocator.free(symbol_depths);
     const symbol_position_order = try buildSymbolPositionOrder(result_allocator, symbols);
     errdefer result_allocator.free(symbol_position_order);
+    const symbol_name_order = try buildSymbolNameOrder(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_name_order);
     return .{
         .symbols = symbols,
+        .root_symbol_indexes = root_symbol_indexes,
         .symbol_depths = symbol_depths,
         .symbol_position_order = symbol_position_order,
+        .symbol_name_order = symbol_name_order,
         .parse_succeeded = parse_succeeded,
         .builder_capacity_requested = builder_capacity_requested,
         .builder_items_built = builder_items_built,
@@ -222,6 +234,22 @@ fn deinitSymbols(allocator: Allocator, symbols: []Symbol) void {
     allocator.free(symbols);
 }
 
+fn buildRootSymbolIndexes(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    var root_count: usize = 0;
+    for (symbols) |symbol| {
+        if (symbol.parent == null) root_count += 1;
+    }
+
+    const indexes = try allocator.alloc(u32, root_count);
+    var out: usize = 0;
+    for (symbols, 0..) |symbol, index| {
+        if (symbol.parent != null) continue;
+        indexes[out] = try symbolIndexU32(index);
+        out += 1;
+    }
+    return indexes;
+}
+
 fn buildSymbolDepths(allocator: Allocator, symbols: []const Symbol) ![]u16 {
     const depths = try allocator.alloc(u16, symbols.len);
     for (symbols, 0..) |_, index| {
@@ -239,6 +267,15 @@ fn buildSymbolPositionOrder(allocator: Allocator, symbols: []const Symbol) ![]u3
     return order;
 }
 
+fn buildSymbolNameOrder(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    const order = try allocator.alloc(u32, symbols.len);
+    for (order, 0..) |*slot, index| {
+        slot.* = try symbolIndexU32(index);
+    }
+    std.mem.sort(u32, order, symbols, lessSymbolName);
+    return order;
+}
+
 fn symbolIndexU32(index: usize) !u32 {
     return std.math.cast(u32, index) orelse error.SymbolIndexOverflow;
 }
@@ -248,6 +285,14 @@ fn lessSymbolStart(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool
     const rhs = symbols[rhs_index];
     if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
     if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs_index < rhs_index;
+}
+
+fn lessSymbolName(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool {
+    const lhs = symbols[lhs_index];
+    const rhs = symbols[rhs_index];
+    const order = std.mem.order(u8, lhs.name, rhs.name);
+    if (order != .eq) return order == .lt;
     return lhs_index < rhs_index;
 }
 
@@ -375,6 +420,46 @@ pub fn findSymbolAtPosition(index: *const SemanticIndex, position: frontend.Posi
     return findSymbolAtPositionLinear(index.symbols, position);
 }
 
+pub fn symbolIndexesWithNamePrefix(index: *const SemanticIndex, prefix: []const u8) ?[]const u32 {
+    if (prefix.len == 0) return null;
+    if (index.symbol_name_order.len != index.symbols.len) return null;
+
+    const start = lowerBoundSymbolName(index.symbols, index.symbol_name_order, prefix);
+    var end = start;
+    while (end < index.symbol_name_order.len) : (end += 1) {
+        const symbol = index.symbols[index.symbol_name_order[end]];
+        if (!std.mem.startsWith(u8, symbol.name, prefix)) break;
+    }
+    return index.symbol_name_order[start..end];
+}
+
+pub fn symbolIndexNamed(index: *const SemanticIndex, name: []const u8) ?usize {
+    if (index.symbol_name_order.len == index.symbols.len) {
+        const start = lowerBoundSymbolName(index.symbols, index.symbol_name_order, name);
+        if (start < index.symbol_name_order.len) {
+            const symbol_index: usize = index.symbol_name_order[start];
+            if (std.mem.eql(u8, index.symbols[symbol_index].name, name)) return symbol_index;
+        }
+        return null;
+    }
+
+    for (index.symbols, 0..) |symbol, symbol_index| {
+        if (std.mem.eql(u8, symbol.name, name)) return symbol_index;
+    }
+    return null;
+}
+
+pub fn symbolIndexWithSelectionRange(index: *const SemanticIndex, range: frontend.Range) ?usize {
+    const symbol_index = findSymbolAtPosition(index, range.start) orelse return null;
+    const symbol = index.symbols[symbol_index];
+    if (rangesEqual(symbol.selection_range, range)) return symbol_index;
+
+    for (index.symbols, 0..) |candidate, candidate_index| {
+        if (rangesEqual(candidate.selection_range, range)) return candidate_index;
+    }
+    return null;
+}
+
 pub fn findSymbolAtPositionLinear(symbols: []const Symbol, position: frontend.Position) ?usize {
     var best_index: ?usize = null;
     var best_in_selection = false;
@@ -421,6 +506,7 @@ fn findSymbolAtPositionIndexed(
         const symbol_index: usize = symbol_position_order[i];
         const symbol = symbols[symbol_index];
         const in_selection = rangeContainsPosition(symbol.selection_range, position);
+        if (in_selection) return symbol_index;
         const in_range = in_selection or rangeContainsPosition(symbol.range, position);
         if (!in_range) continue;
 
@@ -459,6 +545,32 @@ fn upperBoundSymbolStart(
         }
     }
     return low;
+}
+
+fn lowerBoundSymbolName(
+    symbols: []const Symbol,
+    symbol_name_order: []const u32,
+    prefix: []const u8,
+) usize {
+    var low: usize = 0;
+    var high: usize = symbol_name_order.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const symbol = symbols[symbol_name_order[mid]];
+        if (std.mem.order(u8, symbol.name, prefix) == .lt) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn rangesEqual(a: frontend.Range, b: frontend.Range) bool {
+    return a.start.line == b.start.line and
+        a.start.character == b.start.character and
+        a.end.line == b.end.line and
+        a.end.character == b.end.character;
 }
 
 fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, function_decl: compiler.ast.FunctionItem) ![]u8 {

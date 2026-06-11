@@ -2,10 +2,11 @@ const std = @import("std");
 const lsp = @import("lsp");
 const ora_root = @import("ora_root");
 
-const frontend = ora_root.lsp.frontend;
 const references_api = ora_root.lsp.references;
 const rename_api = ora_root.lsp.rename;
+const text_edits = ora_root.lsp.text_edits;
 
+const protocol_ranges = @import("protocol_ranges.zig");
 const rename_response = @import("rename_response.zig");
 const uri_ranges = @import("uri_ranges.zig");
 
@@ -14,33 +15,18 @@ const types = lsp.types;
 
 pub fn prepareRename(
     server: anytype,
-    arena: Allocator,
+    _: Allocator,
     params: types.PrepareRenameParams,
 ) !lsp.ResultType("textDocument/prepareRename") {
     const uri = params.textDocument.uri;
-    const position: frontend.Position = .{
-        .line = params.position.line,
-        .character = params.position.character,
-    };
+    const prepared = (try server.docs.prepareRenameForUri(uri, params.position, server.position_encoding)) orelse return null;
 
-    const source = server.docs.sourceForUri(uri) orelse return null;
-    const workspace_entry = (try server.docs.workspaceEntryForUri(uri, .{ .occurrences = true }, server.workspaceRootPaths(), &server.phase_counters)) orelse return null;
-    const occurrence_index = workspace_entry.occurrenceIndex();
-    const target = occurrence_index.occurrenceAt(position) orelse return null;
-
-    var response_scope = server.responseScope();
-    defer response_scope.deinit();
-    const result = try rename_response.buildPrepare(
-        arena,
-        source,
-        &workspace_entry.line_index,
-        server.position_encoding,
-        target.definition_range,
-        target.name,
-    );
-    if (result == null) return null;
+    const result: lsp.ResultType("textDocument/prepareRename") = .{ .literal_1 = .{
+        .range = prepared.range,
+        .placeholder = prepared.placeholder,
+    } };
     server.response_counters.recordItems(.prepare_rename, types.Range, 1);
-    server.response_counters.recordStringBytes(.prepare_rename, target.name.len);
+    server.response_counters.recordStringBytes(.prepare_rename, prepared.placeholder.len);
     return result;
 }
 
@@ -49,24 +35,34 @@ pub fn rename(
     arena: Allocator,
     params: types.RenameParams,
 ) !lsp.ResultType("textDocument/rename") {
+    const uri = params.textDocument.uri;
+    const dependency_generation = server.dependencies.generation();
+    if (server.docs.renameCacheForUri(uri, params.position, server.position_encoding, dependency_generation, params.newName)) |cached| {
+        server.response_counters.recordItems(.text_edit, types.TextEdit, cached.edit_count);
+        server.response_counters.recordStringBytes(.text_edit, cached.string_bytes);
+        return .{ .changes = cached.changes };
+    }
     if (!rename_api.isValidIdentifier(params.newName)) return null;
 
-    const uri = params.textDocument.uri;
-    const position: frontend.Position = .{
-        .line = params.position.line,
-        .character = params.position.character,
-    };
-
     const source = server.docs.sourceForUri(uri) orelse return null;
-    const workspace_entry = (try server.docs.workspaceEntryForUri(uri, .{ .occurrences = true }, server.workspaceRootPaths(), &server.phase_counters)) orelse return null;
-    const occurrence_index = workspace_entry.occurrenceIndex();
+    const line_index = (try server.docs.lineIndexForUri(uri)) orelse return null;
+    if (server.docs.occurrenceIndexForUri(uri) == null) {
+        try server.docs.rebuildOccurrenceIndex(uri, source, &server.phase_counters);
+    }
+    const occurrence_index = server.docs.occurrenceIndexForUri(uri) orelse return null;
+    const position = protocol_ranges.lspPositionToBytePosition(
+        source,
+        line_index,
+        server.position_encoding,
+        params.position,
+    ) orelse return null;
     const target = occurrence_index.occurrenceAt(position) orelse return null;
 
     var response_scope = server.responseScope();
     defer response_scope.deinit();
     const same_file_ranges = try references_api.referencesAtOccurrenceIndex(
         arena,
-        &occurrence_index,
+        occurrence_index,
         target.name,
         target.definition_range,
         true,
@@ -78,7 +74,7 @@ pub fn rename(
         arena,
         &changes,
         uri,
-        .{ .source = source, .line_index = &workspace_entry.line_index },
+        .{ .source = source, .line_index = line_index },
         same_file_ranges,
         params.newName,
         server.position_encoding,
@@ -86,8 +82,24 @@ pub fn rename(
 
     const imported_edit_count = try appendImportedChanges(server, arena, &changes, uri, target.name, params.newName);
     const edit_count = addSat(same_file_ranges.len, imported_edit_count);
+    const string_bytes = mulSat(edit_count, params.newName.len);
+    if (try server.docs.cacheRenameForUri(
+        uri,
+        params.position,
+        server.position_encoding,
+        dependency_generation,
+        params.newName,
+        changes,
+        edit_count,
+        string_bytes,
+    )) |cached| {
+        server.response_counters.recordItems(.text_edit, types.TextEdit, cached.edit_count);
+        server.response_counters.recordStringBytes(.text_edit, cached.string_bytes);
+        return .{ .changes = cached.changes };
+    }
+
     server.response_counters.recordItems(.text_edit, types.TextEdit, edit_count);
-    server.response_counters.recordStringBytes(.text_edit, mulSat(edit_count, params.newName.len));
+    server.response_counters.recordStringBytes(.text_edit, string_bytes);
 
     return .{ .changes = changes };
 }
@@ -109,18 +121,22 @@ fn appendImportedChanges(
     for (server.dependencies.directImporters(target_path)) |other_uri| {
         if (std.mem.eql(u8, other_uri, target_uri)) continue;
         if (!server.docs.isOpenDocument(other_uri)) continue;
-        const workspace_entry = (try server.docs.workspaceEntryForUri(other_uri, .{ .symbols = false, .imported_members = true }, server.workspaceRootPaths(), &server.phase_counters)) orelse continue;
-        const imported_member_index = workspace_entry.importedMemberIndex();
+        if (try putCachedImportedChange(server, arena, changes, other_uri, target_path, target_name, new_name)) |count| {
+            total_edits = addSat(total_edits, count);
+            continue;
+        }
+        const imported_doc = (try server.importedMemberDocumentForUri(other_uri)) orelse continue;
         total_edits = addSat(total_edits, try putImportedChange(
             server,
             arena,
             changes,
             other_uri,
-            workspace_entry,
-            imported_member_index.occurrences,
+            .{ .source = imported_doc.source, .line_index = imported_doc.line_index },
+            imported_doc.index.occurrences,
             target_path,
             target_name,
             new_name,
+            server.position_encoding,
         ));
     }
 
@@ -129,21 +145,48 @@ fn appendImportedChanges(
         if (std.mem.eql(u8, importer.uri, target_uri)) continue;
         if (server.docs.isOpenDocument(importer.uri)) continue;
 
-        const workspace_entry = (try server.coldImportedMemberWorkspaceEntry(importer)) orelse continue;
-        const imported_member_index = workspace_entry.importedMemberIndex();
+        try server.ensureColdDocumentForPath(importer.uri, importer.normalized_path);
+        if (try putCachedImportedChange(server, arena, changes, importer.uri, target_path, target_name, new_name)) |count| {
+            total_edits = addSat(total_edits, count);
+            continue;
+        }
+        const imported_doc = (try server.coldImportedMemberDocument(importer)) orelse continue;
         total_edits = addSat(total_edits, try putImportedChange(
             server,
             arena,
             changes,
             importer.uri,
-            workspace_entry,
-            imported_member_index.occurrences,
+            .{ .source = imported_doc.source, .line_index = imported_doc.line_index },
+            imported_doc.index.occurrences,
             target_path,
             target_name,
             new_name,
+            server.position_encoding,
         ));
     }
     return total_edits;
+}
+
+fn putCachedImportedChange(
+    server: anytype,
+    arena: Allocator,
+    changes: *lsp.parser.Map(types.DocumentUri, []const types.TextEdit),
+    uri: []const u8,
+    target_path: []const u8,
+    target_name: []const u8,
+    new_name: []const u8,
+) !?usize {
+    if (server.docs.importedMemberRenameCacheForUri(
+        uri,
+        target_path,
+        target_name,
+        new_name,
+        server.position_encoding,
+    )) |cached| {
+        try changes.map.put(arena, uri, cached.edits);
+        return cached.edits.len;
+    }
+    return null;
 }
 
 fn putImportedChange(
@@ -151,12 +194,24 @@ fn putImportedChange(
     arena: Allocator,
     changes: *lsp.parser.Map(types.DocumentUri, []const types.TextEdit),
     uri: []const u8,
-    workspace_entry: anytype,
+    indexed_source: uri_ranges.IndexedSource,
     occurrences: anytype,
     target_path: []const u8,
     target_name: []const u8,
     new_name: []const u8,
+    encoding: text_edits.PositionEncoding,
 ) !usize {
+    if (server.docs.importedMemberRenameCacheForUri(
+        uri,
+        target_path,
+        target_name,
+        new_name,
+        encoding,
+    )) |cached| {
+        try changes.map.put(arena, uri, cached.edits);
+        return cached.edits.len;
+    }
+
     var match_count: usize = 0;
     for (occurrences) |occurrence| {
         if (!std.mem.eql(u8, occurrence.imported_path, target_path)) continue;
@@ -165,29 +220,33 @@ fn putImportedChange(
     }
     if (match_count == 0) return 0;
 
-    const match_ranges = try arena.alloc(frontend.Range, match_count);
-    var range_index: usize = 0;
+    const edits = try arena.alloc(types.TextEdit, match_count);
+    var edit_index: usize = 0;
     for (occurrences) |occurrence| {
         if (!std.mem.eql(u8, occurrence.imported_path, target_path)) continue;
         if (!std.mem.eql(u8, occurrence.member_name, target_name)) continue;
-        match_ranges[range_index] = occurrence.range;
-        range_index += 1;
+        edits[edit_index] = .{
+            .range = uri_ranges.byteRangeToLsp(indexed_source, encoding, occurrence.range),
+            .newText = new_name,
+        };
+        edit_index += 1;
     }
 
-    const indexed_source: ?uri_ranges.IndexedSource = if (server.docs.sourceForUri(uri)) |source|
-        .{ .source = source, .line_index = &workspace_entry.line_index }
-    else
-        null;
-    _ = try rename_response.putChange(
-        arena,
-        changes,
+    const cached = (try server.docs.cacheImportedMemberRenameForUri(
         uri,
-        indexed_source,
-        match_ranges,
+        target_path,
+        target_name,
         new_name,
-        server.position_encoding,
-    );
-    return match_count;
+        encoding,
+        edits,
+        mulSat(edits.len, new_name.len),
+    )) orelse {
+        try changes.map.put(arena, uri, edits);
+        return edits.len;
+    };
+
+    try changes.map.put(arena, uri, cached.edits);
+    return cached.edits.len;
 }
 
 fn addSat(a: usize, b: usize) usize {

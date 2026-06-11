@@ -303,6 +303,12 @@ pub fn completionCandidatesAtPosition(
     return completionCandidatesAt(allocator, source, cursor_offset, prefix, index, aliases);
 }
 
+pub fn isCompletionAccessContext(source: []const u8, position: frontend.Position) bool {
+    const cursor_offset = positionToByteOffsetOnLine(source, position);
+    const prefix = identifierPrefixAtOffset(source, cursor_offset);
+    return completionChainForPrefix(source, cursor_offset, prefix) != null;
+}
+
 const Word = struct {
     text: []const u8,
     range: frontend.Range,

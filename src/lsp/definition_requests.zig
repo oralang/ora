@@ -21,16 +21,27 @@ pub fn definition(
     params: types.DefinitionParams,
 ) !lsp.ResultType("textDocument/definition") {
     const uri = params.textDocument.uri;
+
+    if (server.docs.definitionCacheForUri(uri, params.position, server.position_encoding, &server.dependencies)) |cached| {
+        server.response_counters.recordItems(.definition, types.Location, 1);
+        server.response_counters.recordStringBytes(.definition, cached.string_bytes);
+        return .{ .Definition = .{ .Location = cached.location } };
+    }
+
+    if (try server.docs.sameFileDefinitionRangeForUri(uri, params.position, server.position_encoding, &server.phase_counters)) |range| {
+        server.response_counters.recordItems(.definition, types.Location, 1);
+        server.response_counters.recordStringBytes(.definition, uri.len);
+        return .{ .Definition = .{ .Location = .{ .uri = uri, .range = range } } };
+    }
+
     const source = server.docs.sourceForUri(uri) orelse return null;
     const position: frontend.Position = .{
         .line = params.position.line,
         .character = params.position.character,
     };
 
-    if (try cachedSameFileDefinitionFromOccurrences(server, arena, uri, source, params.position)) |location| {
-        return .{ .Definition = .{ .Location = location } };
-    }
-    if (try cachedImportedMemberDefinition(server, arena, uri, source, params.position)) |location| {
+    const dependency_generation = server.dependencies.generation();
+    if (try cachedImportedMemberDefinition(server, arena, uri, source, params.position, dependency_generation)) |location| {
         return .{ .Definition = .{ .Location = location } };
     }
     if (try stdDocsDefinition(server, arena, uri, source, params.position)) |location| {
@@ -99,56 +110,24 @@ fn stdDocsDefinition(
     };
 }
 
-fn cachedSameFileDefinitionFromOccurrences(
-    server: anytype,
-    arena: Allocator,
-    uri: []const u8,
-    source: []const u8,
-    lsp_position: types.Position,
-) !?types.Location {
-    const occurrence_index = server.docs.occurrenceIndexForUri(uri) orelse return null;
-    const line_index = (try server.docs.lineIndexForUri(uri)) orelse return null;
-    const position = protocol_ranges.lspPositionToBytePosition(
-        source,
-        line_index,
-        server.position_encoding,
-        lsp_position,
-    ) orelse frontend.Position{
-        .line = lsp_position.line,
-        .character = lsp_position.character,
-    };
-    const target = occurrence_index.occurrenceAt(position) orelse return null;
-
-    if (protocol_helpers.occurrenceIsMemberAccess(source, line_index, target.range)) return null;
-    if (protocol_helpers.definitionLineLooksLikeImportAlias(source, line_index, target.definition_range)) return null;
-
-    var range_converter = range_converters.OpenDocument(@TypeOf(server)){
-        .arena = arena,
-        .handler = server,
-        .encoding = server.position_encoding,
-    };
-    var response_scope = server.responseScope();
-    defer response_scope.deinit();
-    const location = try definition_response.build(
-        arena,
-        uri,
-        .{ .range = target.definition_range },
-        &range_converter,
-    );
-    server.response_counters.recordItems(.definition, types.Location, 1);
-    server.response_counters.recordStringBytes(.definition, uri.len);
-    return location;
-}
-
 fn cachedImportedMemberDefinition(
     server: anytype,
     arena: Allocator,
     uri: []const u8,
     source: []const u8,
     lsp_position: types.Position,
+    dependency_generation: u64,
 ) !?types.Location {
     const line_index = (try server.docs.lineIndexForUri(uri)) orelse return null;
     const access = protocol_helpers.importedMemberAccessAtLspPosition(source, line_index, server.position_encoding, lsp_position) orelse return null;
+    if (server.docs.importedMemberIndexForUri(uri) == null) {
+        const import_resolution = (try server.docs.importResolutionForUri(
+            uri,
+            server.workspaceRootPaths(),
+            &server.phase_counters,
+        )) orelse return null;
+        try server.docs.rebuildImportedMemberIndex(uri, import_resolution.imports, &server.phase_counters);
+    }
     const imported_index = server.docs.importedMemberIndexForUri(uri) orelse return null;
 
     for (imported_index.occurrences) |occurrence| {
@@ -156,7 +135,8 @@ fn cachedImportedMemberDefinition(
         if (!std.mem.eql(u8, occurrence.member_name, access.member_name)) continue;
         if (!protocol_helpers.frontendRangesEqual(occurrence.range, access.member_range)) continue;
 
-        const target_uri = try workspace.pathToFileUri(arena, occurrence.imported_path);
+        const target_uri = server.dependencies.uriForPath(occurrence.imported_path) orelse
+            try workspace.pathToFileUri(arena, occurrence.imported_path);
         try server.ensureColdDocumentForPath(target_uri, occurrence.imported_path);
 
         const target_text = server.docs.sourceForUri(target_uri) orelse return null;
@@ -171,13 +151,17 @@ fn cachedImportedMemberDefinition(
 
         var response_scope = server.responseScope();
         defer response_scope.deinit();
-        const location: types.Location = .{
-            .uri = target_uri,
-            .range = range,
-        };
+        const cached = (try server.docs.cacheImportedDefinitionForUri(
+            uri,
+            lsp_position,
+            server.position_encoding,
+            dependency_generation,
+            target_uri,
+            range,
+        )) orelse return null;
         server.response_counters.recordItems(.definition, types.Location, 1);
-        server.response_counters.recordStringBytes(.definition, target_uri.len);
-        return location;
+        server.response_counters.recordStringBytes(.definition, cached.string_bytes);
+        return cached.location;
     }
 
     return null;

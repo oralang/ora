@@ -3,7 +3,6 @@ const lsp = @import("lsp");
 
 const cache_stats_response = @import("cache_stats_response.zig");
 const cache_stats_snapshot = @import("cache_stats_snapshot.zig");
-const range_converters = @import("range_converters.zig");
 const response_stats = @import("response_stats.zig");
 const workspace_symbol_response = @import("workspace_symbol_response.zig");
 
@@ -49,6 +48,12 @@ pub fn symbol(
     params: types.WorkspaceSymbolParams,
 ) !lsp.ResultType("workspace/symbol") {
     const query = params.query;
+    if (server.docs.workspaceSymbolCache(query, server.position_encoding)) |cached| {
+        server.response_counters.recordItems(.workspace_symbol, types.SymbolInformation, cached.items.len);
+        server.response_counters.recordStringBytes(.workspace_symbol, cached.string_bytes);
+        return .{ .array_of_SymbolInformation = cached.items };
+    }
+
     var response_scope = server.responseScope();
     defer response_scope.deinit();
     var symbols = std.ArrayList(types.SymbolInformation){};
@@ -57,29 +62,29 @@ pub fn symbol(
     var doc_it = server.docs.docs.iterator();
     while (doc_it.next()) |entry| {
         const doc_uri = entry.key_ptr.*;
-        const workspace_entry = (try server.docs.workspaceEntryForUri(doc_uri, .symbols_only, server.workspaceRootPaths(), &server.phase_counters)) orelse continue;
-        var range_converter = range_converters.OpenDocument(@TypeOf(server)){
-            .arena = arena,
-            .handler = server,
-            .encoding = server.position_encoding,
-        };
+        const source = server.docs.sourceForUri(doc_uri) orelse continue;
+        const line_index = (try server.docs.lineIndexForUri(doc_uri)) orelse continue;
+        const semantic_index = (try server.docs.semanticIndexForUri(doc_uri, &server.phase_counters)) orelse continue;
 
-        const stats = try workspace_symbol_response.appendEntrySymbols(
+        const stats = try workspace_symbol_response.appendOpenDocumentSymbols(
             arena,
             &symbols,
+            source,
+            line_index,
+            server.position_encoding,
             doc_uri,
-            workspace_entry,
+            semantic_index,
             query,
-            &range_converter,
         );
         string_bytes = addSat(string_bytes, stats.string_bytes);
     }
 
     if (symbols.items.len == 0) return null;
     const result = try symbols.toOwnedSlice(arena);
-    server.response_counters.recordItems(.workspace_symbol, types.SymbolInformation, result.len);
-    server.response_counters.recordStringBytes(.workspace_symbol, string_bytes);
-    return .{ .array_of_SymbolInformation = result };
+    const cached = try server.docs.cacheWorkspaceSymbols(query, server.position_encoding, result, string_bytes);
+    server.response_counters.recordItems(.workspace_symbol, types.SymbolInformation, cached.items.len);
+    server.response_counters.recordStringBytes(.workspace_symbol, cached.string_bytes);
+    return .{ .array_of_SymbolInformation = cached.items };
 }
 
 fn addSat(a: usize, b: usize) usize {

@@ -69,6 +69,111 @@ test "lsp workspace: resolves relative imports in workspace" {
     try testing.expectEqualStrings("lib.ora", std.fs.path.basename(result.imports[0].resolved_path));
 }
 
+test "lsp workspace: sourceImportsTargetPath detects target import without full resolution" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/entry.ora",
+        .data = "const lib = @import(\"./lib.ora\");",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/lib.ora",
+        .data = "contract Lib { }",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/other.ora",
+        .data = "contract Other { }",
+    });
+
+    const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
+    defer allocator.free(entry_path_rel);
+    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    defer allocator.free(entry_path);
+
+    const lib_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/lib.ora");
+    defer allocator.free(lib_path_rel);
+    const lib_path = try std.fs.cwd().realpathAlloc(allocator, lib_path_rel);
+    defer allocator.free(lib_path);
+
+    const other_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/other.ora");
+    defer allocator.free(other_path_rel);
+    const other_path = try std.fs.cwd().realpathAlloc(allocator, other_path_rel);
+    defer allocator.free(other_path);
+
+    const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
+    defer allocator.free(workspace_root_rel);
+    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    defer allocator.free(workspace_root);
+
+    const uri = try toFileUriAlloc(allocator, entry_path);
+    defer allocator.free(uri);
+
+    const roots = [_][]const u8{workspace_root};
+    try testing.expect(try workspace.sourceImportsTargetPath(
+        allocator,
+        uri,
+        entry_path,
+        "const lib = @import(\"./lib.ora\");",
+        .{ .workspace_roots = roots[0..] },
+        lib_path,
+    ));
+    try testing.expect(!try workspace.sourceImportsTargetPath(
+        allocator,
+        uri,
+        entry_path,
+        "const lib = @import(\"./lib.ora\");",
+        .{ .workspace_roots = roots[0..] },
+        other_path,
+    ));
+}
+
+test "lsp workspace: sourceImportsTargetPath accepts spaced and raw imports" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("project");
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/entry.ora",
+        .data = "const lib = @ import(r\"./lib.ora\");",
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "project/lib.ora",
+        .data = "contract Lib { }",
+    });
+
+    const entry_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/entry.ora");
+    defer allocator.free(entry_path_rel);
+    const entry_path = try std.fs.cwd().realpathAlloc(allocator, entry_path_rel);
+    defer allocator.free(entry_path);
+
+    const lib_path_rel = try pathFromTmpAlloc(allocator, tmp, "project/lib.ora");
+    defer allocator.free(lib_path_rel);
+    const lib_path = try std.fs.cwd().realpathAlloc(allocator, lib_path_rel);
+    defer allocator.free(lib_path);
+
+    const workspace_root_rel = try pathFromTmpAlloc(allocator, tmp, "project");
+    defer allocator.free(workspace_root_rel);
+    const workspace_root = try std.fs.cwd().realpathAlloc(allocator, workspace_root_rel);
+    defer allocator.free(workspace_root);
+
+    const uri = try toFileUriAlloc(allocator, entry_path);
+    defer allocator.free(uri);
+
+    const roots = [_][]const u8{workspace_root};
+    try testing.expect(try workspace.sourceImportsTargetPath(
+        allocator,
+        uri,
+        entry_path,
+        "const lib = @ import(r\"./lib.ora\");",
+        .{ .workspace_roots = roots[0..] },
+        lib_path,
+    ));
+}
+
 test "lsp workspace: reports relative import without .ora extension" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});

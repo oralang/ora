@@ -19,6 +19,13 @@ pub fn build(arena: Allocator, ranges: []const folding.FoldingRange) !?[]types.F
 pub fn buildWithStats(arena: Allocator, ranges: []const folding.FoldingRange) !BuildResult {
     if (ranges.len == 0) return .{ .items = null, .item_count = 0 };
 
+    const result = try buildSlice(arena, ranges);
+    return .{ .items = result, .item_count = result.len };
+}
+
+pub fn buildSlice(arena: Allocator, ranges: []const folding.FoldingRange) ![]types.FoldingRange {
+    if (ranges.len == 0) return &.{};
+
     const result = try arena.alloc(types.FoldingRange, ranges.len);
     for (ranges, 0..) |range, index| {
         result[index] = .{
@@ -31,6 +38,5 @@ pub fn buildWithStats(arena: Allocator, ranges: []const folding.FoldingRange) !B
             },
         };
     }
-
-    return .{ .items = result, .item_count = result.len };
+    return result;
 }

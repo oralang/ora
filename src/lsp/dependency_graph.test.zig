@@ -52,6 +52,19 @@ test "dependency graph: direct importers exclude transitive dependents" {
     try testing.expectEqualStrings("file:///tmp/b.ora", direct[0]);
 }
 
+test "dependency graph: uriForPath borrows open uri for normalized path" {
+    const allocator = testing.allocator;
+    var graph = graph_mod.Graph.init(allocator);
+    defer graph.deinit();
+
+    const imports = [_][]const u8{};
+    try graph.upsert("file:///tmp/a.ora", "/tmp/a.ora", imports[0..]);
+
+    const uri = graph.uriForPath("/tmp/a.ora") orelse return error.ExpectedUri;
+    try testing.expectEqualStrings("file:///tmp/a.ora", uri);
+    try testing.expect(graph.uriForPath("/tmp/missing.ora") == null);
+}
+
 test "dependency graph: remove document updates reverse index" {
     const allocator = testing.allocator;
     var graph = graph_mod.Graph.init(allocator);

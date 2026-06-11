@@ -57,6 +57,35 @@ test "lsp document link: converts import path ranges to utf16" {
     try std.testing.expectEqual(expected_end.character, links[0].range.end.character);
 }
 
+test "lsp document link: uses cached import specifier range" {
+    const source =
+        \\const marker = "lib/math.ora";
+        \\const Math = @import("lib/math.ora");
+    ;
+    const import_offset = std.mem.lastIndexOf(u8, source, "lib/math.ora") orelse return error.ExpectedSpecifier;
+
+    var lines = try line_index.LineIndex.init(std.testing.allocator, source);
+    defer lines.deinit(std.testing.allocator);
+
+    const imports = [_]workspace.ResolvedImport{.{
+        .specifier = "lib/math.ora",
+        .alias = "Math",
+        .resolved_path = "/tmp/lib/math.ora",
+        .specifier_range = .{
+            .start = @intCast(import_offset),
+            .end = @intCast(import_offset + "lib/math.ora".len),
+        },
+    }};
+
+    var response_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer response_arena.deinit();
+
+    const links = (try document_link.build(response_arena.allocator(), source, &lines, .utf8, &imports)) orelse return error.ExpectedLinks;
+
+    try std.testing.expectEqual(@as(u32, 1), links[0].range.start.line);
+    try std.testing.expectEqual(@as(u32, 22), links[0].range.start.character);
+}
+
 test "lsp document link: returns null when no import specifier range matches" {
     const source = "pub fn run() -> u256 { return 1; }";
 

@@ -24,9 +24,14 @@ pub fn build(
     errdefer links.deinit(arena);
 
     for (imports) |import_item| {
-        const path_range = findImportPathRange(source, import_item.specifier) orelse continue;
+        const path_range = if (import_item.specifier_range) |range|
+            protocol_ranges.textRangeToLsp(source, line_index, encoding, range)
+        else if (findImportPathRange(source, import_item.specifier)) |range|
+            protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, range)
+        else
+            continue;
         try links.append(arena, .{
-            .range = protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, path_range),
+            .range = path_range,
             .target = try workspace.pathToFileUri(arena, import_item.resolved_path),
             .tooltip = try std.fmt.allocPrint(arena, "Open {s}", .{import_item.specifier}),
         });
