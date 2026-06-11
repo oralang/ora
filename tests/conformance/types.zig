@@ -24,6 +24,7 @@ pub const ExpectedOutcome = union(enum) {
     returns_static: ExpectedStaticReturn,
     reverts_empty,
     reverts_selector: [4]u8,
+    reverts_data: []const u8,
 };
 
 pub const StorageAssertion = struct {

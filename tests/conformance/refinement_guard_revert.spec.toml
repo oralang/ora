@@ -1,0 +1,33 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "take_min(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [150]
+returns = { u256 = 150 }
+
+# Boundary refinement check reverts with the canonical decode-error word (10).
+[[call]]
+fn = "take_min(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [99]
+reverts = { data = "0x000000000000000000000000000000000000000000000000000000000000000a" }
+
+[[call]]
+fn = "take_range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [15]
+returns = { u256 = 15 }
+
+[[call]]
+fn = "take_range(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [21]
+reverts = { data = "0x000000000000000000000000000000000000000000000000000000000000000a" }

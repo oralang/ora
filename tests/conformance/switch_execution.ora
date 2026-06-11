@@ -1,0 +1,9 @@
+contract SwitchExecution {
+    pub fn classify(x: u256) -> u256 {
+        switch (x) {
+            0 => { return 100; }
+            1 => { return 200; }
+            else => { return 999; }
+        }
+    }
+}

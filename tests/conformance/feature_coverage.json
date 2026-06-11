@@ -64,7 +64,8 @@
     {
       "id": "dispatcher.value_transfer",
       "area": "dispatcher_abi",
-      "skip": "no spec exercises nonzero call value or balance effects - T1.2 backfill"
+      "behavior": "Non-payable by default: dispatcher REVERTs (0,0) on nonzero call value before selector dispatch; std.msg.value() reads 0 on the zero path. No payable surface yet",
+      "specs": ["tests/conformance/value_transfer.spec.toml"]
     },
     {
       "id": "abi.source_encode_decode_roundtrip",
@@ -277,12 +278,14 @@
     {
       "id": "control_flow.switch_execution",
       "area": "control_flow",
-      "skip": "no executed spec drives switch/match arms at runtime - T1.2"
+      "behavior": "switch over runtime value takes each literal arm and else",
+      "specs": ["tests/conformance/switch_execution.spec.toml"]
     },
     {
       "id": "refinements.runtime_guard_revert",
       "area": "refinements",
-      "skip": "guards pinned by sir_text golden only; no executed revert assertion - T1.2 batch 2"
+      "behavior": "MinValue/InRange refinement params: in-range args execute, violating args REVERT at the boundary guard",
+      "specs": ["tests/conformance/refinement_guard_revert.spec.toml"]
     },
     {
       "id": "traits.monomorphized_methods",
@@ -302,7 +305,8 @@
     {
       "id": "enums.storage_roundtrip",
       "area": "adt_enums",
-      "skip": "no executed enum store/load/match spec - T1.2"
+      "behavior": "Enum stored, re-read, compared; ordinal raw-slot parity",
+      "specs": ["tests/conformance/enum_storage_roundtrip.spec.toml"]
     },
     {
       "id": "adt.payload_match_execution",
@@ -317,7 +321,8 @@
     {
       "id": "tuples.static_return",
       "area": "tuples",
-      "skip": "unit-level coverage only (compiler.test.match error-union tuple returns); no standalone conformance spec - T1.2"
+      "behavior": "Static tuple returns (uint,uint) and (uint,bool) ABI-encode correctly",
+      "specs": ["tests/conformance/tuple_static_return.spec.toml"]
     }
   ]
 }

@@ -291,7 +291,7 @@ fn assignField(comptime Builder: type, allocator: std.mem.Allocator, builder: *B
         @field(builder.*, field_name) = if (comptime std.mem.eql(u8, field_name, "returns"))
             try parseReturns(value)
         else if (comptime std.mem.eql(u8, field_name, "reverts"))
-            try parseReverts(value)
+            try parseReverts(allocator, value)
         else
             @compileError("ExpectedOutcome field must be returns or reverts");
         return;
@@ -425,16 +425,17 @@ fn parseReturns(value: []const u8) !types.ExpectedOutcome {
     } };
 }
 
-fn parseRevertSelector(value: []const u8) ![4]u8 {
-    const kv = try parseInlineObject(value);
-    if (!std.mem.eql(u8, kv.key, "selector")) return error.UnsupportedRevertExpectation;
-    return try abi.parseSelector(try abi.parseString(kv.value));
-}
-
-fn parseReverts(value: []const u8) !types.ExpectedOutcome {
+fn parseReverts(allocator: std.mem.Allocator, value: []const u8) !types.ExpectedOutcome {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (std.mem.eql(u8, trimmed, "{}")) return .reverts_empty;
-    return .{ .reverts_selector = try parseRevertSelector(value) };
+    const kv = try parseInlineObject(value);
+    if (std.mem.eql(u8, kv.key, "selector")) {
+        return .{ .reverts_selector = try abi.parseSelector(try abi.parseString(kv.value)) };
+    }
+    if (std.mem.eql(u8, kv.key, "data")) {
+        return .{ .reverts_data = try abi.parseHexBytes(allocator, try abi.parseString(kv.value)) };
+    }
+    return error.UnsupportedRevertExpectation;
 }
 
 fn parseTopicArray(allocator: std.mem.Allocator, value: []const u8) ![]u256 {

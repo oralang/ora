@@ -232,3 +232,40 @@ test "conformance spec parser rejects calls with multiple outcomes" {
     ;
     try testing.expectError(error.MultipleOutcomes, spec.parse(testing.allocator, source));
 }
+
+test "conformance spec parser parses exact revert data and rejects unknown revert keys" {
+    const source =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "get()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\reverts = { data = "0x000000000000000000000000000000000000000000000000000000000000000a" }
+    ;
+    var parsed = try spec.parse(testing.allocator, source);
+    defer parsed.deinit();
+    const outcome = parsed.value.calls[0].outcome;
+    try testing.expect(outcome == .reverts_data);
+    try testing.expectEqual(@as(usize, 32), outcome.reverts_data.len);
+    try testing.expectEqual(@as(u8, 0x0a), outcome.reverts_data[31]);
+
+    const bad_source =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "get()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\reverts = { payload = "0x0a" }
+    ;
+    try testing.expectError(error.UnsupportedRevertExpectation, spec.parse(testing.allocator, bad_source));
+}

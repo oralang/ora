@@ -312,6 +312,10 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
                 try testing.expect(result.output.len >= 4);
                 try testing.expectEqualSlices(u8, &expected, result.output[0..4]);
             },
+            .reverts_data => |expected| {
+                try testing.expect(!result.success);
+                try testing.expectEqualSlices(u8, expected, result.output);
+            },
         }
 
         try testing.expectEqual(call.logs.len, result.logs.len);
