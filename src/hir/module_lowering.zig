@@ -168,10 +168,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
                 var has_explicit_values = false;
-                var next_value: i64 = 0;
+                var next_value: ?i64 = 0;
                 for (template_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
-                    const value_attr = try @This().lowerInstantiatedEnumVariantValue(self, instantiated, variant.name, instantiated.variants[index].explicit_value, repr_type, &next_value, &has_explicit_values);
+                    const value_attr = try @This().lowerInstantiatedEnumVariantValue(self, instantiated, variant, instantiated.variants[index].explicit_value, repr_type, &next_value, &has_explicit_values);
                     variant_values[index] = value_attr;
                 }
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_names"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_names.len), variant_names.ptr));
@@ -1168,7 +1168,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
                 var has_explicit_values = false;
-                var next_value: i64 = 0;
+                var next_value: ?i64 = 0;
                 for (enum_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
                     variant_values[index] = try @This().lowerEnumVariantValue(self, enum_item, variant, repr_type, &next_value, &has_explicit_values);
@@ -1198,35 +1198,72 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             enum_item: ast.EnumItem,
             variant: ast.EnumVariant,
             repr_type: mlir.MlirType,
-            next_value: *i64,
+            next_value: *?i64,
             has_explicit_values: *bool,
         ) anyerror!mlir.MlirAttribute {
             if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
                 const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk @This().enumStringValue(self, expr_id) orelse "";
+                    break :blk @This().enumStringValue(self, expr_id) orelse {
+                        try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' must be a string literal", .{ enum_item.name, variant.name });
+                        break :blk "";
+                    };
                 } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_item.name, variant.name });
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
             if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
                 const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk @This().enumBytesValue(self, expr_id) orelse "";
+                    break :blk @This().enumBytesValue(self, expr_id) orelse {
+                        try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' must be a bytes literal", .{ enum_item.name, variant.name });
+                        break :blk "";
+                    };
                 } else "";
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
 
-            const resolved_value = if (variant.value) |expr_id| blk: {
+            if (variant.value) |expr_id| {
                 has_explicit_values.* = true;
-                break :blk @This().enumIntegerValue(self, expr_id) orelse 0;
-            } else blk: {
-                break :blk next_value.*;
+                const attr = try @This().enumIntegerAttr(self, expr_id, repr_type, enum_item.name, variant.name);
+                next_value.* = if (@This().enumIntegerValueI64(self, expr_id)) |value|
+                    std.math.add(i64, value, 1) catch null
+                else
+                    null;
+                return attr;
+            }
+
+            const resolved_value = next_value.* orelse {
+                try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ enum_item.name, variant.name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
             };
-            next_value.* = resolved_value + 1;
+            next_value.* = std.math.add(i64, resolved_value, 1) catch null;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
         }
 
-        fn enumIntegerValue(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
+        fn enumIntegerAttr(self: *Lowerer, expr_id: ast.ExprId, repr_type: mlir.MlirType, enum_name: []const u8, variant_name: []const u8) anyerror!mlir.MlirAttribute {
+            const value = self.const_eval.values[expr_id.index()] orelse {
+                try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' is not a compile-time integer", .{ enum_name, variant_name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
+            };
+            return switch (value) {
+                .integer => |integer| blk: {
+                    if (integer.toInt(i64)) |small| {
+                        break :blk mlir.oraIntegerAttrCreateI64FromType(repr_type, small);
+                    } else |_| {
+                        const text = try integer.toString(self.allocator, 10, .lower);
+                        defer self.allocator.free(text);
+                        break :blk mlir.oraIntegerAttrGetFromString(repr_type, strRef(text));
+                    }
+                },
+                .boolean => |boolean| mlir.oraIntegerAttrCreateI64FromType(repr_type, if (boolean) 1 else 0),
+                else => {
+                    try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' is not an integer", .{ enum_name, variant_name });
+                    return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
+                },
+            };
+        }
+
+        fn enumIntegerValueI64(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
             const value = self.const_eval.values[expr_id.index()] orelse return null;
             return switch (value) {
                 .integer => |integer| integer.toInt(i64) catch null,
@@ -1254,10 +1291,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         fn lowerInstantiatedEnumVariantValue(
             self: *Lowerer,
             instantiated: sema.InstantiatedEnum,
-            variant_name: []const u8,
+            variant: ast.EnumVariant,
             explicit_value: ?sema.ExplicitEnumValue,
             repr_type: mlir.MlirType,
-            next_value: *i64,
+            next_value: *?i64,
             has_explicit_values: *bool,
         ) anyerror!mlir.MlirAttribute {
             if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
@@ -1265,9 +1302,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     has_explicit_values.* = true;
                     break :blk switch (value) {
                         .string => |literal| literal,
-                        else => "",
+                        else => {
+                            try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be a string literal", .{ instantiated.mangled_name, variant.name });
+                            break :blk "";
+                        },
                     };
-                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ instantiated.mangled_name, variant_name });
+                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ instantiated.mangled_name, variant.name });
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
             if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
@@ -1275,7 +1315,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     has_explicit_values.* = true;
                     break :blk switch (value) {
                         .bytes => |literal| literal,
-                        else => "",
+                        else => {
+                            try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be a bytes literal", .{ instantiated.mangled_name, variant.name });
+                            break :blk "";
+                        },
                     };
                 } else "";
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
@@ -1285,12 +1328,18 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 has_explicit_values.* = true;
                 break :blk switch (value) {
                     .integer => |literal| literal,
-                    else => 0,
+                    else => {
+                        try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be an integer", .{ instantiated.mangled_name, variant.name });
+                        break :blk 0;
+                    },
                 };
             } else blk: {
-                break :blk next_value.*;
+                break :blk next_value.* orelse {
+                    try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ instantiated.mangled_name, variant.name });
+                    break :blk 0;
+                };
             };
-            next_value.* = resolved_value + 1;
+            next_value.* = std.math.add(i64, resolved_value, 1) catch null;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
         }
 

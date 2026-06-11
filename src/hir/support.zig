@@ -112,7 +112,11 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: s
         .bytes => bytesType(ctx),
         .fixed_bytes => defaultIntegerType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
-        .array => |array| arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), array.len orelse 0),
+        .array => |array| blk: {
+            const len = array.len orelse return error.UnresolvedArrayLength;
+            if (len > std.math.maxInt(u32)) return error.ArrayLengthOutOfRange;
+            break :blk arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), @intCast(len));
+        },
         .slice => |slice| sliceMemRefType(ctx, try lowerTypeDescriptor(ctx, slice.element_type.*, allocator)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,

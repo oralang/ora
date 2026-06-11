@@ -614,7 +614,11 @@ const Lowerer = struct {
                     if (field_types.items.len == 0) null else field_types.items.ptr,
                 );
             },
-            .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
+            .Array => |array| blk: {
+                const len = self.lowerArraySizeOrError(array.size) orelse
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, array.range);
+                break :blk support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), len);
+            },
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| blk: {
                 const payload_type = self.lowerTypeExpr(error_union.payload);
@@ -642,6 +646,34 @@ const Lowerer = struct {
             else
                 null,
         };
+    }
+
+    fn lowerArraySizeOrError(self: *Lowerer, size: ast.TypeArraySize) ?u32 {
+        if (self.lowerArraySize(size)) |len| return len;
+        switch (size) {
+            .Integer => |literal| self.emitLoweringError(
+                literal.range,
+                "array length '{s}' does not fit in HIR array length type",
+                .{literal.text},
+            ) catch {},
+            .Name => |name| {
+                const trimmed = std.mem.trim(u8, name.name, " \t\n\r");
+                if (self.substitutedInteger(trimmed)) |text| {
+                    self.emitLoweringError(
+                        name.range,
+                        "array length '{s}' from '{s}' does not fit in HIR array length type",
+                        .{ text, trimmed },
+                    ) catch {};
+                } else {
+                    self.emitLoweringError(
+                        name.range,
+                        "array length '{s}' could not be resolved during HIR lowering",
+                        .{trimmed},
+                    ) catch {};
+                }
+            },
+        }
+        return null;
     }
 
     pub fn lowerExprType(self: *Lowerer, expr_id: ast.ExprId) mlir.MlirType {
@@ -680,7 +712,17 @@ const Lowerer = struct {
             .fixed_bytes => support.defaultIntegerType(self.context),
             .external_proxy => support.addressType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
-            .array => |array| support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), array.len orelse 0),
+            .array => |array| blk: {
+                const len = array.len orelse {
+                    self.emitLoweringError(range, "array length must be resolved before HIR lowering", .{}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                };
+                if (len > std.math.maxInt(u32)) {
+                    self.emitLoweringError(range, "array length {d} does not fit in HIR array length type", .{len}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), @intCast(len));
+            },
             .slice => |slice| support.sliceMemRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),
             .map => |map| mlir.oraMapTypeGet(
                 self.context,

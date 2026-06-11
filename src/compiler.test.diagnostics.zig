@@ -1429,6 +1429,30 @@ test "compiler reports integer constant overflow against declared widths" {
     try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
 }
 
+test "compiler reports signed integer constant overflow at 256-bit boundaries" {
+    const signed_source =
+        \\pub fn signed_too_large() -> i256 {
+        \\    let value: i256 = 0x8000000000000000000000000000000000000000000000000000000000000000;
+        \\    return value;
+        \\}
+        \\
+        \\pub fn signed_too_small() -> i256 {
+        \\    let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819969;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(signed_source);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const too_large_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const too_small_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expect(diagnosticMessagesContain(too_large_diags, "does not fit in type 'i256'"));
+    try testing.expect(diagnosticMessagesContain(too_small_diags, "does not fit in type 'i256'"));
+}
+
 test "compiler reports integer constant overflow at call sites" {
     const source_text =
         \\fn take(value: u8) -> u8 {

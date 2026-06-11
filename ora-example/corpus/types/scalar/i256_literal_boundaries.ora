@@ -1,0 +1,30 @@
+contract I256LiteralBoundaries {
+    pub fn max_hex() -> i256 {
+        let value: i256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        return value;
+    }
+
+    pub fn max_decimal() -> i256 {
+        let value: i256 = 57896044618658097711785492504343953926634992332820282019728792003956564819967;
+        return value;
+    }
+
+    pub fn min_decimal() -> i256 {
+        let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819968;
+        return value;
+    }
+
+    pub fn max_is_positive() -> bool {
+        let value: i256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        return value > 0;
+    }
+
+    pub fn min_is_negative() -> bool {
+        let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819968;
+        return value < 0;
+    }
+
+    pub fn parameter_neg_one_is_negative(value: i256) -> bool {
+        return value < 0;
+    }
+}

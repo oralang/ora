@@ -72,8 +72,12 @@ test "compiler lowers impl self methods and calls end to end" {
 test "compiler lowers wide HIR integer literals without defaulting" {
     const source_text =
         \\pub fn run() -> u256 {
-        \\    let value: u256 = 9223372036854775808;
+        \\    let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
         \\    return value;
+        \\}
+        \\
+        \\pub fn direct() -> u256 {
+        \\    return 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
         \\}
     ;
 
@@ -90,8 +94,93 @@ test "compiler lowers wide HIR integer literals without defaulting" {
 
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "9223372036854775808"));
+    // Text alone cannot distinguish u256.max from i256(-1), but it still
+    // proves the literal did not collapse to the old zero/i64 fallback.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "-1 : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 0 : i256"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
+test "compiler preserves full-width u256 and i256 semantics for literal and parameter comparisons" {
+    const source_text =
+        \\contract WideIntegerLiteralBoundaries {
+        \\    pub fn unsigned_param_gt_zero(value: u256) -> bool {
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_param_gt_zero(value: i256) -> bool {
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn unsigned_max_literal_gt_zero() -> bool {
+        \\        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_max_literal_gt_zero() -> bool {
+        \\        let value: i256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_min_literal_lt_zero() -> bool {
+        \\        let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819968;
+        \\        return value < 0;
+        \\    }
+        \\}
+    ;
+
+    const ora_text = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(ora_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "ora.abi_params = [\"uint256\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "ora.abi_params = [\"int256\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 2, "arith.cmpi ugt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 2, "arith.cmpi sgt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "arith.cmpi slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "-1 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "57896044618658097711785492504343953926634992332820282019728792003956564819967 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "-57896044618658097711785492504343953926634992332820282019728792003956564819968 : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, ora_text, 1, "ora.lowering_error"));
+}
+
+test "compiler rejects oversized HIR array lengths instead of defaulting to zero" {
+    const source_text =
+        \\pub fn read(values: [u256; 4294967296]) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(h.diagnosticMessagesContain(&hir_result.diagnostics, "array length must be resolved before HIR lowering"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler lowers wide explicit enum values without defaulting" {
+    const source_text =
+        \\enum Big : u256 {
+        \\    A = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\pub fn current() -> Big {
+        \\    return Big.A;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    // Text alone cannot distinguish u256.max from i256(-1), but it still
+    // proves the explicit enum value did not collapse to zero.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
 }
 
 test "compiler lowers syntax into immutable AST items" {

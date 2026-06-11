@@ -6,6 +6,9 @@ const types = @import("types.zig");
 
 const PROPERTY_CALLER = "0x1000000000000000000000000000000000000000";
 const PROPERTY_ADDRESS_A = "0x2000000000000000000000000000000000000000";
+const U256_MAX_DEC = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+const I256_MAX_DEC = "57896044618658097711785492504343953926634992332820282019728792003956564819967";
+const I256_MIN_DEC = "-57896044618658097711785492504343953926634992332820282019728792003956564819968";
 
 fn expectWord(actual: []const u8, expected: u256) !void {
     if (actual.len != 32) return error.PropertyMismatch;
@@ -112,6 +115,21 @@ const property_source =
     \\    pub fn mul_wrap(a: u256, b: u256) -> u256 { return a *% b; }
     \\    pub fn div_i16(a: i16, b: i16) -> i16 { return a / b; }
     \\    pub fn lt_i16(a: i16, b: i16) -> bool { return a < b; }
+    \\    pub fn u256_gt_zero(x: u256) -> bool { return x > 0; }
+    \\    pub fn i256_gt_zero(x: i256) -> bool { return x > 0; }
+    \\    pub fn i256_lt_zero(x: i256) -> bool { return x < 0; }
+    \\    pub fn u256_max_literal_gt_zero() -> bool {
+    \\        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+    \\        return value > 0;
+    \\    }
+    \\    pub fn i256_max_literal_gt_zero() -> bool {
+    \\        let value: i256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+    \\        return value > 0;
+    \\    }
+    \\    pub fn i256_min_literal_lt_zero() -> bool {
+    \\        let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819968;
+    \\        return value < 0;
+    \\    }
     \\
     \\    pub fn put(slot: u256, value: u256) { slots[slot] = value; }
     \\    pub fn read(slot: u256) -> u256 { return slots[slot]; }
@@ -229,6 +247,38 @@ fn checkArithmeticProperty(runtime: *runner.PropertyRuntime, fault: PropertyFaul
     const lt_result = try runtime.call("lt_i16(int16,int16)", &lt_args);
     try testing.expect(lt_result.success);
     try expectBoolWord(lt_result.output, fault != .arithmetic);
+
+    const u256_max_args = [_]types.ArgValue{.{ .literal = U256_MAX_DEC }};
+    const u256_gt_result = try runtime.call("u256_gt_zero(uint256)", &u256_max_args);
+    try testing.expect(u256_gt_result.success);
+    try expectBoolWord(u256_gt_result.output, true);
+
+    const i256_max_args = [_]types.ArgValue{.{ .literal = I256_MAX_DEC }};
+    const i256_gt_result = try runtime.call("i256_gt_zero(int256)", &i256_max_args);
+    try testing.expect(i256_gt_result.success);
+    try expectBoolWord(i256_gt_result.output, true);
+
+    const i256_neg_args = [_]types.ArgValue{.{ .literal = "-1" }};
+    const i256_neg_gt_result = try runtime.call("i256_gt_zero(int256)", &i256_neg_args);
+    try testing.expect(i256_neg_gt_result.success);
+    try expectBoolWord(i256_neg_gt_result.output, false);
+
+    const i256_min_args = [_]types.ArgValue{.{ .literal = I256_MIN_DEC }};
+    const i256_min_lt_result = try runtime.call("i256_lt_zero(int256)", &i256_min_args);
+    try testing.expect(i256_min_lt_result.success);
+    try expectBoolWord(i256_min_lt_result.output, true);
+
+    const u256_literal_result = try runtime.call("u256_max_literal_gt_zero()", &.{});
+    try testing.expect(u256_literal_result.success);
+    try expectBoolWord(u256_literal_result.output, true);
+
+    const i256_max_literal_result = try runtime.call("i256_max_literal_gt_zero()", &.{});
+    try testing.expect(i256_max_literal_result.success);
+    try expectBoolWord(i256_max_literal_result.output, true);
+
+    const i256_min_literal_result = try runtime.call("i256_min_literal_lt_zero()", &.{});
+    try testing.expect(i256_min_literal_result.success);
+    try expectBoolWord(i256_min_literal_result.output, true);
 }
 
 fn checkStorageProperty(runtime: *runner.PropertyRuntime, fault: PropertyFault) !void {
