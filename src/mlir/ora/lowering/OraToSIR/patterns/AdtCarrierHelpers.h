@@ -18,11 +18,17 @@ namespace mlir
         namespace adt_helpers
         {
 
-            // The wide ADT carrier is two back-to-back u256 words in memory:
-            // tag at offset 0, payload at offset 32, total 64 bytes.
-            inline constexpr uint64_t kAdtCarrierSize = 64;
-            inline constexpr uint64_t kAdtPayloadOffset = 32;
-            inline constexpr uint64_t kAdtStoragePayloadSlotOffset = 1;
+            // The wide ADT/error-union carrier is two consecutive u256 words:
+            // tag first, payload second. Addressing differs by carrier kind
+            // (memory pointer, storage slot, or memref index), but the word
+            // ordering is shared.
+            inline constexpr uint64_t kAdtCarrierWordBytes = 32;
+            inline constexpr uint64_t kAdtCarrierTagWordIndex = 0;
+            inline constexpr uint64_t kAdtCarrierPayloadWordIndex = 1;
+            inline constexpr uint64_t kAdtCarrierWordCount = 2;
+            inline constexpr uint64_t kAdtCarrierSize = kAdtCarrierWordCount * kAdtCarrierWordBytes;
+            inline constexpr uint64_t kAdtPayloadOffset = kAdtCarrierPayloadWordIndex * kAdtCarrierWordBytes;
+            inline constexpr uint64_t kAdtStoragePayloadSlotOffset = kAdtCarrierPayloadWordIndex;
 
             // Allocate a 64-byte handle, store `tag` at offset 0 and `payload`
             // at offset 32, and return the base pointer (sir.ptr<1>). Both

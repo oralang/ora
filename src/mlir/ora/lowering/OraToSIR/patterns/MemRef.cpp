@@ -1,4 +1,5 @@
 #include "patterns/MemRef.h"
+#include "patterns/AdtCarrierHelpers.h"
 #include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/Naming.h"
 #include "patterns/Storage.h"
@@ -1062,15 +1063,18 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
                      << " memrefType=" << memrefType << " resultType=" << op.getType() << "\n";
     }
     auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256);
-    constexpr uint64_t kErrorUnionMemRefCarrierWords = 2;
     auto carrierMemRefType = remapMemRefElementTypeForWordCarrier(
-        memrefType, i256Type, kErrorUnionMemRefCarrierWords);
+        memrefType, i256Type, mlir::ora::adt_helpers::kAdtCarrierWordCount);
     Value carrierMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, carrierMemRefType, op.getMemref()).getResult(0);
 
     SmallVector<Value> tagIndices = buildWordCarrierIndices(
-        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 0);
+        rewriter, loc, op.getIndices(),
+        mlir::ora::adt_helpers::kAdtCarrierWordCount,
+        mlir::ora::adt_helpers::kAdtCarrierTagWordIndex);
     SmallVector<Value> payloadIndices = buildWordCarrierIndices(
-        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 1);
+        rewriter, loc, op.getIndices(),
+        mlir::ora::adt_helpers::kAdtCarrierWordCount,
+        mlir::ora::adt_helpers::kAdtCarrierPayloadWordIndex);
     if (tagIndices.empty() || payloadIndices.empty())
         return failure();
 
@@ -1173,9 +1177,8 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
             rewriter, loc, packed, one);
         return {tag, payload};
     };
-    constexpr uint64_t kErrorUnionMemRefCarrierWords = 2;
     auto carrierMemRefType = remapMemRefElementTypeForWordCarrier(
-        memrefType, i256Type, kErrorUnionMemRefCarrierWords);
+        memrefType, i256Type, mlir::ora::adt_helpers::kAdtCarrierWordCount);
     Value carrierMemRef = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, carrierMemRefType, op.getMemref()).getResult(0);
     Value carrierValue = op.getValue();
     Operation *consumedCast = nullptr;
@@ -1264,9 +1267,13 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     }
 
     SmallVector<Value> tagIndices = buildWordCarrierIndices(
-        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 0);
+        rewriter, loc, op.getIndices(),
+        mlir::ora::adt_helpers::kAdtCarrierWordCount,
+        mlir::ora::adt_helpers::kAdtCarrierTagWordIndex);
     SmallVector<Value> payloadIndices = buildWordCarrierIndices(
-        rewriter, loc, op.getIndices(), kErrorUnionMemRefCarrierWords, 1);
+        rewriter, loc, op.getIndices(),
+        mlir::ora::adt_helpers::kAdtCarrierWordCount,
+        mlir::ora::adt_helpers::kAdtCarrierPayloadWordIndex);
     if (tagIndices.empty() || payloadIndices.empty())
         return failure();
 
