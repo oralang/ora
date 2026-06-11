@@ -797,7 +797,7 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
         .sub_path = "main.ora",
         .data =
         \\contract Entry {
-        \\    pub fn take_pair(value: (u256, string)) -> bool {
+        \\    pub fn take_nested(values: slice[slice[u256]]) -> bool {
         \\        return true;
         \\    }
         \\}
@@ -827,8 +827,8 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
         .Exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
-    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic tuple ABI type for dispatcher") or
-        std.mem.containsAtLeast(u8, result.stderr, 1, "unsupported dynamic tuple ABI type for dispatcher"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic ABI type for dispatcher") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "unsupported dynamic ABI type for dispatcher"));
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
 

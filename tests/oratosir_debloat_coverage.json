@@ -113,14 +113,18 @@
       "id": "dispatcher.dynamic_tuple_arg_decode",
       "tier": "T4",
       "area": "SIRDispatcher/ABI",
-      "conversion": "Public dispatcher mixed dynamic tuple argument path. Current behavior is fail-closed unsupported; the check keeps the limitation visible until this path is implemented.",
+      "conversion": "Public dispatcher mixed dynamic tuple argument decode: outer tuple offset validation, nested dynamic string bounds/padding checks, pointer-backed tuple carrier materialization, and user call",
       "high_churn": true,
       "executing_tests": [
-        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before legacy fallback",
-        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#unsupported dynamic tuple ABI type for dispatcher"
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
+        "tests/conformance/dispatcher_dynamic_tuple_arg.spec.toml",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
       ],
       "sir_goldens": [
-        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#unsupported dynamic tuple ABI type for dispatcher"
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#0x1B4C5F62 => @value_",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#calldatacopy",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#mstore256",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
       ]
     },
     {

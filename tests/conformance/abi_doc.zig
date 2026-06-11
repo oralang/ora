@@ -51,14 +51,38 @@ pub const AbiDoc = struct {
         return .{ .inputs = try self.allocator.alloc([]const u8, 0) };
     }
 
-    fn wireTypeForTypeId(self: *const AbiDoc, type_id: []const u8) ![]const u8 {
+    fn wireTypeForTypeId(self: *const AbiDoc, type_id: []const u8) anyerror![]const u8 {
         const abi_types = getObjectField(self.parsed.value, "types");
         if (abi_types != .object) return error.InvalidAbi;
         const type_value = abi_types.object.get(type_id) orelse return error.InvalidAbi;
         if (type_value != .object) return error.InvalidAbi;
         const wire = getObjectField(type_value, "wire");
         const evm_default = getObjectField(wire, "evm-default");
-        return getStringField(evm_default, "type");
+        if (getOptionalString(evm_default, "type")) |wire_type| {
+            return try self.allocator.dupe(u8, wire_type);
+        }
+        if (getOptionalString(evm_default, "as")) |wire_shape| {
+            if (std.mem.eql(u8, wire_shape, "tuple")) return try self.tupleWireType(type_value);
+        }
+        return error.InvalidAbi;
+    }
+
+    fn tupleWireType(self: *const AbiDoc, type_value: std.json.Value) anyerror![]const u8 {
+        const components = getObjectField(type_value, "components");
+        if (components != .array) return error.InvalidAbi;
+
+        var out = std.ArrayList(u8){};
+        errdefer out.deinit(self.allocator);
+        try out.append(self.allocator, '(');
+        for (components.array.items, 0..) |component, i| {
+            if (component != .string) return error.InvalidAbi;
+            if (i != 0) try out.append(self.allocator, ',');
+            const child_wire = try self.wireTypeForTypeId(component.string);
+            defer self.allocator.free(child_wire);
+            try out.appendSlice(self.allocator, child_wire);
+        }
+        try out.append(self.allocator, ')');
+        return try out.toOwnedSlice(self.allocator);
     }
 };
 
@@ -68,8 +92,8 @@ pub const FunctionAbi = struct {
     outputs: []const []const u8,
 
     pub fn deinit(self: FunctionAbi, allocator: std.mem.Allocator) void {
-        allocator.free(self.inputs);
-        allocator.free(self.outputs);
+        freeWireList(allocator, self.inputs);
+        freeWireList(allocator, self.outputs);
     }
 };
 
@@ -77,7 +101,7 @@ pub const ConstructorAbi = struct {
     inputs: []const []const u8,
 
     pub fn deinit(self: ConstructorAbi, allocator: std.mem.Allocator) void {
-        allocator.free(self.inputs);
+        freeWireList(allocator, self.inputs);
     }
 };
 
@@ -99,13 +123,21 @@ fn typeRefWires(doc: *const AbiDoc, callable: std.json.Value, field: []const u8)
     const refs = getObjectField(callable, field);
     if (refs != .array) return error.InvalidAbi;
     var wires = std.ArrayList([]const u8){};
-    errdefer wires.deinit(doc.allocator);
+    errdefer {
+        for (wires.items) |wire| doc.allocator.free(wire);
+        wires.deinit(doc.allocator);
+    }
     for (refs.array.items) |ref| {
         if (ref != .object) return error.InvalidAbi;
         const type_id = try getStringField(ref, "typeId");
         try wires.append(doc.allocator, try doc.wireTypeForTypeId(type_id));
     }
     return try wires.toOwnedSlice(doc.allocator);
+}
+
+fn freeWireList(allocator: std.mem.Allocator, wires: []const []const u8) void {
+    for (wires) |wire| allocator.free(wire);
+    allocator.free(wires);
 }
 
 fn getObjectField(value: std.json.Value, field: []const u8) std.json.Value {

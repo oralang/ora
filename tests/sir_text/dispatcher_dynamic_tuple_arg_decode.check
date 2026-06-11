@@ -1,4 +1,58 @@
 // INPUT: tests/sir_text/inputs/dispatcher_dynamic_tuple_arg.ora
-// EXPECT-FAIL: dynamic tuple dispatcher input is still a fail-closed unsupported path.
+// CHECK-NOT: builtin.unrealized_conversion_cast
 
-// CHECK: unsupported dynamic tuple ABI type for dispatcher
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0x1B4C5F62 => @value_
+
+// CHECK-LABEL:     value_ {
+// CHECK: cdsize_value = calldatasize
+// CHECK: min_cdsize_1arg_0 = const 0x23
+// CHECK: valid_value = lt min_cdsize_1arg_0 cdsize_value
+// CHECK: => valid_value ? @bb0 : @revert_error
+
+// CHECK-LABEL:     bb0 {
+// CHECK: selector_offset_0 = const 0x4
+// CHECK: a_value = calldataload selector_offset_0
+// CHECK: v5 = const 0x20
+// CHECK: v8 = calldataload
+// CHECK: v9 = eq v8 v5
+// CHECK: => v9 ? @bb1 : @abi_decode_revert_11
+
+// CHECK-LABEL:     value_exec {
+// CHECK: mallocany
+// CHECK: calldatacopy
+// CHECK: const 0x20
+// CHECK: mload256
+// CHECK: mstore256
+// CHECK: icall @value
+// CHECK: return
+
+// CHECK-LABEL:     bb1 {
+// CHECK: v11 = add
+// CHECK: calldatasize
+// CHECK: const 0x40
+// CHECK: => {{.*}} ? @bb2 : @abi_decode_revert_0
+
+// CHECK-LABEL:     bb2 {
+// CHECK: calldataload
+// CHECK: eq
+// CHECK: => {{.*}} ? @bb3 : @abi_decode_revert_11
+
+// CHECK-LABEL:     bb4 {
+// CHECK: calldataload
+// CHECK: large_const 0xFFFFFFFFFFFFFFFF
+// CHECK: gt
+// CHECK: => {{.*}} ? @bb5 : @abi_decode_revert_13
+
+// CHECK-LABEL:     bb5 {
+// CHECK: const 0x100000
+// CHECK: gt
+// CHECK: => {{.*}} ? @bb6 : @abi_decode_revert_14
+
+// CHECK-LABEL:     bb9
+// CHECK: mallocany
+// CHECK: calldatacopy
+// CHECK: mload8
+// CHECK: eq
+// CHECK: => {{.*}} ? @value_exec : @abi_decode_revert_11

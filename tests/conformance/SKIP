@@ -1,3 +1,2 @@
-# Compiler dispatcher does not yet support dynamic tuple ABI types.
 storage_slice_struct.ora
 storage_slice_dynamic_struct.ora

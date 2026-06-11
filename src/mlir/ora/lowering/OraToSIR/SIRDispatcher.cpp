@@ -3205,21 +3205,35 @@ namespace mlir
                             {
                                 if (canonicalAbiLayoutIsDynamic(abiLayout))
                                 {
-                                    module.emitError("unsupported dynamic tuple ABI type for dispatcher");
-                                    signalPassFailure();
-                                    return;
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeResultCarrier(
+                                            abiLayout,
+                                            lowering::constU256(builder, caseDecodeLoc, 4),
+                                            offs - 4,
+                                            getNextDynamicOffset());
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic tuple ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                int64_t words = canonicalAbiLayoutHeadSlots(abiLayout);
-                                if (words <= 0)
+                                else
                                 {
-                                    module.emitError("unsupported tuple ABI type for dispatcher");
-                                    signalPassFailure();
-                                    return;
+                                    int64_t words = canonicalAbiLayoutHeadSlots(abiLayout);
+                                    if (words <= 0)
+                                    {
+                                        module.emitError("unsupported tuple ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
+                                    argVal = buf;
                                 }
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
-                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
-                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
-                                argVal = buf;
                             }
                             else if (hasAbiLayout && canonicalAbiLayoutIsDynamic(abiLayout))
                             {

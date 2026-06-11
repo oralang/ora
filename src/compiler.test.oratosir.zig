@@ -1273,11 +1273,11 @@ test "compiler abiDecode N3b4 rejects unsupported nested dynamic calldata arrays
     try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 }
 
-test "compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before legacy fallback" {
+test "compiler abiDecode N3b4 validates public calldata dynamic tuple params before call" {
     const source_text =
         \\contract Entry {
-        \\    pub fn take_pair(value: (u256, string)) -> bool {
-        \\        return true;
+        \\    pub fn value(t: (u256, string)) -> u256 {
+        \\        return t.0 + t.1.len;
         \\    }
         \\}
     ;
@@ -1287,7 +1287,18 @@ test "compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
-    try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "value_"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "calldataload"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "abi_decode_revert_11"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "mload8"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @value"));
 }
 
 test "compiler abiDecode N3b5 validates dynamic constructor string and bytes calldata" {
