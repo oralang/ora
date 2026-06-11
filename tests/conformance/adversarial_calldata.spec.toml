@@ -42,3 +42,11 @@ calldata = "0x7b67e79d0000000000000000000000000000000000000000000000000000000000
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 reverts = { any = true }
+
+# echo_len(string): valid offset (0x20) but declared length is enormous
+# (2^240) with no payload -> must revert, not allocate/read out of bounds.
+[[call]]
+calldata = "0x7b67e79d00000000000000000000000000000000000000000000000000000000000000200000000000010000000000000000000000000000000000000000000000000000"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
