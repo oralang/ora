@@ -44,3 +44,7 @@ artifacts/
 outside-pr/
 zig-out/
 .*/
+
+# Python bytecode (scripts/ helpers)
+__pycache__/
+*.pyc
