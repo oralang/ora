@@ -269,3 +269,38 @@ test "conformance spec parser parses exact revert data and rejects unknown rever
     ;
     try testing.expectError(error.UnsupportedRevertExpectation, spec.parse(testing.allocator, bad_source));
 }
+
+test "conformance spec parser accepts succeeds and rejects multiple outcomes with it" {
+    const ok_source =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "go()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\succeeds = {}
+    ;
+    var parsed = try spec.parse(testing.allocator, ok_source);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.calls[0].outcome == .succeeds_any);
+
+    const bad_source =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "go()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\succeeds = {}
+        \\returns = { u256 = 0 }
+    ;
+    try testing.expectError(error.MultipleOutcomes, spec.parse(testing.allocator, bad_source));
+}

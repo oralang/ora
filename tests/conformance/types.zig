@@ -22,6 +22,9 @@ pub const ExpectedStaticReturn = struct {
 pub const ExpectedOutcome = union(enum) {
     returns_empty,
     returns_static: ExpectedStaticReturn,
+    /// Call must succeed; return bytes are not checked. For state-effect
+    /// scenarios where the return encoding is irrelevant or untrusted.
+    succeeds_any,
     reverts_empty,
     reverts_selector: [4]u8,
     reverts_data: []const u8,
@@ -46,6 +49,8 @@ pub const DeploySpec = struct {
     caller: Address,
     value: u256,
     args: []ArgValue,
+    /// Repo-relative .ora source path; defaults to the spec's sibling <stem>.ora.
+    source: ?[]const u8 = null,
 
     pub fn deinit(self: DeploySpec, allocator: std.mem.Allocator) void {
         allocator.free(self.args);

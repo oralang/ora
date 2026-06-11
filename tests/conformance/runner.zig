@@ -180,14 +180,24 @@ pub fn runConformanceSpec(allocator: std.mem.Allocator, source_path: []const u8,
     var parsed = try spec_mod.parse(arena, spec_text);
     defer parsed.deinit();
 
+    // [deploy] source = "..." points at a repo-relative contract (e.g. an
+    // ora-example app) instead of the spec's sibling .ora.
+    const effective_source = parsed.value.deploy.source orelse source_path;
+    if (parsed.value.deploy.source) |declared| {
+        std.fs.cwd().access(declared, .{}) catch {
+            std.debug.print("declared deploy source not found: {s}\n", .{declared});
+            return error.DeclaredSourceMissing;
+        };
+    }
+
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.makeDir("out");
     const out_path = try pathFromTmpAlloc(arena, tmp, "out");
 
-    try runOraEmit(arena, source_path, out_path);
+    try runOraEmit(arena, effective_source, out_path);
 
-    const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
+    const stem = sourceStem(effective_source) orelse return error.InvalidSourcePath;
     const artifacts = try readArtifacts(arena, out_path, stem);
 
     var doc = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
@@ -302,6 +312,9 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
                 const expected_output = try abi.encodeArgs(allocator, function_abi.outputs, &expected_args);
                 defer allocator.free(expected_output);
                 try testing.expectEqualSlices(u8, expected_output, result.output);
+            },
+            .succeeds_any => {
+                try testing.expect(result.success);
             },
             .reverts_empty => {
                 try testing.expect(!result.success);

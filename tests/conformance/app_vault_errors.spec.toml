@@ -1,0 +1,80 @@
+# Full-app scenario over ora-example/vault/02_errors.ora (error-union vault).
+# Multi-caller deposit/withdraw exercising both error-union revert paths.
+# deposit/withdraw return !bool | E (NARROW). Per FINDINGS.md#f-006 the narrow
+# error-union dispatcher return encoding is untrustworthy, so success calls use
+# `succeeds = {}` (must not revert; return bytes unchecked) and the real effects
+# are proven by the balanceOf / getTotalDeposits reads. The error paths revert
+# EMPTY (selector lost) — pinned reverts = {}.
+[deploy]
+source = "ora-example/vault/02_errors.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+# see FINDINGS.md#f-006 — narrow error-union return untrusted; effect proven by balanceOf below
+[[call]]
+fn = "deposit(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [5]
+succeeds = {}
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 5 }
+
+[[call]]
+# see FINDINGS.md#f-006 — narrow error path reverts EMPTY; true selector would be 0x1f2a2005 (ZeroAmount)
+fn = "deposit(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [0]
+reverts = {}
+
+[[call]]
+# see FINDINGS.md#f-006 — narrow error path reverts EMPTY; true selector would be 0xcf479181 (InsufficientBalance)
+fn = "withdraw(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [10]
+reverts = {}
+
+# see FINDINGS.md#f-006 — narrow error-union return untrusted; effect proven by balanceOf below
+[[call]]
+fn = "withdraw(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [3]
+succeeds = {}
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 2 }
+
+# see FINDINGS.md#f-006 — narrow error-union return untrusted; effect proven by balanceOf below
+[[call]]
+fn = "deposit(uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = [7]
+succeeds = {}
+
+[[call]]
+fn = "getTotalDeposits()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = { u256 = 7 }

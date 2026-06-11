@@ -17,13 +17,14 @@ const DeployBuilder = struct {
     caller: ?types.Address = null,
     value: ?u256 = null,
     args: ?[]types.ArgValue = null,
+    source: ?[]const u8 = null,
 
     fn toSpec(self: *DeployBuilder) !types.DeploySpec {
         const caller = self.caller orelse return error.MissingRequiredField;
         const value = self.value orelse return error.MissingRequiredField;
         const args = self.args orelse return error.MissingRequiredField;
         self.args = null;
-        return .{ .caller = caller, .value = value, .args = args };
+        return .{ .caller = caller, .value = value, .args = args, .source = self.source };
     }
 };
 
@@ -59,6 +60,7 @@ const CallBuilder = struct {
     args: ?[]types.ArgValue = null,
     returns: ?types.ExpectedOutcome = null,
     reverts: ?types.ExpectedOutcome = null,
+    succeeds: ?types.ExpectedOutcome = null,
     storage: std.ArrayList(types.StorageAssertion) = .{},
     logs: std.ArrayList(types.LogAssertion) = .{},
 
@@ -81,8 +83,12 @@ const CallBuilder = struct {
     }
 
     fn outcome(self: *const CallBuilder) !types.ExpectedOutcome {
-        if (self.returns != null and self.reverts != null) return error.MultipleOutcomes;
-        return self.returns orelse self.reverts orelse error.MissingOutcome;
+        var count: usize = 0;
+        if (self.returns != null) count += 1;
+        if (self.reverts != null) count += 1;
+        if (self.succeeds != null) count += 1;
+        if (count > 1) return error.MultipleOutcomes;
+        return self.returns orelse self.reverts orelse self.succeeds orelse error.MissingOutcome;
     }
 };
 
@@ -105,6 +111,7 @@ const deploy_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "caller", .present },
     .{ "value", .present },
     .{ "args", .present },
+    .{ "source", .present },
 });
 const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "fn", .present },
@@ -113,6 +120,7 @@ const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "args", .present },
     .{ "returns", .present },
     .{ "reverts", .present },
+    .{ "succeeds", .present },
 });
 const storage_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "slot", .present },
@@ -292,8 +300,10 @@ fn assignField(comptime Builder: type, allocator: std.mem.Allocator, builder: *B
             try parseReturns(value)
         else if (comptime std.mem.eql(u8, field_name, "reverts"))
             try parseReverts(allocator, value)
+        else if (comptime std.mem.eql(u8, field_name, "succeeds"))
+            try parseSucceeds(value)
         else
-            @compileError("ExpectedOutcome field must be returns or reverts");
+            @compileError("ExpectedOutcome field must be returns, reverts, or succeeds");
         return;
     }
     @compileError("unhandled conformance spec field type in " ++ @typeName(Builder) ++ "." ++ field_name);
@@ -423,6 +433,12 @@ fn parseReturns(value: []const u8) !types.ExpectedOutcome {
         .spec_type = kv.key,
         .value = try abi.parseArgValue(kv.value),
     } };
+}
+
+fn parseSucceeds(value: []const u8) !types.ExpectedOutcome {
+    const trimmed = std.mem.trim(u8, value, " \t");
+    if (!std.mem.eql(u8, trimmed, "{}")) return error.UnsupportedSucceedsExpectation;
+    return .succeeds_any;
 }
 
 fn parseReverts(allocator: std.mem.Allocator, value: []const u8) !types.ExpectedOutcome {

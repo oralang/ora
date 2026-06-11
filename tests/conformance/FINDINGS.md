@@ -48,6 +48,31 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 - **Flip condition:** none in specs; fix = saturating/checked gas math returning OutOfGas.
   F-002's rows stay blocked on F-002 regardless.
 
+## F-006 — narrow error-union error path reverts empty; success encoding untrusted (S1)
+
+- **Status:** OPEN
+- **What:** a public fn returning `!T | E` with a NARROW (<256-bit) carrier is mishandled at the
+  dispatcher boundary. The WIDE carrier (`!u256 | E`) is correct, which is why the existing
+  `dispatcher_error_union_revert` test (a `!u256` fn) never caught this. Confirmed 2026-06-12:
+  - **Error path (CONFIRMED, reproduced twice):** a narrow `!bool | E` error reverts with EMPTY
+    data (0 bytes) — the 4-byte error selector is LOST. A wide `!u256 | E` error reverts with the
+    selector correctly. Lost-error-identity, S1-class.
+  - **Success path (INCONSISTENT — needs isolation):** the minimal `!bool` `return true` yielded a
+    zero word (reads false), but the vault's `deposit` (`!bool | E`) returned a nonzero word in the
+    app context. So the success-return encoding is unreliable but not characterized to a single
+    rule yet — treat narrow error-union success returns as untrusted, assert via side effects.
+  Likely the narrow packing `(payload << 1) | tag` is not split into payload-return vs
+  selector-revert at the dispatcher seam.
+- **Repro (minimal):** `error E; pub fn f(b: bool) -> !bool | E { if (b) { return E; } return true; }`
+  → `f(true)` reverts empty (selector lost); `f(false)` return-word encoding unreliable.
+- **Affected coverage:** any narrow error-union fn — e.g. the vault's `deposit`/`withdraw`
+  (`!bool | …`). In `app_vault_errors.spec.toml`: success calls use `succeeds = {}` (must not
+  revert; bytes unchecked) with effects proven via balanceOf/getTotalDeposits; error calls pinned
+  `reverts = {}` (empty).
+- **Flip condition:** when narrow error-union dispatcher returns are fixed, change the vault revert
+  rows to `{ selector = "0x1f2a2005" }` (ZeroAmount) / `{ selector = "0xcf479181" }`
+  (InsufficientBalance), and tighten the success rows from `succeeds = {}` to `{ bool = true }`.
+
 ## F-004 — tuple return from inside try/catch fails OraToSIR Phase3b (fails closed)
 
 - **Status:** OPEN
