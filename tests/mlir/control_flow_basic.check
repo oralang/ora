@@ -1,8 +1,11 @@
 // INPUT: ora-example/control_flow/basic_control_flow.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @testIf
-// CHECK: ora.assume
+// CHECK: scf.if
+// testWhile's trip count is constant (counter < 5), so comptime unrolls it;
+// runtime-bound loops still lower to scf.while (see break_continue_test goldens).
 // CHECK-LABEL: func.func @testWhile
-// CHECK: scf.while
+// CHECK-NOT: scf.while
+// CHECK: ora.return
 // CHECK-LABEL: func.func @testSwitch
 // CHECK: ora.switch

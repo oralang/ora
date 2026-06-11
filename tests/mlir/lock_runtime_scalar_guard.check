@@ -7,6 +7,6 @@
 // CHECK: ora.unlock
 // CHECK: key = "gate"
 // CHECK: ora.tstore.guard
-// CHECK: key = "gate"
+// CHECK-SAME: "gate"
 // CHECK: ora.sstore
 // CHECK: "gate"
