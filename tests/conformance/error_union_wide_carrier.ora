@@ -1,0 +1,47 @@
+// FINDING (execution-pinned 2026-06-11): the catch path after `try` on an
+// error union with an AGGREGATE payload (this wide struct, or a string —
+// see error_union_local_aggregate.ora) unpacks a garbage payload pointer and
+// panics lib/evm via huge-offset mload. Ok paths and plain `match` are
+// correct. err_default() compiles but is excluded from the spec until fixed.
+error Failure;
+
+struct Pair {
+    lo: u256;
+    hi: u256;
+}
+
+contract ErrorUnionWideCarrier {
+    fn make(flag: bool) -> !Pair | Failure {
+        if (flag) {
+            return Pair { lo: 11, hi: 22 };
+        }
+        return Failure;
+    }
+
+    pub fn ok_lo() -> u256 {
+        try {
+            let p: Pair = try make(true);
+            return p.lo;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    pub fn ok_hi() -> u256 {
+        try {
+            let p: Pair = try make(true);
+            return p.hi;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    pub fn err_default() -> u256 {
+        try {
+            let p: Pair = try make(false);
+            return p.lo;
+        } catch (e) {
+            return 777;
+        }
+    }
+}

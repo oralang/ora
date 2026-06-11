@@ -1,0 +1,26 @@
+// Checked-arithmetic runtime behavior, pinned by execution.
+//
+// CURRENT SEMANTICS (characterized 2026-06-11, see test-quality program notes):
+//  - Unconstrained checked arithmetic that the verifier cannot discharge is
+//    rejected at COMPILE time (no bytecode) — negative-corpus territory.
+//  - `requires` clauses are verification-only ASSUMPTIONS: they are NOT
+//    enforced at the public ABI boundary; out-of-envelope calls execute.
+//  - The checked-add overflow assert is RETAINED at runtime (add(MAX,1)
+//    reverts), but the requires-discharged division-by-zero check is REMOVED:
+//    div(7,0) returns 0 SILENTLY (EVM DIV semantics).
+//    The div row below is a CHARACTERIZATION PIN of that soundness hole —
+//    flip it to a revert assertion when boundary guards land.
+contract ArithmeticCheckedRevert {
+    pub fn add(a: u256, b: u256) -> u256
+        requires a <= 1000000
+        requires b <= 1000000
+    {
+        return a + b;
+    }
+
+    pub fn div(a: u256, b: u256) -> u256
+        requires b != 0
+    {
+        return a / b;
+    }
+}

@@ -212,12 +212,14 @@
     {
       "id": "error_union.wide_carrier",
       "area": "error_union",
-      "skip": "no executed spec for >255-bit success payload (2xu256 carrier) - T1.2 batch 1"
+      "behavior": "Wide (>255-bit struct) success payload through local error union; Ok paths executed. Err/catch path BLOCKED: aggregate-payload catch unpacks garbage pointer, panics lib/evm (finding 2026-06-11)",
+      "specs": ["tests/conformance/error_union_wide_carrier.spec.toml"]
     },
     {
       "id": "error_union.local_aggregate_result",
       "area": "error_union",
-      "skip": "local Result<aggregate> recently un-gated with zero execution coverage - T1.2 batch 1"
+      "behavior": "Local Result<string>: try Ok path, match extraction, tuple-from-match content executed. Err/catch path BLOCKED (same aggregate-payload catch miscompile); tuple-return-in-catch blocked at OraToSIR Phase3b (findings 2026-06-11)",
+      "specs": ["tests/conformance/error_union_local_aggregate.spec.toml"]
     },
     {
       "id": "local.result_memref_scalar",
@@ -256,14 +258,15 @@
       "specs": ["tests/conformance/properties.zig#checkArithmeticProperty"]
     },
     {
-      "id": "arithmetic.checked_overflow_revert",
+      "id": "arithmetic.unprovable_overflow_rejected",
       "area": "arithmetic",
-      "skip": "no executed spec asserts checked arithmetic reverts on overflow - T1.2 batch 1"
+      "skip": "unconstrained checked arithmetic is rejected at COMPILE time (verifier SAT -> no bytecode); belongs to the expected-diagnostic negative corpus - T1.5"
     },
     {
-      "id": "arithmetic.division_by_zero_revert",
+      "id": "arithmetic.checked_arith_runtime_behavior",
       "area": "arithmetic",
-      "skip": "no executed spec asserts division by zero reverts - T1.2"
+      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - S1 finding with audit",
+      "specs": ["tests/conformance/arithmetic_checked_revert.spec.toml"]
     },
     {
       "id": "control_flow.runtime_loop",
