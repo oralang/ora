@@ -1,8 +1,4 @@
-// FINDING (execution-pinned 2026-06-11): the catch path after `try` on an
-// error union with an AGGREGATE payload (this wide struct, or a string —
-// see error_union_local_aggregate.ora) unpacks a garbage payload pointer and
-// panics lib/evm via huge-offset mload. Ok paths and plain `match` are
-// correct. err_default() compiles but is excluded from the spec until fixed.
+// see FINDINGS.md#f-002 (err_default catch path excluded from spec)
 error Failure;
 
 struct Pair {

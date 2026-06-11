@@ -1,12 +1,4 @@
-// TWO FINDINGS (execution-pinned 2026-06-11):
-// 1. Tuple returns from inside try/catch blocks fail OraToSIR Phase3b
-//    legalization (unresolved !ora.tuple<i256, !ora.string> -> !sir.ptr<1>),
-//    so the try/catch paths assert via .len only.
-// 2. The catch path after `try` on an error union with an aggregate payload
-//    (string here, wide struct in error_union_wide_carrier.ora) unpacks a
-//    garbage payload pointer and panics lib/evm via huge-offset mload.
-//    err_marker() compiles but is excluded from the spec until fixed.
-// Ok paths and plain `match` (incl. tuple-from-match in content()) are correct.
+// see FINDINGS.md#f-002 (catch path excluded from spec) and FINDINGS.md#f-004
 error Failure;
 
 contract ErrorUnionLocalAggregate {

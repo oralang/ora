@@ -1,5 +1,4 @@
-# Characterization rows pin CURRENT behavior (requires not boundary-enforced;
-# discharged div-zero check removed). See the .ora header before "fixing" them.
+# see FINDINGS.md#f-001 — characterization rows pin CURRENT behavior
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
@@ -12,7 +11,7 @@ value = 0
 args = [1, 2]
 returns = { u256 = 3 }
 
-# CHARACTERIZATION: requires a<=1e6 violated, call still executes.
+# FINDINGS.md#f-001 characterization row
 [[call]]
 fn = "add(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -20,7 +19,6 @@ value = 0
 args = [2000000, 1]
 returns = { u256 = 2000001 }
 
-# Retained checked-add assert: genuine overflow DOES revert at runtime.
 [[call]]
 fn = "add(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
@@ -28,8 +26,7 @@ value = 0
 args = ["0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 1]
 reverts = {}
 
-# CHARACTERIZATION (S1-class finding): requires b!=0 discharged the zero check
-# and it was REMOVED from runtime code -> silent 0, no revert.
+# FINDINGS.md#f-001 characterization row
 [[call]]
 fn = "div(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"

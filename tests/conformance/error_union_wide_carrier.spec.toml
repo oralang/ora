@@ -1,7 +1,4 @@
-# Ok paths execute and are asserted below. The Err/catch path is BLOCKED:
-# catching an actual error whose union carries an aggregate (wide struct)
-# payload mloads a garbage pointer and panics lib/evm (gas-cost overflow).
-# Execution-pinned 2026-06-11; un-comment the err_default row when fixed.
+# see FINDINGS.md#f-002 — err_default row blocked
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
@@ -21,7 +18,7 @@ value = 0
 args = []
 returns = { u256 = 22 }
 
-# BLOCKED (catch-path aggregate-payload miscompile):
+# BLOCKED on FINDINGS.md#f-002:
 # [[call]]
 # fn = "err_default()"
 # caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
