@@ -61,3 +61,23 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
   `.len` instead of string content.
 - **Flip condition:** when the lowering lands, add content-bearing tuple returns to the
   try/catch fns and assert `(uint256,string)` rows.
+
+## F-005 — trait-impl methods cannot be called from contract functions (fails closed)
+
+- **Status:** OPEN
+- **What:** calling any trait-impl method from inside a `contract` fn fails lowering:
+  `'func.call' op 'Pricing.Item.unit_price' does not reference a valid function` — the
+  monomorphized impl function is not materialized for contract-context call sites. The
+  `ora-example` trait corpus only calls trait methods from module-level helper fns, so this
+  was never visible. Net: trait methods are currently NOT executable through the ABI at all.
+- **Repro (minimal, 2026-06-12):**
+  `trait P { fn unit_price(self) -> u256; }` + `struct Item { price: u256; }` +
+  `impl P for Item { fn unit_price(self) -> u256 { return self.price; } }` +
+  `contract C { pub fn f(p: u256) -> u256 { let i: Item = Item { price: p }; return i.unit_price(); } }`
+  → exit 2, no bytecode.
+- **Blocked coverage:** `traits.monomorphized_methods` manifest entry stays SKIP; the prepared
+  spec (trait dispatch via `price_of`/`cost_of`) was removed from the corpus because it cannot
+  compile.
+- **Flip condition:** when contract-context trait calls land, restore
+  `trait_method_dispatch.ora`/`.spec.toml` (content in this entry's git history, commit that
+  added this section) and flip the manifest entry to covered.

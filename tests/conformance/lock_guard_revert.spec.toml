@@ -1,0 +1,33 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "safe_other_slot(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", "0x2000000000000000000000000000000000000002", 77]
+returns = { bool = true }
+
+[[call]]
+fn = "balance_of(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = { u256 = 77 }
+
+# Writing the locked slot through a helper while the lock is held must revert.
+[[call]]
+fn = "conflict_same_slot(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000003", 5]
+reverts = {}
+
+[[call]]
+fn = "balance_of(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x3000000000000000000000000000000000000003"]
+returns = { u256 = 0 }

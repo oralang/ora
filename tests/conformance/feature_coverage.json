@@ -290,17 +290,19 @@
     {
       "id": "traits.monomorphized_methods",
       "area": "traits_generics",
-      "skip": "no executed spec calls trait impl methods - T1.2 batch 2"
+      "skip": "BLOCKED: trait-impl methods cannot be called from contract fns at all (FINDINGS.md F-005, lowering gap) - spec ready to restore on fix"
     },
     {
       "id": "generics.comptime_instantiation",
       "area": "traits_generics",
-      "skip": "no executed spec drives a monomorphized generic at runtime - T1.2 batch 2"
+      "behavior": "Monomorphized comptime-generic fn (u256 and u8 instances) driven at runtime; fully-folded call returns the comptime result",
+      "specs": ["tests/conformance/generic_instantiation.spec.toml"]
     },
     {
       "id": "comptime.constant_folding_observable",
       "area": "comptime",
-      "skip": "implicitly exercised by every spec; no dedicated executed assertion comparing comptime result to runtime result - T1.2"
+      "behavior": "comptime const expressions fold and are observable via the ABI, alone and mixed with runtime args",
+      "specs": ["tests/conformance/comptime_observable.spec.toml"]
     },
     {
       "id": "enums.storage_roundtrip",
@@ -316,7 +318,8 @@
     {
       "id": "locks.guard_revert_on_locked_write",
       "area": "locks",
-      "skip": "compile-only coverage (check-lock-contracts.sh); no executed guard-revert spec - T1.2 batch 2"
+      "behavior": "tstore.guard REVERTs an indirect write to a locked map slot at runtime; disjoint-slot write under lock succeeds",
+      "specs": ["tests/conformance/lock_guard_revert.spec.toml"]
     },
     {
       "id": "tuples.static_return",

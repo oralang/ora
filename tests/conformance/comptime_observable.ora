@@ -1,0 +1,12 @@
+comptime const BASE: u256 = 6;
+comptime const FEE: u256 = BASE * 7;
+
+contract ComptimeObservable {
+    pub fn fee() -> u256 {
+        return FEE;
+    }
+
+    pub fn fee_plus(x: u256) -> u256 {
+        return FEE +% x;
+    }
+}
