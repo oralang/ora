@@ -33,10 +33,9 @@ namespace mlir
     {
         namespace
         {
-            using abi_lowering::AbiBase;
             using abi_lowering::AbiLayoutKind;
             using abi_lowering::AbiLayoutNode;
-            using abi_lowering::AbiType;
+            using abi_lowering::AbiStaticKind;
             using abi_lowering::canonicalAbiLayoutHeadSlots;
             using abi_lowering::canonicalAbiLayoutIsDynamic;
             using abi_lowering::canonicalAbiLayoutIsTupleLike;
@@ -47,7 +46,6 @@ namespace mlir
             using abi_lowering::isDynamicFixedBytesArrayAbiNode;
             using abi_lowering::isDynamicU256ArrayAbiNode;
             using abi_lowering::isStaticBoolAbiNode;
-            using abi_lowering::parseAbiType;
             using abi_lowering::AbiLayoutSyntax;
             using abi_lowering::parseAbiLayout;
 
@@ -477,8 +475,23 @@ namespace mlir
                 return valid;
             }
 
-            static std::optional<CalldataStaticDecode> decodeStaticCalldataWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiType &abi, Value word, uint64_t enumVariantCount = 0, bool needsRefinementCheck = false, bool permissive = false)
+            static int64_t dispatcherHeadSlotsForLayout(const AbiLayoutNode &layout)
             {
+                return canonicalAbiLayoutIsDynamic(layout) ? 1 : canonicalAbiLayoutHeadSlots(layout);
+            }
+
+            static bool isStaticFixedArrayLayout(const AbiLayoutNode &layout)
+            {
+                return layout.kind == AbiLayoutKind::FixedArray &&
+                       !canonicalAbiLayoutIsDynamic(layout) &&
+                       canonicalAbiLayoutHeadSlots(layout) > 0;
+            }
+
+            static std::optional<CalldataStaticDecode> decodeStaticCalldataWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiLayoutNode &layout, Value word, uint64_t enumVariantCount = 0, bool needsRefinementCheck = false, bool permissive = false)
+            {
+                if (layout.kind != AbiLayoutKind::Static)
+                    return std::nullopt;
+
                 auto u256Type = sir::U256Type::get(ctx);
                 auto makeDecode = [&](Value payload, Value canonicalWord, Value valid, lowering::AbiDecodeError error) {
                     CalldataStaticDecode decoded;
@@ -496,21 +509,21 @@ namespace mlir
                     decoded.checks.push_back({inRange, lowering::AbiDecodeError::EnumOutOfRange});
                     return decoded;
                 };
-                switch (abi.base)
+                switch (layout.staticKind)
                 {
-                case AbiBase::Bool:
+                case AbiStaticKind::Bool:
                 {
                     Value payload = permissive ? lowering::boolAbiWordPermissivePayload(builder, loc, word) : word;
                     return makeDecode(payload, payload, lowering::boolAbiWordIsCanonical(builder, loc, word), lowering::AbiDecodeError::InvalidBoolValue);
                 }
-                case AbiBase::Address:
+                case AbiStaticKind::Address:
                 {
                     Value payload = lowering::maskLowBits(builder, loc, word, 160);
                     return makeDecode(payload, payload, builder.create<sir::EqOp>(loc, u256Type, word, payload), lowering::AbiDecodeError::InvalidAddress);
                 }
-                case AbiBase::Uint:
+                case AbiStaticKind::Uint:
                 {
-                    if (abi.width >= 256)
+                    if (layout.width >= 256)
                     {
                         if (enumVariantCount == 0 && !needsRefinementCheck)
                             return std::nullopt;
@@ -519,12 +532,12 @@ namespace mlir
                         decoded.canonicalWord = word;
                         return addEnumRangeCheck(decoded);
                     }
-                    Value payload = lowering::maskLowBits(builder, loc, word, abi.width);
+                    Value payload = lowering::maskLowBits(builder, loc, word, layout.width);
                     return addEnumRangeCheck(makeDecode(payload, payload, builder.create<sir::EqOp>(loc, u256Type, word, payload), lowering::AbiDecodeError::NonCanonicalPadding));
                 }
-                case AbiBase::Int:
+                case AbiStaticKind::Int:
                 {
-                    if (abi.width >= 256)
+                    if (layout.width >= 256)
                     {
                         if (enumVariantCount == 0 && !needsRefinementCheck)
                             return std::nullopt;
@@ -533,35 +546,37 @@ namespace mlir
                         decoded.canonicalWord = word;
                         return addEnumRangeCheck(decoded);
                     }
-                    if (abi.width == 0 || abi.width % 8 != 0)
+                    if (layout.width == 0 || layout.width % 8 != 0)
                         return std::nullopt;
-                    Value byteIndex = lowering::constU256(builder, loc, (abi.width / 8) - 1);
+                    Value byteIndex = lowering::constU256(builder, loc, (layout.width / 8) - 1);
                     Value expected = builder.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word);
                     return addEnumRangeCheck(makeDecode(expected, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::NonCanonicalPadding));
                 }
-                case AbiBase::FixedBytes:
+                case AbiStaticKind::FixedBytes:
                 {
-                    if (abi.width >= 32 || abi.width == 0)
+                    if (layout.width >= 32 || layout.width == 0)
                         return std::nullopt;
-                    uint64_t shiftBits = static_cast<uint64_t>(32 - abi.width) * 8ULL;
+                    uint64_t shiftBits = static_cast<uint64_t>(32 - layout.width) * 8ULL;
                     Value shift = lowering::constU256(builder, loc, shiftBits);
                     Value payload = builder.create<sir::ShrOp>(loc, u256Type, shift, word);
                     Value expected = builder.create<sir::ShlOp>(loc, u256Type, shift, payload);
                     return makeDecode(payload, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::InvalidFixedBytes);
                 }
-                default:
-                    return std::nullopt;
                 }
+                return std::nullopt;
             }
 
-            static Value materializeAbiReturnStaticWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiType &abi, Value payload)
+            static Value materializeAbiReturnStaticWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiLayoutNode &layout, Value payload)
             {
-                if (abi.base != AbiBase::FixedBytes || abi.width == 0 || abi.width >= 32)
+                if (layout.kind != AbiLayoutKind::Static ||
+                    layout.staticKind != AbiStaticKind::FixedBytes ||
+                    layout.width == 0 ||
+                    layout.width >= 32)
                     return payload;
 
                 // Ora fixed-bytes values carry their bytes in the low bits
                 // after ABI decode. The ABI word is left-aligned.
-                Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - abi.width) * 8ULL);
+                Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - layout.width) * 8ULL);
                 return builder.create<sir::ShlOp>(loc, sir::U256Type::get(ctx), shift, payload).getResult();
             }
 
@@ -672,13 +687,11 @@ namespace mlir
                 unsigned retCount = 0;
                 bool returnsErrorUnion = false;
                 bool permissiveAbiDecode = false;
-                SmallVector<AbiType, 8> abiParams;
                 SmallVector<std::string, 8> abiParamLayouts;
                 SmallVector<uint64_t, 8> abiParamEnumCounts;
                 SmallVector<std::string, 8> abiParamRefinements;
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
-                AbiType abiReturn;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -968,14 +981,13 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiType abi;
-                                if (!parseAbiType(sattr.getValue(), abi))
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(sattr.getValue(), layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     func.emitError("unsupported ABI param type: " + sattr.getValue());
                                     signalPassFailure();
                                     return;
                                 }
-                                info.abiParams.push_back(abi);
                                 info.abiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
@@ -1045,44 +1057,53 @@ namespace mlir
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
-                            AbiType abiReturn;
-                            if (!parseAbiType(abiReturnAttr.getValue(), abiReturn))
+                            AbiLayoutNode abiReturn;
+                            if (!parseAbiLayout(abiReturnAttr.getValue(), abiReturn, AbiLayoutSyntax::CanonicalAbi))
                             {
                                 func.emitError("unsupported ABI return type: " + abiReturnAttr.getValue());
                                 signalPassFailure();
                                 return;
                             }
-                            info.abiReturn = abiReturn;
+                            info.abiReturnLayout = abiReturnAttr.getValue().str();
                             info.hasAbiReturn = true;
                         }
                         if (auto abiReturnWordsAttr = func->getAttrOfType<IntegerAttr>("ora.abi_return_words"))
                             info.abiReturnWords = abiReturnWordsAttr.getInt();
                         if (auto abiReturnLayoutAttr = func->getAttrOfType<StringAttr>("ora.abi_return_layout"))
+                        {
+                            AbiLayoutNode abiReturnLayout;
+                            if (!parseAbiLayout(abiReturnLayoutAttr.getValue(), abiReturnLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                func.emitError("invalid ora.abi_return_layout");
+                                signalPassFailure();
+                                return;
+                            }
                             info.abiReturnLayout = abiReturnLayoutAttr.getValue().str();
+                        }
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
                         if (auto modeAttr = func->getAttrOfType<StringAttr>("ora.abi_decode_mode"))
                             info.permissiveAbiDecode = modeAttr.getValue() == "permissive";
-                        if (!info.abiParams.empty() && info.resultInputModes.size() != info.abiParams.size())
+                        if (!info.abiParamLayouts.empty() && info.resultInputModes.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.result_input_modes length does not match ora.abi_params");
                             signalPassFailure();
                             return;
                         }
-                        if (!info.abiParams.empty() && info.abiParamEnumCounts.size() != info.abiParams.size())
+                        if (!info.abiParamLayouts.empty() && info.abiParamEnumCounts.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.abi_param_enum_counts length does not match ora.abi_params");
                             signalPassFailure();
                             return;
                         }
-                        if (!info.abiParams.empty() && info.abiParamRefinements.size() != info.abiParams.size())
+                        if (!info.abiParamLayouts.empty() && info.abiParamRefinements.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.abi_param_refinements length does not match ora.abi_params");
                             signalPassFailure();
                             return;
                         }
-                        if (!info.abiParams.empty() && info.resultInputErrorIds.size() != info.abiParams.size())
+                        if (!info.abiParamLayouts.empty() && info.resultInputErrorIds.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.result_input_error_ids length does not match ora.abi_params");
                             signalPassFailure();
@@ -1096,14 +1117,14 @@ namespace mlir
                             return 1;
                         };
 
-                        unsigned expectedArgCount = info.abiParams.empty() ? info.argCount : 0;
-                        if (!info.abiParams.empty())
+                        unsigned expectedArgCount = info.abiParamLayouts.empty() ? info.argCount : 0;
+                        if (!info.abiParamLayouts.empty())
                         {
-                            for (size_t i = 0; i < info.abiParams.size(); ++i)
+                            for (size_t i = 0; i < info.abiParamLayouts.size(); ++i)
                                 expectedArgCount += loweredArgCountForSourceParam(i);
                         }
 
-                        if (!info.abiParams.empty() && expectedArgCount != info.argCount)
+                        if (!info.abiParamLayouts.empty() && expectedArgCount != info.argCount)
                         {
                             func.emitError("public ABI param metadata does not match lowered function argument count");
                             signalPassFailure();
@@ -1111,28 +1132,23 @@ namespace mlir
                         }
 
                         int64_t headSlots = 0;
-                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        size_t sourceParamCount = info.abiParamLayouts.empty() ? info.argCount : info.abiParamLayouts.size();
                         for (size_t i = 0; i < sourceParamCount; ++i)
                         {
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
-                            if (info.abiParams.empty())
+                            if (info.abiParamLayouts.empty())
                             {
                                 headSlots += 1;
                             }
                             else
                             {
-                                int64_t slots = abi.headSlots();
-                                if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
-                                    AbiLayoutNode layout;
-                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
-                                    {
-                                        func.emitError("invalid tuple ABI param layout");
-                                        signalPassFailure();
-                                        return;
-                                    }
-                                    slots = canonicalAbiLayoutIsDynamic(layout) ? 1 : canonicalAbiLayoutHeadSlots(layout);
+                                    func.emitError("invalid ABI param layout");
+                                    signalPassFailure();
+                                    return;
                                 }
+                                int64_t slots = dispatcherHeadSlotsForLayout(layout);
                                 if (slots < 0)
                                 {
                                     func.emitError("unsupported ABI type for head sizing");
@@ -1316,7 +1332,7 @@ namespace mlir
                             }
                         }
 
-                        SmallVector<AbiType, 8> initAbiParams;
+                        SmallVector<std::string, 8> initAbiParamLayouts;
                         if (auto abiAttr = userInit->getAttrOfType<ArrayAttr>("ora.abi_params"))
                         {
                             for (Attribute a : abiAttr)
@@ -1328,41 +1344,57 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiType abi;
-                                if (!parseAbiType(sattr.getValue(), abi))
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(sattr.getValue(), layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     userInit.emitError("unsupported ABI param type: " + sattr.getValue());
                                     signalPassFailure();
                                     return;
                                 }
-                                initAbiParams.push_back(abi);
+                                initAbiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
 
                         unsigned argCount = userInitType.getNumInputs();
-                        if (!initAbiParams.empty() && initAbiParams.size() != argCount)
+                        if (!initAbiParamLayouts.empty() && initAbiParamLayouts.size() != argCount)
                         {
                             userInit.emitError("ora.abi_params length does not match function argument count");
                             signalPassFailure();
                             return;
                         }
                         bool hasDynamicConstructorParam = false;
-                        for (const AbiType &abi : initAbiParams)
-                            if (abi.isDynamic())
+                        for (StringRef abiLayoutText : initAbiParamLayouts)
+                        {
+                            AbiLayoutNode layout;
+                            if (!parseAbiLayout(abiLayoutText, layout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                userInit.emitError("unsupported ABI param type: " + abiLayoutText);
+                                signalPassFailure();
+                                return;
+                            }
+                            if (canonicalAbiLayoutIsDynamic(layout))
                             {
                                 hasDynamicConstructorParam = true;
                                 break;
                             }
+                        }
                         int64_t headSlots = 0;
                         for (unsigned i = 0; i < argCount; ++i)
                         {
-                            if (initAbiParams.empty())
+                            if (initAbiParamLayouts.empty())
                             {
                                 headSlots += 1;
                             }
                             else
                             {
-                                int64_t slots = initAbiParams[i].headSlots();
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(initAbiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    userInit.emitError("invalid constructor ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                int64_t slots = dispatcherHeadSlotsForLayout(layout);
                                 if (slots < 0)
                                 {
                                     userInit.emitError("unsupported ABI type for head sizing");
@@ -1422,7 +1454,18 @@ namespace mlir
                         for (unsigned i = 0; i < argCount; ++i)
                         {
                             headOffsets.push_back(32 * headSlot);
-                            int64_t slots = initAbiParams.empty() ? 1 : initAbiParams[i].headSlots();
+                            int64_t slots = 1;
+                            if (!initAbiParamLayouts.empty())
+                            {
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(initAbiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    module.emitError("invalid constructor ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                slots = dispatcherHeadSlotsForLayout(layout);
+                            }
                             if (slots < 0)
                             {
                                 module.emitError("unsupported ABI type for head offset sizing");
@@ -1679,22 +1722,28 @@ namespace mlir
                             Value offc = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, offs));
                             Value headPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                             Value head = builder.create<sir::LoadOp>(initLoc, u256Type, headPtr);
-                            AbiType abi = initAbiParams.empty() ? AbiType{} : initAbiParams[idx];
+                            AbiLayoutNode abiLayout;
+                            const bool hasAbiLayout = !initAbiParamLayouts.empty();
+                            if (hasAbiLayout && !parseAbiLayout(initAbiParamLayouts[idx], abiLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                module.emitError("invalid constructor ABI param layout");
+                                signalPassFailure();
+                                return;
+                            }
                             Value argVal = head;
 
-                            if (!initAbiParams.empty() && abi.isArray() && abi.supportsStaticArray())
+                            if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
-                                int64_t elemCount = abi.dims.front();
-                                int64_t totalBytes = elemCount * 32;
+                                int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
                                 Value totalVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
                                 Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, totalVal);
                                 Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                                 builder.create<sir::MCopyOp>(initLoc, buf, src, totalVal);
                                 argVal = buf;
                             }
-                            else if (!initAbiParams.empty() && abi.isDynamic())
+                            else if (hasAbiLayout && canonicalAbiLayoutIsDynamic(abiLayout))
                             {
-                                if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String)
+                                if (abiLayout.kind == AbiLayoutKind::DynamicBytes)
                                 {
                                     FailureOr<StrictDynamicCalldataValue> strictArg =
                                         materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::BytesLike);
@@ -1707,7 +1756,7 @@ namespace mlir
                                     argVal = strictArg->payload;
                                     nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                else if (abi.base == AbiBase::Uint && abi.width == 256 && abi.supportsDynamicArray())
+                                else if (isDynamicU256ArrayAbiNode(abiLayout))
                                 {
                                     FailureOr<StrictDynamicCalldataValue> strictArg =
                                         materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::U256Array);
@@ -1720,7 +1769,7 @@ namespace mlir
                                     argVal = strictArg->payload;
                                     nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                else if (abi.base == AbiBase::Address && abi.supportsDynamicArray())
+                                else if (isDynamicAddressArrayAbiNode(abiLayout))
                                 {
                                     FailureOr<StrictDynamicCalldataValue> strictArg =
                                         materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::AddressArray);
@@ -1733,7 +1782,7 @@ namespace mlir
                                     argVal = strictArg->payload;
                                     nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                else if (abi.base == AbiBase::Bool && abi.supportsDynamicArray())
+                                else if (isDynamicBoolArrayAbiNode(abiLayout))
                                 {
                                     FailureOr<StrictDynamicCalldataValue> strictArg =
                                         materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::BoolArray);
@@ -1746,10 +1795,10 @@ namespace mlir
                                     argVal = strictArg->payload;
                                     nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                else if (abi.base == AbiBase::FixedBytes && abi.supportsDynamicArray())
+                                else if (isDynamicFixedBytesArrayAbiNode(abiLayout))
                                 {
                                     FailureOr<StrictDynamicCalldataValue> strictArg =
-                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abi.width);
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abiLayout.children.front()->width);
                                     if (failed(strictArg))
                                     {
                                         module.emitError("unsupported dynamic ABI type for constructor");
@@ -1929,12 +1978,22 @@ namespace mlir
                         SmallVector<Value, 8> args;
                         SmallVector<int64_t, 8> headOffsets;
                         int64_t headSlot = 0;
-                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        size_t sourceParamCount = info.abiParamLayouts.empty() ? info.argCount : info.abiParamLayouts.size();
                         for (size_t i = 0; i < sourceParamCount; ++i)
                         {
                             headOffsets.push_back(4 + 32 * headSlot);
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
-                            int64_t slots = info.abiParams.empty() ? 1 : abi.headSlots();
+                            int64_t slots = 1;
+                            if (!info.abiParamLayouts.empty())
+                            {
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    info.func.emitError("invalid ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                slots = dispatcherHeadSlotsForLayout(layout);
+                            }
                             if (slots < 0)
                             {
                                 module.emitError("unsupported ABI type for head offset sizing");
@@ -1968,13 +2027,20 @@ namespace mlir
                             StringRef argPrefix = idx == 0 ? "a_" : (idx == 1 ? "b_" : (idx == 2 ? "n_" : "arg_"));
                             setResultName(head.getDefiningOp(), (argPrefix + info.func.getName()).str());
 
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[idx];
+                            AbiLayoutNode abiLayout;
+                            const bool hasAbiLayout = !info.abiParamLayouts.empty();
+                            if (hasAbiLayout && !parseAbiLayout(info.abiParamLayouts[idx], abiLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                info.func.emitError("invalid ABI param layout");
+                                signalPassFailure();
+                                return;
+                            }
                             Value argVal = head;
-                            if (!info.abiParams.empty() && !abi.isArray() && !abi.isDynamic())
+                            if (hasAbiLayout && abiLayout.kind == AbiLayoutKind::Static)
                             {
                                 uint64_t enumVariantCount = idx < info.abiParamEnumCounts.size() ? info.abiParamEnumCounts[idx] : 0;
                                 const bool needsRefinementCheck = idx < info.abiParamRefinements.size() && !info.abiParamRefinements[idx].empty();
-                                if (std::optional<CalldataStaticDecode> decoded = decodeStaticCalldataWord(builder, caseDecodeLoc, ctx, abi, head, enumVariantCount, needsRefinementCheck, info.permissiveAbiDecode))
+                                if (std::optional<CalldataStaticDecode> decoded = decodeStaticCalldataWord(builder, caseDecodeLoc, ctx, abiLayout, head, enumVariantCount, needsRefinementCheck, info.permissiveAbiDecode))
                                 {
                                     if (needsRefinementCheck)
                                     {
@@ -2914,20 +2980,14 @@ namespace mlir
                                 };
                             };
 
-                            if (!info.abiParams.empty() &&
+                            if (hasAbiLayout &&
                                 idx < info.resultInputModes.size() &&
                                 info.resultInputModes[idx] == "narrow_payloadless")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public Result input requires tuple ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                AbiLayoutNode layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
-                                {
-                                    info.func.emitError("invalid Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
@@ -2953,20 +3013,14 @@ namespace mlir
                                 Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 argVal = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, packedErr, packedOk);
                             }
-                            else if (!info.abiParams.empty() &&
+                            else if (hasAbiLayout &&
                                      idx < info.resultInputModes.size() &&
                                      info.resultInputModes[idx] == "wide_payloadless")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public wide Result input requires tuple ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                AbiLayoutNode layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
-                                {
-                                    info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
@@ -3043,20 +3097,14 @@ namespace mlir
                                     nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, okCarrier->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
-                            else if (!info.abiParams.empty() &&
+                            else if (hasAbiLayout &&
                                      idx < info.resultInputModes.size() &&
                                      info.resultInputModes[idx] == "wide_single_error")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public wide Result input requires tuple ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                AbiLayoutNode layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
-                                {
-                                    info.func.emitError("invalid wide Result input ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
@@ -3145,31 +3193,23 @@ namespace mlir
                                     nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, errPayload->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
-                            else if (!info.abiParams.empty() && abi.isArray() && abi.supportsStaticArray())
+                            else if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
-                                int64_t elemCount = abi.dims.front();
-                                int64_t totalBytes = elemCount * 32;
+                                int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
                                 Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
                                 Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
                             }
-                            else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
+                            else if (hasAbiLayout && canonicalAbiLayoutIsTupleLike(abiLayout))
                             {
-                                AbiLayoutNode layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout, AbiLayoutSyntax::CanonicalAbi))
-                                {
-                                    info.func.emitError("invalid tuple ABI param layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                if (canonicalAbiLayoutIsDynamic(layout))
+                                if (canonicalAbiLayoutIsDynamic(abiLayout))
                                 {
                                     module.emitError("unsupported dynamic tuple ABI type for dispatcher");
                                     signalPassFailure();
                                     return;
                                 }
-                                int64_t words = canonicalAbiLayoutHeadSlots(layout);
+                                int64_t words = canonicalAbiLayoutHeadSlots(abiLayout);
                                 if (words <= 0)
                                 {
                                     module.emitError("unsupported tuple ABI type for dispatcher");
@@ -3181,82 +3221,67 @@ namespace mlir
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
                             }
-                            else if (!info.abiParams.empty() && abi.isDynamic())
+                            else if (hasAbiLayout && canonicalAbiLayoutIsDynamic(abiLayout))
                             {
-                                if (abi.supportsNestedDynamicArray())
+                                if (abiLayout.kind == AbiLayoutKind::DynamicBytes)
                                 {
-                                    module.emitError("unsupported nested dynamic ABI array type for dispatcher");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                else if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
-                                {
-                                    if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String)
-                                    {
-                                        FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BytesLike);
-                                        if (failed(strictArg))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        argVal = strictArg->payload;
-                                        nextDynamicOffset = strictArg->nextExpectedOffset;
-                                    }
-                                    else if (abi.base == AbiBase::Uint && abi.width == 256 && abi.supportsDynamicArray())
-                                    {
-                                        FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::U256Array);
-                                        if (failed(strictArg))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        argVal = strictArg->payload;
-                                        nextDynamicOffset = strictArg->nextExpectedOffset;
-                                    }
-                                    else if (abi.base == AbiBase::Address && abi.supportsDynamicArray())
-                                    {
-                                        FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::AddressArray);
-                                        if (failed(strictArg))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        argVal = strictArg->payload;
-                                        nextDynamicOffset = strictArg->nextExpectedOffset;
-                                    }
-                                    else if (abi.base == AbiBase::Bool && abi.supportsDynamicArray())
-                                    {
-                                        FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BoolArray);
-                                        if (failed(strictArg))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        argVal = strictArg->payload;
-                                        nextDynamicOffset = strictArg->nextExpectedOffset;
-                                    }
-                                    else if (abi.base == AbiBase::FixedBytes && abi.supportsDynamicArray())
-                                    {
-                                        FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abi.width);
-                                        if (failed(strictArg))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        argVal = strictArg->payload;
-                                        nextDynamicOffset = strictArg->nextExpectedOffset;
-                                    }
-                                    else
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BytesLike);
+                                    if (failed(strictArg))
                                     {
                                         module.emitError("unsupported dynamic ABI type for dispatcher");
                                         signalPassFailure();
                                         return;
                                     }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicU256ArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::U256Array);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicAddressArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::AddressArray);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicBoolArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BoolArray);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicFixedBytesArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abiLayout.children.front()->width);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
                                 }
                                 else
                                 {
@@ -3302,6 +3327,15 @@ namespace mlir
                             SymbolRefAttr::get(ctx, info.func.getName()),
                             args);
 
+                        AbiLayoutNode abiReturnLayout;
+                        const bool hasReturnLayout = info.hasAbiReturn && !info.abiReturnLayout.empty();
+                        if (hasReturnLayout && !parseAbiLayout(info.abiReturnLayout, abiReturnLayout, AbiLayoutSyntax::CanonicalAbi))
+                        {
+                            info.func.emitError("invalid ora.abi_return_layout");
+                            signalPassFailure();
+                            return;
+                        }
+
                         if (info.returnsErrorUnion)
                         {
                             if (info.retCount != 2)
@@ -3344,45 +3378,22 @@ namespace mlir
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 0, constCache, successBlock, "zero");
                                 retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, size);
                             }
-                            else if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            else if (hasReturnLayout && abiReturnLayout.kind == AbiLayoutKind::Static)
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
                                 retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                                 setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, info.abiReturn, successPayload));
+                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, abiReturnLayout, successPayload));
                             }
-                            else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
+                            else if (hasReturnLayout && !canonicalAbiLayoutIsDynamic(abiReturnLayout) && info.abiReturnWords > 0)
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
                                 retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
                             }
-                            else if (!info.abiReturnLayout.empty())
-                            {
-                                AbiLayoutNode layout;
-                                if (!parseAbiLayout(info.abiReturnLayout, layout, AbiLayoutSyntax::CanonicalAbi))
-                                {
-                                    info.func.emitError("invalid ora.abi_return_layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
-                                size = computeAbiEncodedSize(builder, caseReturnLoc, ctx, retPtr, layout);
-                            }
-                            else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
+                            else if (hasReturnLayout)
                             {
                                 retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
-                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
-                                Value padded = lowering::ceil32(builder, caseReturnLoc, length);
-                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, padded, wordSize);
-                            }
-                            else if (info.abiReturn.supportsDynamicArray())
-                            {
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
-                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
-                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                Value lenBytes = builder.create<sir::MulOp>(caseReturnLoc, u256Type, length, wordSize);
-                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, lenBytes, wordSize);
+                                size = computeAbiEncodedSize(builder, caseReturnLoc, ctx, retPtr, abiReturnLayout);
                             }
                             else
                             {
@@ -3452,9 +3463,9 @@ namespace mlir
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
-                            if (info.hasAbiReturn &&
-                                (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String ||
-                                 info.abiReturn.supportsDynamicArray()))
+                            if (hasReturnLayout &&
+                                (abiReturnLayout.kind == AbiLayoutKind::DynamicBytes ||
+                                 canonicalAbiLayoutSupportsDynamicArray(abiReturnLayout)))
                             {
                                 (void)len;
                                 AbiReturnBuffer encoded = materializeSingleDynamicAbiReturn(
@@ -3462,7 +3473,7 @@ namespace mlir
                                     caseReturnLoc,
                                     ctx,
                                     ptr_u,
-                                    info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String);
+                                    abiReturnLayout.kind == AbiLayoutKind::DynamicBytes);
                                 builder.create<sir::ReturnOp>(caseReturnLoc, encoded.ptr, encoded.size);
                             }
                             else
@@ -3478,7 +3489,8 @@ namespace mlir
                             Value size = c32_ret;
                             Value ptr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                             setResultName(ptr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, info.abiReturn, val));
+                            Value stored = hasReturnLayout ? materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, abiReturnLayout, val) : val;
+                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, stored);
                             builder.create<sir::ReturnOp>(caseReturnLoc, ptr, size);
                         }
                         else
