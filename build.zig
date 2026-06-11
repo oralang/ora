@@ -1435,6 +1435,16 @@ pub fn build(b: *std.Build) void {
     check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
     test_step.dependOn(&oratosir_coverage_cmd.step);
 
+    // zig build check-feature-execution-coverage
+    const feature_coverage_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-feature-execution-coverage.py",
+        "tests/conformance/feature_coverage.json",
+    });
+    const check_feature_coverage_step = b.step("check-feature-execution-coverage", "Validate the feature-execution coverage manifest");
+    check_feature_coverage_step.dependOn(&feature_coverage_cmd.step);
+    test_step.dependOn(&feature_coverage_cmd.step);
+
     // zig build check-mlir-ora
     const mlir_ora_checks_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
