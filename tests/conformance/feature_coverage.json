@@ -420,6 +420,14 @@
       ]
     },
     {
+      "id": "adversarial.calldata_decode",
+      "area": "adversarial",
+      "behavior": "Hostile raw calldata against the dispatcher decode surface (unknown selector, truncated args, out-of-bounds dynamic offset) must revert, never accept-and-misbehave",
+      "specs": [
+        "tests/conformance/adversarial_calldata.spec.toml"
+      ]
+    },
+    {
       "id": "full_app.vault_error_union_flow",
       "area": "full_app",
       "behavior": "Multi-caller vault scenario over ora-example/vault/02_errors.ora: deposits, partial withdraw, per-caller balances, total, ZeroAmount and payload-carrying InsufficientBalance revert paths",

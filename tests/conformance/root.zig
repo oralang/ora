@@ -233,6 +233,54 @@ test "conformance spec parser rejects calls with multiple outcomes" {
     try testing.expectError(error.MultipleOutcomes, spec.parse(testing.allocator, source));
 }
 
+test "conformance spec parser accepts raw calldata and rejects typed returns on it" {
+    const ok_source =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\calldata = "0xdeadbeef"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\reverts = {}
+    ;
+    var parsed = try spec.parse(testing.allocator, ok_source);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.calls[0].calldata != null);
+    try testing.expect(parsed.value.calls[0].@"fn" == null);
+
+    const typed_return =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\calldata = "0xdeadbeef"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\returns = { u256 = 0 }
+    ;
+    try testing.expectError(error.RawCalldataNeedsSucceedsOrReverts, spec.parse(testing.allocator, typed_return));
+
+    const both =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "go()"
+        \\calldata = "0xdeadbeef"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\reverts = {}
+    ;
+    try testing.expectError(error.InvalidInvocationForm, spec.parse(testing.allocator, both));
+}
+
 test "conformance spec parser parses exact revert data and rejects unknown revert keys" {
     const source =
         \\[deploy]

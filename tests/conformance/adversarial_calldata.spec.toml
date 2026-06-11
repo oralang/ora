@@ -1,0 +1,44 @@
+# Adversarial raw-calldata cases (T2) against the dispatcher decode surface.
+# Each uses calldata = "0x..." to send hostile bytes the typed encoder can't
+# express. Property: the dispatcher must revert or behave correctly, never
+# accept-and-misbehave.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+# Baseline sanity: a well-formed add(2,3) succeeds (raw-encoded).
+[[call]]
+calldata = "0x771602f700000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+succeeds = {}
+
+# Unknown selector (0xdeadbeef) must revert (no matching dispatch arm).
+[[call]]
+calldata = "0xdeadbeef"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# Selector only, missing both uint256 args -> calldata too short, must revert.
+[[call]]
+calldata = "0x771602f7"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# add with one arg present, second truncated mid-word -> must revert.
+[[call]]
+calldata = "0x771602f70000000000000000000000000000000000000000000000000000000000000002000000000000000000000000"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }
+
+# echo_len(string): offset points far past calldata end -> must revert,
+# not read out of bounds.
+[[call]]
+calldata = "0x7b67e79d0000000000000000000000000000000000000000000000000000000000001000"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+reverts = { any = true }

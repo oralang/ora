@@ -25,6 +25,8 @@ pub const ExpectedOutcome = union(enum) {
     /// Call must succeed; return bytes are not checked. For state-effect
     /// scenarios where the return encoding is irrelevant or untrusted.
     succeeds_any,
+    /// Call must revert; revert data is not checked (adversarial robustness).
+    reverts_any,
     reverts_empty,
     reverts_selector: [4]u8,
     reverts_data: []const u8,
@@ -58,7 +60,11 @@ pub const DeploySpec = struct {
 };
 
 pub const CallSpec = struct {
-    @"fn": []const u8,
+    /// Either @"fn"+args (typed) or calldata (raw hostile bytes) is set, never both.
+    @"fn": ?[]const u8,
+    /// Raw calldata bytes; when set, the call bypasses ABI encoding. Such calls
+    /// can only assert `succeeds`/`reverts` (no function ABI to type returns).
+    calldata: ?[]const u8,
     caller: Address,
     value: u256,
     args: []ArgValue,

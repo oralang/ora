@@ -55,6 +55,7 @@ const LogBuilder = struct {
 
 const CallBuilder = struct {
     @"fn": ?[]const u8 = null,
+    calldata: ?[]u8 = null,
     caller: ?types.Address = null,
     value: ?u256 = null,
     args: ?[]types.ArgValue = null,
@@ -66,16 +67,30 @@ const CallBuilder = struct {
 
     fn toSpec(self: *CallBuilder, allocator: std.mem.Allocator) !types.CallSpec {
         const expected_outcome = try self.outcome();
+        // Exactly one invocation form: typed (fn[+args]) or raw (calldata).
+        if ((self.@"fn" == null) == (self.calldata == null)) return error.InvalidInvocationForm;
+        const args: []types.ArgValue = if (self.calldata != null)
+            (self.args orelse try allocator.alloc(types.ArgValue, 0))
+        else
+            (self.args orelse return error.MissingRequiredField);
+        if (self.calldata != null) {
+            // Raw calldata cannot type a return; only succeeds/reverts are valid.
+            switch (expected_outcome) {
+                .returns_empty, .returns_static => return error.RawCalldataNeedsSucceedsOrReverts,
+                else => {},
+            }
+        }
         const storage = try self.storage.toOwnedSlice(allocator);
         errdefer allocator.free(storage);
         const logs = try self.logs.toOwnedSlice(allocator);
         self.storage = .{};
         self.logs = .{};
         return .{
-            .@"fn" = self.@"fn" orelse return error.MissingRequiredField,
+            .@"fn" = self.@"fn",
+            .calldata = self.calldata,
             .caller = self.caller orelse return error.MissingRequiredField,
             .value = self.value orelse return error.MissingRequiredField,
-            .args = self.args orelse return error.MissingRequiredField,
+            .args = args,
             .outcome = expected_outcome,
             .storage = storage,
             .logs = logs,
@@ -115,6 +130,7 @@ const deploy_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
 });
 const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "fn", .present },
+    .{ "calldata", .present },
     .{ "caller", .present },
     .{ "value", .present },
     .{ "args", .present },
@@ -445,6 +461,10 @@ fn parseReverts(allocator: std.mem.Allocator, value: []const u8) !types.Expected
     const trimmed = std.mem.trim(u8, value, " \t");
     if (std.mem.eql(u8, trimmed, "{}")) return .reverts_empty;
     const kv = try parseInlineObject(value);
+    if (std.mem.eql(u8, kv.key, "any")) {
+        if (!std.mem.eql(u8, std.mem.trim(u8, kv.value, " \t"), "true")) return error.UnsupportedRevertExpectation;
+        return .reverts_any;
+    }
     if (std.mem.eql(u8, kv.key, "selector")) {
         return .{ .reverts_selector = try abi.parseSelector(try abi.parseString(kv.value)) };
     }

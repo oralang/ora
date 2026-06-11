@@ -272,17 +272,27 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
     try testing.expect(host.getCodeForAddress(contract_address).len > 0);
 
     for (spec.calls) |call| {
-        const function_abi = try doc.findFunction(call.@"fn");
-        defer function_abi.deinit(allocator);
-        const resolved_args = try resolveContractAddressArgs(allocator, function_abi.inputs, call.args, contract_address);
-        defer deinitResolvedContractAddressArgs(allocator, call.args, resolved_args);
-        const encoded_args = try abi.encodeArgs(allocator, function_abi.inputs, resolved_args);
-        defer allocator.free(encoded_args);
+        // Raw-calldata calls (T2 adversarial) bypass the ABI; typed calls
+        // resolve a function and encode args. A raw call has no function_abi,
+        // so its outcome is restricted to succeeds/reverts (enforced at parse).
+        var function_abi: ?abi_doc.FunctionAbi = null;
+        defer if (function_abi) |fa| fa.deinit(allocator);
 
         var calldata = std.ArrayList(u8){};
         defer calldata.deinit(allocator);
-        try calldata.appendSlice(allocator, &function_abi.selector);
-        try calldata.appendSlice(allocator, encoded_args);
+
+        if (call.calldata) |raw| {
+            try calldata.appendSlice(allocator, raw);
+        } else {
+            const fa = try doc.findFunction(call.@"fn".?);
+            function_abi = fa;
+            const resolved_args = try resolveContractAddressArgs(allocator, fa.inputs, call.args, contract_address);
+            defer deinitResolvedContractAddressArgs(allocator, call.args, resolved_args);
+            const encoded_args = try abi.encodeArgs(allocator, fa.inputs, resolved_args);
+            defer allocator.free(encoded_args);
+            try calldata.appendSlice(allocator, &fa.selector);
+            try calldata.appendSlice(allocator, encoded_args);
+        }
 
         const result = evm.call(.{ .call = .{
             .caller = call.caller,
@@ -295,26 +305,31 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
 
         switch (call.outcome) {
             .returns_empty => {
+                const fa = function_abi orelse return error.RawCalldataNeedsSucceedsOrReverts;
                 try testing.expect(result.success);
-                if (function_abi.outputs.len != 0) return error.UnsupportedReturnType;
+                if (fa.outputs.len != 0) return error.UnsupportedReturnType;
                 try testing.expectEqual(@as(usize, 0), result.output.len);
             },
             .returns_static => |expected| {
+                const fa = function_abi orelse return error.RawCalldataNeedsSucceedsOrReverts;
                 try testing.expect(result.success);
-                if (function_abi.outputs.len != 1) return error.UnsupportedReturnType;
-                if (!abi.specTypeMatchesAbiWire(expected.spec_type, function_abi.outputs[0])) return error.UnsupportedReturnType;
-                if (try abi.isSingleStaticWord(allocator, function_abi.outputs[0])) {
+                if (fa.outputs.len != 1) return error.UnsupportedReturnType;
+                if (!abi.specTypeMatchesAbiWire(expected.spec_type, fa.outputs[0])) return error.UnsupportedReturnType;
+                if (try abi.isSingleStaticWord(allocator, fa.outputs[0])) {
                     try testing.expectEqual(@as(usize, 32), result.output.len);
-                    try abi.expectStaticReturn(function_abi.outputs[0], expected.value, result.output[0..32]);
+                    try abi.expectStaticReturn(fa.outputs[0], expected.value, result.output[0..32]);
                     continue;
                 }
                 const expected_args = [_]types.ArgValue{expected.value};
-                const expected_output = try abi.encodeArgs(allocator, function_abi.outputs, &expected_args);
+                const expected_output = try abi.encodeArgs(allocator, fa.outputs, &expected_args);
                 defer allocator.free(expected_output);
                 try testing.expectEqualSlices(u8, expected_output, result.output);
             },
             .succeeds_any => {
                 try testing.expect(result.success);
+            },
+            .reverts_any => {
+                try testing.expect(!result.success);
             },
             .reverts_empty => {
                 try testing.expect(!result.success);
