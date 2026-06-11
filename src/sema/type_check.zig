@@ -1512,11 +1512,40 @@ const TypeChecker = struct {
     fn checkLocalResultAggregateTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
         const unwrapped = unwrapRefinement(ty);
         switch (unwrapped) {
-            .array => |array| try self.checkResultCarrierTypeSupport(range, array.element_type.*, "local Result aggregate values"),
-            .tuple => |fields| for (fields) |field| try self.checkResultCarrierTypeSupport(range, field, "local Result aggregate values"),
-            .anonymous_struct => |anon| for (anon.fields) |field| try self.checkResultCarrierTypeSupport(range, field.ty, "local Result aggregate values"),
+            .array => |array| try self.checkLocalResultAggregateCarrierSupport(range, array.element_type.*),
+            .tuple => |fields| for (fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field),
+            .anonymous_struct => |anon| for (anon.fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field.ty),
             else => {},
         }
+    }
+
+    fn checkLocalResultAggregateCarrierSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        const unwrapped = unwrapRefinement(ty);
+        switch (unwrapped) {
+            .array => |array| return self.checkLocalResultAggregateCarrierSupport(range, array.element_type.*),
+            .tuple => |fields| {
+                for (fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field);
+                return;
+            },
+            .anonymous_struct => |anon| {
+                for (anon.fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field.ty);
+                return;
+            },
+            .error_union => {},
+            else => return,
+        }
+
+        const error_union = unwrapped.error_union;
+        if (!localResultAggregatePayloadIsScalar(error_union.payload_type.*)) {
+            try self.emitRangeError(
+                range,
+                "local Result aggregate values currently require a scalar success payload",
+                .{},
+            );
+            return;
+        }
+
+        try self.checkResultErrorTypesPayloadless(range, error_union, "local Result aggregate values");
     }
 
     fn checkResultCarrierTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type, subject: []const u8) !void {
@@ -1545,6 +1574,10 @@ const TypeChecker = struct {
             return;
         }
 
+        try self.checkResultErrorTypesPayloadless(range, error_union, subject);
+    }
+
+    fn checkResultErrorTypesPayloadless(self: *TypeChecker, range: source.TextRange, error_union: anytype, subject: []const u8) !void {
         for (error_union.error_types) |error_type| {
             const named = switch (error_type) {
                 .named => |named| named.name,
@@ -8729,6 +8762,20 @@ fn storageResultPayloadNeedsPointer(ty: Type) bool {
         .function,
         .external_proxy,
         .contract,
+        => true,
+        else => false,
+    };
+}
+
+fn localResultAggregatePayloadIsScalar(ty: Type) bool {
+    return switch (unwrapRefinement(ty).kind()) {
+        .void,
+        .bool,
+        .integer,
+        .address,
+        .fixed_bytes,
+        .bitfield,
+        .enum_,
         => true,
         else => false,
     };

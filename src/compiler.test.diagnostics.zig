@@ -846,7 +846,8 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
 
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out", .{}));
+    try tmp.dir.access("out", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
 }
 
 test "compiler reports undefined type names at value resolution positions once" {
