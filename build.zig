@@ -1435,6 +1435,15 @@ pub fn build(b: *std.Build) void {
     check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
     test_step.dependOn(&oratosir_coverage_cmd.step);
 
+    // zig build check-mlir-ora
+    const mlir_ora_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-mlir-checks.sh",
+    });
+    mlir_ora_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_mlir_ora_step = b.step("check-mlir-ora", "Run Ora MLIR FileCheck snapshots");
+    check_mlir_ora_step.dependOn(&mlir_ora_checks_cmd.step);
+
     // zig build check-mlir-sir
     const mlir_sir_checks_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
@@ -1478,6 +1487,14 @@ pub fn build(b: *std.Build) void {
     const check_smt_modifies_corpus_step = b.step("check-smt-modifies-corpus", "Run SMT modifies corpus checks");
     smt_modifies_corpus_cmd.step.dependOn(b.getInstallStep());
     check_smt_modifies_corpus_step.dependOn(&smt_modifies_corpus_cmd.step);
+
+    // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
+    const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
+    gate_step.dependOn(test_step);
+    gate_step.dependOn(oratosir_debloat_gate_step);
+    gate_step.dependOn(check_mlir_ora_step);
+    gate_step.dependOn(check_smt_modifies_corpus_step);
+    gate_step.dependOn(lsp_smoke_step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
