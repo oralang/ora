@@ -114,6 +114,7 @@ def main() -> int:
         print("failed:")
         for rel, reason in failed:
             print(f"  {rel}: {reason}")
+        return 1
     return 0
 
 
