@@ -1,0 +1,7 @@
+// Negative: undefined type name in a parameter position must be rejected
+// with a diagnostic and no bytecode (fail-closed type resolution).
+contract UndefinedTypeParam {
+    pub fn f(p: Frobnicator) -> u256 {
+        return 0;
+    }
+}

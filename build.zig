@@ -1445,6 +1445,15 @@ pub fn build(b: *std.Build) void {
     check_feature_coverage_step.dependOn(&feature_coverage_cmd.step);
     test_step.dependOn(&feature_coverage_cmd.step);
 
+    // zig build check-negative-corpus
+    const negative_corpus_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-negative-corpus.py",
+    });
+    negative_corpus_cmd.step.dependOn(b.getInstallStep());
+    const check_negative_corpus_step = b.step("check-negative-corpus", "Run the negative expected-diagnostic corpus");
+    check_negative_corpus_step.dependOn(&negative_corpus_cmd.step);
+
     // zig build check-mlir-ora
     const mlir_ora_checks_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
@@ -1503,6 +1512,7 @@ pub fn build(b: *std.Build) void {
     gate_step.dependOn(test_step);
     gate_step.dependOn(oratosir_debloat_gate_step);
     gate_step.dependOn(check_mlir_ora_step);
+    gate_step.dependOn(check_negative_corpus_step);
     gate_step.dependOn(check_smt_modifies_corpus_step);
     gate_step.dependOn(lsp_smoke_step);
 }

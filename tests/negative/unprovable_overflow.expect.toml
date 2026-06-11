@@ -1,0 +1,3 @@
+# Verifier proves the checked-add overflow obligation is satisfiable (a bug is
+# possible) and refuses to emit. The diagnostic stream names the obligation.
+expect_error = "checked addition overflow"

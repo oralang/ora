@@ -1,0 +1,13 @@
+// Negative pin for FINDINGS.md#f-005: calling a trait-impl method from a
+// contract fn currently fails lowering (no bytecode). This pins the CURRENT
+// fail-closed behavior; when F-005 is fixed this file moves to the positive
+// conformance corpus (trait_method_dispatch.*).
+trait P { fn v(self) -> u256; }
+struct I { x: u256; }
+impl P for I { fn v(self) -> u256 { return self.x; } }
+contract TraitCallFromContract {
+    pub fn f(p: u256) -> u256 {
+        let i: I = I { x: p };
+        return i.v();
+    }
+}
