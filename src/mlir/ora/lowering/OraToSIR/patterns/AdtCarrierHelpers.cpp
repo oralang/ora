@@ -21,15 +21,41 @@ namespace mlir
         namespace adt_helpers
         {
 
-            Value materializeAdtHandle(OpBuilder &builder,
-                                       Location loc,
-                                       Value tag,
-                                       Value payload)
+            Value adtCarrierSizeConst(OpBuilder &builder, Location loc)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                return builder.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtCarrierSize));
+            }
+
+            Value adtPayloadOffsetConst(OpBuilder &builder, Location loc)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                return builder.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+            }
+
+            Value adtStoragePayloadSlotOffsetConst(OpBuilder &builder, Location loc)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                return builder.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtStoragePayloadSlotOffset));
+            }
+
+            AdtHandle materializeAdtHandleWithSize(OpBuilder &builder,
+                                                   Location loc,
+                                                   Value tag,
+                                                   Value payload)
             {
                 auto *ctx = builder.getContext();
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
                 Value tagU256 = llvm::isa<sir::U256Type>(tag.getType())
                                     ? tag
@@ -38,15 +64,21 @@ namespace mlir
                                         ? payload
                                         : builder.create<sir::BitcastOp>(loc, u256Type, payload).getResult();
 
-                Value sizeVal = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtCarrierSize));
+                Value sizeVal = adtCarrierSizeConst(builder, loc);
                 Value basePtr = builder.create<sir::MallocOp>(loc, ptrType, sizeVal);
                 builder.create<sir::StoreOp>(loc, basePtr, tagU256);
-                Value payloadOffset = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+                Value payloadOffset = adtPayloadOffsetConst(builder, loc);
                 Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, payloadOffset);
                 builder.create<sir::StoreOp>(loc, payloadPtr, payloadU256);
-                return basePtr;
+                return {basePtr, sizeVal};
+            }
+
+            Value materializeAdtHandle(OpBuilder &builder,
+                                       Location loc,
+                                       Value tag,
+                                       Value payload)
+            {
+                return materializeAdtHandleWithSize(builder, loc, tag, payload).basePtr;
             }
 
             std::pair<Value, Value> loadAdtPartsFromHandle(OpBuilder &builder,
@@ -56,15 +88,13 @@ namespace mlir
                 auto *ctx = builder.getContext();
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
                 Value basePtr = handle;
                 if (llvm::isa<sir::U256Type>(basePtr.getType()))
                     basePtr = builder.create<sir::BitcastOp>(loc, ptrType, basePtr);
 
                 Value tag = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                Value payloadOffset = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+                Value payloadOffset = adtPayloadOffsetConst(builder, loc);
                 Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, payloadOffset);
                 Value payload = builder.create<sir::LoadOp>(loc, u256Type, payloadPtr);
                 return {tag, payload};
@@ -74,12 +104,8 @@ namespace mlir
                                         Location loc,
                                         Value baseSlot)
             {
-                auto *ctx = builder.getContext();
-                auto u256Type = sir::U256Type::get(ctx);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-
-                Value offset = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtStoragePayloadSlotOffset));
+                auto u256Type = sir::U256Type::get(builder.getContext());
+                Value offset = adtStoragePayloadSlotOffsetConst(builder, loc);
                 return builder.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
             }
 

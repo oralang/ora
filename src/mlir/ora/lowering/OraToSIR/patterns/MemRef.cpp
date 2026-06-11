@@ -677,6 +677,8 @@ static Value getStorageStructValueBaseSlot(Value structValue,
     return Value();
 }
 
+static Value getStorageBaseSlotFromConvertedValue(Value convertedMemRef);
+
 static Value getStorageBaseSlot(Value originalMemRef,
                                 Value convertedMemRef,
                                 ConversionPatternRewriter &rewriter,
@@ -698,6 +700,64 @@ static Value getStorageBaseSlot(Value originalMemRef,
             return operand;
         if (operand.getDefiningOp())
             return getStorageBaseSlot(originalMemRef, operand, rewriter, loc);
+    }
+
+    if (auto cast = convertedMemRef.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (cast.getNumOperands() == 1)
+        {
+            Value operand = cast.getOperand(0);
+            auto viewKind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            if (llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            if (operand.getDefiningOp())
+                return getStorageBaseSlot(originalMemRef, operand, rewriter, loc);
+        }
+    }
+
+    if (auto unwrap = originalMemRef.getDefiningOp<ora::ErrorUnwrapOp>())
+    {
+        auto errType = llvm::dyn_cast<ora::ErrorUnionType>(unwrap.getValue().getType());
+        auto memrefType = llvm::dyn_cast<mlir::MemRefType>(unwrap.getResult().getType());
+        if (errType && memrefType && llvm::isa<mlir::MemRefType>(errType.getSuccessType()))
+        {
+            Value source = unwrap.getValue();
+            if (auto cast = source.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (cast.getNumOperands() == 2 &&
+                    (hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion) ||
+                     hasMaterializationKind(cast, mat_kind::kWideErrorUnionJoin)))
+                {
+                    Value payloadView = cast.getOperand(1);
+                    if (llvm::isa<sir::U256Type>(payloadView.getType()))
+                        return payloadView;
+                    if (Value slot = getStorageBaseSlotFromConvertedValue(payloadView))
+                        return slot;
+                }
+            }
+            while (auto cast = source.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+            {
+                if (cast.getNumOperands() != 1)
+                    break;
+                source = cast.getOperand(0);
+            }
+            if (auto sload = source.getDefiningOp<ora::SLoadOp>())
+            {
+                auto slotIndexOpt = computeGlobalSlot(sload.getGlobalName(), unwrap.getOperation());
+                if (!slotIndexOpt)
+                    return Value();
+
+                auto *ctx = rewriter.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value rootSlot = rewriter.create<sir::ConstOp>(
+                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+                return mlir::ora::adt_helpers::adtStoragePayloadSlot(rewriter, loc, rootSlot);
+            }
+        }
     }
 
     if (auto extract = originalMemRef.getDefiningOp<ora::StructFieldExtractOp>())

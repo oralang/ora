@@ -2,6 +2,8 @@
 #include "patterns/EVMConstants.h"
 #include "patterns/LoweringHelpers.h"
 #include "patterns/Naming.h"
+#include "patterns/StorageLayout.h"
+#include "OraMaterializationKinds.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -22,11 +24,43 @@ using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::constU256;
+using mlir::ora::lowering::kStorageMemRefViewKind;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
 static SIRNamingHelper arithmeticNamingHelper;
+
+static Value getStorageViewRootSlot(Value value)
+{
+    if (!value)
+        return Value();
+
+    if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+    {
+        if (cast.getNumOperands() == 1)
+        {
+            Value operand = cast.getOperand(0);
+            auto viewKind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            return getStorageViewRootSlot(operand);
+        }
+    }
+
+    if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+    {
+        Value operand = bitcast.getInput();
+        auto viewKind = bitcast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+        if (viewKind && viewKind.getValue() == kStorageMemRefViewKind &&
+            llvm::isa<sir::U256Type>(operand.getType()))
+            return operand;
+        return getStorageViewRootSlot(operand);
+    }
+
+    return Value();
+}
 
 static SIRNamingHelper &getNamingHelper(Operation *op)
 {
@@ -556,11 +590,25 @@ LogicalResult ConvertLengthOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "ora.length expects one operand and one result");
 
     Value source = operands[0];
+    auto loc = op->getLoc();
+    auto u256Type = sir::U256Type::get(rewriter.getContext());
+
+    if (Value storageRoot = getStorageViewRootSlot(op->getOperand(0)))
+    {
+        Value length = rewriter.create<sir::SLoadOp>(loc, u256Type, storageRoot);
+        rewriter.replaceOp(op, length);
+        return success();
+    }
+    if (Value storageRoot = getStorageViewRootSlot(source))
+    {
+        Value length = rewriter.create<sir::SLoadOp>(loc, u256Type, storageRoot);
+        rewriter.replaceOp(op, length);
+        return success();
+    }
+
     if (!llvm::isa<sir::PtrType>(source.getType()))
         return rewriter.notifyMatchFailure(op, "ora.length source is not a lowered dynamic bytes pointer");
 
-    auto loc = op->getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     Value length = rewriter.create<sir::LoadOp>(loc, u256Type, source);
     rewriter.replaceOp(op, length);
     return success();

@@ -610,7 +610,6 @@ static void buildWideErrorUnionReturnFromParts(
     Location loc,
     Value tag,
     Value payload,
-    Type ptrType,
     Type u256Type,
     Type ui64Type)
 {
@@ -624,17 +623,9 @@ static void buildWideErrorUnionReturnFromParts(
         normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayload, normPayload);
     }
 
-    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtCarrierSize);
-    Value sizeConst = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
-    Value mem = rewriter.create<sir::MallocOp>(loc, ptrType, sizeConst);
-
-    rewriter.create<sir::StoreOp>(loc, mem, normTag);
-    Value offset = rewriter.create<sir::ConstOp>(
-        loc, u256Type, mlir::IntegerAttr::get(ui64Type, ora::adt_helpers::kAdtPayloadOffset));
-    Value mem2 = rewriter.create<sir::AddPtrOp>(loc, ptrType, mem, offset);
-    rewriter.create<sir::StoreOp>(loc, mem2, normPayload);
-
-    rewriter.create<sir::ReturnOp>(loc, mem, sizeConst);
+    auto handle = ora::adt_helpers::materializeAdtHandleWithSize(
+        rewriter, loc, normTag, normPayload);
+    rewriter.create<sir::ReturnOp>(loc, handle.basePtr, handle.sizeBytes);
 }
 
 static bool isNarrowErrorUnion(ora::ErrorUnionType type);
@@ -1778,9 +1769,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                     }
                     else
                     {
-                        Value offs = rewriter.create<sir::ConstOp>(
-                            loc, u256Type,
-                            mlir::IntegerAttr::get(u256IntType, ora::adt_helpers::kAdtPayloadOffset));
+                        Value offs = ora::adt_helpers::adtPayloadOffsetConst(rewriter, loc);
                         Value payloadPtr = rewriter.create<sir::AddPtrOp>(loc, basePtr.getType(), basePtr, offs);
                         payloadU256 = rewriter.create<sir::LoadOp>(loc, u256Type, payloadPtr);
                     }
@@ -2505,6 +2494,26 @@ static LogicalResult convertErrorExtractCommon(
     if (auto *tc = typeConverter)
         if (auto converted = tc->convertType(resultType))
             resultType = converted;
+
+    if constexpr (std::is_same_v<OpTy, ora::ErrorUnwrapOp>)
+    {
+        if (auto cast = op.getValue().template getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if ((isNormalizedErrorUnionCast(cast) ||
+                 ora::hasMaterializationKind(cast, mat_kind::kWideErrorUnionJoin)) &&
+                cast.getNumOperands() == 2)
+            {
+                Value payloadOperand = cast.getOperand(1);
+                if (payloadOperand.getType() == resultType)
+                {
+                    op->replaceAllUsesWith(ValueRange{payloadOperand});
+                    rewriter.eraseOp(op);
+                    return success();
+                }
+            }
+        }
+    }
+
     SmallVector<Value, 2> localOperands;
     if (operands.empty())
     {
@@ -2560,10 +2569,13 @@ static LogicalResult convertErrorExtractCommon(
     }
     else
     {
-        payload = coerceToU256(rewriter, loc, operands[1]);
+        if (operands[1].getType() == resultType)
+            payload = operands[1];
+        else
+            payload = coerceToU256(rewriter, loc, operands[1]);
     }
 
-    if (resultType != u256Type)
+    if (payload.getType() != resultType && resultType != u256Type)
         payload = rewriter.create<sir::BitcastOp>(loc, resultType, payload);
 
     op->replaceAllUsesWith(ValueRange{payload});
@@ -3242,7 +3254,7 @@ namespace
                 {
                     buildWideErrorUnionReturnFromParts(
                         c.rewriter, c.loc, cast.getOperand(0), cast.getOperand(1),
-                        c.ptrType, c.u256Type, c.ui64Type);
+                        c.u256Type, c.ui64Type);
                     return eraseAndOk();
                 }
             }
@@ -3251,7 +3263,7 @@ namespace
         {
             buildWideErrorUnionReturnFromParts(
                 c.rewriter, c.loc, c.operands[0], c.operands[1],
-                c.ptrType, c.u256Type, c.ui64Type);
+                c.u256Type, c.ui64Type);
             return eraseAndOk();
         }
 
@@ -3264,7 +3276,7 @@ namespace
         {
             buildWideErrorUnionReturnFromParts(
                 c.rewriter, c.loc, parts[0], parts[1],
-                c.ptrType, c.u256Type, c.ui64Type);
+                c.u256Type, c.ui64Type);
             return eraseAndOk();
         }
 
@@ -3279,7 +3291,7 @@ namespace
                     c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 1));
         }
         buildWideErrorUnionReturnFromParts(
-            c.rewriter, c.loc, tag, payload, c.ptrType, c.u256Type, c.ui64Type);
+            c.rewriter, c.loc, tag, payload, c.u256Type, c.ui64Type);
         return eraseAndOk();
     }
 
@@ -3288,9 +3300,7 @@ namespace
     static LogicalResult emitAdtPairReturn(ReturnCtx &c, Value tag, Value payload)
     {
         Value mem = ora::adt_helpers::materializeAdtHandle(c.rewriter, c.loc, tag, payload);
-        Value sizeConst = c.rewriter.create<sir::ConstOp>(
-            c.loc, c.u256Type,
-            mlir::IntegerAttr::get(c.ui64Type, ora::adt_helpers::kAdtCarrierSize));
+        Value sizeConst = ora::adt_helpers::adtCarrierSizeConst(c.rewriter, c.loc);
         c.rewriter.create<sir::ReturnOp>(c.loc, mem, sizeConst);
         c.rewriter.eraseOp(c.op);
         return success();
@@ -4307,8 +4317,70 @@ namespace
         return failure();
     }
 
+    static Value storageViewRootSlot(Value value)
+    {
+        if (!value)
+            return Value();
+
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() != 1)
+                return Value();
+            Value operand = cast.getOperand(0);
+            auto viewKind = cast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == lowering::kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            return storageViewRootSlot(operand);
+        }
+
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            Value operand = bitcast.getInput();
+            auto viewKind = bitcast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == lowering::kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            return storageViewRootSlot(operand);
+        }
+
+        return Value();
+    }
+
     static CastHandlerResult castPtrView(CastCtx &c)
     {
+        if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
+            llvm::isa<sir::PtrType>(c.resultType))
+        {
+            Value storageRoot = storageViewRootSlot(c.op.getOperand(0));
+            if (!storageRoot)
+                storageRoot = storageViewRootSlot(c.input);
+            if (storageRoot)
+            {
+                SmallVector<sir::LoadOp, 4> loads;
+                for (Operation *user : llvm::make_early_inc_range(c.op.getResult(0).getUsers()))
+                {
+                    auto load = dyn_cast<sir::LoadOp>(user);
+                    if (!load || load.getPtr() != c.op.getResult(0))
+                        return failure();
+                    loads.push_back(load);
+                }
+                if (loads.empty())
+                    return failure();
+
+                auto u256Type = sir::U256Type::get(c.rewriter.getContext());
+                for (sir::LoadOp load : loads)
+                {
+                    c.rewriter.setInsertionPoint(load);
+                    Value loaded = c.rewriter.create<sir::SLoadOp>(load.getLoc(), u256Type, storageRoot);
+                    load.getResult().replaceAllUsesWith(loaded);
+                    c.rewriter.eraseOp(load);
+                }
+                c.rewriter.eraseOp(c.op);
+                return success();
+            }
+        }
+
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
             llvm::isa<sir::PtrType>(c.input.getType()))
         {

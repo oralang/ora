@@ -1,0 +1,51 @@
+// INPUT: tests/conformance/dispatcher_dynamic_return_aggregates.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0xB09087C9 => @echoValues_
+// CHECK: 0x95987B51 => @echoQuote_
+
+// CHECK-LABEL:     echoValues_exec {
+// CHECK: v[[SRC:[0-9]+]] v[[SRC_LEN:[0-9]+]] = icall @echoValues
+// CHECK: v[[WORD:[0-9]+]] = const 0x20
+// CHECK: v[[TAIL:[0-9]+]] = const 0x40
+// CHECK: v[[COUNT:[0-9]+]] = mload256 v[[SRC]]
+// CHECK: v[[PAYLOAD_BYTES:[0-9]+]] = mul v[[COUNT]] v[[WORD]]
+// CHECK: v[[TOTAL:[0-9]+]] = add v[[TAIL]] v[[PAYLOAD_BYTES]]
+// CHECK: v[[RET:[0-9]+]] = mallocany v[[TOTAL]]
+// CHECK: mstore256 v[[RET]] v[[WORD]]
+// CHECK: v[[LEN_SLOT:[0-9]+]] = add v[[RET]] v[[WORD]]
+// CHECK: mstore256 v[[LEN_SLOT]] v[[COUNT]]
+// CHECK: v[[SRC_PAYLOAD:[0-9]+]] = add v[[SRC]] v[[WORD]]
+// CHECK: v[[DST_PAYLOAD:[0-9]+]] = add v[[RET]] v[[TAIL]]
+// CHECK: mcopy v[[DST_PAYLOAD]] v[[SRC_PAYLOAD]] v[[PAYLOAD_BYTES]]
+// CHECK: return v[[RET]] v[[TOTAL]]
+
+// CHECK-LABEL:     echoQuote_exec {
+// CHECK: v[[TUPLE_PTR:[0-9]+]] v[[TUPLE_SIZE:[0-9]+]] = icall @echoQuote
+// CHECK: v[[OUTER_OFFSET:[0-9]+]] = const 0x20
+// CHECK: v[[TUPLE_HEAD_BYTES:[0-9]+]] = const 0x40
+// CHECK: v[[ZERO:[0-9]+]] = const 0x0
+// CHECK: v[[STRING_SOURCE_SLOT:[0-9]+]] = add v[[TUPLE_PTR]]
+// CHECK: v[[STRING_PTR:[0-9]+]] = mload256 v[[STRING_SOURCE_SLOT]]
+// CHECK: v[[STRING_LEN:[0-9]+]] = mload256 v[[STRING_PTR]]
+// CHECK: v[[PAD_MASK:[0-9]+]] = const 0x1F
+// CHECK: v[[LEN_PLUS_PAD:[0-9]+]] = add v[[STRING_LEN]] v[[PAD_MASK]]
+// CHECK: v[[PADDED_WORDS:[0-9]+]] = div v[[LEN_PLUS_PAD]]
+// CHECK: v[[PADDED_BYTES:[0-9]+]] = mul v[[PADDED_WORDS]]
+// CHECK: v[[STRING_TAIL_BYTES:[0-9]+]] = add v[[PADDED_BYTES]] v[[OUTER_OFFSET]]
+// CHECK: v[[TUPLE_BYTES:[0-9]+]] = add v[[TUPLE_HEAD_BYTES]] v[[STRING_TAIL_BYTES]]
+// CHECK: v[[RETURN_BYTES:[0-9]+]] = add v[[OUTER_OFFSET]] v[[TUPLE_BYTES]]
+// CHECK: v[[RET_BUF:[0-9]+]] = mallocany v[[RETURN_BYTES]]
+// CHECK: mstore256 v[[RET_BUF]] v[[OUTER_OFFSET]]
+// CHECK: v[[TUPLE_DST:[0-9]+]] = add v[[RET_BUF]] v[[OUTER_OFFSET]]
+// CHECK: mstore256 {{v[0-9]+}} {{v[0-9]+}}
+// CHECK: mstore256 {{v[0-9]+}} v[[TUPLE_HEAD_BYTES]]
+// CHECK: mload256
+// CHECK: add
+// CHECK: div
+// CHECK: v[[TAIL_PADDED_BYTES:[0-9]+]] = mul
+// CHECK: mstore256 {{v[0-9]+}} {{v[0-9]+}}
+// CHECK: mcopy {{v[0-9]+}} {{v[0-9]+}} v[[TAIL_PADDED_BYTES]]
+// CHECK: return v[[RET_BUF]] v[[RETURN_BYTES]]

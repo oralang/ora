@@ -74,6 +74,35 @@ namespace
                          mlir::arith::ArithDialect>(target);
     }
 
+    static Value getStorageMemRefViewRootSlot(Value value)
+    {
+        if (!value)
+            return Value();
+
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() != 1)
+                return Value();
+            Value operand = cast.getOperand(0);
+            if (ora::hasMaterializationKind(cast, lowering::kStorageMemRefViewKind) &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            return getStorageMemRefViewRootSlot(operand);
+        }
+
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            Value operand = bitcast.getInput();
+            auto viewKind = bitcast->getAttrOfType<StringAttr>(kOraMaterializationKindAttr);
+            if (viewKind && viewKind.getValue() == lowering::kStorageMemRefViewKind &&
+                llvm::isa<sir::U256Type>(operand.getType()))
+                return operand;
+            return getStorageMemRefViewRootSlot(operand);
+        }
+
+        return Value();
+    }
+
     static std::optional<unsigned> bitcastPayloadWidth(Type type)
     {
         if (!type)
@@ -2004,6 +2033,40 @@ public:
                 {
                     Value input = castOp.getOperand(0);
                     Type resultType = castOp.getResult(0).getType();
+
+                    if (ora::hasMaterializationKind(castOp, mat_kind::kPtrView) &&
+                        llvm::isa<sir::PtrType>(resultType))
+                    {
+                        if (Value storageRoot = getStorageMemRefViewRootSlot(input))
+                        {
+                            SmallVector<sir::LoadOp, 4> loads;
+                            bool allUsersAreLoads = !castOp.getResult(0).use_empty();
+                            for (Operation *user : castOp.getResult(0).getUsers())
+                            {
+                                auto load = dyn_cast<sir::LoadOp>(user);
+                                if (!load || load.getPtr() != castOp.getResult(0))
+                                {
+                                    allUsersAreLoads = false;
+                                    break;
+                                }
+                                loads.push_back(load);
+                            }
+
+                            if (allUsersAreLoads && !loads.empty())
+                            {
+                                for (sir::LoadOp load : loads)
+                                {
+                                    b.setInsertionPoint(load);
+                                    Value replacement = b.create<sir::SLoadOp>(
+                                        load.getLoc(), u256Ty, storageRoot);
+                                    load.getResult().replaceAllUsesWith(replacement);
+                                    b.eraseOp(load);
+                                }
+                                eraseResidualCast(castOp);
+                                continue;
+                            }
+                        }
+                    }
 
                     if (input.getType() == resultType)
                     {

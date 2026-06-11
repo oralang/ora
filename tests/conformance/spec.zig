@@ -373,8 +373,46 @@ fn parseInlineObject(value: []const u8) !KeyValue {
     const trimmed = std.mem.trim(u8, value, " \t");
     if (trimmed.len < 2 or trimmed[0] != '{' or trimmed[trimmed.len - 1] != '}') return error.InvalidSpec;
     const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
-    if (std.mem.indexOfScalar(u8, inner, ',') != null) return error.UnsupportedInlineObject;
+    if (hasTopLevelComma(inner)) return error.UnsupportedInlineObject;
     return try splitKeyValue(inner);
+}
+
+fn hasTopLevelComma(value: []const u8) bool {
+    var paren_depth: usize = 0;
+    var bracket_depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+
+    for (value) |c| {
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (in_string and c == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (c == '"') {
+            in_string = !in_string;
+            continue;
+        }
+        if (in_string) continue;
+
+        switch (c) {
+            '(' => paren_depth += 1,
+            ')' => {
+                if (paren_depth != 0) paren_depth -= 1;
+            },
+            '[' => bracket_depth += 1,
+            ']' => {
+                if (bracket_depth != 0) bracket_depth -= 1;
+            },
+            ',' => if (paren_depth == 0 and bracket_depth == 0) return true,
+            else => {},
+        }
+    }
+
+    return false;
 }
 
 fn parseReturns(value: []const u8) !types.ExpectedOutcome {

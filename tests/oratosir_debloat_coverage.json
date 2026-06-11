@@ -32,16 +32,23 @@
       "id": "dispatcher.dynamic_return_abi_encoding",
       "tier": "T5",
       "area": "SIRDispatcher",
-      "conversion": "Public dynamic return ABI encoding for string/bytes-style dispatcher returns: offset word, length word, padded payload copy, and returndata length",
+      "conversion": "Public dynamic return ABI encoding for string/bytes-style, dynamic array, and dynamic tuple dispatcher returns: offset word, length word, padded payload copy, tuple head/tail encoding, and returndata length",
       "high_churn": true,
       "executing_tests": [
-        "tests/conformance/external_return_decode.spec.toml"
+        "tests/conformance/external_return_decode.spec.toml",
+        "tests/conformance/dispatcher_dynamic_return_aggregates.spec.toml"
       ],
       "sir_goldens": [
         "tests/sir_text/dispatcher_dynamic_return.check#0x06FDDE03 => @name_",
         "tests/sir_text/dispatcher_dynamic_return.check#mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]",
         "tests/sir_text/dispatcher_dynamic_return.check#mcopy v[[DST]] v[[SRC]] v[[NAME_LEN]]",
-        "tests/sir_text/dispatcher_dynamic_return.check#return v[[RET_BUF]] v[[TOTAL_LEN]]"
+        "tests/sir_text/dispatcher_dynamic_return.check#return v[[RET_BUF]] v[[TOTAL_LEN]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#0xB09087C9 => @echoValues_",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#0x95987B51 => @echoQuote_",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mcopy v[[DST_PAYLOAD]] v[[SRC_PAYLOAD]] v[[PAYLOAD_BYTES]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mstore256 {{v[0-9]+}} v[[TUPLE_HEAD_BYTES]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mload256",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mcopy {{v[0-9]+}} {{v[0-9]+}} v[[TAIL_PADDED_BYTES]]"
       ]
     },
     {

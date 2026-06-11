@@ -293,8 +293,15 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
                 try testing.expect(result.success);
                 if (function_abi.outputs.len != 1) return error.UnsupportedReturnType;
                 if (!abi.specTypeMatchesAbiWire(expected.spec_type, function_abi.outputs[0])) return error.UnsupportedReturnType;
-                try testing.expectEqual(@as(usize, 32), result.output.len);
-                try abi.expectStaticReturn(function_abi.outputs[0], expected.value, result.output[0..32]);
+                if (try abi.isSingleStaticWord(allocator, function_abi.outputs[0])) {
+                    try testing.expectEqual(@as(usize, 32), result.output.len);
+                    try abi.expectStaticReturn(function_abi.outputs[0], expected.value, result.output[0..32]);
+                    continue;
+                }
+                const expected_args = [_]types.ArgValue{expected.value};
+                const expected_output = try abi.encodeArgs(allocator, function_abi.outputs, &expected_args);
+                defer allocator.free(expected_output);
+                try testing.expectEqualSlices(u8, expected_output, result.output);
             },
             .reverts_empty => {
                 try testing.expect(!result.success);

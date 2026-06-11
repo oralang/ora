@@ -1,0 +1,9 @@
+contract DispatcherDynamicReturnAggregates {
+    pub fn echoValues(values: slice[u256]) -> slice[u256] {
+        return values;
+    }
+
+    pub fn echoQuote(t: (u256, string)) -> (u256, string) {
+        return t;
+    }
+}

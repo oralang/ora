@@ -1539,7 +1539,7 @@ const TypeChecker = struct {
         if (storageResultPayloadNeedsPointer(error_union.payload_type.*)) {
             try self.emitRangeError(
                 range,
-                "{s} currently require a scalar success payload",
+                "{s} currently support only scalar, string, bytes, or slice success payloads",
                 .{subject},
             );
             return;
@@ -8714,13 +8714,16 @@ fn unwrapRefinement(ty: Type) Type {
 
 fn storageResultPayloadNeedsPointer(ty: Type) bool {
     return switch (unwrapRefinement(ty).kind()) {
+        // These are pointer-backed, but storage lowering has explicit
+        // storage-root representations for Result success payloads.
+        .slice,
+        .string,
+        .bytes,
+        => false,
         .tuple,
         .anonymous_struct,
         .struct_,
-        .string,
-        .bytes,
         .array,
-        .slice,
         .map,
         .error_union,
         .function,

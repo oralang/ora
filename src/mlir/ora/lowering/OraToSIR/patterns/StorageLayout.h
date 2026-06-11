@@ -1,5 +1,6 @@
 #pragma once
 
+#include "patterns/AdtCarrierLayout.h"
 #include "LoweringHelpers.h"
 
 #include "OraDialect.h"
@@ -102,7 +103,7 @@ namespace mlir::ora::lowering
     inline uint64_t getStorageWordCount(Operation *anchor, Type type)
     {
         if (llvm::isa<ora::ErrorUnionType>(type))
-            return 2;
+            return ::mlir::ora::adt_helpers::kAdtCarrierWordCount;
 
         if (auto structType = llvm::dyn_cast<ora::StructType>(type))
         {
@@ -220,7 +221,7 @@ namespace mlir::ora::lowering
     inline Value addStorageWordOffset(Location loc,
                                       Value slot,
                                       uint64_t offset,
-                                      ConversionPatternRewriter &rewriter)
+                                      OpBuilder &rewriter)
     {
         if (offset == 0)
             return slot;

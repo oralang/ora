@@ -1,5 +1,7 @@
 #pragma once
 
+#include "patterns/AdtCarrierLayout.h"
+
 #include "OraDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Value.h"
@@ -8,7 +10,6 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
 
-#include <cstdint>
 #include <utility>
 
 namespace mlir
@@ -18,36 +19,45 @@ namespace mlir
         namespace adt_helpers
         {
 
-            // The wide ADT/error-union carrier is two consecutive u256 words:
-            // tag first, payload second. Addressing differs by carrier kind
-            // (memory pointer, storage slot, or memref index), but the word
-            // ordering is shared.
-            inline constexpr uint64_t kAdtCarrierWordBytes = 32;
-            inline constexpr uint64_t kAdtCarrierTagWordIndex = 0;
-            inline constexpr uint64_t kAdtCarrierPayloadWordIndex = 1;
-            inline constexpr uint64_t kAdtCarrierWordCount = 2;
-            inline constexpr uint64_t kAdtCarrierSize = kAdtCarrierWordCount * kAdtCarrierWordBytes;
-            inline constexpr uint64_t kAdtPayloadOffset = kAdtCarrierPayloadWordIndex * kAdtCarrierWordBytes;
-            inline constexpr uint64_t kAdtStoragePayloadSlotOffset = kAdtCarrierPayloadWordIndex;
+            ::mlir::Value adtCarrierSizeConst(::mlir::OpBuilder &builder,
+                                              ::mlir::Location loc);
 
-            // Allocate a 64-byte handle, store `tag` at offset 0 and `payload`
-            // at offset 32, and return the base pointer (sir.ptr<1>). Both
-            // operands are coerced to sir.u256 if needed.
+            ::mlir::Value adtPayloadOffsetConst(::mlir::OpBuilder &builder,
+                                                ::mlir::Location loc);
+
+            ::mlir::Value adtStoragePayloadSlotOffsetConst(::mlir::OpBuilder &builder,
+                                                           ::mlir::Location loc);
+
+            struct AdtHandle
+            {
+                ::mlir::Value basePtr;
+                ::mlir::Value sizeBytes;
+            };
+
+            AdtHandle materializeAdtHandleWithSize(::mlir::OpBuilder &builder,
+                                                   ::mlir::Location loc,
+                                                   ::mlir::Value tag,
+                                                   ::mlir::Value payload);
+
+            // Allocate a kAdtCarrierSize-byte handle, store `tag` at the tag
+            // word and `payload` at the payload word, and return the base
+            // pointer (sir.ptr<1>). Both operands are coerced to sir.u256 if
+            // needed.
             ::mlir::Value materializeAdtHandle(::mlir::OpBuilder &builder,
                                                ::mlir::Location loc,
                                                ::mlir::Value tag,
                                                ::mlir::Value payload);
 
-            // View `handle` as a base pointer to a 64-byte ADT carrier and load
-            // (tag, payload). Accepts `handle` as sir.ptr<1> or sir.u256
-            // (a u256 is bitcast to ptr first). Loads are typed sir.u256.
+            // View `handle` as a base pointer to an ADT carrier and load
+            // (tag, payload). Accepts `handle` as sir.ptr<1> or sir.u256 (a
+            // u256 is bitcast to ptr first). Loads are typed sir.u256.
             std::pair<::mlir::Value, ::mlir::Value>
             loadAdtPartsFromHandle(::mlir::OpBuilder &builder,
                                    ::mlir::Location loc,
                                    ::mlir::Value handle);
 
             // Storage representation for wide ADT/error-union carriers:
-            // tag at `baseSlot`, payload at `baseSlot + 1`.
+            // tag at `baseSlot`, payload at `baseSlot + kAdtStoragePayloadSlotOffset`.
             ::mlir::Value adtStoragePayloadSlot(::mlir::OpBuilder &builder,
                                                 ::mlir::Location loc,
                                                 ::mlir::Value baseSlot);

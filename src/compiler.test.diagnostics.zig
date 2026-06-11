@@ -535,7 +535,7 @@ test "compiler reports unsupported storage Result payload shapes" {
         \\error Failure;
         \\
         \\contract Vault {
-        \\    storage var saved: Result<bytes, Failure>;
+        \\    storage var saved: Result<(u256, u256), Failure>;
         \\}
     ;
 
@@ -545,8 +545,15 @@ test "compiler reports unsupported storage Result payload shapes" {
     const dynamic_typecheck = try dynamic_payload.db.moduleTypeCheck(dynamic_payload.root_module_id);
     try testing.expect(diagnosticMessagesContain(
         &dynamic_typecheck.diagnostics,
-        "storage Result values currently require a scalar success payload",
+        "storage Result values currently support only scalar, string, bytes, or slice success payloads",
     ));
+    try testing.expectEqual(
+        @as(usize, 1),
+        countDiagnosticMessages(
+            &dynamic_typecheck.diagnostics,
+            "storage Result values currently support only scalar, string, bytes, or slice success payloads",
+        ),
+    );
 
     const error_payload_source =
         \\error Failure(code: u256);
@@ -564,6 +571,13 @@ test "compiler reports unsupported storage Result payload shapes" {
         &error_typecheck.diagnostics,
         "storage Result values currently require payloadless error types",
     ));
+    try testing.expectEqual(
+        @as(usize, 1),
+        countDiagnosticMessages(
+            &error_typecheck.diagnostics,
+            "storage Result values currently require payloadless error types",
+        ),
+    );
 }
 
 test "compiler abi emit barrier rejects undefined types without artifacts" {

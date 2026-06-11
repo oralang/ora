@@ -5,6 +5,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OraToSIR.h"
+#include "patterns/AdtCarrierLayout.h"
 #include "patterns/AbiLoweringCommon.h"
 #include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/LoweringHelpers.h"
@@ -647,6 +648,271 @@ namespace mlir
                 Value size;
             };
 
+            static Value computePointerBackedAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout);
+
+            static LogicalResult emitPointerBackedAbiEncoding(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout,
+                Value destPtr);
+
+            static LogicalResult emitPointerBackedStaticAbiWords(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                const AbiLayoutNode &layout,
+                Value sourcePtr,
+                Value sourceOffset,
+                Value destPtr,
+                Value destOffset)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (layout.kind == AbiLayoutKind::Static)
+                {
+                    Value src = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceOffset);
+                    Value dst = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, destOffset);
+                    Value raw = builder.create<sir::LoadOp>(loc, u256Type, src);
+                    builder.create<sir::StoreOp>(loc, dst, materializeAbiReturnStaticWord(builder, loc, ctx, layout, raw));
+                    return success();
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout) && !canonicalAbiLayoutIsDynamic(layout))
+                {
+                    Value sourceCursor = sourceOffset;
+                    Value destCursor = destOffset;
+                    for (const auto &child : layout.children)
+                    {
+                        if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, *child, sourcePtr, sourceCursor, destPtr, destCursor)))
+                            return failure();
+                        Value childBytes = builder.create<sir::ConstOp>(
+                            loc,
+                            u256Type,
+                            IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(*child) * 32));
+                        sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                        destCursor = builder.create<sir::AddOp>(loc, u256Type, destCursor, childBytes);
+                    }
+                    return success();
+                }
+
+                if (layout.kind == AbiLayoutKind::FixedArray && !canonicalAbiLayoutIsDynamic(layout) && layout.children.size() == 1)
+                {
+                    const AbiLayoutNode &element = *layout.children.front();
+                    int64_t elementSlots = canonicalAbiLayoutHeadSlots(element);
+                    if (elementSlots <= 0)
+                        return failure();
+                    Value elementBytes = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, elementSlots * 32));
+                    Value sourceCursor = sourceOffset;
+                    Value destCursor = destOffset;
+                    for (unsigned i = 0; i < layout.arrayLen; ++i)
+                    {
+                        if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, element, sourcePtr, sourceCursor, destPtr, destCursor)))
+                            return failure();
+                        sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, elementBytes);
+                        destCursor = builder.create<sir::AddOp>(loc, u256Type, destCursor, elementBytes);
+                    }
+                    return success();
+                }
+
+                int64_t words = canonicalAbiLayoutHeadSlots(layout);
+                if (words <= 0)
+                    return failure();
+                Value bytes = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                Value src = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceOffset);
+                Value dst = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, destOffset);
+                builder.create<sir::MCopyOp>(loc, dst, src, bytes);
+                (void)c32;
+                return success();
+            }
+
+            static Value computePointerBackedAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (layout.kind == AbiLayoutKind::DynamicBytes)
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value padded = lowering::ceil32(builder, loc, length);
+                    return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
+                }
+
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(*layout.children.front())));
+                    Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
+                    Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
+                    return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout))
+                {
+                    Value total = builder.create<sir::ConstOp>(
+                        loc,
+                        u256Type,
+                        IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
+                    Value sourceCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
+                    for (const auto &childPtr : layout.children)
+                    {
+                        const AbiLayoutNode &child = *childPtr;
+                        if (canonicalAbiLayoutIsDynamic(child))
+                        {
+                            Value childSlot = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceCursor);
+                            Value childPtrWord = builder.create<sir::LoadOp>(loc, u256Type, childSlot);
+                            Value childSource = builder.create<sir::BitcastOp>(loc, ptrType, childPtrWord);
+                            Value childSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, childSource, child);
+                            total = builder.create<sir::AddOp>(loc, u256Type, total, childSize);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, c32);
+                        }
+                        else
+                        {
+                            Value childBytes = builder.create<sir::ConstOp>(
+                                loc,
+                                u256Type,
+                                IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(child) * 32));
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                        }
+                    }
+                    return total;
+                }
+
+                int64_t words = canonicalAbiLayoutHeadSlots(layout);
+                return builder.create<sir::ConstOp>(
+                    loc,
+                    u256Type,
+                    IntegerAttr::get(i64Type, (words > 0 ? words : 1) * 32));
+            }
+
+            static LogicalResult emitPointerBackedAbiEncoding(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout,
+                Value destPtr)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+
+                if (layout.kind == AbiLayoutKind::DynamicBytes)
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value padded = lowering::ceil32(builder, loc, length);
+                    builder.create<sir::StoreOp>(loc, destPtr, length);
+                    Value srcPayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, c32);
+                    Value dstPayload = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, c32);
+                    builder.create<sir::MCopyOp>(loc, dstPayload, srcPayload, padded);
+                    return success();
+                }
+
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(*layout.children.front())));
+                    Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
+                    Value payloadBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
+                    builder.create<sir::StoreOp>(loc, destPtr, length);
+                    Value srcPayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, c32);
+                    Value dstPayload = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, c32);
+                    builder.create<sir::MCopyOp>(loc, dstPayload, srcPayload, payloadBytes);
+                    return success();
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout))
+                {
+                    Value tailOffset = builder.create<sir::ConstOp>(
+                        loc,
+                        u256Type,
+                        IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
+                    Value sourceCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
+                    Value headCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
+                    for (const auto &childPtr : layout.children)
+                    {
+                        const AbiLayoutNode &child = *childPtr;
+                        if (canonicalAbiLayoutIsDynamic(child))
+                        {
+                            Value headSlot = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, headCursor);
+                            builder.create<sir::StoreOp>(loc, headSlot, tailOffset);
+
+                            Value childSlot = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceCursor);
+                            Value childPtrWord = builder.create<sir::LoadOp>(loc, u256Type, childSlot);
+                            Value childSource = builder.create<sir::BitcastOp>(loc, ptrType, childPtrWord);
+                            Value childDest = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, tailOffset);
+                            if (failed(emitPointerBackedAbiEncoding(builder, loc, ctx, childSource, child, childDest)))
+                                return failure();
+                            Value childSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, childSource, child);
+                            tailOffset = builder.create<sir::AddOp>(loc, u256Type, tailOffset, childSize);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, c32);
+                            headCursor = builder.create<sir::AddOp>(loc, u256Type, headCursor, c32);
+                        }
+                        else
+                        {
+                            if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, child, sourcePtr, sourceCursor, destPtr, headCursor)))
+                                return failure();
+                            Value childBytes = builder.create<sir::ConstOp>(
+                                loc,
+                                u256Type,
+                                IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(child) * 32));
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                            headCursor = builder.create<sir::AddOp>(loc, u256Type, headCursor, childBytes);
+                        }
+                    }
+                    return success();
+                }
+
+                return emitPointerBackedStaticAbiWords(
+                    builder,
+                    loc,
+                    ctx,
+                    layout,
+                    sourcePtr,
+                    builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0)),
+                    destPtr,
+                    builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0)));
+            }
+
+            static FailureOr<AbiReturnBuffer> materializeSingleDynamicTupleAbiReturn(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtrWord,
+                const AbiLayoutNode &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
+                Value wordSize = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
+                Value tupleSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, sourcePtr, layout);
+                Value size = builder.create<sir::AddOp>(loc, u256Type, wordSize, tupleSize);
+                Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                builder.create<sir::StoreOp>(loc, retPtr, wordSize);
+                Value tupleDest = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, wordSize);
+                if (failed(emitPointerBackedAbiEncoding(builder, loc, ctx, sourcePtr, layout, tupleDest)))
+                    return failure();
+                return AbiReturnBuffer{retPtr, size};
+            }
+
             static AbiReturnBuffer materializeSingleDynamicAbiReturn(
                 OpBuilder &builder,
                 Location loc,
@@ -1113,7 +1379,7 @@ namespace mlir
                         auto loweredArgCountForSourceParam = [&](size_t idx) -> unsigned {
                             if (idx < info.resultInputModes.size() &&
                                 (info.resultInputModes[idx] == "wide_payloadless" || info.resultInputModes[idx] == "wide_single_error"))
-                                return 2;
+                                return static_cast<unsigned>(adt_helpers::kAdtCarrierWordCount);
                             return 1;
                         };
 
@@ -3309,7 +3575,7 @@ namespace mlir
                             {
                                 args.push_back(wideTag);
                                 args.push_back(widePayload);
-                                loweredArgIndex += 2;
+                                loweredArgIndex += static_cast<unsigned>(adt_helpers::kAdtCarrierWordCount);
                                 continue;
                             }
 
@@ -3478,6 +3744,25 @@ namespace mlir
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
                             if (hasReturnLayout &&
+                                canonicalAbiLayoutIsTupleLike(abiReturnLayout) &&
+                                canonicalAbiLayoutIsDynamic(abiReturnLayout))
+                            {
+                                (void)len;
+                                FailureOr<AbiReturnBuffer> encoded = materializeSingleDynamicTupleAbiReturn(
+                                    builder,
+                                    caseReturnLoc,
+                                    ctx,
+                                    ptr_u,
+                                    abiReturnLayout);
+                                if (failed(encoded))
+                                {
+                                    info.func.emitError("unsupported dynamic tuple ABI return layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                builder.create<sir::ReturnOp>(caseReturnLoc, encoded->ptr, encoded->size);
+                            }
+                            else if (hasReturnLayout &&
                                 (abiReturnLayout.kind == AbiLayoutKind::DynamicBytes ||
                                  canonicalAbiLayoutSupportsDynamicArray(abiReturnLayout)))
                             {

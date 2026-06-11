@@ -91,6 +91,11 @@ pub fn encodeArgs(allocator: std.mem.Allocator, wires: []const []const u8, args:
     return try encodeAbiSequence(allocator, wires, args);
 }
 
+pub fn isSingleStaticWord(allocator: std.mem.Allocator, wire_type: []const u8) anyerror!bool {
+    const words = (try staticAbiWordCount(allocator, wire_type)) orelse return false;
+    return words == 1;
+}
+
 fn encodeAbiSequence(allocator: std.mem.Allocator, wires: []const []const u8, args: []const ArgValue) anyerror![]u8 {
     if (wires.len != args.len) return error.ArgumentCountMismatch;
 
