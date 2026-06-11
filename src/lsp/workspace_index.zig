@@ -682,8 +682,12 @@ pub const Index = struct {
 };
 
 fn copyLineIndex(allocator: Allocator, source: *const line_index.LineIndex) !line_index.LineIndex {
+    const starts = try allocator.dupe(u32, source.line_starts);
+    errdefer allocator.free(starts);
+
     return .{
-        .line_starts = try allocator.dupe(u32, source.line_starts),
+        .line_starts = starts,
+        .line_ascii = try allocator.dupe(bool, source.line_ascii),
         .source_len = source.source_len,
     };
 }

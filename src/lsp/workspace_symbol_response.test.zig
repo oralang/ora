@@ -169,5 +169,5 @@ fn testEntry(symbols: []workspace_index.Symbol) workspace_index.FileEntry {
 }
 
 fn testLineIndex() line_index.LineIndex {
-    return .{ .line_starts = @constCast(&[_]u32{0}), .source_len = 0 };
+    return .{ .line_starts = @constCast(&[_]u32{0}), .line_ascii = @constCast(&[_]bool{true}), .source_len = 0 };
 }

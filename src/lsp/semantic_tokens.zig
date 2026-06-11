@@ -204,26 +204,27 @@ fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex
     const tok_line = if (token.line > 0) token.line - 1 else 0;
     const tok_char = if (token.column > 0) token.column - 1 else 0;
     const tok_end = tok_char + @as(u32, @intCast(token.lexeme.len));
+    const token_range: frontend.Range = .{
+        .start = .{ .line = tok_line, .character = tok_char },
+        .end = .{ .line = tok_line, .character = tok_end },
+    };
 
     // Check if this identifier matches a symbol's selection range (declaration site).
-    for (idx.symbols) |symbol| {
-        const sel = symbol.selection_range;
-        if (sel.start.line == tok_line and sel.start.character == tok_char and sel.end.character == tok_end) {
-            return .{
-                .kind = symbolKindToTokenKind(symbol.kind),
-                .modifiers = symbolKindToModifiers(symbol.kind) | SemanticTokenModifier.mask(.declaration) | SemanticTokenModifier.mask(.definition),
-            };
-        }
+    if (semantic_index.symbolIndexWithSelectionRange(&idx, token_range)) |symbol_index| {
+        const symbol = idx.symbols[symbol_index];
+        return .{
+            .kind = symbolKindToTokenKind(symbol.kind),
+            .modifiers = symbolKindToModifiers(symbol.kind) | SemanticTokenModifier.mask(.declaration) | SemanticTokenModifier.mask(.definition),
+        };
     }
 
     // Not at declaration — try to match by name for type-level symbols.
-    for (idx.symbols) |symbol| {
-        if (std.mem.eql(u8, symbol.name, token.lexeme)) {
-            return .{
-                .kind = symbolKindToTokenKind(symbol.kind),
-                .modifiers = symbolKindToModifiers(symbol.kind),
-            };
-        }
+    if (semantic_index.symbolIndexNamed(&idx, token.lexeme)) |symbol_index| {
+        const symbol = idx.symbols[symbol_index];
+        return .{
+            .kind = symbolKindToTokenKind(symbol.kind),
+            .modifiers = symbolKindToModifiers(symbol.kind),
+        };
     }
 
     return .{ .kind = .variable, .modifiers = 0 };
@@ -405,7 +406,7 @@ fn isTypeKeyword(tt: TokenType) bool {
 
 fn isOperator(tt: TokenType) bool {
     return switch (tt) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .LessLess, .LessLessEqual, .GreaterGreater, .GreaterGreaterEqual, .Bang, .Tilde, .Ampersand, .AmpersandEqual, .AmpersandAmpersand, .Pipe, .PipeEqual, .PipePipe, .Caret, .CaretEqual, .PlusPercent, .PlusPercentEqual, .MinusPercent, .MinusPercentEqual, .StarPercent, .StarPercentEqual, .LessLessPercent, .GreaterGreaterPercent, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .StarStarEqual, .Arrow, .DotDot, .DotDotDot => true,
+        .Bang, .AmpersandAmpersand, .PipePipe => true,
         else => false,
     };
 }

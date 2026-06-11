@@ -144,7 +144,9 @@ test "lsp references: occurrence index reports builder telemetry" {
     defer index.deinit(testing.allocator);
 
     try testing.expect(index.occurrences.len > 0);
-    try testing.expectEqual(index.occurrences.len * 2, index.builderItemsBuilt());
+    try testing.expectEqual(index.occurrences.len, index.range_indexes.len);
+    try testing.expectEqual(index.occurrences.len, index.name_indexes.len);
+    try testing.expectEqual(index.occurrences.len * 3, index.builderItemsBuilt());
     try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
     try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
     try testing.expect(index.builderGrowthEvents() > 0);

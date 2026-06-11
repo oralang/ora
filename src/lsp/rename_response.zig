@@ -37,7 +37,7 @@ pub fn putChange(
     if (ranges.len == 0) return &.{};
 
     const edits = try buildTextEdits(arena, source, ranges, new_name, encoding);
-    try changes.map.put(arena, try arena.dupe(u8, uri), edits);
+    try changes.map.put(arena, uri, edits);
     return edits;
 }
 
@@ -53,7 +53,6 @@ pub fn buildTextEdits(
     encoding: text_edits.PositionEncoding,
 ) ![]const types.TextEdit {
     const edits = try arena.alloc(types.TextEdit, ranges.len);
-    const replacement = try arena.dupe(u8, new_name);
-    uri_ranges.fillRenameTextEdits(edits, source, ranges, replacement, encoding);
+    uri_ranges.fillRenameTextEdits(edits, source, ranges, new_name, encoding);
     return edits;
 }

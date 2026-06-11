@@ -16,9 +16,15 @@ const RangeIndexEntry = struct {
     item_index: u32,
 };
 
+const NameIndexEntry = struct {
+    name: []const u8,
+    item_index: u32,
+};
+
 pub const OccurrenceIndex = struct {
     occurrences: []const Occurrence,
     range_indexes: []const RangeIndexEntry = &.{},
+    name_indexes: []const NameIndexEntry = &.{},
     builder_capacity_requested: usize = 0,
     builder_items_built: usize = 0,
     builder_unused_capacity: usize = 0,
@@ -62,6 +68,8 @@ pub const OccurrenceIndex = struct {
 
         const range_index_builder = try buildRangeIndexes(allocator, occurrences.items);
         errdefer allocator.free(range_index_builder.items);
+        const name_index_builder = try buildNameIndexes(allocator, occurrences.items);
+        errdefer allocator.free(name_index_builder.items);
 
         const occurrences_capacity_requested = occurrences.capacity;
         const occurrence_items_built = occurrences.items.len;
@@ -71,15 +79,22 @@ pub const OccurrenceIndex = struct {
             allocator.free(occurrence_slice);
         }
 
-        const builder_capacity_requested = addSat(occurrences_capacity_requested, range_index_builder.capacity_requested);
-        const builder_items_built = addSat(occurrence_items_built, range_index_builder.items.len);
+        const builder_capacity_requested = addSat(
+            addSat(occurrences_capacity_requested, range_index_builder.capacity_requested),
+            name_index_builder.capacity_requested,
+        );
+        const builder_items_built = addSat(
+            addSat(occurrence_items_built, range_index_builder.items.len),
+            name_index_builder.items.len,
+        );
         return .{
             .occurrences = occurrence_slice,
             .range_indexes = range_index_builder.items,
+            .name_indexes = name_index_builder.items,
             .builder_capacity_requested = builder_capacity_requested,
             .builder_items_built = builder_items_built,
             .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
-            .builder_growth_events = builder_growth_events + range_index_builder.growth_events,
+            .builder_growth_events = builder_growth_events + range_index_builder.growth_events + name_index_builder.growth_events,
         };
     }
 
@@ -87,6 +102,7 @@ pub const OccurrenceIndex = struct {
         deinitOccurrences(allocator, self.occurrences);
         allocator.free(self.occurrences);
         allocator.free(self.range_indexes);
+        allocator.free(self.name_indexes);
         self.* = undefined;
     }
 
@@ -101,11 +117,19 @@ pub const OccurrenceIndex = struct {
         return null;
     }
 
+    fn matchingNameIndexes(self: *const OccurrenceIndex, name: []const u8) []const NameIndexEntry {
+        if (self.name_indexes.len != self.occurrences.len) return &.{};
+        const start = lowerBoundName(self.name_indexes, name);
+        const end = upperBoundName(self.name_indexes, name, start);
+        return self.name_indexes[start..end];
+    }
+
     pub fn estimatedByteSize(self: *const OccurrenceIndex) usize {
         var total: usize = addSat(
             self.occurrences.len * @sizeOf(Occurrence),
             self.range_indexes.len * @sizeOf(RangeIndexEntry),
         );
+        total = addSat(total, self.name_indexes.len * @sizeOf(NameIndexEntry));
         for (self.occurrences) |occurrence| {
             total = addSat(total, occurrence.name.len);
         }
@@ -206,11 +230,21 @@ pub fn referencesAtOccurrenceIndex(
     var ranges = std.ArrayList(frontend.Range){};
     errdefer ranges.deinit(allocator);
 
-    for (index.occurrences) |occurrence| {
-        if (!std.mem.eql(u8, occurrence.name, target_name)) continue;
-        if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
-        if (!include_declaration and rangesEqual(occurrence.range, target_definition_range)) continue;
-        try appendUniqueRange(allocator, &ranges, occurrence.range);
+    if (index.name_indexes.len == index.occurrences.len) {
+        const matching_indexes = index.matchingNameIndexes(target_name);
+        for (matching_indexes) |name_index| {
+            const occurrence = index.occurrences[name_index.item_index];
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (!include_declaration and rangesEqual(occurrence.range, target_definition_range)) continue;
+            try appendUniqueRange(allocator, &ranges, occurrence.range);
+        }
+    } else {
+        for (index.occurrences) |occurrence| {
+            if (!std.mem.eql(u8, occurrence.name, target_name)) continue;
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (!include_declaration and rangesEqual(occurrence.range, target_definition_range)) continue;
+            try appendUniqueRange(allocator, &ranges, occurrence.range);
+        }
     }
 
     if (include_declaration) {
@@ -218,6 +252,88 @@ pub fn referencesAtOccurrenceIndex(
     }
 
     return ranges.toOwnedSlice(allocator);
+}
+
+pub fn referenceRangeCountAtOccurrenceIndex(
+    index: *const OccurrenceIndex,
+    target_name: []const u8,
+    target_definition_range: frontend.Range,
+    include_declaration: bool,
+) usize {
+    var count: usize = 0;
+    var declaration_seen = false;
+    if (index.name_indexes.len == index.occurrences.len) {
+        const matching_indexes = index.matchingNameIndexes(target_name);
+        for (matching_indexes) |name_index| {
+            const occurrence = index.occurrences[name_index.item_index];
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (rangesEqual(occurrence.range, target_definition_range)) {
+                declaration_seen = true;
+                if (!include_declaration) continue;
+            }
+            count += 1;
+        }
+    } else {
+        for (index.occurrences) |occurrence| {
+            if (!std.mem.eql(u8, occurrence.name, target_name)) continue;
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (rangesEqual(occurrence.range, target_definition_range)) {
+                declaration_seen = true;
+                if (!include_declaration) continue;
+            }
+            count += 1;
+        }
+    }
+    if (include_declaration and !declaration_seen) count += 1;
+    return count;
+}
+
+pub fn referenceRangeCapacityHintAtOccurrenceIndex(
+    index: *const OccurrenceIndex,
+    target_name: []const u8,
+    include_declaration: bool,
+) usize {
+    const base = if (index.name_indexes.len == index.occurrences.len)
+        index.matchingNameIndexes(target_name).len
+    else
+        index.occurrences.len;
+    return base + @intFromBool(include_declaration);
+}
+
+pub fn appendReferenceRangesAtOccurrenceIndex(
+    index: *const OccurrenceIndex,
+    target_name: []const u8,
+    target_definition_range: frontend.Range,
+    include_declaration: bool,
+    context: anytype,
+    comptime appendRange: fn (@TypeOf(context), frontend.Range) anyerror!void,
+) !void {
+    var declaration_seen = false;
+    if (index.name_indexes.len == index.occurrences.len) {
+        const matching_indexes = index.matchingNameIndexes(target_name);
+        for (matching_indexes) |name_index| {
+            const occurrence = index.occurrences[name_index.item_index];
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (rangesEqual(occurrence.range, target_definition_range)) {
+                declaration_seen = true;
+                if (!include_declaration) continue;
+            }
+            try appendRange(context, occurrence.range);
+        }
+    } else {
+        for (index.occurrences) |occurrence| {
+            if (!std.mem.eql(u8, occurrence.name, target_name)) continue;
+            if (!rangesEqual(occurrence.definition_range, target_definition_range)) continue;
+            if (rangesEqual(occurrence.range, target_definition_range)) {
+                declaration_seen = true;
+                if (!include_declaration) continue;
+            }
+            try appendRange(context, occurrence.range);
+        }
+    }
+    if (include_declaration and !declaration_seen) {
+        try appendRange(context, target_definition_range);
+    }
 }
 
 pub fn buildImportedMemberIndex(
@@ -321,6 +437,12 @@ const RangeIndexBuilder = struct {
     growth_events: usize,
 };
 
+const NameIndexBuilder = struct {
+    items: []NameIndexEntry,
+    capacity_requested: usize,
+    growth_events: usize,
+};
+
 fn buildRangeIndexes(allocator: Allocator, occurrences: []const Occurrence) !RangeIndexBuilder {
     var indexes = std.ArrayList(RangeIndexEntry){};
     var growth_events: usize = 0;
@@ -345,6 +467,66 @@ fn buildRangeIndexes(allocator: Allocator, occurrences: []const Occurrence) !Ran
         .capacity_requested = capacity_requested,
         .growth_events = growth_events,
     };
+}
+
+fn buildNameIndexes(allocator: Allocator, occurrences: []const Occurrence) !NameIndexBuilder {
+    var indexes = std.ArrayList(NameIndexEntry){};
+    var growth_events: usize = 0;
+    errdefer indexes.deinit(allocator);
+
+    const capacity_before = indexes.capacity;
+    try indexes.ensureTotalCapacity(allocator, occurrences.len);
+    if (indexes.capacity > capacity_before) growth_events += 1;
+
+    for (occurrences, 0..) |occurrence, index| {
+        const item_index = std.math.cast(u32, index) orelse return error.IndexTooLarge;
+        indexes.appendAssumeCapacity(.{
+            .name = occurrence.name,
+            .item_index = item_index,
+        });
+    }
+
+    std.mem.sort(NameIndexEntry, indexes.items, {}, lessNameIndex);
+    const capacity_requested = indexes.capacity;
+    return .{
+        .items = try indexes.toOwnedSlice(allocator),
+        .capacity_requested = capacity_requested,
+        .growth_events = growth_events,
+    };
+}
+
+fn lessNameIndex(_: void, a: NameIndexEntry, b: NameIndexEntry) bool {
+    const order = std.mem.order(u8, a.name, b.name);
+    if (order != .eq) return order == .lt;
+    return a.item_index < b.item_index;
+}
+
+fn lowerBoundName(indexes: []const NameIndexEntry, name: []const u8) usize {
+    var low: usize = 0;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (std.mem.order(u8, indexes[mid].name, name) == .lt) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn upperBoundName(indexes: []const NameIndexEntry, name: []const u8, start: usize) usize {
+    var low = start;
+    var high: usize = indexes.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (std.mem.order(u8, indexes[mid].name, name) != .gt) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
 }
 
 fn occurrenceIndexAtPosition(

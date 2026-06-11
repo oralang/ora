@@ -10,17 +10,31 @@ pub fn build(
     uri: types.DocumentUri,
     diagnostics: []const types.Diagnostic,
 ) !lsp.ResultType("textDocument/codeAction") {
-    var results = std.ArrayList(CodeActionOrCommand){};
-    errdefer results.deinit(arena);
-
-    for (diagnostics) |diagnostic| {
-        if (std.mem.indexOf(u8, diagnostic.message, "expected ';'") != null) {
-            try results.append(arena, .{ .CodeAction = try missingSemicolonAction(arena, uri, diagnostic) });
+    var first_match: ?usize = null;
+    for (diagnostics, 0..) |diagnostic, diagnostic_index| {
+        if (isMissingSemicolonDiagnostic(diagnostic)) {
+            first_match = diagnostic_index;
+            break;
         }
     }
+    const start_index = first_match orelse return null;
 
-    if (results.items.len == 0) return null;
-    return try results.toOwnedSlice(arena);
+    const results = try arena.alloc(CodeActionOrCommand, diagnostics.len - start_index);
+    results[0] = .{ .CodeAction = try missingSemicolonAction(arena, uri, diagnostics[start_index]) };
+    var out_index: usize = 1;
+    for (diagnostics[start_index + 1 ..]) |diagnostic| {
+        if (!isMissingSemicolonDiagnostic(diagnostic)) continue;
+        results[out_index] = .{
+            .CodeAction = try missingSemicolonAction(arena, uri, diagnostic),
+        };
+        out_index += 1;
+    }
+
+    return results[0..out_index];
+}
+
+fn isMissingSemicolonDiagnostic(diagnostic: types.Diagnostic) bool {
+    return std.mem.startsWith(u8, diagnostic.message, "expected ';'");
 }
 
 fn missingSemicolonAction(
@@ -38,7 +52,7 @@ fn missingSemicolonAction(
     return .{
         .title = "Insert missing ';'",
         .kind = .quickfix,
-        .diagnostics = try arena.dupe(types.Diagnostic, &.{diagnostic}),
+        .diagnostics = null,
         .edit = .{ .changes = changes },
         .isPreferred = true,
     };

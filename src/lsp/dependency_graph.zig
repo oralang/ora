@@ -21,6 +21,7 @@ pub const Graph = struct {
     allocator: Allocator,
     nodes_by_uri: std.StringHashMap(Node),
     reverse_importers: std.StringHashMap([]const []const u8),
+    generation_value: u64 = 1,
 
     pub fn init(allocator: Allocator) Graph {
         return .{
@@ -58,6 +59,7 @@ pub const Graph = struct {
 
         try self.nodes_by_uri.put(uri_copy, node);
         try self.rebuildReverseImporters();
+        self.bumpGeneration();
     }
 
     pub fn remove(self: *Graph, uri: []const u8) !?[]u8 {
@@ -72,6 +74,7 @@ pub const Graph = struct {
             node.deinit(self.allocator);
 
             try self.rebuildReverseImporters();
+            self.bumpGeneration();
             return path_copy;
         }
 
@@ -83,10 +86,23 @@ pub const Graph = struct {
         return node.normalized_path;
     }
 
+    pub fn uriForPath(self: *const Graph, normalized_path: []const u8) ?[]const u8 {
+        var it = self.nodes_by_uri.iterator();
+        while (it.next()) |entry| {
+            const path = entry.value_ptr.normalized_path orelse continue;
+            if (std.mem.eql(u8, path, normalized_path)) return entry.key_ptr.*;
+        }
+        return null;
+    }
+
     /// Returns open document URIs that directly import the given normalized path.
     /// The returned slice and items are borrowed from graph storage.
     pub fn directImporters(self: *const Graph, imported_path: []const u8) []const []const u8 {
         return self.reverse_importers.get(imported_path) orelse &.{};
+    }
+
+    pub fn generation(self: *const Graph) u64 {
+        return self.generation_value;
     }
 
     /// Returns importer URIs that (transitively) depend on the given path.
@@ -208,6 +224,10 @@ pub const Graph = struct {
             self.allocator.free(entry.value_ptr.*);
         }
         self.reverse_importers.clearRetainingCapacity();
+    }
+
+    fn bumpGeneration(self: *Graph) void {
+        self.generation_value = if (self.generation_value == std.math.maxInt(u64)) self.generation_value else self.generation_value + 1;
     }
 };
 

@@ -14,6 +14,9 @@ pub fn lspPositionToBytePosition(
     encoding: text_edits.PositionEncoding,
     position: types.Position,
 ) ?frontend.Position {
+    if (fastLspPositionToBytePosition(source, line_index, encoding, position)) |byte_position| {
+        return byte_position;
+    }
     const offset = line_index.positionToOffset(source, position.line, position.character, encoding) orelse return null;
     return line_index.offsetToPosition(source, offset, .utf8);
 }
@@ -36,6 +39,9 @@ pub fn bytePositionToLsp(
     encoding: text_edits.PositionEncoding,
     position: frontend.Position,
 ) ?types.Position {
+    if (fastBytePositionToLsp(source, line_index, encoding, position)) |lsp_position| {
+        return lsp_position;
+    }
     const offset = line_index.positionToOffset(source, position.line, position.character, .utf8) orelse return null;
     const converted = line_index.offsetToPosition(source, offset, encoding);
     return .{ .line = converted.line, .character = converted.character };
@@ -80,4 +86,54 @@ pub fn rawRange(range: frontend.Range) types.Range {
 fn positionLessThan(a: frontend.Position, b: frontend.Position) bool {
     if (a.line != b.line) return a.line < b.line;
     return a.character < b.character;
+}
+
+fn fastLspPositionToBytePosition(
+    source: []const u8,
+    line_index: *const line_index_api.LineIndex,
+    encoding: text_edits.PositionEncoding,
+    position: types.Position,
+) ?frontend.Position {
+    if (source.len != line_index.source_len) return null;
+    const line_no: usize = @intCast(position.line);
+    if (line_no >= line_index.line_starts.len) return null;
+
+    const can_reuse_character = encoding == .utf8 or
+        (line_index.line_ascii.len == line_index.line_starts.len and line_index.line_ascii[line_no]);
+    if (!can_reuse_character) return null;
+
+    const line_start = line_index.line_starts[line_no];
+    const next_line = line_no + 1;
+    const line_end = if (next_line < line_index.line_starts.len)
+        line_index.line_starts[next_line] - 1
+    else
+        line_index.source_len;
+    if (position.character > line_end - line_start) return null;
+
+    return .{ .line = position.line, .character = position.character };
+}
+
+fn fastBytePositionToLsp(
+    source: []const u8,
+    line_index: *const line_index_api.LineIndex,
+    encoding: text_edits.PositionEncoding,
+    position: frontend.Position,
+) ?types.Position {
+    if (source.len != line_index.source_len) return null;
+    const line_no: usize = @intCast(position.line);
+    if (line_no >= line_index.line_starts.len) return null;
+
+    const can_reuse_character = encoding == .utf8 or
+        (line_index.line_ascii.len == line_index.line_starts.len and line_index.line_ascii[line_no]);
+    if (!can_reuse_character) return null;
+
+    const line_start = line_index.line_starts[line_no];
+    const next_line = line_no + 1;
+    const line_end = if (next_line < line_index.line_starts.len)
+        line_index.line_starts[next_line] - 1
+    else
+        line_index.source_len;
+    if (position.character > line_end - line_start) return null;
+
+    return .{ .line = position.line, .character = position.character };
 }

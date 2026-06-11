@@ -29,12 +29,12 @@ pub fn build(
 
     const result = try arena.alloc(types.CallHierarchyItem, 1);
     result[0] = .{
-        .name = try arena.dupe(u8, symbol.name),
+        .name = symbol.name,
         .kind = @enumFromInt(semantic_index.toLspKind(symbol.kind)),
-        .uri = try arena.dupe(u8, uri),
+        .uri = uri,
         .range = range,
         .selectionRange = selection_range,
-        .detail = if (symbol.detail) |detail| try arena.dupe(u8, detail) else null,
+        .detail = symbol.detail,
     };
     return result;
 }

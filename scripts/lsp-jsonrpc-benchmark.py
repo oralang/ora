@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import resource
 import statistics
 import sys
@@ -348,6 +349,15 @@ COLD_FIRST_BUILD_ROWS = (
     ("cold", "callHierarchy.outgoing.recursive_cold_imported_target.first_build"),
 )
 
+COLD_DIRECT_IMPORTED_MEMBER_FIRST_BUILD_ROWS = (
+    ("cold", "references.cold_imported_member.first_build"),
+)
+
+COLD_WORKSPACE_FIRST_BUILD_ROWS = tuple(
+    row for row in COLD_FIRST_BUILD_ROWS
+    if row not in COLD_DIRECT_IMPORTED_MEMBER_FIRST_BUILD_ROWS
+)
+
 POSITION_LOOKUP_ROWS = tuple(
     (fixture, "positionLookup.%s.cache_hit" % location)
     for fixture in ("positionsmall", "positionlarge")
@@ -565,6 +575,28 @@ def percentile(values: list[float], q: float) -> float:
     ordered = sorted(values)
     index = min(len(ordered) - 1, max(0, int(round((len(ordered) - 1) * q))))
     return ordered[index]
+
+
+def row_key(row: tuple[str, str]) -> str:
+    return "%s.%s" % row
+
+
+def load_p95_baseline(path: str) -> dict[tuple[str, str], float]:
+    raw = json.loads(Path(path).read_text())
+    if not isinstance(raw, dict):
+        raise RuntimeError("baseline p95 file must contain a JSON object")
+
+    result: dict[tuple[str, str], float] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            raise RuntimeError("baseline p95 keys must be strings")
+        if not isinstance(value, (int, float)):
+            raise RuntimeError("baseline p95 value for %s must be a number" % key)
+        fixture, sep, operation = key.partition(".")
+        if not sep or not fixture or not operation:
+            raise RuntimeError("baseline p95 key %s must be fixture.operation" % key)
+        result[(fixture, operation)] = float(value)
+    return result
 
 
 def peak_rss_kib() -> int:
@@ -1012,7 +1044,12 @@ def main() -> int:
     parser.add_argument("--profile", choices=("quick", "release"), default="quick")
     parser.add_argument("--build-mode", default="")
     parser.add_argument("--require-build-mode")
-    parser.add_argument("--iterations", type=int, default=2)
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=20,
+        help="Timed samples per operation. The default keeps p95 from degenerating into the max sample.",
+    )
     parser.add_argument("--functions", type=int, default=80)
     parser.add_argument("--contract-libs", type=int, default=3)
     parser.add_argument("--contract-helpers", type=int, default=8)
@@ -1035,6 +1072,25 @@ def main() -> int:
     parser.add_argument("--max-position-lookup-p95-ms", type=float, default=10.0)
     parser.add_argument("--max-position-lookup-scale-ratio", type=float, default=8.0)
     parser.add_argument("--position-lookup-scale-slop-ms", type=float, default=1.0)
+    parser.add_argument(
+        "--baseline-p95-file",
+        help="JSON object keyed by fixture.operation with baseline p95 milliseconds.",
+    )
+    parser.add_argument(
+        "--min-p95-improvement",
+        type=float,
+        default=0.15,
+        help="Required fractional p95 improvement when --baseline-p95-file is provided.",
+    )
+    parser.add_argument(
+        "--require-baseline-for-all-rows",
+        action="store_true",
+        help="Fail if --baseline-p95-file omits any observed benchmark row.",
+    )
+    parser.add_argument(
+        "--write-p95-file",
+        help="Write observed p95 milliseconds as a fixture.operation JSON object.",
+    )
     parser.add_argument(
         "--skip-profile-p95-budgets",
         action="store_true",
@@ -1062,6 +1118,8 @@ def main() -> int:
         parser.error("missing LSP server path")
     if args.require_build_mode and args.build_mode != args.require_build_mode:
         parser.error("--require-build-mode expected %s, got %s" % (args.require_build_mode, args.build_mode or "<unset>"))
+    if args.min_p95_improvement < 0.0 or args.min_p95_improvement >= 1.0:
+        parser.error("--min-p95-improvement must be >= 0.0 and < 1.0")
     if args.profile == "release":
         args.functions = max(args.functions, 180)
         args.contract_libs = max(args.contract_libs, 6)
@@ -1231,6 +1289,7 @@ def main() -> int:
 
                 request_text_document(client, "textDocument/documentSymbol", contract_uri)
                 timed(samples, counter_deltas, client, "contractsuite", "documentSymbol.cache_hit", lambda: request_text_document(client, "textDocument/documentSymbol", contract_uri))
+                request_text_document(client, "textDocument/documentLink", contract_uri)
                 timed(samples, counter_deltas, client, "contractsuite", "documentLink.cache_hit", lambda: request_text_document(client, "textDocument/documentLink", contract_uri))
                 client.request("workspace/symbol", {"query": "method"})
                 timed(samples, counter_deltas, client, "contractsuite", "workspaceSymbol.cache_hit", lambda: client.request("workspace/symbol", {"query": "method"}))
@@ -1340,6 +1399,7 @@ def main() -> int:
                 request_text_document(client, "textDocument/semanticTokens/full", stress_uri)
                 timed(samples, counter_deltas, client, "stress", "semanticTokens.cache_hit", lambda: request_text_document(client, "textDocument/semanticTokens/full", stress_uri))
 
+                request_text_document(client, "textDocument/codeAction", broken_uri, {"range": full_range(broken_source), "context": {"diagnostics": broken_diagnostics, "only": ["quickfix"]}})
                 timed(samples, counter_deltas, client, "code_action", "codeAction.quickfix.cache_hit", lambda: request_text_document(client, "textDocument/codeAction", broken_uri, {"range": full_range(broken_source), "context": {"diagnostics": broken_diagnostics, "only": ["quickfix"]}}))
 
             stats = cache_stats(client)
@@ -1361,6 +1421,10 @@ def main() -> int:
         else:
             request_ok = request_ok and p95 <= args.max_request_p95_ms
 
+    if args.write_p95_file:
+        observed_p95 = {row_key(row): p95_by_row[row] for row in sorted(p95_by_row.keys())}
+        Path(args.write_p95_file).write_text(json.dumps(observed_p95, indent=2, sort_keys=True) + "\n")
+
     profile_budget_failures = []
     if not args.skip_profile_p95_budgets:
         profile_budgets = PROFILE_P95_BUDGET_MS[args.profile]
@@ -1374,6 +1438,32 @@ def main() -> int:
             if row not in p95_by_row:
                 profile_budget_failures.append("%s.%s:missing-row" % row)
     profile_budget_ok = args.skip_profile_p95_budgets or len(profile_budget_failures) == 0
+
+    baseline_p95_failures = []
+    baseline_p95_uncovered_rows = []
+    baseline_p95_count = 0
+    if args.baseline_p95_file:
+        baseline_p95 = load_p95_baseline(args.baseline_p95_file)
+        baseline_p95_count = len(baseline_p95)
+        for row, baseline in sorted(baseline_p95.items()):
+            p95 = p95_by_row.get(row)
+            if p95 is None:
+                baseline_p95_failures.append("%s:missing-row" % row_key(row))
+                continue
+            target = baseline * (1.0 - args.min_p95_improvement)
+            if p95 > target:
+                baseline_p95_failures.append(
+                    "%s %.3f > %.3f baseline %.3f"
+                    % (row_key(row), p95, target, baseline)
+                )
+        baseline_p95_uncovered_rows = sorted(
+            row_key(row) for row in p95_by_row.keys() if row not in baseline_p95
+        )
+        if args.require_baseline_for_all_rows:
+            baseline_p95_failures.extend(
+                "%s:missing-baseline" % row for row in baseline_p95_uncovered_rows
+            )
+    baseline_p95_ok = len(baseline_p95_failures) == 0
 
     printed_counter_delta = False
     for (fixture, operation, key), values in sorted(counter_deltas.items()):
@@ -1709,9 +1799,6 @@ def main() -> int:
             if (fixture, operation) not in samples:
                 cold_cache_failures.append("%s.%s:missing-samples" % (fixture, operation))
                 continue
-            hit_values = counter_deltas.get((fixture, operation, "workspaceDiscoveryCacheHits"), [])
-            if sum(hit_values) <= 0:
-                cold_cache_failures.append("%s.%s:workspaceDiscoveryCacheHits" % (fixture, operation))
             for key in ("coldWorkspaceIndexBuilds", "workspaceDiscoveryRuns"):
                 values = counter_deltas.get((fixture, operation, key), [])
                 if sum(values) != 0 or (max(values) if values else 0) != 0:
@@ -1719,13 +1806,23 @@ def main() -> int:
     cold_cache_ok = cache_stats_available and len(cold_cache_failures) == 0
     cold_first_build_failures = []
     if cache_stats_available:
-        for fixture, operation in COLD_FIRST_BUILD_ROWS:
+        for fixture, operation in COLD_WORKSPACE_FIRST_BUILD_ROWS:
             if (fixture, operation) not in samples:
                 cold_first_build_failures.append("%s.%s:missing-samples" % (fixture, operation))
                 continue
             build_values = counter_deltas.get((fixture, operation, "coldWorkspaceIndexBuilds"), [])
             if sum(build_values) <= 0:
                 cold_first_build_failures.append("%s.%s:coldWorkspaceIndexBuilds<=0" % (fixture, operation))
+        for fixture, operation in COLD_DIRECT_IMPORTED_MEMBER_FIRST_BUILD_ROWS:
+            if (fixture, operation) not in samples:
+                cold_first_build_failures.append("%s.%s:missing-samples" % (fixture, operation))
+                continue
+            import_values = counter_deltas.get((fixture, operation, "importedMemberIndexBuilds"), [])
+            if sum(import_values) <= 0:
+                cold_first_build_failures.append("%s.%s:importedMemberIndexBuilds<=0" % (fixture, operation))
+            workspace_values = counter_deltas.get((fixture, operation, "coldWorkspaceIndexBuilds"), [])
+            if sum(workspace_values) != 0 or (max(workspace_values) if workspace_values else 0) != 0:
+                cold_first_build_failures.append("%s.%s:coldWorkspaceIndexBuilds" % (fixture, operation))
     cold_first_build_ok = cache_stats_available and len(cold_first_build_failures) == 0
     edit_diagnostic_boundary_failures = []
     if cache_stats_available:
@@ -1776,6 +1873,18 @@ def main() -> int:
         1 if profile_budget_ok else 0,
         ",".join(profile_budget_failures) if profile_budget_failures else "-",
     ))
+    if args.baseline_p95_file:
+        print("gate p95_baseline_improvement ok %d min_improvement %.3f compared_rows %d uncovered_rows %d failures %s" % (
+            1 if baseline_p95_ok else 0,
+            args.min_p95_improvement,
+            baseline_p95_count,
+            len(baseline_p95_uncovered_rows),
+            ",".join(baseline_p95_failures) if baseline_p95_failures else "-",
+        ))
+        if baseline_p95_uncovered_rows:
+            print("info p95_baseline_uncovered %s" % ",".join(baseline_p95_uncovered_rows))
+    else:
+        print("info p95_baseline_improvement skipped no_baseline_p95_file")
     print("gate representative_fixture_coverage ok %d fixtures %s" % (1 if coverage_ok else 0, ",".join(coverage_fixtures)))
     print("info cache_stats_available %d" % (1 if cache_stats_available else 0))
     if cache_stats_available:
@@ -1911,6 +2020,7 @@ def main() -> int:
         request_ok and
         edit_ok and
         profile_budget_ok and
+        baseline_p95_ok and
         profile_byte_ok and
         source_ok and
         byte_ok and

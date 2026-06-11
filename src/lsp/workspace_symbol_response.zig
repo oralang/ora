@@ -27,26 +27,69 @@ pub fn appendOpenDocumentSymbols(
     query: []const u8,
 ) !AppendStats {
     var stats: AppendStats = .{};
+    if (index.root_symbol_indexes.len != 0) {
+        for (index.root_symbol_indexes) |raw_index| {
+            const symbol_index: usize = raw_index;
+            if (symbol_index >= index.symbols.len) continue;
+            try appendOpenDocumentSymbol(
+                arena,
+                symbols,
+                source,
+                line_index,
+                encoding,
+                uri,
+                index.symbols[symbol_index],
+                query,
+                &stats,
+            );
+        }
+        return stats;
+    }
+
     for (index.symbols) |sym| {
         if (sym.parent != null) continue;
-        if (query.len > 0 and !fuzzyMatch(sym.name, query)) continue;
-
-        stats.count += 1;
-        stats.string_bytes = addSat(stats.string_bytes, sym.name.len);
-        stats.string_bytes = addSat(stats.string_bytes, uri.len);
-        if (sym.detail) |detail| stats.string_bytes = addSat(stats.string_bytes, detail.len);
-
-        try symbols.append(arena, .{
-            .name = try arena.dupe(u8, sym.name),
-            .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
-            .location = .{
-                .uri = try arena.dupe(u8, uri),
-                .range = protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, sym.selection_range),
-            },
-            .containerName = if (sym.detail) |d| try arena.dupe(u8, d) else null,
-        });
+        try appendOpenDocumentSymbol(
+            arena,
+            symbols,
+            source,
+            line_index,
+            encoding,
+            uri,
+            sym,
+            query,
+            &stats,
+        );
     }
     return stats;
+}
+
+fn appendOpenDocumentSymbol(
+    arena: Allocator,
+    symbols: *std.ArrayList(types.SymbolInformation),
+    source: []const u8,
+    line_index: *const line_index_api.LineIndex,
+    encoding: text_edits.PositionEncoding,
+    uri: []const u8,
+    sym: semantic_index.Symbol,
+    query: []const u8,
+    stats: *AppendStats,
+) !void {
+    if (query.len > 0 and !fuzzyMatch(sym.name, query)) return;
+
+    stats.count += 1;
+    stats.string_bytes = addSat(stats.string_bytes, sym.name.len);
+    stats.string_bytes = addSat(stats.string_bytes, uri.len);
+    if (sym.detail) |detail| stats.string_bytes = addSat(stats.string_bytes, detail.len);
+
+    try symbols.append(arena, .{
+        .name = sym.name,
+        .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
+        .location = .{
+            .uri = uri,
+            .range = protocol_ranges.byteRangeToLspOrRaw(source, line_index, encoding, sym.selection_range),
+        },
+        .containerName = sym.detail,
+    });
 }
 
 pub fn appendEntrySymbols(
@@ -68,13 +111,13 @@ pub fn appendEntrySymbols(
         if (sym.detail) |detail| stats.string_bytes = addSat(stats.string_bytes, detail.len);
 
         try symbols.append(arena, .{
-            .name = try arena.dupe(u8, sym.name),
+            .name = sym.name,
             .kind = @enumFromInt(semantic_index.toLspKind(sym.kind)),
             .location = .{
-                .uri = try arena.dupe(u8, uri),
+                .uri = uri,
                 .range = try range_converter.byteRangeToLsp(uri, sym.selection_range),
             },
-            .containerName = if (sym.detail) |d| try arena.dupe(u8, d) else null,
+            .containerName = sym.detail,
         });
     }
     return stats;
