@@ -8,6 +8,7 @@ const ora_types = @import("ora_types");
 const refinements = ora_types.refinement_semantics;
 const compiler_query = @import("../compiler_query.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const executable_fallbacks = @import("executable_fallbacks.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -22,6 +23,12 @@ const abi_layout_context = @import("../abi/layout_context.zig");
 const RefinementArg = ora_types.RefinementArg;
 
 pub const abi = @import("abi.zig");
+pub const ExecutableFallbackViolation = executable_fallbacks.ExecutableFallbackViolation;
+pub const executable_fallback_attr_name = executable_fallbacks.executable_fallback_attr_name;
+pub const protocol_zero_attr_name = executable_fallbacks.protocol_zero_attr_name;
+pub const findExecutableFallback = executable_fallbacks.findExecutableFallback;
+pub const verifyNoExecutableFallbacks = executable_fallbacks.verifyNoExecutableFallbacks;
+pub const isAllowedProtocolZeroPurpose = executable_fallbacks.isAllowedProtocolZeroPurpose;
 
 pub const abi_layout_test_support = struct {
     pub fn mixin(TestLowerer: type, TestContractLowerer: type, TestFunctionLowerer: type, TestHirSymbolKind: type) type {

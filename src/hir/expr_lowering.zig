@@ -180,7 +180,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const attr = mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
                     const bits = appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, i160_type, attr));
                     const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, bits);
-                    if (mlir.oraOperationIsNull(addr_op)) break :blk null;
+                    if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, addr_op);
                 },
                 .string => |text| blk: {
@@ -206,7 +206,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         values[index] = (try @This().lowerPersistedConstValue(self, element, element_sema_type, element_type, loc)) orelse break :blk null;
                     }
                     const op = mlir.oraTupleCreateOpCreate(self.parent.context, loc, values.ptr, values.len, tuple_result_type);
-                    if (mlir.oraOperationIsNull(op)) break :blk null;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
             };
@@ -408,7 +408,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const value = try self.lowerExpr(old.expr, locals);
                     const result_type = self.parent.lowerExprType(old.expr);
                     const op = mlir.oraOldOpCreate(self.parent.context, loc, value, result_type);
-                    if (mlir.oraOperationIsNull(op)) break :blk value;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .Unary => |unary| try self.lowerUnary(unary, locals),
@@ -813,13 +813,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         createIntegerConstant(self.parent.context, loc, mlir.oraValueGetType(operand), 0),
                     );
                     const op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, operand);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .not_ => blk: {
                     const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                     const op = mlir.oraArithXorIOpCreate(self.parent.context, loc, operand, one);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .bit_not => blk: {
@@ -831,7 +831,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const all_ones: i64 = if (bit_width >= 64) -1 else (@as(i64, 1) << @intCast(bit_width)) - 1;
                     const mask = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, operand_ty, all_ones));
                     const op = mlir.oraArithXorIOpCreate(self.parent.context, loc, operand, mask);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .try_ => try @This().lowerTryUnary(self, operand, unary.range),
@@ -846,7 +846,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (self.in_try_block) {
                 const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
-                if (mlir.oraOperationIsNull(unwrap)) return operand;
+                if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, unwrap);
             }
 
@@ -854,11 +854,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.return_type) |return_type| {
                     if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(return_type))) {
                         const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, operand);
-                        if (mlir.oraOperationIsNull(is_error)) return operand;
+                        if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
                         const is_error_value = appendValueOp(self.block, is_error);
 
                         const branch = mlir.oraConditionalReturnOpCreate(self.parent.context, loc, is_error_value);
-                        if (mlir.oraOperationIsNull(branch)) return operand;
+                        if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, branch);
 
                         const then_block = mlir.oraConditionalReturnOpGetThenBlock(branch);
@@ -869,12 +869,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
                         const error_type = defaultIntegerType(self.parent.context);
                         const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
-                        if (mlir.oraOperationIsNull(get_error)) return operand;
+                        if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
                         appendOp(then_block, get_error);
                         const error_value = mlir.oraOperationGetResult(get_error, 0);
 
                         const error_union = mlir.oraErrorErrOpCreate(self.parent.context, loc, error_value, return_type);
-                        if (mlir.oraOperationIsNull(error_union)) return operand;
+                        if (mlir.oraOperationIsNull(error_union)) return error.MlirOperationCreationFailed;
                         if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
                             mlir.oraOperationSetAttributeByName(error_union, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
                         }
@@ -888,7 +888,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try support.appendEmptyYield(self.parent.context, else_block, loc);
 
                         const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
-                        if (mlir.oraOperationIsNull(unwrap)) return operand;
+                        if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
                         return appendValueOp(self.block, unwrap);
                     }
                 }
@@ -3013,7 +3013,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     target_type,
                     self.block,
                 );
-                if (mlir.oraOperationIsNull(wrap_op)) return value;
+                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
                 return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return value;
@@ -3117,7 +3117,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         target_type,
                         self.block,
                     );
-                    if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+                    if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
+                    return mlir.oraOperationGetResult(wrap_op, 0);
                 }
                 return value;
             }
@@ -3128,7 +3129,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value,
                 concrete_target,
             );
-            if (mlir.oraOperationIsNull(bitcast)) return value;
+            if (mlir.oraOperationIsNull(bitcast)) return error.MlirOperationCreationFailed;
             const casted = appendValueOp(self.block, bitcast);
 
             if (!mlir.oraTypeIsNull(target_ref_base)) {
@@ -3139,7 +3140,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     target_type,
                     self.block,
                 );
-                if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
+                return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return casted;
         }
@@ -3175,7 +3177,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (mlir.oraTypeIsAddressType(value_type) and target_is_int) {
                 const op = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
-                if (mlir.oraOperationIsNull(op)) return value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 const i160_value = appendValueOp(self.block, op);
                 if (mlir.oraIntegerTypeGetWidth(target_type) == 160) return i160_value;
                 return try @This().convertBuiltinCastValue(self, i160_value, target_type, false, target_is_signed, range, checked);
@@ -3183,13 +3185,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (value_is_int and mlir.oraTypeIsAddressType(target_type)) {
                 const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
-                if (mlir.oraTypeIsNull(i160_type)) return value;
+                if (mlir.oraTypeIsNull(i160_type)) return error.MlirOperationCreationFailed;
                 const i160_value = if (mlir.oraIntegerTypeGetWidth(value_type) == 160)
                     value
                 else
                     try @This().convertBuiltinCastValue(self, value, i160_type, source_is_signed, false, range, checked);
                 const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, i160_value);
-                if (mlir.oraOperationIsNull(op)) return i160_value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
@@ -3199,7 +3201,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const target_width = mlir.oraIntegerTypeGetWidth(target_type);
             if (value_width == target_width) {
                 const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, target_type);
-                if (mlir.oraOperationIsNull(op)) return value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
@@ -3208,7 +3210,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
                 else
                     mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
-                if (mlir.oraOperationIsNull(op)) return value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
@@ -3217,7 +3219,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const trunc = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
-            if (mlir.oraOperationIsNull(trunc)) return value;
+            if (mlir.oraOperationIsNull(trunc)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, trunc);
         }
 
@@ -4318,7 +4320,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn createValuePlaceholder(self: *FunctionLowerer, op_name: []const u8, text: []const u8, range: source.TextRange, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
             self.parent.recordPlaceholder();
-            var attrs: [1]mlir.MlirNamedAttribute = .{namedStringAttr(self.parent.context, "value", text)};
+            var attrs: [2]mlir.MlirNamedAttribute = .{
+                namedStringAttr(self.parent.context, "value", text),
+                namedStringAttr(self.parent.context, "ora.executable_fallback", op_name),
+            };
             return mlir.oraOperationCreate(
                 self.parent.context,
                 self.parent.location(range),
@@ -4336,7 +4341,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn createAggregatePlaceholder(self: *FunctionLowerer, op_name: []const u8, range: source.TextRange, operands: []const mlir.MlirValue, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
             self.parent.recordPlaceholder();
-            var attrs: [1]mlir.MlirNamedAttribute = .{namedTypeAttr(self.parent.context, "ora.type", result_type)};
+            var attrs: [2]mlir.MlirNamedAttribute = .{
+                namedTypeAttr(self.parent.context, "ora.type", result_type),
+                namedStringAttr(self.parent.context, "ora.executable_fallback", op_name),
+            };
             return mlir.oraOperationCreate(
                 self.parent.context,
                 self.parent.location(range),

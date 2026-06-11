@@ -2240,6 +2240,20 @@ fn rejectIfNotEmittable(
     std.process.exit(1);
 }
 
+fn rejectIfExecutableFallbacksSurvive(
+    writer: anytype,
+    lowering: *const compiler.hir.LoweringResult,
+) !void {
+    if (compiler.hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+        try writer.print(
+            "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
+            .{ violation.op_name, violation.reason },
+        );
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
 fn writeDetectOnlyTypeFallbacks(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
@@ -3804,6 +3818,7 @@ fn runCompilerMlirEmit(
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -3889,6 +3904,7 @@ fn runMlirEmitAdvanced(
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
 

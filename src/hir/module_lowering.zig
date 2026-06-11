@@ -1673,8 +1673,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
-            if (std.mem.endsWith(u8, op_name, "_placeholder")) {
+            const mark_executable_fallback = std.mem.endsWith(u8, op_name, "_placeholder");
+            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            defer marked_attrs.deinit(self.allocator);
+            var final_attrs = attrs;
+
+            if (mark_executable_fallback) {
                 self.recordPlaceholder();
+                try marked_attrs.appendSlice(self.allocator, attrs);
+                try marked_attrs.append(self.allocator, namedStringAttr(self.context, "ora.executable_fallback", op_name));
+                final_attrs = marked_attrs.items;
             }
             const op = mlir.oraOperationCreate(
                 self.context,
@@ -1684,8 +1692,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 0,
                 null,
                 0,
-                if (attrs.len == 0) null else attrs.ptr,
-                attrs.len,
+                if (final_attrs.len == 0) null else final_attrs.ptr,
+                final_attrs.len,
                 0,
                 false,
             );

@@ -636,7 +636,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const payload = try @This().convertValueForFlow(self, value, success_type, range);
             const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, return_type);
-            if (mlir.oraOperationIsNull(op)) return payload;
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -695,7 +695,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraTypeEqual(mlir.oraValueGetType(value), return_type)) return value;
 
             const op = mlir.oraErrorErrOpCreate(self.parent.context, self.parent.location(range), value, return_type);
-            if (mlir.oraOperationIsNull(op)) return value;
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -2222,7 +2222,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     @intCast(index),
                     field_type,
                 );
-                if (mlir.oraOperationIsNull(extract)) return null;
+                if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
                 const extracted = appendValueOp(self.block, extract);
                 const converted = try @This().convertValueForFlow(self, extracted, field_type, range);
                 try fields.append(self.parent.allocator, converted);
@@ -2235,7 +2235,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 fields.items.len,
                 target_type,
             );
-            if (mlir.oraOperationIsNull(struct_init)) return null;
+            if (mlir.oraOperationIsNull(struct_init)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, struct_init);
         }
 
@@ -2266,7 +2266,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     field_name,
                     target_element_type,
                 );
-                if (mlir.oraOperationIsNull(extract)) return null;
+                if (mlir.oraOperationIsNull(extract)) return error.MlirOperationCreationFailed;
                 const extracted = appendValueOp(self.block, extract);
                 const converted = try @This().convertValueForFlow(self, extracted, target_element_type, range);
                 try elements.append(self.parent.allocator, converted);
@@ -2279,7 +2279,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 elements.items.len,
                 target_type,
             );
-            if (mlir.oraOperationIsNull(tuple)) return null;
+            if (mlir.oraOperationIsNull(tuple)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, tuple);
         }
 

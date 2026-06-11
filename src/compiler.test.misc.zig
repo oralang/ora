@@ -754,6 +754,36 @@ test "HIR emittability arms all executable fallback counters" {
     try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
 }
 
+test "HIR executable fallback verifier enforces protocol-zero allowlist" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    const module_op = mlir.oraModuleGetOperation(hir_result.module.raw_module);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("abi_padding")),
+    );
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("debug_zero")),
+    );
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("unknown protocol-zero purpose", violation.reason);
+}
+
 test "compiler tracks HIR executable placeholders as non-emittable" {
     const source_text =
         \\contract Sample {
@@ -775,8 +805,11 @@ test "compiler tracks HIR executable placeholders as non-emittable" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.executable_fallback"));
     try testing.expect(hir_result.placeholder_count > 0);
     try testing.expect(!hir_result.isEmittable());
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("ora.for_placeholder", violation.op_name);
 }
 
 test "compiler diagnoses uninitialized locals instead of emitting HIR default values" {
@@ -1808,7 +1841,7 @@ test "compiler unrolls small constant runtime for-count loops" {
     const source_text =
         \\contract Sample {
         \\    pub fn run() -> u256 {
-        \\        let sum = 0;
+        \\        let sum: u256 = 0;
         \\        for (4) |i| {
         \\            sum += i;
         \\        }
@@ -1817,8 +1850,16 @@ test "compiler unrolls small constant runtime for-count loops" {
         \\}
     ;
 
-    const rendered = try renderOraMlirForSource(source_text);
-    defer testing.allocator.free(rendered);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
     try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") == null);
     try testing.expect(std.mem.count(u8, rendered, "ora.stmt.1") >= 4);

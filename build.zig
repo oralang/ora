@@ -1407,6 +1407,15 @@ pub fn build(b: *std.Build) void {
     check_no_width_defaults_step.dependOn(&no_width_defaults_cmd.step);
     test_step.dependOn(&no_width_defaults_cmd.step);
 
+    // zig build check-no-hir-op-null-fallbacks
+    const no_hir_op_null_fallbacks_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-hir-op-null-fallbacks.sh",
+    });
+    const check_no_hir_op_null_fallbacks_step = b.step("check-no-hir-op-null-fallbacks", "Run HIR op-creation fail-closed static checks");
+    check_no_hir_op_null_fallbacks_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
+    test_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
+
     // zig build check-query-view-ownership
     const query_view_ownership_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
