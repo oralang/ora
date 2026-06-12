@@ -279,7 +279,7 @@
     {
       "id": "error_union.wide_carrier",
       "area": "error_union",
-      "behavior": "Wide (>255-bit struct) success payload through local error union; Ok paths executed. Err/catch path BLOCKED: aggregate-payload catch unpacks garbage pointer, panics lib/evm (finding 2026-06-11)",
+      "behavior": "Wide (>255-bit struct) success payload through local error union; Ok and Err/catch paths executed",
       "specs": [
         "tests/conformance/error_union_wide_carrier.spec.toml"
       ]
@@ -287,7 +287,7 @@
     {
       "id": "error_union.local_aggregate_result",
       "area": "error_union",
-      "behavior": "Local Result<string>: try Ok path, match extraction, tuple-from-match content executed. Err/catch path BLOCKED (same aggregate-payload catch miscompile); tuple-return-in-catch blocked at OraToSIR Phase3b (findings 2026-06-11)",
+      "behavior": "Local Result<string>: try Ok/Err paths, match extraction, tuple-from-match content executed. Tuple-return-in-catch remains blocked at OraToSIR Phase3b",
       "specs": [
         "tests/conformance/error_union_local_aggregate.spec.toml"
       ]

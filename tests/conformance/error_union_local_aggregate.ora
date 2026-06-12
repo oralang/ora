@@ -1,4 +1,4 @@
-// see FINDINGS.md#f-002 (catch path excluded from spec) and FINDINGS.md#f-004
+// see FINDINGS.md#f-004
 error Failure;
 
 contract ErrorUnionLocalAggregate {

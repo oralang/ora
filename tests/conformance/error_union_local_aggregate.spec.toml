@@ -1,4 +1,4 @@
-# see FINDINGS.md#f-002 — err_marker row blocked; FINDINGS.md#f-004 — len-only asserts
+# see FINDINGS.md#f-004 — len-only asserts
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
@@ -25,10 +25,9 @@ value = 0
 args = []
 returns = { (uint256,string) = (1,ora) }
 
-# BLOCKED on FINDINGS.md#f-002:
-# [[call]]
-# fn = "err_marker()"
-# caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-# value = 0
-# args = []
-# returns = { u256 = 999 }
+[[call]]
+fn = "err_marker()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 999 }

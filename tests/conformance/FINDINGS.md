@@ -29,19 +29,19 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 
 ## F-002 — catch-path unpacking of aggregate error-union payloads is miscompiled (S1-class)
 
-- **Status:** OPEN
+- **Status:** FIXED (aggregate-success error-union Err payloads no longer dereference scalar error IDs)
 - **Severity:** S1
 - **Owner:** compiler
 - **What:** `catch` after a `try` that actually returns an error, on an error union whose
   payload is an AGGREGATE (wide struct, string), dereferences a garbage payload pointer →
   huge-offset `mload`. Scalar payloads are fine (properties suite). Ok paths, plain `match`,
   and tuple-from-match all return correct values — only catch-on-actual-Err breaks; both
-  payload kinds show one root cause. Likely the src-full-review "mload fresh-malloc" S1 class.
-- **Repro:** `error_union_wide_carrier.ora` `err_default()`,
-  `error_union_local_aggregate.ora` `err_marker()` (call-level bisected 2026-06-11).
-- **Blocked rows (commented in the spec.toml files):** `err_default()` returns 777;
-  `err_marker()` returns 999.
-- **Flip condition:** un-comment both rows when the catch-path lowering is fixed.
+  payload kinds showed one root cause.
+- **Repro/fixed rows:** `error_union_wide_carrier.ora` `err_default()` now returns 777;
+  `error_union_local_aggregate.ora` `err_marker()` now returns 999.
+- **Fix:** wide error-union return lowering now distinguishes real pointer-backed payloads
+  from scalar error words temporarily relabelled as the aggregate success carrier. Scalar
+  error IDs are carried as words and are not loaded as pointers before catch dispatch.
 
 ## F-003 — lib/evm panics (integer overflow) on huge-offset mload gas computation
 

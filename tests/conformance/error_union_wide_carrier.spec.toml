@@ -1,4 +1,3 @@
-# see FINDINGS.md#f-002 — err_default row blocked
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
@@ -18,10 +17,9 @@ value = 0
 args = []
 returns = { u256 = 22 }
 
-# BLOCKED on FINDINGS.md#f-002:
-# [[call]]
-# fn = "err_default()"
-# caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-# value = 0
-# args = []
-# returns = { u256 = 777 }
+[[call]]
+fn = "err_default()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 777 }

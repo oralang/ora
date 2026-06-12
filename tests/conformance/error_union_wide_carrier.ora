@@ -1,4 +1,3 @@
-// see FINDINGS.md#f-002 (err_default catch path excluded from spec)
 error Failure;
 
 struct Pair {

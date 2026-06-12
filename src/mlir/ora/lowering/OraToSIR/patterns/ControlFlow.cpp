@@ -617,7 +617,20 @@ static void buildWideErrorUnionReturnFromParts(
     Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
     normTag = ora::error_union_helpers::maskedTagWordWithMask(rewriter, loc, normTag, one);
     Value normPayload = coerceToU256(rewriter, loc, payload);
-    if (llvm::isa<sir::PtrType>(payload.getType()))
+
+    auto scalarWordRelabelledAsPtr = [](Value value) -> bool {
+        if (!llvm::isa<sir::PtrType>(value.getType()))
+            return false;
+        auto bitcast = value.getDefiningOp<sir::BitcastOp>();
+        if (!bitcast || !llvm::isa<sir::U256Type>(bitcast.getInput().getType()))
+            return false;
+        if (auto inner = bitcast.getInput().getDefiningOp<sir::BitcastOp>())
+            if (llvm::isa<sir::PtrType>(inner.getInput().getType()))
+                return false;
+        return true;
+    };
+
+    if (llvm::isa<sir::PtrType>(payload.getType()) && !scalarWordRelabelledAsPtr(payload))
     {
         Value errorPayload = rewriter.create<sir::LoadOp>(loc, u256Type, payload);
         normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayload, normPayload);
