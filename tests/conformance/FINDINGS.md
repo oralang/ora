@@ -50,9 +50,15 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
   PANICS the interpreter instead of failing cleanly (out-of-gas / error). The conformance
   oracle must never panic on hostile-but-valid bytecode behavior; the R9 Anvil differential
   would cross-check this class.
-- **Repro:** run either F-002 blocked row.
+- **Repro:** run either F-002 blocked row. **DIFFERENTIAL-CONFIRMED 2026-06-12:**
+  `bash scripts/prove-f003-differential.sh` runs the identical `err_default()` call through both
+  EVMs — lib/evm PANICS (exit 134, `handlers_memory.zig:35` integer overflow in `mload`), Anvil/revm
+  cleanly OOG-reverts (`EVM error MemoryOOG`). Repro at `tests/differential/f003_repro.{ora,spec.toml}`
+  (kept out of `tests/conformance/` so it cannot crash the gate). This is the differential catching a
+  defect the in-process oracle cannot even evaluate.
 - **Flip condition:** none in specs; fix = saturating/checked gas math returning OutOfGas.
-  F-002's rows stay blocked on F-002 regardless.
+  F-002's rows stay blocked on F-002 regardless. When fixed, `prove-f003-differential.sh` exits 1
+  (lib/evm no longer panics) — promote the repro to a real conformance spec then.
 
 ## F-006 — narrow error-union error path reverts empty; success encoding untrusted (S1)
 

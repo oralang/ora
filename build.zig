@@ -610,6 +610,24 @@ pub fn build(b: *std.Build) void {
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
 
+    // Single-spec lib/evm runner — runs ONE .ora+.spec.toml outside the harness
+    // (used by the Anvil differential proof to observe lib/evm on one call).
+    const conformance_one_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/single_spec.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    conformance_one_mod.addImport("ora_evm", ora_evm_mod);
+    conformance_one_mod.addImport("voltaire", evm_primitives_mod);
+    const conformance_one_exe = b.addExecutable(.{
+        .name = "conformance-one",
+        .root_module = conformance_one_mod,
+    });
+    conformance_one_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const conformance_one_install = b.addInstallArtifact(conformance_one_exe, .{});
+    const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
+    conformance_one_step.dependOn(&conformance_one_install.step);
+
     const evm_tests_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",

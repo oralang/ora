@@ -48,6 +48,13 @@ def cast(*args: str, rpc: bool = True) -> str:
     return p.stdout.strip()
 
 
+def cast_try(*args: str) -> tuple[bool, str]:
+    """Run cast, returning (succeeded, output_or_error). Does not raise on revert."""
+    cmd = ["cast", args[0], "--rpc-url", RPC, *args[1:]]
+    p = sh(cmd)
+    return (p.returncode == 0, (p.stdout or p.stderr).strip())
+
+
 # --- tiny spec reader (the [deploy]/[[call]]/[[call.storage]] subset) ---------
 
 def read_spec(path: Path) -> dict:
@@ -188,9 +195,25 @@ def main() -> int:
                 diverged += 1
             print(f"  [{mark}] {sig} -> anvil={actual} expected(lib/evm)={expected}")
             checked += 1
+        elif "reverts" in call:
+            ok, out = cast_try("call", addr, data)
+            mark = "OK" if not ok else "DIVERGE"
+            if ok:
+                diverged += 1
+            note = out.split(":")[-1].strip()[:40] if not ok else "did NOT revert"
+            print(f"  [{mark}] {sig} -> anvil reverts ({note})")
+            checked += 1
+            continue
+        elif "succeeds" in call:
+            ok, _ = cast_try("send", "--private-key", DEV_KEY, addr, data)
+            mark = "OK" if ok else "DIVERGE"
+            if not ok:
+                diverged += 1
+            print(f"  [{mark}] {sig} -> anvil {'succeeds' if ok else 'REVERTED'}")
+            checked += 1
+            continue
         else:
-            # reverts / succeeds not yet differentiated here.
-            print(f"  [skip] {sig}: only returns/void supported in this scaffold")
+            print(f"  [skip] {sig}: no recognized outcome")
             skipped += 1
             continue
 
