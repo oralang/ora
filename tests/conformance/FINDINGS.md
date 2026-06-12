@@ -118,3 +118,18 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 - **Flip condition:** when contract-context trait calls land, restore
   `trait_method_dispatch.ora`/`.spec.toml` (content in this entry's git history, commit that
   added this section) and flip the manifest entry to covered.
+
+## F-007 — conformance harness does not thread metered gas (blocks gas tests)
+
+- **Status:** OPEN
+- **Severity:** S3
+- **Owner:** test-harness
+- **What:** the conformance `evm.call` path returns `CallResult.gas_left ≈ DEFAULT_GAS` (the full
+  budget), not the post-execution remaining — so `gas_used = DEFAULT_GAS - gas_left ≈ 0` for every
+  call. A `gas_max` ceiling assertion was prototyped (2026-06-12) and BACKED OUT rather than ship a
+  hollow check: with `gas_max = 1` a real getter still "passed". Gas testing (T4.1) is blocked until
+  the harness threads true metered gas through `executeSpec` (the inner_create/call gas accounting
+  needs to surface used-gas, possibly via the EVM's tracer or a gas-used field on the result).
+- **Repro:** add `gas_max = 1` to any `[[call]]`; the call passes (gas_used reads as 0).
+- **Flip condition:** wire real gas-used into the runner result, then re-add `gas_max` with
+  teeth (a `gas_max = 1` must fail) and start ceilings on the full-app specs.
