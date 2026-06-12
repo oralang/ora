@@ -295,7 +295,7 @@
     {
       "id": "error_union.local_aggregate_result",
       "area": "error_union",
-      "behavior": "Local Result<string>: try Ok/Err paths, match extraction, tuple-from-match content executed. Tuple-return-in-catch remains blocked at OraToSIR Phase3b",
+      "behavior": "Local Result<string>: try Ok/Err paths, match extraction, tuple-from-match content, and tuple-return-in-catch content executed",
       "specs": [
         "tests/conformance/error_union_local_aggregate.spec.toml"
       ]
