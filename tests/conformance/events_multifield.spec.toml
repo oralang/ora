@@ -1,5 +1,5 @@
-# Events depth: a multi-field log. Hypothesis (from Ping() emitting topics=[]):
-# Ora emits no topic0 signature hash and packs args into data.
+# Events depth: a multi-field log. see FINDINGS.md#f-008 — topics=[] (no topic0
+# signature hash), all fields packed in data.
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
