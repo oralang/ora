@@ -290,11 +290,9 @@ static bool isAlreadyMasked160(Value val)
 
 static Value constShiftedSelector(ConversionPatternRewriter &rewriter, Location loc, uint32_t selector)
 {
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), evm::kWordBits, mlir::IntegerType::Unsigned);
     llvm::APInt selectorWord(256, selector);
     selectorWord = selectorWord.shl(224);
-    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, selectorWord));
+    return constU256(rewriter, loc, selectorWord);
 }
 
 static void emitPanicRevert(ConversionPatternRewriter &rewriter, Location loc, unsigned code)
@@ -401,8 +399,7 @@ static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc,
 
     llvm::APInt maskValue(256, 0);
     maskValue.setLowBits(160);
-    auto maskAttr = mlir::IntegerAttr::get(u256Type, maskValue);
-    Value mask = rewriter.create<sir::ConstOp>(loc, u256Type, maskAttr);
+    Value mask = constU256(rewriter, loc, maskValue);
     return rewriter.create<sir::AndOp>(loc, u256Type, v, mask);
 }
 
@@ -682,17 +679,16 @@ LogicalResult ConvertByteAtOp::matchAndRewrite(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     Value source = operands[0];
     if (!llvm::isa<sir::PtrType>(source.getType()))
         source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
 
     Value index = coerceToU256(rewriter, loc, operands[1]);
-    Value headerSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value headerSize = constU256(rewriter, loc, 32);
     Value offset = rewriter.create<sir::AddOp>(loc, u256Type, headerSize, index);
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, offset);
-    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 0));
+    Value zero = constU256(rewriter, loc, 0);
     Value byteValue = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
     rewriter.replaceOp(op, byteValue);
     return success();
@@ -836,14 +832,13 @@ LogicalResult ConvertKeccak256Op::matchAndRewrite(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     Value source = operands[0];
     if (!llvm::isa<sir::PtrType>(source.getType()))
         source = rewriter.create<sir::BitcastOp>(loc, ptrType, source);
 
     Value length = rewriter.create<sir::LoadOp>(loc, u256Type, source);
-    Value headerSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value headerSize = constU256(rewriter, loc, 32);
     Value payload = rewriter.create<sir::AddPtrOp>(loc, ptrType, source, headerSize);
     Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, payload, length);
     rewriter.replaceOp(op, hash);
@@ -871,11 +866,9 @@ LogicalResult ConvertStringConstantOp::matchAndRewrite(
     auto ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    auto lengthAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(bytes.size()));
-    Value lengthConst = rewriter.create<sir::ConstOp>(loc, u256Type, lengthAttr);
-    Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value lengthConst = constU256(rewriter, loc, bytes.size());
+    Value wordSize = constU256(rewriter, loc, 32);
     Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, lengthConst, wordSize);
     Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
 
@@ -884,7 +877,6 @@ LogicalResult ConvertStringConstantOp::matchAndRewrite(
 
     // store payload as 32-byte words (EVM-friendly layout)
     const size_t word_count = (bytes.size() + 31) / 32;
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
     for (size_t w = 0; w < word_count; ++w)
     {
         llvm::APInt word(256, 0);
@@ -895,10 +887,8 @@ LogicalResult ConvertStringConstantOp::matchAndRewrite(
             word = word.shl(8);
             word = word | llvm::APInt(256, byte);
         }
-        auto wordAttr = mlir::IntegerAttr::get(u256IntType, word);
-        Value wordConst = rewriter.create<sir::ConstOp>(loc, u256Type, wordAttr);
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + w * 32);
-        Value offsetConst = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        Value wordConst = constU256(rewriter, loc, word);
+        Value offsetConst = constU256(rewriter, loc, 32 + w * 32);
         Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offsetConst);
         rewriter.create<sir::StoreOp>(loc, dataPtr, wordConst);
     }
@@ -948,11 +938,9 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
     auto ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
-    auto lengthAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(bytes.size()));
-    Value lengthConst = rewriter.create<sir::ConstOp>(loc, u256Type, lengthAttr);
-    Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+    Value lengthConst = constU256(rewriter, loc, bytes.size());
+    Value wordSize = constU256(rewriter, loc, 32);
     Value totalSize = rewriter.create<sir::AddOp>(loc, u256Type, lengthConst, wordSize);
     Value base = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
 
@@ -960,7 +948,6 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
 
     // store payload as 32-byte words (EVM-friendly layout)
     const size_t word_count = (bytes.size() + 31) / 32;
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
     for (size_t w = 0; w < word_count; ++w)
     {
         llvm::APInt word(256, 0);
@@ -971,10 +958,8 @@ LogicalResult ConvertBytesConstantOp::matchAndRewrite(
             word = word.shl(8);
             word = word | llvm::APInt(256, byte);
         }
-        auto wordAttr = mlir::IntegerAttr::get(u256IntType, word);
-        Value wordConst = rewriter.create<sir::ConstOp>(loc, u256Type, wordAttr);
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, 32 + w * 32);
-        Value offsetConst = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        Value wordConst = constU256(rewriter, loc, word);
+        Value offsetConst = constU256(rewriter, loc, 32 + w * 32);
         Value dataPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offsetConst);
         rewriter.create<sir::StoreOp>(loc, dataPtr, wordConst);
     }
@@ -1009,13 +994,7 @@ LogicalResult ConvertHexConstantOp::matchAndRewrite(
     }
 
     llvm::APInt value(256, raw, 16);
-    auto ctx = op.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    auto valueAttrU256 = mlir::IntegerAttr::get(u256IntType, value);
-
-    auto constOp = rewriter.create<sir::ConstOp>(loc, u256Type, valueAttrU256);
-    rewriter.replaceOp(op, constOp.getResult());
+    rewriter.replaceOp(op, constU256(rewriter, loc, value));
     return success();
 }
 
@@ -1057,8 +1036,7 @@ LogicalResult ConvertI160ToAddrOp::matchAndRewrite(
 
     llvm::APInt maskValue(256, 0);
     maskValue.setLowBits(160);
-    auto maskAttr = mlir::IntegerAttr::get(u256Type, maskValue);
-    Value mask = rewriter.create<sir::ConstOp>(loc, u256Type, maskAttr);
+    Value mask = constU256(rewriter, loc, maskValue);
     Value masked = rewriter.create<sir::AndOp>(loc, u256Type, cast, mask);
 
     rewriter.replaceOp(op, masked);
@@ -1221,9 +1199,7 @@ LogicalResult ConvertQuantifiedOp::matchAndRewrite(
     // domain, so erase the operator by replacing it with a trivially true value.
     if (llvm::isa<sir::U256Type>(resultType))
     {
-        auto i256Type = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-        auto oneAttr = mlir::IntegerAttr::get(i256Type, 1);
-        Value one = rewriter.create<sir::ConstOp>(op.getLoc(), sir::U256Type::get(rewriter.getContext()), oneAttr);
+        Value one = constU256(rewriter, op.getLoc(), 1);
         rewriter.replaceOp(op, ValueRange{one});
         return success();
     }
@@ -1318,9 +1294,7 @@ LogicalResult ConvertArithCmpIOp::matchAndRewrite(
     }
 
     auto u256Type = sir::U256Type::get(op.getContext());
-    auto ui64Type = mlir::IntegerType::get(op.getContext(), 64, mlir::IntegerType::Unsigned);
-    auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
-    auto one = rewriter.create<sir::ConstOp>(loc, u256Type, oneAttr);
+    auto one = constU256(rewriter, loc, 1);
 
     Value lhs = adaptor.getLhs();
     Value rhs = adaptor.getRhs();
@@ -1847,11 +1821,7 @@ LogicalResult FoldEqSameOp::matchAndRewrite(
     if (op.getLhs() != op.getRhs())
         return failure();
 
-    auto *ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-    auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
-    Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, oneAttr);
+    Value one = constU256(rewriter, op.getLoc(), 1);
     rewriter.replaceOp(op, one);
     return success();
 }
@@ -1873,15 +1843,11 @@ LogicalResult FoldEqConstOp::matchAndRewrite(
     if (!lhsAttr || !rhsAttr)
         return failure();
 
-    auto *ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
     // Zero-extend both to 256 bits to avoid APInt assertion on mismatched widths.
     APInt lhs = lhsAttr.getValue().zextOrTrunc(256);
     APInt rhs = rhsAttr.getValue().zextOrTrunc(256);
     uint64_t isEqual = lhs == rhs ? 1 : 0;
-    auto resultAttr = mlir::IntegerAttr::get(u256IntType, isEqual);
-    Value result = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, resultAttr);
+    Value result = constU256(rewriter, op.getLoc(), isEqual);
     rewriter.replaceOp(op, result);
     return success();
 }
@@ -1901,12 +1867,8 @@ LogicalResult FoldIsZeroConstOp::matchAndRewrite(
     if (!intAttr)
         return failure();
 
-    auto *ctx = rewriter.getContext();
-    auto u256Type = sir::U256Type::get(ctx);
-    auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
     uint64_t isZero = intAttr.getValue().isZero() ? 1 : 0;
-    auto resultAttr = mlir::IntegerAttr::get(u256IntType, isZero);
-    Value result = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, resultAttr);
+    Value result = constU256(rewriter, op.getLoc(), isZero);
     rewriter.replaceOp(op, result);
     return success();
 }
