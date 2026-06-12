@@ -1369,7 +1369,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                 },
                 .Ok, .Err => return false,
-                .Else => unreachable,
+                .Else => |range| {
+                    try self.parent.emitLoweringError(
+                        range,
+                        "switch else pattern must be lowered as a default case",
+                        .{},
+                    );
+                    return false;
+                },
             }
             return true;
         }

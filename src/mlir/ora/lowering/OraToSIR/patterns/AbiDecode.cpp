@@ -2349,7 +2349,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     {
         Type convertedType = typeConverter->convertType(origType);
         if (!convertedType)
-            convertedType = ptrType;
+            return rewriter.notifyMatchFailure(op, "failed to convert dynamic ABI return type");
 
         Value offset = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
         Value dataPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, returndataPtr, offset);
@@ -2363,7 +2363,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
     auto replaceReturndataPtrView = [&](Type viewType) -> LogicalResult {
         Type convertedType = typeConverter->convertType(viewType);
         if (!convertedType)
-            convertedType = ptrType;
+            return rewriter.notifyMatchFailure(op, "failed to convert ABI return ptr-view type");
 
         Value decodedPtr = returndataPtr;
         if (convertedType != ptrType)

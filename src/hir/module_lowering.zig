@@ -739,7 +739,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .assert => .ensures,
                     .assume => .requires,
                     .ghost_axiom => continue,
-                    else => unreachable,
+                    else => {
+                        try self.emitLoweringError(
+                            fact.range,
+                            "unsupported trait ghost verification fact '{s}' during HIR lowering",
+                            .{@tagName(fact.kind)},
+                        );
+                        return error.InvalidVerificationFact;
+                    },
                 };
                 const expr = fact.expr orelse return error.InvalidVerificationFact;
                 try clauses.append(self.allocator, .{
