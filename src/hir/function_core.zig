@@ -20,7 +20,6 @@ const appendValueOp = support.appendValueOp;
 const boolType = support.boolType;
 const clearKnownTerminator = support.clearKnownTerminator;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
 const cmpPredicate = support.cmpPredicate;
 const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
@@ -1150,7 +1149,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             "local declaration requires a type or initializer",
                             .{},
                         );
-                        const op = try self.createAggregatePlaceholder("ora.uninitialized_local", decl.range, &.{}, defaultIntegerType(self.parent.context));
+                        const op = try self.createAggregatePlaceholder("ora.uninitialized_local", decl.range, &.{}, reprIntegerType(self.parent.context));
                         break :blk appendValueOp(self.block, op);
                     };
                     try self.bindPatternValue(decl.pattern, value, locals);
@@ -2585,7 +2584,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const target_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, index.range);
                     if (mlir.oraTypeIsAMemRef(base_type)) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
+                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         if (@This().guardedStorageRootNameForPattern(self, index.base)) |root_name| {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
@@ -2653,7 +2652,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const loc = self.parent.location(range);
             const zero = appendValueOp(
                 self.block,
-                createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 0),
+                createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 0),
             );
             const guard = mlir.oraTStoreGuardOpCreateWithResource(self.parent.context, loc, zero, strRef(field_name));
             if (mlir.oraOperationIsNull(guard)) return error.MlirOperationCreationFailed;
@@ -2925,7 +2924,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Index => |index| blk: {
                     const base_value = try @This().lowerPatternValueWithCache(self, index.base, locals, cache);
                     if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base_value))) {
-                        const key_value = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
+                        const key_value = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key_value, index.range);
                         const result_type = self.parent.lowerSemaType(@This().patternType(self, pattern_id, locals), index.range);
                         const op = mlir.oraMemrefLoadOpCreate(
@@ -3084,7 +3083,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 appendValueOp(
                     self.block,
-                    createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 0),
+                    createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 0),
                 );
             const op = if (is_lock)
                 mlir.oraLockOpCreateWithKey(self.parent.context, loc, resource, strRef(key))
@@ -3208,7 +3207,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 self.parent.context,
                 loc,
                 induction_var,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(current_value_op)) return error.MlirOperationCreationFailed;
             appendOp(body_block, current_value_op);
@@ -3236,7 +3235,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     self.parent.context,
                     loc,
                     lower_bound,
-                    defaultIntegerType(self.parent.context),
+                    reprIntegerType(self.parent.context),
                 );
                 if (mlir.oraOperationIsNull(start_value_op)) return error.MlirOperationCreationFailed;
                 appendOp(body_block, start_value_op);
@@ -3415,14 +3414,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const loc = self.parent.location(for_stmt.range);
                 const item_value = appendValueOp(
                     self.block,
-                    createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), current),
+                    createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), current),
                 );
                 try self.bindPatternValue(for_stmt.item_pattern, item_value, locals);
                 try locals.setPatternKnownInt(self.parent.file, for_stmt.item_pattern, current);
                 if (for_stmt.index_pattern) |index_pattern| {
                     const index_value = appendValueOp(
                         self.block,
-                        createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), @intCast(iteration)),
+                        createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), @intCast(iteration)),
                     );
                     try self.bindPatternValue(index_pattern, index_value, locals);
                     try locals.setPatternKnownInt(self.parent.file, index_pattern, @intCast(iteration));

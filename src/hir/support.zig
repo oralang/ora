@@ -386,10 +386,6 @@ pub fn zeroInitAttr(ty: mlir.MlirType) mlir.MlirAttribute {
     return mlir.oraNullAttrCreate();
 }
 
-pub fn defaultIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
-    return reprIntegerType(ctx);
-}
-
 pub fn unknownTypeFallbackI256(ctx: mlir.MlirContext) mlir.MlirType {
     return reprIntegerType(ctx);
 }

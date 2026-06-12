@@ -21,12 +21,12 @@ const boolType = support.boolType;
 const bytesType = support.bytesType;
 const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
 const exprRange = support.exprRange;
 const nullStringRef = support.nullStringRef;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
 const parseUnsignedIntegerLiteral = support.parseUnsignedIntegerLiteral;
+const reprIntegerType = support.reprIntegerType;
 const strRef = support.strRef;
 const stringType = support.stringType;
 const LocalEnv = hir_locals.LocalEnv;
@@ -82,7 +82,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn predicateForBinaryCompare(op: ast.BinaryOp, is_signed: bool) []const u8 {
+        fn predicateForBinaryCompare(op: ast.BinaryOp, is_signed: bool) ?[]const u8 {
             return switch (op) {
                 .lt => if (is_signed) "slt" else "ult",
                 .le => if (is_signed) "sle" else "ule",
@@ -90,7 +90,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .ge => if (is_signed) "sge" else "uge",
                 .eq => "eq",
                 .ne => "ne",
-                else => unreachable,
+                else => null,
             };
         }
 
@@ -479,7 +479,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const base_type = self.parent.typecheck.exprType(index.base);
                     const base_mlir_type = mlir.oraValueGetType(base);
                     if (mlir.oraTypeIsAMemRef(base_mlir_type)) {
-                        const key = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
+                        const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key, index.range);
                         const result_type = self.parent.lowerExprType(expr_id);
                         const op = mlir.oraMemrefLoadOpCreate(
@@ -494,8 +494,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     switch (base_type.kind()) {
                         .bytes, .string => {
-                            const key = try self.lowerExprForFlowTarget(index.index, defaultIntegerType(self.parent.context), locals);
-                            const raw_byte_type = defaultIntegerType(self.parent.context);
+                            const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                            const raw_byte_type = reprIntegerType(self.parent.context);
                             const op = mlir.oraByteAtOpCreate(
                                 self.parent.context,
                                 self.parent.location(index.range),
@@ -866,7 +866,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             return error.MlirOperationCreationFailed;
                         }
 
-                        const error_type = defaultIntegerType(self.parent.context);
+                        const error_type = reprIntegerType(self.parent.context);
                         const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
                         if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
                         appendOp(then_block, get_error);
@@ -1035,8 +1035,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .wrapping_shr => mlir.oraShrWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .eq => self.createCompareOp(loc, "eq", lhs, rhs),
                 .ne => self.createCompareOp(loc, "ne", lhs, rhs),
-                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(binary.op, is_signed_int_op), lhs, rhs),
-                .pow => unreachable,
+                .lt, .le, .gt, .ge => blk: {
+                    const predicate = @This().predicateForBinaryCompare(binary.op, is_signed_int_op) orelse
+                        return try @This().loweringValueError(
+                            self,
+                            binary.range,
+                            result_type,
+                            "failed to lower comparison operator '{s}'",
+                            .{@tagName(binary.op)},
+                        );
+                    break :blk self.createCompareOp(loc, predicate, lhs, rhs);
+                },
+                .pow => return self.lowerCheckedPower(lhs, rhs, result_type, try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range),
             };
 
             if (mlir.oraOperationIsNull(op)) return try @This().loweringValueError(
@@ -1084,7 +1094,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .add => "checked addition overflow",
                 .sub => "checked subtraction overflow",
                 .mul => "checked multiplication overflow",
-                else => unreachable,
+                else => return,
             };
             try FunctionLowerer.emitOverflowAssert(self, overflow_flag, message, range);
         }
@@ -1161,7 +1171,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .IntegerLiteral => |literal| if (std.mem.eql(u8, std.mem.trim(u8, literal.text, " \t\n\r"), "0"))
                     appendValueOp(
                         self.block,
-                        createIntegerConstant(self.parent.context, self.parent.location(literal.range), defaultIntegerType(self.parent.context), 0),
+                        createIntegerConstant(self.parent.context, self.parent.location(literal.range), reprIntegerType(self.parent.context), 0),
                     )
                 else
                     value,
@@ -1828,13 +1838,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.method.name,
                 resolved.method.param_types,
                 encode_args.items,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
             const calldata = appendValueOp(self.block, encode_op);
 
             const target = try self.lowerExpr(proxy.address_expr, locals);
-            const gas = try self.lowerExprForFlowTarget(proxy.gas_expr, defaultIntegerType(self.parent.context), locals);
+            const gas = try self.lowerExprForFlowTarget(proxy.gas_expr, reprIntegerType(self.parent.context), locals);
 
             const external_call_op = mlir.oraExternalCallOpCreate(
                 self.parent.context,
@@ -1846,7 +1856,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 gas,
                 calldata,
                 boolType(self.parent.context),
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(external_call_op)) return error.MlirOperationCreationFailed;
             if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(self, resolved.trait_method_owner)) {
@@ -2014,7 +2024,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 layout_context,
                 .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
                 returndata,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
             appendOp(block, decode_op);
@@ -2114,7 +2124,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             returndata: mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, expr_id));
-            const payload_offset = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 4));
+            const payload_offset = appendValueOp(block, createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 4));
             const payload_ptr_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, returndata, payload_offset);
             if (mlir.oraOperationIsNull(payload_ptr_op)) return error.MlirOperationCreationFailed;
             appendOp(block, payload_ptr_op);
@@ -2165,10 +2175,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const selector_value = try std.fmt.parseUnsigned(u32, selector_text[2..], 16);
             const selector_u32_type = mlir.oraIntegerTypeCreate(self.parent.context, 32);
             const selector_const = appendValueOp(block, createIntegerConstant(self.parent.context, loc, selector_u32_type, selector_value));
-            const selector_u256_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, selector_const, defaultIntegerType(self.parent.context));
+            const selector_u256_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, selector_const, reprIntegerType(self.parent.context));
             if (mlir.oraOperationIsNull(selector_u256_op)) return error.MlirOperationCreationFailed;
             const selector_u256 = appendValueOp(block, selector_u256_op);
-            const shift = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 224));
+            const shift = appendValueOp(block, createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 224));
             const shifted = mlir.oraArithShlIOpCreate(self.parent.context, loc, selector_u256, shift);
             if (mlir.oraOperationIsNull(shifted)) return error.MlirOperationCreationFailed;
             return appendValueOp(block, shifted);
@@ -3957,7 +3967,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.enum_ordinal"),
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.parent.context), ordinal),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), ordinal),
                 );
             }
         }
@@ -4106,7 +4116,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 std.mem.eql(u8, opcode_name, "ora.evm.coinbase"))
                     addressType(self.parent.context)
                 else
-                    defaultIntegerType(self.parent.context);
+                    reprIntegerType(self.parent.context);
 
             const op = mlir.oraEvmOpCreate(
                 self.parent.context,
@@ -4273,7 +4283,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(
                         self.parent.context,
                         self.parent.location(array.range),
-                        defaultIntegerType(self.parent.context),
+                        reprIntegerType(self.parent.context),
                         @intCast(index),
                     ),
                 );

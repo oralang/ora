@@ -27,7 +27,7 @@ const blockEndsWithTerminator = support.blockEndsWithTerminator;
 const boolType = support.boolType;
 const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
+const reprIntegerType = support.reprIntegerType;
 const memRefType = support.memRefType;
 const namedBoolAttr = support.namedBoolAttr;
 const namedStringAttr = support.namedStringAttr;
@@ -293,7 +293,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (catch_clause.error_pattern) |pattern_id| {
                     const catch_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
                     const lowered_type = if (catch_type.kind() == .unknown)
-                        defaultIntegerType(self.parent.context)
+                        reprIntegerType(self.parent.context)
                     else
                         self.parent.lowerSemaType(catch_type, catch_clause.range);
                     const error_arg = mlir.mlirBlockAddArgument(catch_block, lowered_type, self.parent.location(catch_clause.range));
@@ -842,7 +842,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const op = createIntegerConstant(
                         self.parent.context,
                         self.parent.location(literal.range),
-                        defaultIntegerType(self.parent.context),
+                        reprIntegerType(self.parent.context),
                         if (literal.value) 1 else 0,
                     );
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
@@ -865,7 +865,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 self.parent.context,
                 self.parent.location(range),
                 condition,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
@@ -1776,7 +1776,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
                     const is_error_value = appendValueOp(self.block, is_error);
 
-                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, defaultIntegerType(self.parent.context));
+                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, reprIntegerType(self.parent.context));
                     if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
                     const raw_error_value = appendValueOp(self.block, raw_error);
 
@@ -1785,7 +1785,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         createIntegerConstant(
                             self.parent.context,
                             self.parent.location(range),
-                            defaultIntegerType(self.parent.context),
+                            reprIntegerType(self.parent.context),
                             try self.parent.errorDeclRuntimeIdForItem(item_id),
                         ),
                     );
@@ -1804,7 +1804,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
                     const is_error_value = appendValueOp(self.block, is_error);
 
-                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, defaultIntegerType(self.parent.context));
+                    const raw_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, self.parent.location(range), condition, reprIntegerType(self.parent.context));
                     if (mlir.oraOperationIsNull(raw_error)) return error.MlirOperationCreationFailed;
                     const raw_error_value = appendValueOp(self.block, raw_error);
 
@@ -1813,7 +1813,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         createIntegerConstant(
                             self.parent.context,
                             self.parent.location(range),
-                            defaultIntegerType(self.parent.context),
+                            reprIntegerType(self.parent.context),
                             try self.parent.errorDeclRuntimeIdForItem(item_id),
                         ),
                     );

@@ -14,7 +14,6 @@ const support = @import("support.zig");
 const BigInt = std.math.big.int.Managed;
 const appendOp = support.appendOp;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
 const identifier = support.identifier;
 const namedBoolAttr = support.namedBoolAttr;
 const namedStringAttr = support.namedStringAttr;
@@ -558,7 +557,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         op,
                         @intCast(index),
                         strRef("ora.result_input_error_id"),
-                        mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), error_id),
+                        mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), error_id),
                     );
                 }
             }
@@ -842,11 +841,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 ) catch return error.OutOfMemory;
                 result_input_error_id_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast((try @This().publicResultInputErrorId(self, param_type)) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast((try @This().publicResultInputErrorId(self, param_type)) orelse 0)),
                 ) catch return error.OutOfMemory;
                 abi_param_enum_count_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().enumVariantCountForType(self, param_type) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(@This().enumVariantCountForType(self, param_type) orelse 0)),
                 ) catch return error.OutOfMemory;
                 const refinement_spec = try @This().abiParamRefinementSpec(self, param_type);
                 defer self.allocator.free(refinement_spec);
@@ -921,7 +920,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
                         try attrs.append(self.allocator, .{
                             .name = identifier(self.context, "ora.abi_return_words"),
-                            .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
+                            .attribute = mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(word_count)),
                         });
                     }
                 }
@@ -939,7 +938,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const ty = if (field.type_expr) |_|
                 self.lowerSemaType(self.typecheck.item_types[item_id.index()], field.range)
             else
-                defaultIntegerType(self.context);
+                reprIntegerType(self.context);
 
             if (field.binding_kind == .immutable) {
                 const op = if (field.value) |expr_id| blk: {
@@ -1427,7 +1426,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
             try attrs.append(self.allocator, .{
                 .name = identifier(self.context, "ora.error_id"),
-                .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), try @This().errorDeclRuntimeId(self, error_decl)),
+                .attribute = mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), try @This().errorDeclRuntimeId(self, error_decl)),
             });
 
             const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
