@@ -22,4 +22,13 @@ if [ -n "$matches" ]; then
   fail "integer width/signedness must be resolved explicitly; no local defaults or empty integer descriptors"
 fi
 
+literal_matches="$(
+  grep -R -n -E 'parse(Int|UnsignedInteger)Literal.*orelse[[:space:]]*0' src --include="*.zig" || true
+)"
+
+if [ -n "$literal_matches" ]; then
+  echo "$literal_matches" >&2
+  fail "integer literal parse failures must not default to zero"
+fi
+
 echo "check-no-width-defaults: ok"
