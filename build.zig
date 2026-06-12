@@ -723,17 +723,28 @@ pub fn build(b: *std.Build) void {
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
 
-    // z3 encoder tests (requires MLIR + Z3)
-    const z3_encoder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/z3/encoder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    z3_encoder_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    const z3_encoder_tests = b.addTest(.{ .root_module = z3_encoder_test_mod });
-    linkMlirLibraries(b, z3_encoder_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
-    linkZ3Libraries(b, z3_encoder_tests, z3_step, target);
-    test_step.dependOn(&b.addRunArtifact(z3_encoder_tests).step);
+    // z3 encoder tests (requires MLIR + Z3). Split by category from the former
+    // 22K-line encoder.test.zig; all share encoder_test_prelude.zig.
+    const z3_encoder_test_files = [_][]const u8{
+        "src/z3/encoder.test.types.zig",
+        "src/z3/encoder.test.arith.zig",
+        "src/z3/encoder.test.controlflow.zig",
+        "src/z3/encoder.test.summaries.zig",
+        "src/z3/encoder.test.storage.zig",
+        "src/z3/encoder.test.misc.zig",
+    };
+    for (z3_encoder_test_files) |test_file| {
+        const enc_mod = b.createModule(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+        });
+        enc_mod.addImport("mlir_c_api", mlir_c_mod);
+        const enc_tests = b.addTest(.{ .root_module = enc_mod });
+        linkMlirLibraries(b, enc_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+        linkZ3Libraries(b, enc_tests, z3_step, target);
+        test_step.dependOn(&b.addRunArtifact(enc_tests).step);
+    }
 
     // z3 verification tests (requires MLIR + Z3)
     const z3_verification_test_mod = b.createModule(.{
