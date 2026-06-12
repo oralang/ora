@@ -19,6 +19,7 @@
 using namespace mlir;
 using namespace ora;
 using namespace sir;
+namespace euh = mlir::ora::error_union_helpers;
 
 namespace
 {
@@ -42,16 +43,6 @@ namespace
         auto cast = builder.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{type}, inputs);
         cast->setAttr(kOraMaterializationKindAttr, builder.getStringAttr(kind));
         return cast.getResult(0);
-    }
-
-    static bool isNarrowErrorUnion(ora::ErrorUnionType type)
-    {
-        return ora::error_union_helpers::isNarrowErrorUnion(type);
-    }
-
-    static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
-    {
-        return ora::error_union_helpers::getWideErrorUnionCarrierType(ctx, successType);
     }
 
     static Type getAdtPayloadCarrierType(MLIRContext *ctx)
@@ -453,11 +444,11 @@ namespace mlir
                 }
 
                 auto u256 = sir::U256Type::get(ctx);
-                if (isNarrowErrorUnion(type)) {
+                if (euh::isNarrowErrorUnion(type)) {
                     results.push_back(u256);
                 } else {
                     results.push_back(u256); // tag
-                    results.push_back(getWideErrorUnionCarrierType(ctx, type.getSuccessType())); // payload carrier
+                    results.push_back(euh::getWideErrorUnionCarrierType(ctx, type.getSuccessType())); // payload carrier
                 }
                 return success(); });
             addConversion([](ora::ErrorUnionType type) -> Type
@@ -465,7 +456,7 @@ namespace mlir
                 auto *ctx = type.getDialect().getContext();
                 if (!ctx)
                     return Type();
-                if (isNarrowErrorUnion(type))
+                if (euh::isNarrowErrorUnion(type))
                     return sir::U256Type::get(ctx);
                 return Type(); });
 
@@ -641,7 +632,7 @@ namespace mlir
                                         {
                                             if (auto errUnion = dyn_cast<ora::ErrorUnionType>(input.getType()))
                                             {
-                                                if (!isNarrowErrorUnion(errUnion))
+                                                if (!euh::isNarrowErrorUnion(errUnion))
                                                     return Value();
 
                                                 auto u256Type = sir::U256Type::get(builder.getContext());
@@ -939,7 +930,7 @@ namespace mlir
                                              return {};
                                          Value input = inputs[0];
                                          auto errType = dyn_cast<ora::ErrorUnionType>(input.getType());
-                                         if (!errType || isNarrowErrorUnion(errType))
+                                         if (!errType || euh::isNarrowErrorUnion(errType))
                                              return {};
                                          // Look through an existing unrealized_conversion_cast.
                                          if (auto cast = input.getDefiningOp<mlir::UnrealizedConversionCastOp>())
@@ -1066,7 +1057,7 @@ namespace mlir
 
                                         if (auto errType = dyn_cast<ora::ErrorUnionType>(type))
                                         {
-                                            if (isNarrowErrorUnion(errType))
+                                            if (euh::isNarrowErrorUnion(errType))
                                             {
                                                 Value packed = input;
                                                 if (!llvm::isa<sir::U256Type>(packed.getType()))

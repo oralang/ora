@@ -24,6 +24,7 @@
 
 using namespace mlir;
 using namespace ora;
+namespace euh = mlir::ora::error_union_helpers;
 
 using mlir::ora::lowering::addStorageWordOffset;
 using mlir::ora::lowering::ensureU256;
@@ -143,26 +144,6 @@ static bool storageStructCarrierPreservesField(Value carrier, size_t fieldIndex)
             return true;
     }
     return false;
-}
-
-static bool isNarrowErrorUnionType(Type type)
-{
-    return mlir::ora::error_union_helpers::isScalarErrorUnionMemRefCarrier(type);
-}
-
-static bool hasForceWideErrorUnionAttr(Operation *op)
-{
-    return mlir::ora::error_union_helpers::hasForceWideErrorUnionAttr(op);
-}
-
-static bool valueHasForceWideErrorUnion(Value value)
-{
-    return mlir::ora::error_union_helpers::valueHasForceWideErrorUnion(value);
-}
-
-static bool isScalarErrorUnionMemRefCarrier(Type type)
-{
-    return mlir::ora::error_union_helpers::isScalarErrorUnionMemRefCarrier(type);
 }
 
 static Value unwrapIndexCastInput(Value value)
@@ -1103,17 +1084,17 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     auto memrefType = op.getMemRefType();
     if (!memrefType)
         return failure();
-    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
-    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    bool narrowCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    bool scalarCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
     if (!narrowCarrier && !scalarCarrier)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
+    if (euh::valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
         return failure();
-    if (!narrowCarrier && hasForceWideErrorUnionAttr(op) && !scalarCarrier)
+    if (!narrowCarrier && euh::hasForceWideErrorUnionAttr(op) && !scalarCarrier)
         return failure();
-    if (!isNarrowErrorUnionType(op.getType()) && !scalarCarrier)
+    if (!euh::isScalarErrorUnionMemRefCarrier(op.getType()) && !scalarCarrier)
         return failure();
-    if (hasForceWideErrorUnionAttr(op) && !scalarCarrier)
+    if (euh::hasForceWideErrorUnionAttr(op) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -1155,15 +1136,15 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     auto memrefType = op.getMemRefType();
     if (!memrefType)
         return failure();
-    bool narrowCarrier = isNarrowErrorUnionType(memrefType.getElementType());
-    bool scalarCarrier = isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    bool narrowCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
+    bool scalarCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
     if (!narrowCarrier && !scalarCarrier)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
+    if (euh::valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
         return failure();
-    if (!isNarrowErrorUnionType(op.getValue().getType()) && !scalarCarrier)
+    if (!euh::isScalarErrorUnionMemRefCarrier(op.getValue().getType()) && !scalarCarrier)
         return failure();
-    if (valueHasForceWideErrorUnion(op.getValue()) && !scalarCarrier)
+    if (euh::valueHasForceWideErrorUnion(op.getValue()) && !scalarCarrier)
         return failure();
 
     auto loc = op.getLoc();
@@ -1300,7 +1281,7 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(carrierValue.getType()))
         {
-            if (isScalarErrorUnionMemRefCarrier(errType))
+            if (euh::isScalarErrorUnionMemRefCarrier(errType))
             {
                 // Opaque scalar Result values, such as private helper returns,
                 // arrive here before call conversion has split them into

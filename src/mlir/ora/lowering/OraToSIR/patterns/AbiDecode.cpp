@@ -20,29 +20,10 @@ using namespace ora;
 using namespace mlir::ora::abi_lowering;
 using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::createPtrViewMaterializationCast;
+namespace euh = mlir::ora::error_union_helpers;
 
 namespace
 {
-static bool isNarrowErrorUnion(ora::ErrorUnionType type)
-{
-    return ora::error_union_helpers::isNarrowErrorUnion(type);
-}
-
-static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
-{
-    return ora::error_union_helpers::getWideErrorUnionCarrierType(ctx, successType);
-}
-
-static bool hasForceWideErrorUnionAttr(Operation *op)
-{
-    return ora::error_union_helpers::hasForceWideErrorUnionAttr(op);
-}
-
-static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *op)
-{
-    return ora::error_union_helpers::shouldUseWideErrorUnionCarrier(type, op);
-}
-
 static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConverter,
                                                 Type resultType,
                                                 Operation *op,
@@ -59,8 +40,8 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         if (!ctx)
             return failure();
         auto u256 = sir::U256Type::get(ctx);
-        const bool narrow = isNarrowErrorUnion(errType);
-        if (narrow && !hasForceWideErrorUnionAttr(op))
+        const bool narrow = euh::isNarrowErrorUnion(errType);
+        if (narrow && !euh::hasForceWideErrorUnionAttr(op))
         {
             if (convertedTypes.size() != 1 || !isa<sir::U256Type>(convertedTypes.front()))
             {
@@ -74,7 +55,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
             {
                 convertedTypes.clear();
                 convertedTypes.push_back(u256);
-                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
             }
         }
     }
@@ -1557,10 +1538,10 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             {
                 return std::nullopt;
             }
-            if (!shouldUseWideErrorUnionCarrier(resultType, op.getOperation()) || convertedResultTypes.size() != 2)
+            if (!euh::shouldUseWideErrorUnionCarrier(resultType, op.getOperation()) || convertedResultTypes.size() != 2)
                 return failure();
 
-            Type payloadCarrierType = getWideErrorUnionCarrierType(op.getContext(), carrierSuccessType);
+            Type payloadCarrierType = euh::getWideErrorUnionCarrierType(op.getContext(), carrierSuccessType);
             auto branchDynamicErr = [&, payloadCarrierType](AbiDecodeError err, Value requiredBytes) -> LogicalResult {
                 return emitWideResultBranch(
                     WideAbiDecodeResult{
@@ -1725,7 +1706,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                     op.getLoc(),
                     *root.children.front(),
                     successType,
-                    shouldUseWideErrorUnionCarrier(resultType, op.getOperation()),
+                    euh::shouldUseWideErrorUnionCarrier(resultType, op.getOperation()),
                     payloadPtr,
                     /*byteOffset=*/0,
                     permissive))
@@ -1737,7 +1718,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                     op.getLoc(),
                     *root.children.front(),
                     successType,
-                    shouldUseWideErrorUnionCarrier(resultType, op.getOperation()),
+                    euh::shouldUseWideErrorUnionCarrier(resultType, op.getOperation()),
                     payloadPtr,
                     /*byteOffset=*/0,
                     permissive))
@@ -1749,9 +1730,9 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             if (!isStaticU256AbiNode(*root.children.front()) && !isStaticI256AbiNode(*root.children.front()))
                 return rewriter.notifyMatchFailure(op, "memory/result scalar ABI decode requires a supported static scalar target");
             Value decoded = decodeAbiU256FromMemory(rewriter, op.getLoc(), payloadPtr, /*byteOffset=*/0);
-            if (!shouldUseWideErrorUnionCarrier(resultType, op.getOperation()))
+            if (!euh::shouldUseWideErrorUnionCarrier(resultType, op.getOperation()))
                 return rewriter.notifyMatchFailure(op, "full-word ABI decode requires wide error-union carrier");
-            Type payloadCarrierType = getWideErrorUnionCarrierType(op.getContext(), successType);
+            Type payloadCarrierType = euh::getWideErrorUnionCarrierType(op.getContext(), successType);
             if (Value refinementValid = abiDecodeRefinementSatisfied(
                     rewriter,
                     op.getLoc(),
@@ -1813,13 +1794,13 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
                 permissive);
             if (!decodedTuple)
                 return rewriter.notifyMatchFailure(op, "memory/result tuple ABI decode requires a supported static tuple target");
-            if (!shouldUseWideErrorUnionCarrier(resultType, op.getOperation()))
+            if (!euh::shouldUseWideErrorUnionCarrier(resultType, op.getOperation()))
                 return rewriter.notifyMatchFailure(op, "memory/result tuple ABI decode requires wide error-union carrier");
 
             auto u256Type = sir::U256Type::get(op.getContext());
             Value zero = constU256(rewriter, op.getLoc(), 0);
             Value one = constU256(rewriter, op.getLoc(), 1);
-            Type payloadCarrierType = getWideErrorUnionCarrierType(op.getContext(), successType);
+            Type payloadCarrierType = euh::getWideErrorUnionCarrierType(op.getContext(), successType);
             Value okPayload = decodedTuple->value;
             if (auto materialized = ora::materializePtrCarrierFromOraValue(rewriter, op.getLoc(), payloadCarrierType, okPayload))
                 okPayload = *materialized;
