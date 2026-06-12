@@ -1,5 +1,4 @@
-# Events depth: a multi-field log. see FINDINGS.md#f-008 — topics=[] (no topic0
-# signature hash), all fields packed in data.
+# Events depth: a multi-field log with topic0 plus ABI-packed data.
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
@@ -13,5 +12,5 @@ args = ["0x2000000000000000000000000000000000000002", 42]
 returns = {}
 
 [[call.log]]
-topics = []
+topics = ["0x41b6cb040efd36b804b3afdd1d86a9ac9ba947b3ed595129c63453e98b431668"]
 data = "0x0000000000000000000000002000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000002a"

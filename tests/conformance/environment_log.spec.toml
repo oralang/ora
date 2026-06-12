@@ -18,5 +18,5 @@ args = []
 returns = {}
 
 [[call.log]]
-topics = []
+topics = ["0xca6e822df923f741dfe968d15d80a18abd25bd1e748bcb9ad81fea5bbb7386af"]
 data = "0x"

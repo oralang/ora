@@ -1,5 +1,4 @@
-// Events depth (smaller gap): a multi-field event. see FINDINGS.md#f-008 —
-// Ora emits topics=[] (no topic0 signature hash), all fields packed in data.
+// Events depth: a multi-field event with topic0 plus ABI-packed data.
 contract EventsMultifield {
     log Recorded(who: address, amount: u256);
 

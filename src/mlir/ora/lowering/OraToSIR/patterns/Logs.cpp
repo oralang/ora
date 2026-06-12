@@ -1,9 +1,11 @@
 #include "patterns/Logs.h"
+#include "patterns/LoweringHelpers.h"
 #include "patterns/Naming.h"
 #include "SIR/SIRDialect.h"
 
 using namespace mlir;
 using namespace mlir::ora;
+using mlir::ora::lowering::constU256;
 
 LogicalResult ConvertLogOp::matchAndRewrite(
     ora::LogOp op,
@@ -50,7 +52,19 @@ LogicalResult ConvertLogOp::matchAndRewrite(
         }
     }
 
-    auto logOp = rewriter.create<sir::Log0Op>(loc, dataPtr, dataLen);
+    Operation *logOp = nullptr;
+    if (auto topicAttr = op->getAttrOfType<StringAttr>("ora.event_topic0"))
+    {
+        auto topicText = topicAttr.getValue();
+        if (!topicText.consume_front("0x"))
+            topicText.consume_front("0X");
+        Value topic0 = constU256(rewriter, loc, llvm::APInt(256, topicText, 16));
+        logOp = rewriter.create<sir::Log1Op>(loc, dataPtr, dataLen, topic0);
+    }
+    else
+    {
+        logOp = rewriter.create<sir::Log0Op>(loc, dataPtr, dataLen);
+    }
     if (auto nameAttr = op.getEventNameAttr())
     {
         logOp->setAttr("ora.event_name", nameAttr);

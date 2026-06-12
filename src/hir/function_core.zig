@@ -587,6 +587,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn eventTopic0Hex(self: *FunctionLowerer, event_name: []const u8, log_decl: ast.LogDeclItem) anyerror![]const u8 {
+            var abi_types: std.ArrayList([]const u8) = .{};
+            defer {
+                for (abi_types.items) |abi_type| self.parent.allocator.free(abi_type);
+                abi_types.deinit(self.parent.allocator);
+            }
+
+            for (log_decl.fields) |field| {
+                const field_ty = try type_descriptors.descriptorFromTypeExpr(
+                    self.parent.allocator,
+                    self.parent.file,
+                    self.parent.item_index,
+                    field.type_expr,
+                );
+                try abi_types.append(self.parent.allocator, try self.parent.abiLayoutForType(field_ty));
+            }
+
+            const signature = try abi_support.signatureForAbiTypes(self.parent.allocator, event_name, abi_types.items);
+            defer self.parent.allocator.free(signature);
+            return abi_support.keccakTopicHex(self.parent.allocator, signature);
+        }
+
         fn refinementMessage(self: *FunctionLowerer, refinement: RefinementType) anyerror![]const u8 {
             if (refinements.isCompileTimeOnly(refinement)) return error.MlirOperationCreationFailed;
             const expectation = try refinements.expectationText(self.parent.allocator, refinement);
@@ -1408,12 +1430,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     for (log_stmt.args) |arg| {
                         try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     }
-                    const event_name = blk: {
-                        const log_item_id = self.parent.item_index.lookup(log_stmt.name) orelse break :blk log_stmt.name;
+                    var event_name = log_stmt.name;
+                    var topic0: ?[]const u8 = null;
+                    if (self.parent.item_index.lookup(log_stmt.name)) |log_item_id| {
                         const item = self.parent.file.item(log_item_id).*;
-                        if (item != .LogDecl) break :blk log_stmt.name;
-                        break :blk abi_support.eventWireNameFromLogDecl(self.parent.file, item.LogDecl) orelse log_stmt.name;
-                    };
+                        if (item == .LogDecl) {
+                            event_name = abi_support.eventWireNameFromLogDecl(self.parent.file, item.LogDecl) orelse log_stmt.name;
+                            topic0 = try @This().eventTopic0Hex(self, event_name, item.LogDecl);
+                        }
+                    }
                     const op = mlir.oraLogOpCreate(
                         self.parent.context,
                         self.parent.location(log_stmt.range),
@@ -1422,6 +1447,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         args.items.len,
                     );
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    if (topic0) |topic_hex| {
+                        defer self.parent.allocator.free(topic_hex);
+                        mlir.oraOperationSetAttributeByName(
+                            op,
+                            strRef("ora.event_topic0"),
+                            mlir.oraStringAttrCreate(self.parent.context, strRef(topic_hex)),
+                        );
+                    }
                     appendOp(self.block, op);
                     return false;
                 },
