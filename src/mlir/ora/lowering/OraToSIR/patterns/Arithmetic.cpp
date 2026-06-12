@@ -310,6 +310,14 @@ static void emitPanicRevert(ConversionPatternRewriter &rewriter, Location loc, u
     rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
 }
 
+static void emitEmptyRevert(ConversionPatternRewriter &rewriter, Location loc)
+{
+    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+    Value zeroU256 = constU256(rewriter, loc, 0);
+    Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
+    rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroU256);
+}
+
 static void emitErrorStringRevert(ConversionPatternRewriter &rewriter, Location loc, StringRef message)
 {
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
@@ -339,6 +347,48 @@ static void emitErrorStringRevert(ConversionPatternRewriter &rewriter, Location 
     }
 
     rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
+}
+
+static bool isCleanUserRuntimeCheck(Operation *op)
+{
+    auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
+    return verificationType &&
+           (verificationType.getValue() == "guard" || verificationType.getValue() == "requires");
+}
+
+static LogicalResult lowerOraRuntimeCheck(
+    Operation *op,
+    Value condition,
+    ConversionPatternRewriter &rewriter,
+    StringAttr messageAttr = {})
+{
+    auto loc = op->getLoc();
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+
+    auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    if (isCleanUserRuntimeCheck(op))
+        emitEmptyRevert(rewriter, loc);
+    else if (messageAttr)
+        emitErrorStringRevert(rewriter, loc, messageAttr.getValue());
+    else
+        emitPanicRevert(rewriter, loc, 1);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value cond = coerceToU256(rewriter, loc, condition);
+    Value isZero = rewriter.create<sir::IsZeroOp>(loc, sir::U256Type::get(rewriter.getContext()), cond);
+    rewriter.create<sir::CondBrOp>(
+        loc,
+        isZero,
+        ValueRange{},
+        ValueRange{},
+        revertBlock,
+        afterBlock);
+    rewriter.eraseOp(op);
+    return success();
 }
 
 static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc, Value value)
@@ -1110,31 +1160,11 @@ LogicalResult ConvertAssertOp::matchAndRewrite(
     typename ora::AssertOp::Adaptor adaptor,
     ConversionPatternRewriter &rewriter) const
 {
-    auto loc = op.getLoc();
-    Block *parentBlock = op->getBlock();
-    Region *parentRegion = parentBlock->getParent();
-
-    auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
-    auto *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
-
-    rewriter.setInsertionPointToStart(revertBlock);
-    if (auto messageAttr = op->getAttrOfType<mlir::StringAttr>("message"))
-        emitErrorStringRevert(rewriter, loc, messageAttr.getValue());
-    else
-        emitPanicRevert(rewriter, loc, 1);
-
-    rewriter.setInsertionPointToEnd(parentBlock);
-    Value cond = coerceToU256(rewriter, loc, adaptor.getCondition());
-    Value isZero = rewriter.create<sir::IsZeroOp>(loc, sir::U256Type::get(rewriter.getContext()), cond);
-    rewriter.create<sir::CondBrOp>(
-        loc,
-        isZero,
-        ValueRange{},
-        ValueRange{},
-        revertBlock,
-        afterBlock);
-    rewriter.eraseOp(op);
-    return success();
+    return lowerOraRuntimeCheck(
+        op.getOperation(),
+        adaptor.getCondition(),
+        rewriter,
+        op->getAttrOfType<mlir::StringAttr>("message"));
 }
 
 LogicalResult ConvertAssumeOp::matchAndRewrite(

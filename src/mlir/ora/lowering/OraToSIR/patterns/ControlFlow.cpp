@@ -5226,8 +5226,8 @@ LogicalResult ConvertCfCondBrOp::matchAndRewrite(
 
 // -----------------------------------------------------------------------------
 // Lower cf.assert -> sir.cond_br + sir.invalid / sir.revert
-// Guard-tagged asserts are expected user-facing runtime failures and should
-// revert cleanly. Untagged asserts remain invalid/panic-like.
+// Guard- and requires-tagged asserts are expected user-facing runtime failures
+// and should revert cleanly. Untagged asserts remain invalid/panic-like.
 // -----------------------------------------------------------------------------
 LogicalResult ConvertCfAssertOp::matchAndRewrite(
     mlir::cf::AssertOp op,
@@ -5243,7 +5243,8 @@ LogicalResult ConvertCfAssertOp::matchAndRewrite(
 
     rewriter.setInsertionPointToStart(failBlock);
     auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
-    if (verificationType && verificationType.getValue() == "guard")
+    if (verificationType &&
+        (verificationType.getValue() == "guard" || verificationType.getValue() == "requires"))
     {
         auto u256Type = sir::U256Type::get(rewriter.getContext());
         auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);

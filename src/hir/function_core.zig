@@ -166,6 +166,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
                     }
                     appendOp(self.block, op);
+                    try @This().emitRuntimeRequiresAssert(self, clause.range, condition, clause.verification_context);
                 }
                 try @This().emitExtraGuardClauses(self, &self.locals);
 
@@ -223,7 +224,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 appendOp(self.block, op);
+                try @This().emitRuntimeRequiresAssert(self, fact.range, condition, null);
             }
+        }
+
+        fn emitRuntimeRequiresAssert(self: *FunctionLowerer, range: source.TextRange, condition: mlir.MlirValue, verification_context: ?[]const u8) anyerror!void {
+            const loc = self.parent.location(range);
+            const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, nullStringRef());
+            if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.requires"), namedBoolAttr(self.parent.context, "ora.requires", true).attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.formal"), namedBoolAttr(self.parent.context, "ora.formal", true).attribute);
+            mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.verification_type"), namedStringAttr(self.parent.context, "ora.verification_type", "requires").attribute);
+            mlir.oraOperationSetAttributeByName(
+                assert_op,
+                strRef("ora.verification_context"),
+                namedStringAttr(self.parent.context, "ora.verification_context", verification_context orelse "requires").attribute,
+            );
+            appendOp(self.block, assert_op);
         }
 
         fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv, exit_kind: EnsureExitKind, ok_result_value: ?mlir.MlirValue) anyerror!void {

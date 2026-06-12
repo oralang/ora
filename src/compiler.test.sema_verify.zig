@@ -596,7 +596,7 @@ test "compiler keeps proven guard clauses after verification cleanup" {
     defer testing.allocator.free(hir_text);
 
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "\"guard_clause\""));
-    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "cf.assert"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "cf.assert"));
 }
 
 test "compiler verification facts respect item and body keys" {

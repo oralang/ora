@@ -2524,6 +2524,68 @@ test "compiler lowers guard clauses to runtime revert through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
 }
 
+test "compiler lowers requires clauses to runtime revert and erases ensures before SIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(amount: u256) -> u256
+        \\        requires amount < 10
+        \\        ensures result == amount
+        \\    {
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    {
+        const before_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+        defer if (before_ref.data != null) mlir.oraStringRefFree(before_ref);
+        const before = before_ref.data[0..before_ref.length];
+        try testing.expect(std.mem.containsAtLeast(u8, before, 1, "ora.requires"));
+        try testing.expect(std.mem.containsAtLeast(u8, before, 1, "ora.ensures"));
+    }
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.ensures"));
+}
+
+test "compiler preserves requires source order before hazardous later clauses" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn ordered(a: u256, b: u256) -> u256
+        \\        requires b != 0
+        \\        requires a / b < 10
+        \\    {
+        \\        return a;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const rendered = after_ref.data[0..after_ref.length];
+
+    const first_branch = std.mem.indexOf(u8, rendered, "sir.cond_br") orelse return error.TestUnexpectedResult;
+    const division = std.mem.indexOf(u8, rendered, "sir.div") orelse return error.TestUnexpectedResult;
+    try testing.expect(first_branch < division);
+}
+
 test "corpus guard runtime clause lowers to SIR revert" {
     var compilation = try compilePackage("ora-example/smt/verification/guard_runtime_clause.ora");
     defer compilation.deinit();

@@ -9,21 +9,23 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 
 ## F-001 — `requires` not boundary-enforced; discharged checks erased (S1)
 
-- **Status:** OPEN (escalated to SMT soundness audit, 2026-06-11)
+- **Status:** FIXED (runtime requires assertion emitted beside SMT precondition)
 - **Severity:** S1
 - **Owner:** compiler+smt-audit
-- **What:** `requires` clauses on pub fns are verification-only assumptions — the dispatcher
-  emits no guard for them. Additionally, obligations the verifier discharges *using* those
-  assumptions are removed from runtime code. Net: `pub fn div(a,b) requires b != 0` has no
-  zero-check at all; an external `div(7,0)` executes EVM DIV and returns **silent 0**.
-  Asymmetry: the checked-add overflow assert is retained (`add(MAX,1)` reverts correctly).
+- **What:** `requires` clauses on pub fns were verification-only assumptions — the dispatcher
+  emitted no guard for them. Additionally, obligations the verifier discharged *using* those
+  assumptions were removed from runtime code. Net: `pub fn div(a,b) requires b != 0` had no
+  zero-check at all; an external `div(7,0)` executed EVM DIV and returned **silent 0**.
+  Asymmetry: the checked-add overflow assert was retained (`add(MAX,1)` reverted correctly).
 - **Repro:** `tests/conformance/arithmetic_checked_revert.ora` (also minimal:
   any pub fn with `requires b != 0` + `a / b`; IR shows `ora.requires` but no assert).
-- **Pinned rows (ACTIVE characterization, `arithmetic_checked_revert.spec.toml`):**
-  `add(2000000,1) returns 2000001` (requires violated, executes) and
-  `div(7,0) returns 0` (silent zero).
-- **Flip condition:** when pub-fn requires lower to dispatcher guards, change both rows to
-  `reverts` assertions.
+- **Fixed rows (`arithmetic_checked_revert.spec.toml`):**
+  `add(2000000,1)`, `div(7,0)`, and `call_private_div(8,0)` now assert `reverts`.
+  `ordered_requires(18,0)` pins source order: the first `requires b != 0` check runs
+  before evaluating the later `a / b < 10` precondition.
+- **Fix:** HIR emits `ora.requires` for SMT and a tagged executable `ora.assert` twin for
+  runtime. Verification cleanup removes the pure `ora.requires` and keeps the executable
+  assertion as `cf.assert`; `requires`-tagged `cf.assert` lowers to a clean revert.
 
 ## F-002 — catch-path unpacking of aggregate error-union payloads is miscompiled (S1-class)
 

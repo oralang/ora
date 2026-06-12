@@ -1,4 +1,4 @@
-// see FINDINGS.md#f-001 (requires not boundary-enforced; characterization rows in spec)
+// Requires are boundary-enforced.
 contract ArithmeticCheckedRevert {
     pub fn add(a: u256, b: u256) -> u256
         requires a <= 1000000
@@ -9,6 +9,23 @@ contract ArithmeticCheckedRevert {
 
     pub fn div(a: u256, b: u256) -> u256
         requires b != 0
+    {
+        return a / b;
+    }
+
+    fn private_div(a: u256, b: u256) -> u256
+        requires b != 0
+    {
+        return a / b;
+    }
+
+    pub fn call_private_div(a: u256, b: u256) -> u256 {
+        return private_div(a, b);
+    }
+
+    pub fn ordered_requires(a: u256, b: u256) -> u256
+        requires b != 0
+        requires a / b < 10
     {
         return a / b;
     }
