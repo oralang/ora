@@ -1114,7 +1114,7 @@ namespace mlir
                                 {
                                     Value ptr = ret.getPtr();
                                     Value tag = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ptr);
-                                    Value c32 = builder.create<sir::ConstOp>(ret.getLoc(), u256Type, IntegerAttr::get(i64Type, 32));
+                                    Value c32 = lowering::constU256(builder, ret.getLoc(), 32);
                                     Value payloadPtr = builder.create<sir::AddPtrOp>(ret.getLoc(), ptrType, ptr, c32);
                                     Value payload = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, payloadPtr);
                                     builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{tag, payload});
@@ -1480,9 +1480,7 @@ namespace mlir
                         // If old call had fewer results, the prefix mapping above is sufficient.
                         if (icall.getNumResults() > newCall.getNumResults())
                         {
-                            auto u256 = sir::U256Type::get(module.getContext());
-                            auto zero = callBuilder.create<sir::ConstOp>(icall.getLoc(), u256,
-                                                                         IntegerAttr::get(callBuilder.getI64Type(), 0));
+                            auto zero = lowering::constU256(callBuilder, icall.getLoc(), 0);
                             for (unsigned i = common; i < icall.getNumResults(); ++i)
                             {
                                 Value oldRes = icall.getResult(i);
@@ -1659,7 +1657,7 @@ namespace mlir
                             builder.create<sir::CondBrOp>(initLoc, valid_code, ValueRange{}, ValueRange{}, codeOkBlock, getInitRevert());
                             builder.setInsertionPointToEnd(codeOkBlock);
 
-                            Value minSizeVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, minHeadBytes));
+                            Value minSizeVal = lowering::constU256(builder, initLoc, minHeadBytes);
                             Value dataTooShort = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, minSizeVal);
                             Value valid_args = builder.create<sir::IsZeroOp>(initLoc, u256Type, dataTooShort);
                             initDecode = initFunc.addBlock();
@@ -1963,7 +1961,7 @@ namespace mlir
                         for (unsigned idx = 0; idx < argCount; ++idx)
                         {
                             int64_t offs = headOffsets[idx];
-                            Value offc = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, offs));
+                            Value offc = lowering::constU256(builder, initLoc, offs);
                             Value headPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                             Value head = builder.create<sir::LoadOp>(initLoc, u256Type, headPtr);
                             AbiLayoutNode abiLayout;
@@ -1979,7 +1977,7 @@ namespace mlir
                             if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
                                 int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                Value totalVal = lowering::constU256(builder, initLoc, totalBytes);
                                 Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, totalVal);
                                 Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                                 builder.create<sir::MCopyOp>(initLoc, buf, src, totalVal);
@@ -2125,10 +2123,7 @@ namespace mlir
                     Value runtimeHeapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
                     if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
                     {
-                        Value reservedBytes = builder.create<sir::ConstOp>(
-                            dispatcherMainLoc,
-                            u256Type,
-                            IntegerAttr::get(i64Type, debugNamedMemoryBytes));
+                        Value reservedBytes = lowering::constU256(builder, dispatcherMainLoc, debugNamedMemoryBytes);
                         runtimeHeapBase = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, runtimeHeapBase, reservedBytes);
                     }
                     Value currentFreePtr = builder.create<sir::LoadOp>(dispatcherMainLoc, u256Type, freePtrSlot);
@@ -2265,7 +2260,7 @@ namespace mlir
                                               : offs == 68 ? StringRef("arg2_offset")
                                                            : StringRef();
                             Value offc = offName.empty()
-                                             ? builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, offs))
+                                             ? lowering::constU256(builder, caseDecodeLoc, offs)
                                              : getConst(builder, caseDecodeLoc, u256Type, i64Type, offs, constCache, caseBody, offName);
                             Value head = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, offc);
                             StringRef argPrefix = idx == 0 ? "a_" : (idx == 1 ? "b_" : (idx == 2 ? "n_" : "arg_"));
@@ -3221,7 +3216,7 @@ namespace mlir
                                         expectedDynamicOffset,
                                     };
 
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                Value totalVal = lowering::constU256(builder, caseDecodeLoc, words * 32);
                                 Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, fieldHeadOff, totalVal);
                                 return StrictDynamicCalldataValue{
@@ -3446,7 +3441,7 @@ namespace mlir
                             else if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
                                 int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                Value totalVal = lowering::constU256(builder, caseDecodeLoc, totalBytes);
                                 Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
@@ -3479,7 +3474,7 @@ namespace mlir
                                         signalPassFailure();
                                         return;
                                     }
-                                    Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                    Value totalVal = lowering::constU256(builder, caseDecodeLoc, words * 32);
                                     Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                     builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                     argVal = buf;
@@ -3774,7 +3769,7 @@ namespace mlir
                         }
                         else
                         {
-                            Value z = builder.create<sir::ConstOp>(caseReturnLoc, u256Type, IntegerAttr::get(i64Type, 0));
+                            Value z = lowering::constU256(builder, caseReturnLoc, 0);
                             Value pz = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, z);
                             builder.create<sir::ReturnOp>(caseReturnLoc, pz, z);
                         }
