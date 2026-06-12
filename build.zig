@@ -1454,6 +1454,14 @@ pub fn build(b: *std.Build) void {
     const check_negative_corpus_step = b.step("check-negative-corpus", "Run the negative expected-diagnostic corpus");
     check_negative_corpus_step.dependOn(&negative_corpus_cmd.step);
 
+    // zig build check-findings-ledger — surfaces known defects the green gate masks
+    const findings_ledger_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-findings-ledger.py",
+    });
+    const check_findings_ledger_step = b.step("check-findings-ledger", "Validate the findings ledger and report masked known defects");
+    check_findings_ledger_step.dependOn(&findings_ledger_cmd.step);
+
     // zig build check-verifier-mutations — bounded deterministic verifier soundness
     const verifier_mutations_cmd = b.addSystemCommand(&[_][]const u8{
         "python3",
@@ -1526,6 +1534,7 @@ pub fn build(b: *std.Build) void {
     gate_step.dependOn(oratosir_debloat_gate_step);
     gate_step.dependOn(check_mlir_ora_step);
     gate_step.dependOn(check_negative_corpus_step);
+    gate_step.dependOn(check_findings_ledger_step);
     gate_step.dependOn(check_verifier_mutations_step);
     gate_step.dependOn(check_smt_modifies_corpus_step);
     gate_step.dependOn(lsp_smoke_step);

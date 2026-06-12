@@ -10,6 +10,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-001 — `requires` not boundary-enforced; discharged checks erased (S1)
 
 - **Status:** OPEN (escalated to SMT soundness audit, 2026-06-11)
+- **Severity:** S1
 - **What:** `requires` clauses on pub fns are verification-only assumptions — the dispatcher
   emits no guard for them. Additionally, obligations the verifier discharges *using* those
   assumptions are removed from runtime code. Net: `pub fn div(a,b) requires b != 0` has no
@@ -26,6 +27,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-002 — catch-path unpacking of aggregate error-union payloads is miscompiled (S1-class)
 
 - **Status:** OPEN
+- **Severity:** S1
 - **What:** `catch` after a `try` that actually returns an error, on an error union whose
   payload is an AGGREGATE (wide struct, string), dereferences a garbage payload pointer →
   huge-offset `mload`. Scalar payloads are fine (properties suite). Ok paths, plain `match`,
@@ -40,6 +42,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-003 — lib/evm panics (integer overflow) on huge-offset mload gas computation
 
 - **Status:** OPEN (lib/evm robustness, surfaced by F-002)
+- **Severity:** S2
 - **What:** `handlers_memory.zig:35` `GasConstants.GasFastestStep + mem_cost` overflows and
   PANICS the interpreter instead of failing cleanly (out-of-gas / error). The conformance
   oracle must never panic on hostile-but-valid bytecode behavior; the R9 Anvil differential
@@ -51,6 +54,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-006 — narrow error-union error path reverts empty; success encoding untrusted (S1)
 
 - **Status:** OPEN
+- **Severity:** S1
 - **What:** a public fn returning `!T | E` with a NARROW (<256-bit) carrier is mishandled at the
   dispatcher boundary. The WIDE carrier (`!u256 | E`) is correct, which is why the existing
   `dispatcher_error_union_revert` test (a `!u256` fn) never caught this. Confirmed 2026-06-12:
@@ -76,6 +80,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-004 — tuple return from inside try/catch fails OraToSIR Phase3b (fails closed)
 
 - **Status:** OPEN
+- **Severity:** S3
 - **What:** returning a `(u256, string)` tuple from within a try/catch block fails
   legalization: "unresolved materialization from !ora.tuple<i256, !ora.string> to
   !sir.ptr<1>". Same tuple from a `match` arm or plain function works. Compile-time error,
@@ -90,6 +95,7 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 ## F-005 — trait-impl methods cannot be called from contract functions (fails closed)
 
 - **Status:** OPEN
+- **Severity:** S2
 - **What:** calling any trait-impl method from inside a `contract` fn fails lowering:
   `'func.call' op 'Pricing.Item.unit_price' does not reference a valid function` — the
   monomorphized impl function is not materialized for contract-context call sites. The
