@@ -31,4 +31,16 @@ if [ -n "$literal_matches" ]; then
   fail "integer literal parse failures must not default to zero"
 fi
 
+fallback_matches="$(
+  grep -R -n 'unknownTypeFallbackI256' src/hir --include="*.zig" \
+    | grep -v -E 'src/hir/support\.zig:[0-9]+:pub fn unknownTypeFallbackI256' \
+    | grep -v -E 'src/hir/mod\.zig:[0-9]+:[[:space:]]*return support\.unknownTypeFallbackI256\(self\.context\);' \
+    || true
+)"
+
+if [ -n "$fallback_matches" ]; then
+  echo "$fallback_matches" >&2
+  fail "unknown i256 fallback must only be returned by counted recordTypeFallback"
+fi
+
 echo "check-no-width-defaults: ok"
