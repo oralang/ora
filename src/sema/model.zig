@@ -4,6 +4,8 @@ const diagnostics = @import("../diagnostics/mod.zig");
 const lookup_index = @import("lookup.zig");
 const source = @import("../source/mod.zig");
 
+const BigInt = std.math.big.int.Managed;
+
 pub const ModuleImport = struct {
     range: source.TextRange,
     path: []const u8,
@@ -235,7 +237,7 @@ pub const InstantiatedEnumVariant = struct {
 };
 
 pub const ExplicitEnumValue = union(enum) {
-    integer: i64,
+    integer: BigInt,
     string: []const u8,
     bytes: []const u8,
 };

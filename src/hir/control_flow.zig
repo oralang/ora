@@ -2147,7 +2147,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         var next_value: i64 = 0;
                         for (instantiated.variants[0 .. variant_index + 1], 0..) |variant, index| {
                             const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
-                                .integer => |literal| literal,
+                                .integer => |integer| integer.toInt(i64) catch break :blk null,
                                 else => next_value,
                             } else next_value;
                             if (index == variant_index) break :blk resolved_value;

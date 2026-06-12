@@ -11,6 +11,7 @@ const abi_support = @import("abi.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
+const BigInt = std.math.big.int.Managed;
 const appendOp = support.appendOp;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
@@ -1246,21 +1247,23 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
             };
             return switch (value) {
-                .integer => |integer| blk: {
-                    if (integer.toInt(i64)) |small| {
-                        break :blk mlir.oraIntegerAttrCreateI64FromType(repr_type, small);
-                    } else |_| {
-                        const text = try integer.toString(self.allocator, 10, .lower);
-                        defer self.allocator.free(text);
-                        break :blk mlir.oraIntegerAttrGetFromString(repr_type, strRef(text));
-                    }
-                },
+                .integer => |integer| try @This().integerAttrFromBigInt(self, integer, repr_type),
                 .boolean => |boolean| mlir.oraIntegerAttrCreateI64FromType(repr_type, if (boolean) 1 else 0),
                 else => {
                     try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' is not an integer", .{ enum_name, variant_name });
                     return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
                 },
             };
+        }
+
+        fn integerAttrFromBigInt(self: *Lowerer, integer: BigInt, repr_type: mlir.MlirType) anyerror!mlir.MlirAttribute {
+            if (integer.toInt(i64)) |small| {
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, small);
+            } else |_| {
+                const text = try integer.toString(self.allocator, 10, .lower);
+                defer self.allocator.free(text);
+                return mlir.oraIntegerAttrGetFromString(repr_type, strRef(text));
+            }
         }
 
         fn enumIntegerValueI64(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
@@ -1324,20 +1327,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
 
-            const resolved_value = if (explicit_value) |value| blk: {
+            if (explicit_value) |value| {
                 has_explicit_values.* = true;
-                break :blk switch (value) {
-                    .integer => |literal| literal,
-                    else => {
+                return switch (value) {
+                    .integer => |integer| blk: {
+                        next_value.* = if (integer.toInt(i64)) |small|
+                            std.math.add(i64, small, 1) catch null
+                        else |_|
+                            null;
+                        break :blk try @This().integerAttrFromBigInt(self, integer, repr_type);
+                    },
+                    else => blk: {
                         try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be an integer", .{ instantiated.mangled_name, variant.name });
-                        break :blk 0;
+                        break :blk mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
                     },
                 };
-            } else blk: {
-                break :blk next_value.* orelse {
-                    try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ instantiated.mangled_name, variant.name });
-                    break :blk 0;
-                };
+            }
+
+            const resolved_value = next_value.* orelse {
+                try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ instantiated.mangled_name, variant.name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
             };
             next_value.* = std.math.add(i64, resolved_value, 1) catch null;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);

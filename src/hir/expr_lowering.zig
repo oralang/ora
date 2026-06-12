@@ -3969,7 +3969,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 var next_value: i64 = 0;
                 for (instantiated.variants[0 .. variant_index + 1], 0..) |variant, index| {
                     const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
-                        .integer => |literal| literal,
+                        .integer => |integer| integer.toInt(i64) catch return null,
                         else => next_value,
                     } else next_value;
                     if (index == variant_index) return resolved_value;
@@ -3985,7 +3985,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
             var next_value: i64 = 0;
             for (enum_item.variants[0 .. variant_index + 1], 0..) |variant, index| {
-                const resolved_value = if (variant.value) |expr_id| @This().enumIntegerValue(self, expr_id) orelse next_value else next_value;
+                const resolved_value = if (variant.value) |expr_id|
+                    @This().enumIntegerValue(self, expr_id) orelse return null
+                else
+                    next_value;
                 if (index == variant_index) return resolved_value;
                 next_value = resolved_value + 1;
             }

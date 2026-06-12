@@ -1387,6 +1387,25 @@ test "compiler lowers value-parameter generic enum declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity(%arg0: i256"));
 }
 
+test "compiler lowers wide explicit values on instantiated generic enum declarations" {
+    const source_text =
+        \\enum Choice(comptime T: type) : u256 {
+        \\    left = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256>) -> Choice<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
+}
+
 test "compiler monomorphizes generic bitfield types on type use" {
     const source_text =
         \\bitfield Flags(comptime T: type): u256 {

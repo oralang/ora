@@ -5307,8 +5307,8 @@ const TypeChecker = struct {
         if (enumBytesLiteralText(self.file, expr_id)) |bytes| return .{ .bytes = bytes };
         const value = self.const_eval.values[expr_id.index()] orelse return null;
         return switch (value) {
-            .integer => |integer| .{ .integer = integer.toInt(i64) catch return null },
-            .boolean => |boolean| .{ .integer = if (boolean) 1 else 0 },
+            .integer => |integer| .{ .integer = integer },
+            .boolean => |boolean| .{ .integer = BigInt.initSet(self.arena, @as(i64, @intFromBool(boolean))) catch return null },
             .string => |string| .{ .string = string },
             else => null,
         };

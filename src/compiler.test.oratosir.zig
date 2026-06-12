@@ -2897,6 +2897,34 @@ test "compiler converts source scalar ADT constructors through OraToSIR" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts wide explicit enum constants through OraToSIR" {
+    const source_text =
+        \\enum Big : u256 {
+        \\    A = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\fn current() -> Big {
+        \\    return Big.A;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const has_max_literal =
+        std.mem.containsAtLeast(u8, rendered, 1, "large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF") or
+        std.mem.containsAtLeast(u8, rendered, 1, "sir.const -1");
+    try testing.expect(has_max_literal);
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.const 0"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts source aggregate ADT constructors through OraToSIR" {
     const source_text =
         \\struct Receipt {

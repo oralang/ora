@@ -983,6 +983,48 @@ static void inlineContractsAndEraseDecls(ModuleOp module)
         } });
 }
 
+static void preserveEnumDiscriminants(ModuleOp module, MLIRContext *ctx)
+{
+    // Preserve enum discriminants before ora.enum.decl is erased. Enum
+    // constants can then lower deterministically even if the declaration
+    // was removed earlier in the greedy conversion.
+    SmallVector<NamedAttribute> enumEntries;
+    module.walk([&](ora::EnumDeclOp decl) {
+        auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
+        auto arrayVariantValues = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_values");
+        auto denseVariantValues = decl->getAttrOfType<mlir::DenseI64ArrayAttr>("ora.variant_values");
+        if (!variantNames || (!arrayVariantValues && !denseVariantValues))
+            return;
+
+        const size_t valueCount = denseVariantValues ? denseVariantValues.size() : arrayVariantValues.size();
+        const size_t count = std::min<size_t>(variantNames.size(), valueCount);
+        for (size_t i = 0; i < count; ++i)
+        {
+            auto nameAttr = dyn_cast<mlir::StringAttr>(variantNames[i]);
+            Attribute valueAttr;
+            if (denseVariantValues)
+            {
+                valueAttr = mlir::IntegerAttr::get(
+                    mlir::IntegerType::get(ctx, 64),
+                    denseVariantValues[i]);
+            }
+            else
+            {
+                valueAttr = arrayVariantValues[i];
+            }
+            if (!nameAttr || !valueAttr)
+                continue;
+
+            std::string key = decl.getName().str();
+            key.push_back('.');
+            key += nameAttr.getValue().str();
+            enumEntries.push_back(NamedAttribute(StringAttr::get(ctx, key), valueAttr));
+        }
+    });
+    if (!enumEntries.empty())
+        module->setAttr("sir.enum_values", DictionaryAttr::get(ctx, enumEntries));
+}
+
 // Verification pass: marks memref dialect illegal with zero conversion patterns.
 // Will fail if any memref ops survive to this point, acting as a gatekeeper.
 class MemRefEliminationPass : public PassWrapper<MemRefEliminationPass, OperationPass<ModuleOp>>
@@ -1165,6 +1207,7 @@ public:
             ctx->printOpOnDiagnostic(false);
 
         assignGlobalSlots(module);
+        preserveEnumDiscriminants(module, ctx);
         inlineContractsAndEraseDecls(module);
         if (failed(eraseRefinements(module)))
         {
@@ -1501,35 +1544,6 @@ public:
                 module->setAttr("sir.error_selectors", DictionaryAttr::get(ctx, errSelectorEntries));
             if (!errParamCountEntries.empty())
                 module->setAttr("sir.error_param_counts", DictionaryAttr::get(ctx, errParamCountEntries));
-        }
-
-        // Preserve enum discriminants before ora.enum.decl is erased. Enum
-        // constants can then lower deterministically even if the declaration
-        // was removed earlier in the greedy conversion.
-        {
-            SmallVector<NamedAttribute> enumEntries;
-            module.walk([&](ora::EnumDeclOp decl)
-                        {
-                auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
-                auto variantValues = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_values");
-                if (!variantNames || !variantValues)
-                    return;
-
-                const size_t count = std::min<size_t>(variantNames.size(), variantValues.size());
-                for (size_t i = 0; i < count; ++i)
-                {
-                    auto nameAttr = dyn_cast<mlir::StringAttr>(variantNames[i]);
-                    auto valueAttr = variantValues[i];
-                    if (!nameAttr || !valueAttr)
-                        continue;
-
-                    std::string key = decl.getName().str();
-                    key.push_back('.');
-                    key += nameAttr.getValue().str();
-                    enumEntries.push_back(NamedAttribute(StringAttr::get(ctx, key), valueAttr));
-                } });
-            if (!enumEntries.empty())
-                module->setAttr("sir.enum_values", DictionaryAttr::get(ctx, enumEntries));
         }
 
         // Phase 0 only: normalize error_union ops into explicit packing/unpacking.

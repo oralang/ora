@@ -301,10 +301,13 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
         }
     }
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    int64_t discriminant = -1;
+    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), evm::kWordBits, mlir::IntegerType::Unsigned);
+    auto normalizeDiscriminant = [&](mlir::IntegerAttr attr) -> mlir::IntegerAttr {
+        return mlir::IntegerAttr::get(u256IntType, attr.getValue().zextOrTrunc(evm::kWordBits));
+    };
+    mlir::IntegerAttr discriminantAttr;
     if (auto ordinalAttr = op->getAttrOfType<mlir::IntegerAttr>("ora.enum_ordinal"))
-        discriminant = ordinalAttr.getInt();
+        discriminantAttr = normalizeDiscriminant(ordinalAttr);
 
     Operation *moduleOp = op->getParentOfType<mlir::ModuleOp>();
     if (!moduleOp)
@@ -312,7 +315,7 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     if (moduleOp)
     {
         moduleOp->walk([&](ora::EnumDeclOp decl) {
-            if (discriminant >= 0 || decl.getName() != op.getEnumName())
+            if (discriminantAttr || decl.getName() != op.getEnumName())
                 return;
 
             auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
@@ -330,28 +333,40 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
                     continue;
                 if (denseVariantValues)
                 {
-                    discriminant = denseVariantValues[i];
+                    auto denseAttr = mlir::IntegerAttr::get(
+                        mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits),
+                        denseVariantValues[i]);
+                    discriminantAttr = normalizeDiscriminant(denseAttr);
                     return;
                 }
                 auto valueAttr = llvm::dyn_cast<mlir::IntegerAttr>(arrayVariantValues[i]);
                 if (!valueAttr)
                     return;
-                discriminant = valueAttr.getInt();
+                discriminantAttr = normalizeDiscriminant(valueAttr);
                 return;
             }
         });
     }
-    if (discriminant < 0 && moduleOp)
+    if (!discriminantAttr && moduleOp)
     {
         if (auto enumDict = moduleOp->getAttrOfType<DictionaryAttr>("sir.enum_values"))
         {
             std::string key = op.getEnumName().str();
             key.push_back('.');
             key += op.getVariantName().str();
-            if (auto valueAttr = enumDict.get(key))
+            Attribute valueAttr;
+            for (NamedAttribute entry : enumDict)
+            {
+                if (entry.getName().strref() == key)
+                {
+                    valueAttr = entry.getValue();
+                    break;
+                }
+            }
+            if (valueAttr)
             {
                 if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
-                    discriminant = intAttr.getInt();
+                    discriminantAttr = normalizeDiscriminant(intAttr);
                 else if (auto strAttr = llvm::dyn_cast<mlir::StringAttr>(valueAttr))
                 {
                     auto stringType = ora::StringType::get(rewriter.getContext());
@@ -370,11 +385,10 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
             }
         }
     }
-    if (discriminant < 0)
+    if (!discriminantAttr)
         return rewriter.notifyMatchFailure(op, "missing enum discriminant metadata");
 
-    Value result = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(discriminant)));
+    Value result = rewriter.create<sir::ConstOp>(loc, u256Type, discriminantAttr);
     rewriter.replaceOp(op, result);
     return success();
 }
