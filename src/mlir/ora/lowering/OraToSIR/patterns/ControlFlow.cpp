@@ -34,6 +34,7 @@ using namespace ora;
 using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::createPtrViewMaterializationCast;
 using mlir::ora::lowering::findStructDeclForName;
+namespace euh = mlir::ora::error_union_helpers;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -100,8 +101,6 @@ static bool isPayloadlessErrorStruct(Type type, Operation *contextOp)
     return matched;
 }
 
-static bool isNarrowErrorUnion(ora::ErrorUnionType type);
-static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType);
 static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index);
 static bool funcResultForcesWideErrorUnion(func::FuncOp func, unsigned index);
 
@@ -286,7 +285,6 @@ static FailureOr<Value> phase0FromI256(PatternRewriter &rewriter, Location loc, 
     return failure();
 }
 
-static std::optional<unsigned> getOraBitWidth(Type type);
 
 static bool valueFitsNarrowErrorPayload(Value value)
 {
@@ -312,7 +310,7 @@ static bool valueFitsNarrowErrorPayload(Value value)
         }
     }
 
-    auto width = getOraBitWidth(value.getType());
+    auto width = euh::getOraBitWidth(value.getType());
     return width && *width <= 255;
 }
 
@@ -645,8 +643,6 @@ static void buildWideErrorUnionReturnFromParts(
     rewriter.create<sir::ReturnOp>(loc, handle.basePtr, handle.sizeBytes);
 }
 
-static bool isNarrowErrorUnion(ora::ErrorUnionType type);
-static bool valueHasForceWideErrorUnion(Value value);
 // Error unions have two SIR encodings. Narrow unions fit in one u256 word
 // as (payload << 1) | tag. Wide unions lower to two values: a u256 tag and a
 // carrier for the success payload. Scalar payloads use u256; aggregate or
@@ -666,7 +662,7 @@ static std::optional<Value> materializeNarrowErrorUnionPackedValue(
     Value operand)
 {
     auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType());
-    if (!errType || !isNarrowErrorUnion(errType))
+    if (!errType || !euh::isNarrowErrorUnion(errType))
         return std::nullopt;
 
     if (auto okOp = operand.getDefiningOp<ora::ErrorOkOp>())
@@ -823,10 +819,10 @@ static LogicalResult appendConvertedCallArgument(
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(origType))
     {
         const bool useWideCarrier = (calleeFunc && funcArgForcesWideErrorUnion(calleeFunc, operandIndex)) ||
-                                    !isNarrowErrorUnion(errType);
+                                    !euh::isNarrowErrorUnion(errType);
         if (useWideCarrier)
         {
-            Type payloadCarrierType = getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType());
+            Type payloadCarrierType = euh::getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType());
             SmallVector<Value> wideParts;
             if (succeeded(materializeWideErrorUnion(rewriter, loc, operand, wideParts, payloadCarrierType)) &&
                 wideParts.size() == 2)
@@ -959,12 +955,6 @@ static std::optional<llvm::APInt> getConstValue(Value value)
     return std::nullopt;
 }
 
-static bool isNarrowErrorUnion(ora::ErrorUnionType type);
-
-static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType)
-{
-    return ora::error_union_helpers::getWideErrorUnionCarrierType(ctx, successType);
-}
 
 static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
@@ -985,7 +975,7 @@ static LogicalResult materializeWideErrorUnion(
         if (!carrierType)
         {
             if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
-                carrierType = getWideErrorUnionCarrierType(ctx, errType.getSuccessType());
+                carrierType = euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType());
         }
         if (!carrierType || v.getType() == carrierType)
         {
@@ -1066,7 +1056,7 @@ static LogicalResult materializeWideErrorUnion(
 
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
     {
-        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(operand))
+        if (euh::isNarrowErrorUnion(errType) && !euh::valueHasForceWideErrorUnion(operand))
         {
             Value packed = toU256(operand);
             auto [tag, payload] = ora::error_union_helpers::splitNarrowPackedCarrierWithMask(
@@ -1077,7 +1067,7 @@ static LogicalResult materializeWideErrorUnion(
 
         SmallVector<Type, 2> splitTypes;
         splitTypes.push_back(u256Type);
-        splitTypes.push_back(payloadCarrierType ? payloadCarrierType : getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType()));
+        splitTypes.push_back(payloadCarrierType ? payloadCarrierType : euh::getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType()));
         auto split = createWideErrorUnionSplitCast(
             rewriter,
             loc,
@@ -1089,31 +1079,6 @@ static LogicalResult materializeWideErrorUnion(
     }
 
     return failure();
-}
-
-static std::optional<unsigned> getOraBitWidth(Type type)
-{
-    return ora::error_union_helpers::getOraBitWidth(type);
-}
-
-static bool isNarrowErrorUnion(ora::ErrorUnionType type)
-{
-    return ora::error_union_helpers::isNarrowErrorUnion(type);
-}
-
-static bool hasForceWideErrorUnionAttr(Operation *op)
-{
-    return ora::error_union_helpers::hasForceWideErrorUnionAttr(op);
-}
-
-static bool valueHasForceWideErrorUnion(Value value)
-{
-    return ora::error_union_helpers::valueHasForceWideErrorUnion(value);
-}
-
-static bool shouldUseWideErrorUnionCarrier(ora::ErrorUnionType type, Operation *op)
-{
-    return ora::error_union_helpers::shouldUseWideErrorUnionCarrier(type, op);
 }
 
 static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index)
@@ -1156,7 +1121,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         if (!ctx)
             return failure();
         auto u256 = sir::U256Type::get(ctx);
-        const bool narrow = isNarrowErrorUnion(errType);
+        const bool narrow = euh::isNarrowErrorUnion(errType);
         if (narrow)
         {
             if (convertedTypes.size() != 1 || !isa<sir::U256Type>(convertedTypes.front()))
@@ -1171,7 +1136,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
             {
                 convertedTypes.clear();
                 convertedTypes.push_back(u256);
-                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
             }
         }
     }
@@ -1195,8 +1160,6 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
     return success();
 }
 
-static bool isNarrowErrorUnion(ora::ErrorUnionType type);
-static Type getWideErrorUnionCarrierType(MLIRContext *ctx, Type successType);
 static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index);
 static bool funcResultForcesWideErrorUnion(func::FuncOp func, unsigned index);
 
@@ -1213,10 +1176,10 @@ static LogicalResult getCallResultEncodingTypes(const TypeConverter *typeConvert
     {
         const bool useWideCarrier =
             (calleeFunc && funcResultForcesWideErrorUnion(calleeFunc, resultIndex)) ||
-            !isNarrowErrorUnion(errType);
+            !euh::isNarrowErrorUnion(errType);
         convertedTypes.push_back(sir::U256Type::get(oldResultType.getContext()));
         if (useWideCarrier)
-            convertedTypes.push_back(getWideErrorUnionCarrierType(oldResultType.getContext(), errType.getSuccessType()));
+            convertedTypes.push_back(euh::getWideErrorUnionCarrierType(oldResultType.getContext(), errType.getSuccessType()));
         return success();
     }
 
@@ -1321,10 +1284,10 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(inputType))
         {
             auto *ctx = inputType.getContext();
-            if (funcArgForcesWideErrorUnion(op, index) || !isNarrowErrorUnion(errType))
+            if (funcArgForcesWideErrorUnion(op, index) || !euh::isNarrowErrorUnion(errType))
             {
                 convertedTypes.push_back(sir::U256Type::get(ctx));
-                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
             }
             else if (failed(getErrorUnionEncodingTypes(typeConverter, inputType, convertedTypes)))
             {
@@ -1728,7 +1691,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
         }
         if (!isErrU256)
         {
-            Type payloadCarrierType = getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
+            Type payloadCarrierType = euh::getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
             auto wideRes = materializeWideErrorUnion(
                 rewriter, loc, unwrap->getOperand(0), wideParts, payloadCarrierType);
             if (succeeded(wideRes) && wideParts.size() == 2)
@@ -1759,7 +1722,7 @@ static LogicalResult rewriteErrorUnwrapInTryStmt(
                     {
                         SmallVector<Value> castParts;
                         Type payloadCarrierType =
-                            getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
+                            euh::getWideErrorUnionCarrierType(rewriter.getContext(), unwrap.getResult().getType());
                         if (succeeded(materializeWideErrorUnion(
                                 rewriter, loc, cast.getOperand(0), castParts, payloadCarrierType)) &&
                             castParts.size() == 2)
@@ -2065,7 +2028,7 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
     {
-        if (shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
+        if (euh::shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
         {
             resultTypes.clear();
             resultTypes.push_back(u256Type);
@@ -2074,7 +2037,7 @@ LogicalResult ConvertErrorOkOp::matchAndRewrite(
     }
 
     const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
-                        shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
+                        euh::shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
     if (!isWide && resultTypes.size() == 1)
     {
         Value value = adaptor.getValue();
@@ -2122,7 +2085,7 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult().getType()))
     {
-        if (shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
+        if (euh::shouldUseWideErrorUnionCarrier(errType, op) && resultTypes.size() == 1)
         {
             resultTypes.clear();
             resultTypes.push_back(u256Type);
@@ -2131,7 +2094,7 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
     }
 
     const bool isWide = llvm::isa<ora::ErrorUnionType>(op.getResult().getType()) &&
-                        shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
+                        euh::shouldUseWideErrorUnionCarrier(llvm::cast<ora::ErrorUnionType>(op.getResult().getType()), op);
     if (!isWide && resultTypes.size() == 1)
     {
         Value value = coerceToU256(rewriter, loc, adaptor.getValue());
@@ -2382,7 +2345,7 @@ static LogicalResult convertErrorIsError(
             SmallVector<Value, 2> wideParts;
             auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType());
             Type payloadCarrierType = errType
-                                          ? getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
+                                          ? euh::getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
                                           : u256Type;
             if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts, payloadCarrierType)) &&
                 wideParts.size() >= 1)
@@ -2427,7 +2390,7 @@ static LogicalResult convertErrorIsError(
         SmallVector<Value, 2> wideParts;
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType());
         Type payloadCarrierType = errType
-                                      ? getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
+                                      ? euh::getWideErrorUnionCarrierType(rewriter.getContext(), errType.getSuccessType())
                                       : u256Type;
         if (succeeded(materializeWideErrorUnion(rewriter, loc, op.getValue(), wideParts, payloadCarrierType)) &&
             wideParts.size() >= 1)
@@ -2874,7 +2837,7 @@ LogicalResult ConvertCallOp::matchAndRewrite(
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(oldResultTypes.front()))
         {
-            if (!isNarrowErrorUnion(errType) && replaced.size() == 2)
+            if (!euh::isNarrowErrorUnion(errType) && replaced.size() == 2)
             {
                 SmallVector<Operation *, 8> users;
                 for (Operation *user : op.getResult(0).getUsers())
@@ -2936,7 +2899,7 @@ LogicalResult ConvertCallOp::matchAndRewrite(
                         if (!errType)
                             continue;
                         const bool useWideCarrier =
-                            (funcArgForcesWideErrorUnion(callCallee, calleeInputIndex) || !isNarrowErrorUnion(errType));
+                            (funcArgForcesWideErrorUnion(callCallee, calleeInputIndex) || !euh::isNarrowErrorUnion(errType));
                         if (useWideCarrier)
                         {
                             Type tagType = calleeInputIndex < calleeType.getNumInputs()
@@ -2944,7 +2907,7 @@ LogicalResult ConvertCallOp::matchAndRewrite(
                                                : sir::U256Type::get(callUser.getContext());
                             Type payloadType = calleeInputIndex + 1 < calleeType.getNumInputs()
                                                    ? calleeType.getInput(calleeInputIndex + 1)
-                                                   : getWideErrorUnionCarrierType(callUser.getContext(), errType.getSuccessType());
+                                                   : euh::getWideErrorUnionCarrierType(callUser.getContext(), errType.getSuccessType());
                             Value tag = materializeValueForTargetType(
                                 rewriter, callUser.getLoc(), typeConverter, replaced[0], tagType);
                             Value payload = materializeValueForTargetType(
@@ -3144,7 +3107,7 @@ LogicalResult ConvertErrorReturnOp::matchAndRewrite(
         auto oneAttr = mlir::IntegerAttr::get(u256IntType, 1);
         Value one = rewriter.create<sir::ConstOp>(op.getLoc(), u256Type, oneAttr);
 
-        if (isNarrowErrorUnion(errType) && !hasForceWideErrorUnionAttr(op))
+        if (euh::isNarrowErrorUnion(errType) && !euh::hasForceWideErrorUnionAttr(op))
         {
             Value shifted = rewriter.create<sir::ShlOp>(op.getLoc(), u256Type, one, idConst);
             Value packed = rewriter.create<sir::OrOp>(op.getLoc(), u256Type, shifted, one);
@@ -3242,7 +3205,7 @@ namespace
             return;
         if (isPublicErrorUnionReturn(c.op))
             return;
-        if (!isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(c.retVal))
+        if (!euh::isNarrowErrorUnion(errType) || euh::valueHasForceWideErrorUnion(c.retVal))
             return;
         auto cast = c.retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>();
         if (!cast || !isNormalizedErrorUnionCast(cast) || cast.getNumOperands() != 1)
@@ -3270,7 +3233,7 @@ namespace
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
         if (!errType)
             return std::nullopt;
-        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(c.retVal) &&
+        if (euh::isNarrowErrorUnion(errType) && !euh::valueHasForceWideErrorUnion(c.retVal) &&
             !isPublicErrorUnionReturn(c.op))
             return std::nullopt;
         const bool pointerBackErrorPayloadForAbi = isPublicErrorUnionReturn(c.op);
@@ -3304,7 +3267,7 @@ namespace
         SmallVector<Value> parts;
         Type payloadCarrierType = c.u256Type;
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.op.getOperand(0).getType()))
-            payloadCarrierType = getWideErrorUnionCarrierType(c.op.getContext(), errType.getSuccessType());
+            payloadCarrierType = euh::getWideErrorUnionCarrierType(c.op.getContext(), errType.getSuccessType());
         if (succeeded(materializeWideErrorUnion(c.rewriter, c.loc, c.op.getOperand(0), parts, payloadCarrierType)) &&
             parts.size() == 2)
         {
@@ -4006,12 +3969,12 @@ LogicalResult NormalizeErrorOkOp::matchAndRewrite(
 {
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
     {
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()))
+        if (euh::shouldUseWideErrorUnionCarrier(errType, op.getOperation()))
         {
             rewriter.replaceOp(op, phase0BuildWideErrorUnion(rewriter, op.getLoc(), op.getValue(), op.getType(), false));
             return success();
         }
-        bool narrow = isNarrowErrorUnion(errType);
+        bool narrow = euh::isNarrowErrorUnion(errType);
         if (!narrow)
             return failure();
     }
@@ -4034,13 +3997,13 @@ LogicalResult NormalizeErrorErrOp::matchAndRewrite(
 {
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getType()))
     {
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) ||
+        if (euh::shouldUseWideErrorUnionCarrier(errType, op.getOperation()) ||
             !valueFitsNarrowErrorPayload(op.getValue()))
         {
             rewriter.replaceOp(op, phase0BuildWideErrorUnion(rewriter, op.getLoc(), op.getValue(), op.getType(), true));
             return success();
         }
-        bool narrow = isNarrowErrorUnion(errType);
+        bool narrow = euh::isNarrowErrorUnion(errType);
         if (!narrow)
             return failure();
     }
@@ -4092,13 +4055,13 @@ LogicalResult NormalizeErrorIsErrorOp::matchAndRewrite(
     }
 
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getValue().getType()))
-        if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(op.getValue()))
+        if (euh::shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || euh::valueHasForceWideErrorUnion(op.getValue()))
         {
             auto *ctx = rewriter.getContext();
             auto u256Type = sir::U256Type::get(ctx);
             SmallVector<Type, 2> splitTypes;
             splitTypes.push_back(u256Type);
-            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+            splitTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
             auto split = createWideErrorUnionSplitCast(rewriter, loc, op.getValue(), TypeRange(splitTypes));
             Value replacement = buildIsErrorFromTag(rewriter, loc, split.getResult(0), op.getType());
             if (!replacement)
@@ -4156,7 +4119,7 @@ static FailureOr<Value> materializeErrorPayloadValue(
         }
     }
     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(value.getType()))
-        if (shouldUseWideErrorUnionCarrier(errType, operation) || valueHasForceWideErrorUnion(value))
+        if (euh::shouldUseWideErrorUnionCarrier(errType, operation) || euh::valueHasForceWideErrorUnion(value))
         {
             auto *ctx = rewriter.getContext();
             SmallVector<Type, 2> splitTypes;
@@ -4164,7 +4127,7 @@ static FailureOr<Value> materializeErrorPayloadValue(
             // get_error materializes the error payload side, so the wide carrier
             // must be chosen from the requested error result type, not from the
             // union's success type.
-            splitTypes.push_back(getWideErrorUnionCarrierType(ctx, resultType));
+            splitTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, resultType));
             auto split = createWideErrorUnionSplitCast(rewriter, loc, value, TypeRange(splitTypes));
             auto cast = split.getOperation();
             return adaptErrorPayloadToResultType(rewriter, loc, cast->getResult(1), resultType);
@@ -4210,7 +4173,7 @@ LogicalResult NormalizeErrorUnionCastOp::matchAndRewrite(
     auto errType = llvm::dyn_cast<ora::ErrorUnionType>(op.getResult(0).getType());
     if (!errType)
         return failure();
-    if (!isNarrowErrorUnion(errType) || hasForceWideErrorUnionAttr(op))
+    if (!euh::isNarrowErrorUnion(errType) || euh::hasForceWideErrorUnionAttr(op))
         return failure();
 
     Value operand = op.getOperand(0);
@@ -4676,7 +4639,7 @@ namespace
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.resultType);
         if (!errType)
             return std::nullopt;
-        if (!isNarrowErrorUnion(errType))
+        if (!euh::isNarrowErrorUnion(errType))
             return failure();
         Value packed = coerceToU256(c.rewriter, c.loc, c.input);
         c.rewriter.replaceOp(c.op, packed);
@@ -4691,7 +4654,7 @@ namespace
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.resultType);
         if (!errType)
             return std::nullopt;
-        if (!isNarrowErrorUnion(errType))
+        if (!euh::isNarrowErrorUnion(errType))
             return failure();
         Value tag = coerceToU256(c.rewriter, c.loc, adaptor.getOperands()[0]);
         Value payload = coerceToU256(c.rewriter, c.loc, adaptor.getOperands()[1]);
@@ -4844,7 +4807,7 @@ static LogicalResult normalizeNarrowErrorUnionOperands(OpTy op, PatternRewriter 
     {
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(operand.getType()))
         {
-            if (shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || valueHasForceWideErrorUnion(operand))
+            if (euh::shouldUseWideErrorUnionCarrier(errType, op.getOperation()) || euh::valueHasForceWideErrorUnion(operand))
             {
                 newOperands.push_back(operand);
                 continue;
@@ -5328,11 +5291,11 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
         SmallVector<Type> convertedTypes;
         if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(t))
         {
-            if (hasForceWideErrorUnionAttr(op.getOperation()) && isNarrowErrorUnion(errType))
+            if (euh::hasForceWideErrorUnionAttr(op.getOperation()) && euh::isNarrowErrorUnion(errType))
             {
                 auto *ctx = rewriter.getContext();
                 convertedTypes.push_back(sir::U256Type::get(ctx));
-                convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
             }
         }
         if (convertedTypes.empty() && (failed(tc->convertType(t, convertedTypes)) || convertedTypes.empty()))
@@ -5341,14 +5304,14 @@ LogicalResult ConvertScfIfOp::matchAndRewrite(
             {
                 auto *ctx = rewriter.getContext();
                 auto u256 = sir::U256Type::get(ctx);
-                if (isNarrowErrorUnion(errType))
+                if (euh::isNarrowErrorUnion(errType))
                 {
                     convertedTypes.push_back(u256);
                 }
                 else
                 {
                     convertedTypes.push_back(u256);
-                    convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                    convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
                 }
             }
             if (convertedTypes.empty())
