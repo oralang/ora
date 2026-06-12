@@ -5,6 +5,7 @@
 #include "OraDialect.h"
 
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -77,6 +78,33 @@ namespace mlir
                 return llvm::isa<::mlir::IntegerType, ::mlir::ora::IntegerType,
                                  ::mlir::NoneType, ::mlir::ora::AddressType,
                                  ::mlir::ora::NonZeroAddressType>(successType);
+            }
+
+            inline bool isPayloadlessErrorStruct(::mlir::Type type, ::mlir::Operation *contextOp)
+            {
+                auto structType = llvm::dyn_cast<::mlir::ora::StructType>(type);
+                if (!structType || !contextOp)
+                    return false;
+
+                ::mlir::ModuleOp module = contextOp->getParentOfType<::mlir::ModuleOp>();
+                if (!module)
+                    return false;
+
+                bool matched = false;
+                module.walk([&](::mlir::Operation *op) {
+                    if (matched)
+                        return;
+                    auto sym = op->getAttrOfType<::mlir::StringAttr>("sym_name");
+                    if (!sym || sym.getValue() != structType.getName())
+                        return;
+                    if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
+                        return;
+                    auto params = op->getAttrOfType<::mlir::ArrayAttr>("ora.param_types");
+                    if (!params || params.empty())
+                        matched = true;
+                });
+
+                return matched;
             }
 
             inline ::mlir::Type getWideErrorUnionCarrierType(::mlir::MLIRContext *ctx,

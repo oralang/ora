@@ -12,6 +12,7 @@
 #include "patterns/EVM.h"
 #include "patterns/Logs.h"
 #include "patterns/MissingOps.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/StorageLayout.h"
 
 #include "OraDialect.h"
@@ -50,6 +51,7 @@
 
 using namespace mlir;
 using namespace ora;
+namespace euh = mlir::ora::error_union_helpers;
 
 namespace
 {
@@ -617,33 +619,6 @@ static LogicalResult applyFullConversionWithDiagnostics(
     if (!afterLog.empty())
         logModuleOps(module, afterLog);
     return success();
-}
-
-static bool isPayloadlessErrorStructType(Type type, Operation *contextOp)
-{
-    auto structType = llvm::dyn_cast<ora::StructType>(type);
-    if (!structType || !contextOp)
-        return false;
-
-    ModuleOp module = contextOp->getParentOfType<ModuleOp>();
-    if (!module)
-        return false;
-
-    bool matched = false;
-    module.walk([&](Operation *op) {
-        if (matched)
-            return;
-        auto sym = op->getAttrOfType<StringAttr>("sym_name");
-        if (!sym || sym.getValue() != structType.getName())
-            return;
-        if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
-            return;
-        auto params = op->getAttrOfType<ArrayAttr>("ora.param_types");
-        if (!params || params.empty())
-            matched = true;
-    });
-
-    return matched;
 }
 
 static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
@@ -1408,7 +1383,7 @@ public:
             {
                 for (Value operand : op.getOperands())
                 {
-                    if (isPayloadlessErrorStructType(operand.getType(), op))
+                    if (euh::isPayloadlessErrorStruct(operand.getType(), op))
                         return false;
                 }
                 return true;
@@ -1479,12 +1454,12 @@ public:
                     // we can lower them with callee-aware result/ABI handling.
                     for (Value operand : callOp.getOperands())
                     {
-                        if (isPayloadlessErrorStructType(operand.getType(), callOp))
+                        if (euh::isPayloadlessErrorStruct(operand.getType(), callOp))
                             return false;
                     }
                     for (Type resultType : callOp.getResultTypes())
                     {
-                        if (isPayloadlessErrorStructType(resultType, callOp))
+                        if (euh::isPayloadlessErrorStruct(resultType, callOp))
                             return false;
                     }
                     return true;

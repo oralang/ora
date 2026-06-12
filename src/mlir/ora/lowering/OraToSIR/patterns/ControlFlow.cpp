@@ -71,36 +71,6 @@ static FailureOr<uint64_t> getStructFieldCount(Operation *op, StringRef structNa
     return static_cast<uint64_t>(fieldTypesAttr.size());
 }
 
-static bool isPayloadlessErrorStruct(Type type, Operation *contextOp)
-{
-    auto structType = llvm::dyn_cast<ora::StructType>(type);
-    if (!structType || !contextOp)
-        return false;
-
-    ModuleOp module = contextOp->getParentOfType<ModuleOp>();
-    if (!module)
-        return false;
-
-    bool matched = false;
-    module.walk([&](Operation *op) {
-        if (matched)
-            return;
-        auto sym = op->getAttrOfType<StringAttr>("sym_name");
-        if (!sym || sym.getValue() != structType.getName())
-            return;
-        if (!op->hasAttr("ora.error_decl") && !op->hasAttr("sir.error_decl"))
-            return;
-        auto params = op->getAttrOfType<ArrayAttr>("ora.param_types");
-        if (!params || params.empty())
-        {
-            matched = true;
-            return;
-        }
-    });
-
-    return matched;
-}
-
 static bool funcArgForcesWideErrorUnion(func::FuncOp func, unsigned index);
 static bool funcResultForcesWideErrorUnion(func::FuncOp func, unsigned index);
 
@@ -110,12 +80,12 @@ static bool opUsesPayloadlessErrorStruct(Operation *op)
         return false;
     for (Type type : op->getOperandTypes())
     {
-        if (isPayloadlessErrorStruct(type, op))
+        if (euh::isPayloadlessErrorStruct(type, op))
             return true;
     }
     for (Type type : op->getResultTypes())
     {
-        if (isPayloadlessErrorStruct(type, op))
+        if (euh::isPayloadlessErrorStruct(type, op))
             return true;
     }
     return false;
@@ -865,7 +835,7 @@ static LogicalResult appendConvertedCallArgument(
         return success();
     }
 
-    if (isPayloadlessErrorStruct(origType, contextOp))
+    if (euh::isPayloadlessErrorStruct(origType, contextOp))
     {
         if (convertedOperandIndex >= adaptorOperands.size())
             return failure();
@@ -1193,7 +1163,7 @@ static LogicalResult getCallResultEncodingTypes(const TypeConverter *typeConvert
         return success();
     }
 
-    if (isPayloadlessErrorStruct(oldResultType, contextOp))
+    if (euh::isPayloadlessErrorStruct(oldResultType, contextOp))
     {
         convertedTypes.push_back(sir::U256Type::get(oldResultType.getContext()));
         return success();
@@ -1301,7 +1271,7 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
             convertedTypes.push_back(sir::U256Type::get(ctx));
             convertedTypes.push_back(sir::U256Type::get(ctx));
         }
-        else if (isPayloadlessErrorStruct(inputType, op))
+        else if (euh::isPayloadlessErrorStruct(inputType, op))
         {
             convertedTypes.push_back(sir::U256Type::get(inputType.getContext()));
         }
@@ -1331,7 +1301,7 @@ LogicalResult ConvertFuncOp::matchAndRewrite(
     for (auto [resultIndex, resultType] : llvm::enumerate(oldFuncType.getResults()))
     {
         SmallVector<Type> convertedTypes;
-        if (isPayloadlessErrorStruct(resultType, op))
+        if (euh::isPayloadlessErrorStruct(resultType, op))
         {
             convertedTypes.push_back(sir::U256Type::get(resultType.getContext()));
         }
@@ -3217,7 +3187,7 @@ namespace
     // struct return so the operand reaches its packed form.
     static void unwrapPayloadlessErrorStructRetVal(ReturnCtx &c)
     {
-        if (!isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
+        if (!euh::isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
             return;
         auto cast = c.retVal.getDefiningOp<mlir::UnrealizedConversionCastOp>();
         if (!cast || cast.getNumOperands() != 1)
@@ -3331,7 +3301,7 @@ namespace
     static ReturnHandlerResult returnStruct(ReturnCtx &c)
     {
         auto structType = llvm::dyn_cast<ora::StructType>(c.origType);
-        if (!structType || isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
+        if (!structType || euh::isPayloadlessErrorStruct(c.origType, c.op.getOperation()))
             return std::nullopt;
 
         FailureOr<uint64_t> fieldCount = getStructFieldCount(c.op.getOperation(), structType.getName());
@@ -4624,7 +4594,7 @@ namespace
             return std::nullopt;
         if (llvm::isa<ora::StructType>(c.resultType) &&
             llvm::isa<sir::U256Type>(c.input.getType()) &&
-            isPayloadlessErrorStruct(c.resultType, c.op))
+            euh::isPayloadlessErrorStruct(c.resultType, c.op))
         {
             c.rewriter.replaceOp(c.op, c.input);
             return success();
