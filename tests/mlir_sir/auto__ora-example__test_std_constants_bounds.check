@@ -76,8 +76,8 @@
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/test_std_constants_bounds.ora":34:5)
 // CHECK-NEXT:   func.func @getU128Min() -> !sir.u256 attributes {ora.abi_return = "uint128", ora.abi_return_layout = "uint128", ora.abi_return_words = 1 : i256, ora.selector = "0x42ceddd5", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:16)))
-// CHECK-NEXT:     %0 = sir.bitcast %c0 : !sir.u256 : i128 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:16)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : i128 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:9)))
+// CHECK-NEXT:     %0 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:16)))
+// CHECK-NEXT:     %1 = sir.and %c0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:16)))
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:9)))
 // CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:9)))
 // CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/test_std_constants_bounds.ora":39:9)))
@@ -85,8 +85,8 @@
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/test_std_constants_bounds.ora":38:5)
 // CHECK-NEXT:   func.func @getU128Max() -> !sir.u256 attributes {ora.abi_return = "uint128", ora.abi_return_layout = "uint128", ora.abi_return_words = 1 : i256, ora.selector = "0x0cc9679c", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:16)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i128 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:16)))
-// CHECK-NEXT:     %2 = sir.bitcast %1 : i128 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:9)))
+// CHECK-NEXT:     %1 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:16)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:16)))
 // CHECK-NEXT:     %3 = sir.const 32 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:9)))
 // CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:9)))
 // CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/test_std_constants_bounds.ora":43:9)))
@@ -180,8 +180,8 @@
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/test_std_constants_bounds.ora":83:5)
 // CHECK-NEXT:   func.func @getI128Min() -> !sir.u256 attributes {ora.abi_return = "int128", ora.abi_return_layout = "int128", ora.abi_return_words = 1 : i256, ora.selector = "0x6d369214", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 170141183460469231731687303715884105728 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:16)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i128 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:16)))
-// CHECK-NEXT:     %2 = sir.bitcast %1 : i128 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:9)))
+// CHECK-NEXT:     %1 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:16)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:16)))
 // CHECK-NEXT:     %3 = sir.const 32 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:9)))
 // CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:9)))
 // CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/test_std_constants_bounds.ora":88:9)))
@@ -189,8 +189,8 @@
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/test_std_constants_bounds.ora":87:5)
 // CHECK-NEXT:   func.func @getI128Max() -> !sir.u256 attributes {ora.abi_return = "int128", ora.abi_return_layout = "int128", ora.abi_return_words = 1 : i256, ora.selector = "0x1435c9eb", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 170141183460469231731687303715884105727 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:16)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i128 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:16)))
-// CHECK-NEXT:     %2 = sir.bitcast %1 : i128 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:9)))
+// CHECK-NEXT:     %1 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:16)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:16)))
 // CHECK-NEXT:     %3 = sir.const 32 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:9)))
 // CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:9)))
 // CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/test_std_constants_bounds.ora":92:9)))

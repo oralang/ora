@@ -146,7 +146,8 @@
 // CHECK-NEXT:     %0:2 = sir.icall @mayFail(%arg0) : !sir.u256, !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/try_catch_block.ora":16:21)))
 // CHECK-NEXT:     %1 = sir.const 0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/errors/try_catch_block.ora":17:13)))
 // CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/errors/try_catch_block.ora":17:13)))
-// CHECK-NEXT:     sir.log0 %2 : !sir.ptr<1>, %1 : !sir.u256 {ora.event_name = "Success"} loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/errors/try_catch_block.ora":17:13)))
+// CHECK-NEXT:     %3 = sir.const 25941916321868769184378827571354893538779785966189194190010799891179688585899 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/errors/try_catch_block.ora":17:13)))
+// CHECK-NEXT:     sir.log1 %2 : !sir.ptr<1>, %1 : !sir.u256, %3 : !sir.u256 {ora.event_name = "Success"} loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/errors/try_catch_block.ora":17:13)))
 // CHECK-NEXT:     sir.br ^bb2 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/errors/try_catch_block.ora":15:9)))
 // CHECK-NEXT:   ^bb2:  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/errors/try_catch_block.ora":14:5)

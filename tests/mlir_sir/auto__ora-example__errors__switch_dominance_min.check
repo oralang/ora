@@ -88,7 +88,7 @@
 // CHECK-NEXT:     %44 = sir.const 64 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
 // CHECK-NEXT:     %45 = sir.malloc %44 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
 // CHECK-NEXT:     sir.store %45 : !sir.ptr<1>, %40 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
-// CHECK-NEXT:     %46 = sir.addptr %45 : !sir.ptr<1>, %elem_size : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
+// CHECK-NEXT:     %46 = sir.addptr %45 : !sir.ptr<1>, %34 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
 // CHECK-NEXT:     sir.store %46 : !sir.ptr<1>, %43 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
 // CHECK-NEXT:     sir.return %45 : !sir.ptr<1>, %44 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/switch_dominance_min.ora":8:11)))
 // CHECK-NEXT:   ^bb7:  // pred: ^bb5

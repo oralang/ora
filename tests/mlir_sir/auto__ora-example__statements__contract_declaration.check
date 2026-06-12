@@ -4,12 +4,13 @@
 // CHECK: module attributes {ora.global_slot_ambiguous_names = ["owner"], ora.global_slots = {owner = 1 : ui64, owner = 0 : ui64, value = 0 : ui64}, ora.global_slots_built} {
 // CHECK-NEXT:   func.func @init() attributes {ora.effect = "writes", ora.init = true, ora.visibility = "pub", ora.write_slots = ["owner"]} {
 // CHECK-NEXT:     %0 = sir.const 103929005307130220006098923584552504982110632080 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i160 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
+// CHECK-NEXT:     %1 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
 // CHECK-NEXT:     %slot_owner = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:9)))
-// CHECK-NEXT:     %2 = sir.bitcast %1 : i160 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
-// CHECK-NEXT:     %3 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
-// CHECK-NEXT:     %4 = sir.and %2 : !sir.u256, %3 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
-// CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:9)))
+// CHECK-NEXT:     %3 = sir.and %2 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
+// CHECK-NEXT:     %4 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
+// CHECK-NEXT:     %5 = sir.and %3 : !sir.u256, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:17)))
+// CHECK-NEXT:     sir.sstore %slot_owner : !sir.u256, %5 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/statements/contract_declaration.ora":22:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/statements/contract_declaration.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/statements/contract_declaration.ora":21:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/statements/contract_declaration.ora":7:1)

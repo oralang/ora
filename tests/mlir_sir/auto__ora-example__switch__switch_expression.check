@@ -1,7 +1,7 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/switch/switch_expression.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK: module {
+// CHECK: module attributes {sir.enum_values = {Role.Admin = 1 : i8, Role.User = 0 : i8}} {
 // CHECK-NEXT:   func.func @test_switch_expression() attributes {ora.selector = "0x6792913b", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %c30 = sir.const 30 : !sir.u256 loc(unknown)
