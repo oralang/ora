@@ -61,6 +61,13 @@ namespace
         return sir::U256Type::get(ctx);
     }
 
+    static bool isPointerBackedCarrierType(Type type)
+    {
+        return llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                         ora::StringType, ora::BytesType,
+                         mlir::MemRefType, mlir::UnrankedMemRefType>(type);
+    }
+
 }
 
 static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
@@ -143,13 +150,28 @@ namespace mlir
                 return builder.create<sir::BitcastOp>(loc, ptrType, input).getResult();
             }
 
-            if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType, ora::StringType, ora::BytesType,
-                          mlir::MemRefType, mlir::UnrankedMemRefType>(input.getType()))
+            if (isPointerBackedCarrierType(input.getType()))
             {
                 if (auto bitcast = input.getDefiningOp<sir::BitcastOp>())
                 {
                     if (llvm::isa<sir::PtrType>(bitcast.getOperand().getType()))
                         return bitcast.getOperand();
+                }
+
+                if (auto loadOp = input.getDefiningOp<mlir::memref::LoadOp>())
+                {
+                    auto memrefType = llvm::dyn_cast<mlir::MemRefType>(loadOp.getMemRefType());
+                    if (memrefType && memrefType.getRank() == 0 &&
+                        isPointerBackedCarrierType(memrefType.getElementType()))
+                    {
+                        Value memref = loadOp.getMemref();
+                        if (!llvm::isa<sir::PtrType>(memref.getType()))
+                            memref = builder.create<sir::BitcastOp>(loc, ptrType, memref);
+
+                        auto u256Type = sir::U256Type::get(builder.getContext());
+                        Value storedCarrier = builder.create<sir::LoadOp>(loc, u256Type, memref);
+                        return builder.create<sir::BitcastOp>(loc, ptrType, storedCarrier).getResult();
+                    }
                 }
             }
 

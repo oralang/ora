@@ -46,4 +46,13 @@ contract ErrorUnionLocalAggregate {
             Err(_) => (0, "none"),
         };
     }
+
+    pub fn catch_content() -> (u256, string) {
+        try {
+            let s: string = try pick(false);
+            return (1, s);
+        } catch {
+            return (0, "none");
+        }
+    }
 }
