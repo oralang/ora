@@ -2372,6 +2372,8 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             rewriter.replaceOp(op, replacement);
             return success();
         }
+        if (isStaticFixedBytesAbiNode(*root.children.front()))
+            return rewriter.notifyMatchFailure(op, "fixed-bytes ABI returndata decode requires supported fixed-bytes projection");
     }
 
     Value loaded = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, returndataPtr);
