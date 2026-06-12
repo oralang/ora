@@ -239,6 +239,27 @@ test "MLOAD: offset out of bounds error" {
     try testing.expectError(error.OutOfBounds, result);
 }
 
+test "MLOAD: huge bounded offset returns out of gas instead of panicking" {
+    const allocator = testing.allocator;
+    var evm = try createTestEvm(allocator, .OSAKA);
+    defer {
+        evm.deinit();
+        allocator.destroy(evm);
+    }
+
+    const bytecode = &[_]u8{0x51}; // MLOAD
+    var frame = try createTestFrame(allocator, evm, bytecode, .OSAKA, 1_000_000);
+    defer frame.deinit();
+
+    // Fits u32, but exceeds the memory-expansion cap after adding the word size.
+    try frame.pushStack(0x0100_0000);
+
+    const MemHandlers = @import("handlers_memory.zig").Handlers(@TypeOf(frame));
+    const result = MemHandlers.mload(&frame);
+
+    try testing.expectError(error.OutOfGas, result);
+}
+
 // ============================================================================
 // MSTORE Tests
 // ============================================================================
@@ -435,6 +456,27 @@ test "MSTORE: offset out of bounds error" {
     try testing.expectError(error.OutOfBounds, result);
 }
 
+test "MSTORE: huge bounded offset returns out of gas instead of panicking" {
+    const allocator = testing.allocator;
+    var evm = try createTestEvm(allocator, .OSAKA);
+    defer {
+        evm.deinit();
+        allocator.destroy(evm);
+    }
+
+    const bytecode = &[_]u8{0x52}; // MSTORE
+    var frame = try createTestFrame(allocator, evm, bytecode, .OSAKA, 1_000_000);
+    defer frame.deinit();
+
+    try frame.pushStack(0x42);
+    try frame.pushStack(0x0100_0000);
+
+    const MemHandlers = @import("handlers_memory.zig").Handlers(@TypeOf(frame));
+    const result = MemHandlers.mstore(&frame);
+
+    try testing.expectError(error.OutOfGas, result);
+}
+
 // ============================================================================
 // MSTORE8 Tests
 // ============================================================================
@@ -619,6 +661,27 @@ test "MSTORE8: offset out of bounds error" {
 
     // Verify error
     try testing.expectError(error.OutOfBounds, result);
+}
+
+test "MSTORE8: huge bounded offset returns out of gas instead of panicking" {
+    const allocator = testing.allocator;
+    var evm = try createTestEvm(allocator, .OSAKA);
+    defer {
+        evm.deinit();
+        allocator.destroy(evm);
+    }
+
+    const bytecode = &[_]u8{0x53}; // MSTORE8
+    var frame = try createTestFrame(allocator, evm, bytecode, .OSAKA, 1_000_000);
+    defer frame.deinit();
+
+    try frame.pushStack(0x42);
+    try frame.pushStack(0x0100_0000);
+
+    const MemHandlers = @import("handlers_memory.zig").Handlers(@TypeOf(frame));
+    const result = MemHandlers.mstore8(&frame);
+
+    try testing.expectError(error.OutOfGas, result);
 }
 
 // ============================================================================

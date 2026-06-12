@@ -1,40 +1,39 @@
-# see FINDINGS.md#f-004 — len-only asserts
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
 
 [[call]]
-fn = "ok_len()"
+fn = "flag(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
-args = []
-returns = { u256 = 3 }
+args = [0]
+returns = { bool = false }
 
 [[call]]
-fn = "match_local()"
+fn = "flag(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
-args = []
-returns = { u256 = 3 }
+args = [1]
+returns = { bool = true }
 
 [[call]]
-fn = "content()"
+fn = "flag(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
-args = []
-returns = { (uint256,string) = (1,ora) }
-
-[[call]]
-fn = "err_marker()"
-caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-value = 0
-args = []
-returns = { u256 = 999 }
-
-[[call]]
-fn = "public_err()"
-caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
-value = 0
-args = []
+args = [2]
 reverts = { selector = "0xff7e9f57" }
+
+[[call]]
+fn = "rich(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+returns = { bool = true }
+
+[[call]]
+fn = "rich(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+reverts = { selector = "0x1d301e4f" }

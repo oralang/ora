@@ -1,7 +1,7 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/type-system/refinements/refinement_in_functions.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK: module attributes {sir.error_ids = {InvalidAmount = 925415485 : i256}, sir.error_selectors = {InvalidAmount = "0x3728b83d"}} {
+// CHECK: module attributes {sir.error_ids = {InvalidAmount = 925415485 : i256}, sir.error_param_counts = {InvalidAmount = 1 : i64}, sir.error_selectors = {InvalidAmount = "0x3728b83d"}} {
 // CHECK-NEXT:   func.func @testRefinementParameter(%arg0: !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":11:36)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = ["min:u:0:0:0:100"], ora.abi_params = ["uint256"], ora.param_names = ["amount"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x952df3ff", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":1:1)
 // CHECK-NEXT:     %0 = sir.gt %arg0 : !sir.u256, %c100 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":1:1)
@@ -229,12 +229,16 @@
 // CHECK-NEXT:     %21 = sir.const 0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
 // CHECK-NEXT:     %22 = sir.const 1 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
 // CHECK-NEXT:     %23 = sir.and %21 : !sir.u256, %22 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     %24 = sir.const 64 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %24 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
 // CHECK-NEXT:     %25 = sir.malloc %24 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %23 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     %26 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     %27 = sir.addptr %25 : !sir.ptr<1>, %26 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     sir.store %27 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
-// CHECK-NEXT:     sir.return %25 : !sir.ptr<1>, %24 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     sir.store %25 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %26 = sir.bitcast %25 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %27 = sir.select %23 : !sir.u256, %26 : !sir.u256, %arg0 : !sir.u256 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %28 = sir.const 64 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %29 = sir.malloc %28 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     sir.store %29 : !sir.ptr<1>, %23 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     %30 = sir.addptr %29 : !sir.ptr<1>, %24 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     sir.store %30 : !sir.ptr<1>, %27 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
+// CHECK-NEXT:     sir.return %29 : !sir.ptr<1>, %28 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":58:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":53:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/type-system/refinements/refinement_in_functions.ora":8:1)

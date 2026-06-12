@@ -1091,6 +1091,7 @@ namespace mlir
                     if (auto idDict = module->getAttrOfType<DictionaryAttr>("sir.error_ids"))
                     {
                         auto selectorDict = module->getAttrOfType<DictionaryAttr>("sir.error_selectors");
+                        auto paramCountDict = module->getAttrOfType<DictionaryAttr>("sir.error_param_counts");
                         for (NamedAttribute idEntry : idDict)
                         {
                             auto idAttr = dyn_cast<IntegerAttr>(idEntry.getValue());
@@ -1100,7 +1101,10 @@ namespace mlir
                             auto selector = parseErrorSelector(selectorAttr.getValue());
                             if (!selector)
                                 continue;
-                            addErrorInfo(idAttr.getValue().getZExtValue(), *selector, 0);
+                            uint64_t paramCount = 0;
+                            if (auto paramCountAttr = dyn_cast_or_null<IntegerAttr>(lookupDictionaryAttr(paramCountDict, idEntry.getName())))
+                                paramCount = paramCountAttr.getValue().getZExtValue();
+                            addErrorInfo(idAttr.getValue().getZExtValue(), *selector, paramCount);
                         }
                     }
 
@@ -3692,12 +3696,8 @@ namespace mlir
                                 Value comparePayload = loadPayloadFromScratch(compareBlock, caseErrorLoc);
 
                                 Value errId = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
-                                Value compareValue = comparePayload;
-                                if (errInfo.paramCount != 0)
-                                {
-                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, comparePayload);
-                                    compareValue = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadAggPtr);
-                                }
+                                Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, comparePayload);
+                                Value compareValue = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadAggPtr);
                                 Value matches = builder.create<sir::EqOp>(caseErrorLoc, u256Type, compareValue, errId);
                                 Block *emitBlock = mainFunc.addBlock();
                                 builder.create<sir::CondBrOp>(caseErrorLoc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);

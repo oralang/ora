@@ -263,7 +263,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
     try host.setNonce(spec.deploy.caller, 1);
 
     var evm: types.Evm = undefined;
-    try evm.init(allocator, host.hostInterface(), .CANCUN, evm_mod.deterministicBlockContext(), spec.deploy.caller, 0, null);
+    try evm.init(allocator, host.hostInterface(), .OSAKA, evm_mod.deterministicBlockContext(), spec.deploy.caller, 0, null);
     defer evm.deinit();
 
     try evm.initTransactionState(null);
@@ -466,7 +466,7 @@ pub fn compileAndRunPropertySource(
     try host.setNonce(caller, 1);
 
     var evm: types.Evm = undefined;
-    try evm.init(arena, host.hostInterface(), .CANCUN, evm_mod.deterministicBlockContext(), caller, 0, null);
+    try evm.init(arena, host.hostInterface(), .OSAKA, evm_mod.deterministicBlockContext(), caller, 0, null);
     defer evm.deinit();
 
     try evm.initTransactionState(null);

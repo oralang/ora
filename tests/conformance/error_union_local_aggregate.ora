@@ -27,6 +27,10 @@ contract ErrorUnionLocalAggregate {
         }
     }
 
+    pub fn public_err() -> !string | Failure {
+        return Failure;
+    }
+
     pub fn match_local() -> u256 {
         let r: Result<string, Failure> = Ok("ora");
         return match (r) {

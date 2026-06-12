@@ -1,7 +1,7 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/errors/error_union_test.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK: module attributes {sir.error_ids = {InsufficientBalance = 3477574017 : i256, InvalidAddress = 3871614075 : i256}, sir.error_selectors = {InsufficientBalance = "0xcf479181", InvalidAddress = "0xe6c4247b"}} {
+// CHECK: module attributes {sir.error_ids = {InsufficientBalance = 3477574017 : i256, InvalidAddress = 3871614075 : i256}, sir.error_param_counts = {InsufficientBalance = 2 : i64}, sir.error_selectors = {InsufficientBalance = "0xcf479181", InvalidAddress = "0xe6c4247b"}} {
 // CHECK-NEXT:   func.func @test1() -> !sir.u256 attributes {ora.force_wide_error_union = true, ora.returns_error_union = true, ora.visibility = "private"} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/error_union_test.ora":10:16)))
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/errors/error_union_test.ora":10:16)))

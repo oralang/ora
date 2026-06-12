@@ -1479,19 +1479,28 @@ public:
         {
             SmallVector<NamedAttribute> errEntries;
             SmallVector<NamedAttribute> errSelectorEntries;
+            SmallVector<NamedAttribute> errParamCountEntries;
             module.walk([&](ora::ErrorDeclOp decl)
                         {
                 auto id = decl->getAttrOfType<mlir::IntegerAttr>("ora.error_id");
                 auto sym = decl->getAttrOfType<mlir::StringAttr>("sym_name");
                 auto selector = decl->getAttrOfType<mlir::StringAttr>("ora.error_selector");
+                auto paramTypes = decl->getAttrOfType<mlir::ArrayAttr>("ora.param_types");
                 if (sym && id)
                     errEntries.push_back(NamedAttribute(sym, id));
                 if (sym && selector)
-                    errSelectorEntries.push_back(NamedAttribute(sym, selector)); });
+                    errSelectorEntries.push_back(NamedAttribute(sym, selector));
+                if (sym && paramTypes && !paramTypes.empty())
+                    errParamCountEntries.push_back(NamedAttribute(
+                        sym,
+                        mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 64),
+                                               static_cast<int64_t>(paramTypes.size())))); });
             if (!errEntries.empty())
                 module->setAttr("sir.error_ids", DictionaryAttr::get(ctx, errEntries));
             if (!errSelectorEntries.empty())
                 module->setAttr("sir.error_selectors", DictionaryAttr::get(ctx, errSelectorEntries));
+            if (!errParamCountEntries.empty())
+                module->setAttr("sir.error_param_counts", DictionaryAttr::get(ctx, errParamCountEntries));
         }
 
         // Preserve enum discriminants before ora.enum.decl is erased. Enum

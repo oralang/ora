@@ -8,7 +8,7 @@ highest-value signal the suite can produce (a compiler bug, a lib/evm bug, or a
 hardfork mismatch — F-003 was lib/evm itself panicking).
 
 LOCAL-FIRST, not in the blocking gate (Anvil is a live process). Pins the
-hardfork to lib/evm's (CANCUN). This is a working scaffold: it covers the
+hardfork to lib/evm's Ora target (OSAKA). This is a working scaffold: it covers the
 scalar/storage subset end-to-end and skips (loudly) calls it can't yet encode.
 Extend by adding arg/return/outcome handling, not by rearchitecting.
 

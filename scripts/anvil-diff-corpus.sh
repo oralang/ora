@@ -11,7 +11,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 STARTED=0
 if ! cast rpc eth_blockNumber --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
-  anvil --hardfork cancun --auto-impersonate --silent >/tmp/anvil-corpus.log 2>&1 &
+  anvil --hardfork osaka --auto-impersonate --silent >/tmp/anvil-corpus.log 2>&1 &
   STARTED=1
   sleep 3
 fi

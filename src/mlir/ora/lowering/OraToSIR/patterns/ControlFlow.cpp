@@ -611,7 +611,8 @@ static void buildWideErrorUnionReturnFromParts(
     Value tag,
     Value payload,
     Type u256Type,
-    Type ui64Type)
+    Type ui64Type,
+    bool pointerBackErrorPayloadForAbi = false)
 {
     Value normTag = coerceToU256(rewriter, loc, tag);
     Value one = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 1));
@@ -630,7 +631,26 @@ static void buildWideErrorUnionReturnFromParts(
         return true;
     };
 
-    if (llvm::isa<sir::PtrType>(payload.getType()) && !scalarWordRelabelledAsPtr(payload))
+    const bool payloadAlreadyPointerBacked = llvm::isa<sir::PtrType,
+                                                       ora::StructType,
+                                                       ora::AnonymousStructType,
+                                                       ora::TupleType,
+                                                       ora::StringType,
+                                                       ora::BytesType,
+                                                       MemRefType,
+                                                       UnrankedMemRefType>(payload.getType()) &&
+                                             !scalarWordRelabelledAsPtr(payload);
+    if (pointerBackErrorPayloadForAbi && !payloadAlreadyPointerBacked)
+    {
+        Type ptrType = sir::PtrType::get(rewriter.getContext(), 1);
+        Value wordSize = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+        Value errorPayloadPtr = rewriter.create<sir::MallocOp>(loc, ptrType, wordSize);
+        rewriter.create<sir::StoreOp>(loc, errorPayloadPtr, normPayload);
+        Value errorPayloadPtrWord = rewriter.create<sir::BitcastOp>(loc, u256Type, errorPayloadPtr);
+        normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayloadPtrWord, normPayload);
+    }
+    else if (!pointerBackErrorPayloadForAbi && llvm::isa<sir::PtrType>(payload.getType()) &&
+             !scalarWordRelabelledAsPtr(payload))
     {
         Value errorPayload = rewriter.create<sir::LoadOp>(loc, u256Type, payload);
         normPayload = rewriter.create<sir::SelectOp>(loc, u256Type, normTag, errorPayload, normPayload);
@@ -3216,12 +3236,27 @@ namespace
         Type ui64Type;
     };
 
+    static bool isPublicErrorUnionReturn(ora::ReturnOp op)
+    {
+        auto func = op->getParentOfType<func::FuncOp>();
+        if (!func)
+            return false;
+        auto vis = func->getAttrOfType<StringAttr>("ora.visibility");
+        if (!vis || vis.getValue() != "pub")
+            return false;
+        if (auto attr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
+            return attr.getValue();
+        return false;
+    }
+
     // Strip a single-operand normalized error_union cast off the return value
     // so that a narrow error_union return sees the packed u256 directly.
     static void unpackNarrowErrorUnionRetVal(ReturnCtx &c)
     {
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
         if (!errType)
+            return;
+        if (isPublicErrorUnionReturn(c.op))
             return;
         if (!isNarrowErrorUnion(errType) || valueHasForceWideErrorUnion(c.retVal))
             return;
@@ -3251,8 +3286,10 @@ namespace
         auto errType = llvm::dyn_cast<ora::ErrorUnionType>(c.origType);
         if (!errType)
             return std::nullopt;
-        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(c.retVal))
+        if (isNarrowErrorUnion(errType) && !valueHasForceWideErrorUnion(c.retVal) &&
+            !isPublicErrorUnionReturn(c.op))
             return std::nullopt;
+        const bool pointerBackErrorPayloadForAbi = isPublicErrorUnionReturn(c.op);
 
         auto eraseAndOk = [&]() -> LogicalResult {
             c.rewriter.eraseOp(c.op);
@@ -3267,7 +3304,7 @@ namespace
                 {
                     buildWideErrorUnionReturnFromParts(
                         c.rewriter, c.loc, cast.getOperand(0), cast.getOperand(1),
-                        c.u256Type, c.ui64Type);
+                        c.u256Type, c.ui64Type, pointerBackErrorPayloadForAbi);
                     return eraseAndOk();
                 }
             }
@@ -3276,7 +3313,7 @@ namespace
         {
             buildWideErrorUnionReturnFromParts(
                 c.rewriter, c.loc, c.operands[0], c.operands[1],
-                c.u256Type, c.ui64Type);
+                c.u256Type, c.ui64Type, pointerBackErrorPayloadForAbi);
             return eraseAndOk();
         }
 
@@ -3289,7 +3326,7 @@ namespace
         {
             buildWideErrorUnionReturnFromParts(
                 c.rewriter, c.loc, parts[0], parts[1],
-                c.u256Type, c.ui64Type);
+                c.u256Type, c.ui64Type, pointerBackErrorPayloadForAbi);
             return eraseAndOk();
         }
 
@@ -3304,7 +3341,7 @@ namespace
                     c.loc, c.u256Type, mlir::IntegerAttr::get(c.ui64Type, 1));
         }
         buildWideErrorUnionReturnFromParts(
-            c.rewriter, c.loc, tag, payload, c.u256Type, c.ui64Type);
+            c.rewriter, c.loc, tag, payload, c.u256Type, c.ui64Type, pointerBackErrorPayloadForAbi);
         return eraseAndOk();
     }
 
