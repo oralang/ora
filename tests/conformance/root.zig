@@ -12,6 +12,78 @@ test "conformance properties execute and catch planted failures" {
     try properties.run(testing.allocator);
 }
 
+// Suite self-test (gap #6): prove the conformance layer has teeth — a correct
+// spec passes, and the SAME spec with one wrong expected value is caught. If a
+// corrupted expectation still "passed", the whole layer would be vacuously green.
+test "conformance runner detects a wrong expected return (suite teeth)" {
+    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract Teeth {
+        \\    pub fn answer() -> u256 {
+        \\        return 42;
+        \\    }
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "teeth.ora", .data = source });
+
+    const good_spec =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "answer()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\returns = { u256 = 42 }
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "teeth_good.spec.toml", .data = good_spec });
+
+    // Same call, deliberately wrong expected value.
+    const bad_spec =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "answer()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\returns = { u256 = 43 }
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "teeth_bad.spec.toml", .data = bad_spec });
+
+    const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "teeth.ora");
+    defer allocator.free(source_path);
+    const good_path = try runner.pathFromTmpAlloc(allocator, tmp, "teeth_good.spec.toml");
+    defer allocator.free(good_path);
+    const bad_path = try runner.pathFromTmpAlloc(allocator, tmp, "teeth_bad.spec.toml");
+    defer allocator.free(bad_path);
+
+    // The correct spec must pass...
+    try runner.runConformanceSpec(allocator, source_path, good_path);
+    // ...and the corrupted spec must be caught. Any error means the layer has
+    // teeth; returning normally would mean a wrong expectation passes silently.
+    if (runner.runConformanceSpec(allocator, source_path, bad_path)) |_| {
+        return error.ConformanceSuiteHasNoTeeth;
+    } else |_| {}
+}
+
 test "conformance corpus files have sidecars or explicit skips" {
     try runner.checkCorpusSidecars(testing.allocator, types.CONFORMANCE_DIR_REL);
 }

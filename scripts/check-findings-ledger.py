@@ -31,6 +31,7 @@ TESTS_DIR = ROOT / "tests"
 HEADER_RE = re.compile(r"^## (F-\d+)\b", re.M)
 STATUS_RE = re.compile(r"^- \*\*Status:\*\*\s*(\w+)", re.M)
 SEVERITY_RE = re.compile(r"^- \*\*Severity:\*\*\s*(S\d)", re.M)
+OWNER_RE = re.compile(r"^- \*\*Owner:\*\*\s*(.+)$", re.M)
 REF_RE = re.compile(r"FINDINGS\.md#(f-\d+)", re.I)
 
 
@@ -53,13 +54,17 @@ def parse_ledger() -> dict[str, dict]:
         body = text[start:end]
         status_m = STATUS_RE.search(body)
         sev_m = SEVERITY_RE.search(body)
+        owner_m = OWNER_RE.search(body)
         if not status_m:
             fail(f"{fid.upper()} has no Status field")
         if not sev_m:
             fail(f"{fid.upper()} has no Severity field")
+        if not owner_m:
+            fail(f"{fid.upper()} has no Owner field")
         findings[fid] = {
             "status": status_m.group(1).upper(),
             "severity": sev_m.group(1),
+            "owner": owner_m.group(1).strip(),
         }
     if not findings:
         fail("no findings parsed from ledger")
@@ -121,7 +126,17 @@ def main() -> None:
         for fid in sorted(open_ids):
             n = len(refs.get(fid, []))
             tag = f"{n} pins" if n else "no pins (tracked elsewhere)"
-            print(f"    {fid.upper()} ({findings[fid]['severity']}) OPEN — {tag}")
+            info = findings[fid]
+            print(f"    {fid.upper()} ({info['severity']}) OPEN — owner: {info['owner']} — {tag}")
+
+    # Gap #1 visibility: the dangerous backlog must be impossible to miss.
+    s1_open = sorted(f for f in open_ids if findings[f]["severity"] == "S1")
+    if s1_open:
+        print(
+            f"  ⚠ UNFIXED S1 BACKLOG ({len(s1_open)}): "
+            + ", ".join(f.upper() for f in s1_open)
+            + " — these are dangerous and OPEN; they need a fix owner, not just a pin."
+        )
 
 
 if __name__ == "__main__":
