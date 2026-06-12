@@ -133,3 +133,18 @@ When a finding is fixed: flip its blocked/characterization rows as described, ru
 - **Repro:** add `gas_max = 1` to any `[[call]]`; the call passes (gas_used reads as 0).
 - **Flip condition:** wire real gas-used into the runner result, then re-add `gas_max` with
   teeth (a `gas_max = 1` must fail) and start ceilings on the full-app specs.
+
+## F-008 — events emit no topic0 signature hash (not Solidity-ABI filterable)
+
+- **Status:** OPEN
+- **Severity:** S2
+- **Owner:** compiler
+- **What:** Ora `log` events emit with EMPTY topics and all fields packed into data — there is no
+  `topic0 = keccak(eventSignature)` and no indexed-parameter topics. Execution-confirmed 2026-06-12:
+  `log Recorded(who: address, amount: u256)` emits `topics=[]`, `data = abi(address,uint256)` (and
+  the existing `Ping()` likewise emits `topics=[]`). Consequence: standard tooling (ethers/web3
+  `getLogs` filtered by event signature or indexed args) cannot find or decode Ora contract events —
+  a real interop limitation for any dapp/indexer consuming them.
+- **Repro:** `tests/conformance/events_multifield.spec.toml` (asserts the current topics=[] layout).
+- **Flip condition:** when Ora emits the standard `topic0 = keccak(signature)` (+ any indexed
+  params as topics), update `events_multifield.spec.toml` (and `environment_log`) to the real topics.

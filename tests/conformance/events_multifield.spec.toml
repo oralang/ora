@@ -1,0 +1,17 @@
+# Events depth: a multi-field log. Hypothesis (from Ping() emitting topics=[]):
+# Ora emits no topic0 signature hash and packs args into data.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "record(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002", 42]
+returns = {}
+
+[[call.log]]
+topics = []
+data = "0x0000000000000000000000002000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000002a"

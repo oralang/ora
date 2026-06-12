@@ -309,6 +309,14 @@
       ]
     },
     {
+      "id": "events.multifield_log_layout",
+      "area": "events",
+      "behavior": "Multi-field event (address, uint256) layout: topics vs data packing on the wire",
+      "specs": [
+        "tests/conformance/events_multifield.spec.toml"
+      ]
+    },
+    {
       "id": "events.log_topics_and_data",
       "area": "events",
       "behavior": "log statement emits expected topics and ABI-encoded data",
