@@ -1,5 +1,6 @@
 #pragma once
 
+#include "OraMaterializationKinds.h"
 #include "SIR/SIRDialect.h"
 
 #include "mlir/IR/BuiltinOps.h"
@@ -48,9 +49,11 @@ namespace mlir::ora::lowering
         return constU256(rewriter, loc, llvm::APInt(256, value));
     }
 
-    inline Value u256Const(OpBuilder &rewriter, Location loc, uint64_t value)
+    inline Value createPtrViewMaterializationCast(PatternRewriter &rewriter, Location loc, Type resultType, Value input)
     {
-        return constU256(rewriter, loc, value);
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
+        cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));
+        return cast.getResult(0);
     }
 
     inline Value maskLowBits(OpBuilder &rewriter, Location loc, Value value, unsigned bits)

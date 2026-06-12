@@ -19,20 +19,10 @@ using namespace mlir;
 using namespace ora;
 using namespace mlir::ora::abi_lowering;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::createPtrViewMaterializationCast;
 
 namespace
 {
-static Value createPtrViewMaterializationCast(
-    PatternRewriter &rewriter,
-    Location loc,
-    Type resultType,
-    Value input)
-{
-    auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
-    cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));
-    return cast.getResult(0);
-}
-
 static bool isNarrowErrorUnion(ora::ErrorUnionType type)
 {
     return ora::error_union_helpers::isNarrowErrorUnion(type);

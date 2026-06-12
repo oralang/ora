@@ -32,6 +32,7 @@
 using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::createPtrViewMaterializationCast;
 using mlir::ora::lowering::findStructDeclForName;
 
 // Debug logging macro
@@ -381,12 +382,6 @@ static bool isNormalizedErrorUnionCast(mlir::UnrealizedConversionCastOp castOp)
     return false;
 }
 
-static Value createPtrViewMaterializationCast(
-    PatternRewriter &rewriter,
-    Location loc,
-    Type resultType,
-    Value input);
-
 static Value adaptErrorPayloadToResultType(
     PatternRewriter &rewriter,
     Location loc,
@@ -511,17 +506,6 @@ static Value buildIsErrorFromTag(
         return isErrU256;
 
     return rewriter.create<sir::BitcastOp>(loc, resultType, isErrU256);
-}
-
-static Value createPtrViewMaterializationCast(
-    PatternRewriter &rewriter,
-    Location loc,
-    Type resultType,
-    Value input)
-{
-    auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
-    cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));
-    return cast.getResult(0);
 }
 
 static Value materializeReturnPtrCarrier(
