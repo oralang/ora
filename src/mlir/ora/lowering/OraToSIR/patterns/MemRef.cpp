@@ -27,6 +27,7 @@ using namespace ora;
 namespace euh = mlir::ora::error_union_helpers;
 
 using mlir::ora::lowering::addStorageWordOffset;
+using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::ensureU256;
 using mlir::ora::lowering::getMemRefElementWordCount;
 using mlir::ora::lowering::getStaticMemRefWordCount;
@@ -183,9 +184,7 @@ static Value subtractStorageWordOffset(Location loc,
 
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-    Value offsetValue = rewriter.create<sir::ConstOp>(
-        loc, u256Type, mlir::IntegerAttr::get(ui64Type, offset));
+    Value offsetValue = constU256(rewriter, loc, offset);
     return rewriter.create<sir::SubOp>(loc, u256Type, slot, offsetValue);
 }
 

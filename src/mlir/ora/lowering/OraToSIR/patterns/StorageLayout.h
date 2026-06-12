@@ -228,9 +228,7 @@ namespace mlir::ora::lowering
 
         auto *ctx = rewriter.getContext();
         auto u256Type = sir::U256Type::get(ctx);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        Value offsetValue = rewriter.create<sir::ConstOp>(
-            loc, u256Type, mlir::IntegerAttr::get(ui64Type, offset));
+        Value offsetValue = constU256(rewriter, loc, offset);
         return rewriter.create<sir::AddOp>(loc, u256Type, slot, offsetValue);
     }
 }
