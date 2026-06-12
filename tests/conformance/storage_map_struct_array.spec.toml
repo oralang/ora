@@ -1,0 +1,69 @@
+# Combinatorial layout (gap #5): struct-with-static-array under a map.
+# buckets at slot 0; map<u256,Bucket> key k -> base = keccak(k.0);
+# Bucket { slots:[u256;3], tail:u256 } -> slots[i] at base+i, tail at base+3.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_slot(uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 0, 111]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint256,5,0)"
+value = 111
+
+[[call]]
+fn = "set_slot(uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 2, 333]
+returns = {}
+
+[[call.storage]]
+slot = "add(map(uint256,5,0),2)"
+value = 333
+
+[[call]]
+fn = "set_tail(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 999]
+returns = {}
+
+[[call.storage]]
+slot = "add(map(uint256,5,0),3)"
+value = 999
+
+[[call]]
+fn = "get_slot(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 0]
+returns = { u256 = 111 }
+
+[[call]]
+fn = "get_slot(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5, 2]
+returns = { u256 = 333 }
+
+[[call]]
+fn = "get_tail(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [5]
+returns = { u256 = 999 }
+
+# Distinct key must be independent (no slot collision).
+[[call]]
+fn = "get_tail(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [6]
+returns = { u256 = 0 }

@@ -420,6 +420,14 @@
       ]
     },
     {
+      "id": "storage.combinatorial_map_struct_array",
+      "area": "storage",
+      "behavior": "Struct with a static-array field stored under a map: array-offset within struct within map-derived slot, with raw-slot parity and key independence",
+      "specs": [
+        "tests/conformance/storage_map_struct_array.spec.toml"
+      ]
+    },
+    {
       "id": "adversarial.calldata_decode",
       "area": "adversarial",
       "behavior": "Hostile raw calldata against the dispatcher decode surface (unknown selector, truncated args, out-of-bounds dynamic offset) must revert, never accept-and-misbehave",
