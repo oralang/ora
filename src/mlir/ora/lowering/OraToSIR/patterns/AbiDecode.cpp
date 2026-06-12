@@ -776,7 +776,7 @@ static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConvert
         case AbiStaticKind::Address:
             return maskLowBits(rewriter, loc, word, 160);
         case AbiStaticKind::FixedBytes:
-            llvm_unreachable("fixed bytes handled before narrow scalar dispatch");
+            return std::nullopt;
         }
         return std::nullopt;
     }
