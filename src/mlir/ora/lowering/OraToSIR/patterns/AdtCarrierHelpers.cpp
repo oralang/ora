@@ -23,29 +23,17 @@ namespace mlir
 
             Value adtCarrierSizeConst(OpBuilder &builder, Location loc)
             {
-                auto *ctx = builder.getContext();
-                auto u256Type = sir::U256Type::get(ctx);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                return builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtCarrierSize));
+                return constU256(builder, loc, kAdtCarrierSize);
             }
 
             Value adtPayloadOffsetConst(OpBuilder &builder, Location loc)
             {
-                auto *ctx = builder.getContext();
-                auto u256Type = sir::U256Type::get(ctx);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                return builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+                return constU256(builder, loc, kAdtPayloadOffset);
             }
 
             Value adtStoragePayloadSlotOffsetConst(OpBuilder &builder, Location loc)
             {
-                auto *ctx = builder.getContext();
-                auto u256Type = sir::U256Type::get(ctx);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                return builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtStoragePayloadSlotOffset));
+                return constU256(builder, loc, kAdtStoragePayloadSlotOffset);
             }
 
             AdtHandle materializeAdtHandleWithSize(OpBuilder &builder,
