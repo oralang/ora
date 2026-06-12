@@ -98,6 +98,73 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
     } else |_| {}
 }
 
+test "conformance runner detects gas ceilings (suite teeth)" {
+    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const source =
+        \\contract GasTeeth {
+        \\    pub fn answer() -> u256 {
+        \\        return 42;
+        \\    }
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth.ora", .data = source });
+
+    const good_spec =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "answer()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\gas_max = 1000000
+        \\returns = { u256 = 42 }
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_good.spec.toml", .data = good_spec });
+
+    const bad_spec =
+        \\[deploy]
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\
+        \\[[call]]
+        \\fn = "answer()"
+        \\caller = "0x1000000000000000000000000000000000000000"
+        \\value = 0
+        \\args = []
+        \\gas_max = 1
+        \\returns = { u256 = 42 }
+        \\
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_bad.spec.toml", .data = bad_spec });
+
+    const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "gas_teeth.ora");
+    defer allocator.free(source_path);
+    const good_path = try runner.pathFromTmpAlloc(allocator, tmp, "gas_teeth_good.spec.toml");
+    defer allocator.free(good_path);
+    const bad_path = try runner.pathFromTmpAlloc(allocator, tmp, "gas_teeth_bad.spec.toml");
+    defer allocator.free(bad_path);
+
+    try runner.runConformanceSpec(allocator, source_path, good_path);
+    if (runner.runConformanceSpec(allocator, source_path, bad_path)) |_| {
+        return error.ConformanceGasCeilingHasNoTeeth;
+    } else |_| {}
+}
+
 test "conformance corpus files have sidecars or explicit skips" {
     try runner.checkCorpusSidecars(testing.allocator, types.CONFORMANCE_DIR_REL);
 }

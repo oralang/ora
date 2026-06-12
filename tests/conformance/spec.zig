@@ -62,6 +62,7 @@ const CallBuilder = struct {
     returns: ?types.ExpectedOutcome = null,
     reverts: ?types.ExpectedOutcome = null,
     succeeds: ?types.ExpectedOutcome = null,
+    gas_max: ?u64 = null,
     storage: std.ArrayList(types.StorageAssertion) = .{},
     logs: std.ArrayList(types.LogAssertion) = .{},
 
@@ -92,6 +93,7 @@ const CallBuilder = struct {
             .value = self.value orelse return error.MissingRequiredField,
             .args = args,
             .outcome = expected_outcome,
+            .gas_max = self.gas_max,
             .storage = storage,
             .logs = logs,
         };
@@ -137,6 +139,7 @@ const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "returns", .present },
     .{ "reverts", .present },
     .{ "succeeds", .present },
+    .{ "gas_max", .present },
 });
 const storage_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "slot", .present },
@@ -270,7 +273,7 @@ fn ParsedField(comptime field_name: []const u8, comptime FieldType: type) type {
         .optional => |opt| opt.child,
         else => @compileError("conformance spec field must be optional: " ++ field_name),
     };
-    if (child == types.Address or child == u256 or child == []types.ArgValue or child == []const u8 or child == []u256 or child == []u8 or child == types.ExpectedOutcome) {
+    if (child == types.Address or child == u256 or child == u64 or child == []types.ArgValue or child == []const u8 or child == []u256 or child == []u8 or child == types.ExpectedOutcome) {
         return child;
     }
     @compileError("missing conformance spec parser for field: " ++ field_name);
@@ -293,6 +296,11 @@ fn assignField(comptime Builder: type, allocator: std.mem.Allocator, builder: *B
             try slots.parseSlotExpressionValue(value)
         else
             try abi.parseU256(value);
+        return;
+    }
+    if (Parsed == u64) {
+        const parsed = try abi.parseU256(value);
+        @field(builder.*, field_name) = std.math.cast(u64, parsed) orelse return error.ValueOutOfRange;
         return;
     }
     if (Parsed == []types.ArgValue) {

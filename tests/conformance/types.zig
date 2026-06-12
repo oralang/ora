@@ -69,6 +69,7 @@ pub const CallSpec = struct {
     value: u256,
     args: []ArgValue,
     outcome: ExpectedOutcome,
+    gas_max: ?u64,
     storage: []StorageAssertion,
     logs: []LogAssertion,
 

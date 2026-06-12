@@ -315,6 +315,9 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
             .gas = types.DEFAULT_GAS,
         } });
         try host.check();
+        if (call.gas_max) |max| {
+            try testing.expect(result.gasConsumed(types.DEFAULT_GAS) <= max);
+        }
 
         switch (call.outcome) {
             .returns_empty => {
@@ -331,12 +334,12 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
                 if (try abi.isSingleStaticWord(allocator, fa.outputs[0])) {
                     try testing.expectEqual(@as(usize, 32), result.output.len);
                     try abi.expectStaticReturn(fa.outputs[0], expected.value, result.output[0..32]);
-                    continue;
+                } else {
+                    const expected_args = [_]types.ArgValue{expected.value};
+                    const expected_output = try abi.encodeArgs(allocator, fa.outputs, &expected_args);
+                    defer allocator.free(expected_output);
+                    try testing.expectEqualSlices(u8, expected_output, result.output);
                 }
-                const expected_args = [_]types.ArgValue{expected.value};
-                const expected_output = try abi.encodeArgs(allocator, fa.outputs, &expected_args);
-                defer allocator.free(expected_output);
-                try testing.expectEqualSlices(u8, expected_output, result.output);
             },
             .succeeds_any => {
                 try testing.expect(result.success);
