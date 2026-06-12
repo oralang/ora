@@ -383,6 +383,33 @@ test "OraToSIR handles residual cast worklist entries erased by an earlier cast"
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
 }
 
+test "OraToSIR masks unsigned materialization widths above u64" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @mask_u128(%arg0: i128) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : i128 to !sir.u256
+        \\    sir.iret %0
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "340282366920938463463374607431768211455"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.and"));
+}
+
 test "OraToSIR rejects generic aggregate to scalar cast fallback" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);

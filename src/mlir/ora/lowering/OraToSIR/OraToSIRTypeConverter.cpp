@@ -65,20 +65,7 @@ static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
 {
     if (width >= 256)
         return Value();
-    auto u256 = sir::U256Type::get(builder.getContext());
-    auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-    if (width == 64)
-    {
-        auto attr = mlir::IntegerAttr::get(ui64Type, std::numeric_limits<uint64_t>::max());
-        return builder.create<sir::ConstOp>(loc, u256, attr);
-    }
-    if (width < 64)
-    {
-        uint64_t mask = (width == 0) ? 0ULL : ((1ULL << width) - 1ULL);
-        auto attr = mlir::IntegerAttr::get(ui64Type, mask);
-        return builder.create<sir::ConstOp>(loc, u256, attr);
-    }
-    return Value();
+    return lowering::constU256(builder, loc, llvm::APInt::getLowBitsSet(256, width));
 }
 
 namespace mlir
