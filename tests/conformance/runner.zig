@@ -39,6 +39,19 @@ pub const PropertyRuntime = struct {
         try self.host.check();
         return result;
     }
+
+    /// Send raw calldata bytes (no ABI encoding) — for the structured fuzzer.
+    pub fn callRaw(self: *PropertyRuntime, calldata: []const u8) !types.Evm.CallResult {
+        const result = self.evm.call(.{ .call = .{
+            .caller = self.caller,
+            .to = self.contract_address,
+            .value = 0,
+            .input = calldata,
+            .gas = types.DEFAULT_GAS,
+        } });
+        try self.host.check();
+        return result;
+    }
 };
 
 pub fn runOraEmit(allocator: std.mem.Allocator, source_path: []const u8, output_dir: []const u8) !void {

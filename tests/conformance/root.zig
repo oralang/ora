@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 
 const abi = @import("abi.zig");
+const fuzz = @import("fuzz.zig");
 const properties = @import("properties.zig");
 const runner = @import("runner.zig");
 const slots = @import("slots.zig");
@@ -10,6 +11,19 @@ const types = @import("types.zig");
 
 test "conformance properties execute and catch planted failures" {
     try properties.run(testing.allocator);
+}
+
+test "structured ABI fuzzer rejects malformed calldata (T2.3)" {
+    try fuzz.run(testing.allocator);
+}
+
+test "structured ABI fuzzer detects acceptance (teeth)" {
+    fuzz.runTeeth(testing.allocator) catch |err| switch (err) {
+        error.SkipZigTest => return error.SkipZigTest,
+        error.FuzzAcceptedMalformedCalldata => return, // expected: teeth fired
+        else => return err,
+    };
+    return error.FuzzTeethDidNotFire;
 }
 
 // Suite self-test (gap #6): prove the conformance layer has teeth — a correct
