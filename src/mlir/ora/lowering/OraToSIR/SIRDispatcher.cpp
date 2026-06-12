@@ -248,7 +248,7 @@ namespace mlir
                        kind == StrictDynamicCalldataKind::FixedBytesArray;
             }
 
-            static lowering::AbiDecodeError strictDynamicCalldataInvalidElementError(StrictDynamicCalldataKind kind)
+            static FailureOr<lowering::AbiDecodeError> strictDynamicCalldataInvalidElementError(StrictDynamicCalldataKind kind)
             {
                 switch (kind)
                 {
@@ -260,9 +260,9 @@ namespace mlir
                     return lowering::AbiDecodeError::InvalidFixedBytes;
                 case StrictDynamicCalldataKind::BytesLike:
                 case StrictDynamicCalldataKind::U256Array:
-                    llvm_unreachable("dynamic kind has no per-word element validation error");
+                    return failure();
                 }
-                llvm_unreachable("unknown strict dynamic calldata kind");
+                return failure();
             }
 
             template <typename AddBlock, typename GetRevertBlock, typename GetBufferSize, typename MaterializeBase, typename ReadDynamicLen>
@@ -1875,14 +1875,16 @@ namespace mlir
 
                                 builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
                                 Value validElements = wordArrayValidateDoneBlock->getArgument(0);
-                                const lowering::AbiDecodeError invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                if (failed(invalidElementError))
+                                    return failure();
                                 builder.create<sir::CondBrOp>(
                                     initLoc,
                                     validElements,
                                     ValueRange{},
                                     ValueRange{},
                                     doneBlock,
-                                    getInitAbiDecodeRevertBlock(invalidElementError));
+                                    getInitAbiDecodeRevertBlock(*invalidElementError));
                             }
 
                             if (kind == StrictDynamicCalldataKind::FixedBytesArray)
@@ -2461,14 +2463,16 @@ namespace mlir
 
                                     builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
                                     Value validElements = wordArrayValidateDoneBlock->getArgument(0);
-                                    const lowering::AbiDecodeError invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    if (failed(invalidElementError))
+                                        return failure();
                                     builder.create<sir::CondBrOp>(
                                         caseDecodeLoc,
                                         validElements,
                                         ValueRange{},
                                         ValueRange{},
                                         copyBlock,
-                                        getAbiDecodeRevertBlock(invalidElementError));
+                                        getAbiDecodeRevertBlock(*invalidElementError));
                                 }
 
                                 builder.setInsertionPointToEnd(copyBlock);
@@ -2740,14 +2744,16 @@ namespace mlir
 
                                     builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
                                     Value validElements = wordArrayValidateDoneBlock->getArgument(0);
-                                    const lowering::AbiDecodeError invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    if (failed(invalidElementError))
+                                        return failure();
                                     builder.create<sir::CondBrOp>(
                                         caseDecodeLoc,
                                         validElements,
                                         ValueRange{},
                                         ValueRange{},
                                         doneBlock,
-                                        getAbiDecodeRevertBlock(invalidElementError));
+                                        getAbiDecodeRevertBlock(*invalidElementError));
                                 }
 
                                 if (kind == StrictDynamicCalldataKind::BytesLike && info.permissiveAbiDecode)
@@ -3054,14 +3060,16 @@ namespace mlir
 
                                         builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
                                         Value validElements = wordArrayValidateDoneBlock->getArgument(0);
-                                        const lowering::AbiDecodeError invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                        FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                        if (failed(invalidElementError))
+                                            return failure();
                                         builder.create<sir::CondBrOp>(
                                             caseDecodeLoc,
                                             validElements,
                                             ValueRange{},
                                             ValueRange{},
                                             copyBlock,
-                                            getAbiDecodeRevertBlock(invalidElementError));
+                                            getAbiDecodeRevertBlock(*invalidElementError));
                                     }
 
                                     builder.setInsertionPointToEnd(copyBlock);
