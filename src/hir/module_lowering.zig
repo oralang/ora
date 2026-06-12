@@ -207,7 +207,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             caller_contract_id: ?ast.ItemId,
         ) anyerror!?[]const u8 {
             if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
-                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.trait_name, impl_item.target_name, call, null);
+                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.trait_name, impl_item.target_name, call, null, null);
                 return symbol_name;
             }
             const scoped_contract_id = if (function.parent_contract == null) caller_contract_id else null;
@@ -394,23 +394,34 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             target_name: []const u8,
             call: ?ast.CallExpr,
             parent_block_override: ?mlir.MlirBlock,
+            caller_contract_id: ?ast.ItemId,
         ) anyerror![]const u8 {
             const base_symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
+            const scoped_symbol_name = if (caller_contract_id) |contract_id|
+                try @This().scopedFunctionSymbolName(self, contract_id, base_symbol_name)
+            else
+                base_symbol_name;
             const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name, self.module_body);
             if (function.is_generic) {
-                const method_call = call orelse return base_symbol_name;
-                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return base_symbol_name;
+                const method_call = call orelse return scoped_symbol_name;
+                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return scoped_symbol_name;
                 const runtime_parameters = try self.runtimeFunctionParameters(function);
-                const symbol_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+                const symbol_name = try self.mangleGenericFunctionName(scoped_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
+                    const previous_impl_contract_scope = self.active_impl_contract_scope;
+                    self.active_impl_contract_scope = caller_contract_id;
+                    defer self.active_impl_contract_scope = previous_impl_contract_scope;
                     try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, null, null);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 return symbol_name;
             }
 
-            const symbol_name = base_symbol_name;
+            const symbol_name = scoped_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
+                const previous_impl_contract_scope = self.active_impl_contract_scope;
+                self.active_impl_contract_scope = caller_contract_id;
+                defer self.active_impl_contract_scope = previous_impl_contract_scope;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }

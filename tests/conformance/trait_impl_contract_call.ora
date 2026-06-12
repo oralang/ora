@@ -1,0 +1,39 @@
+trait Priced {
+    fn raw(self) -> u256;
+    fn with_fee(self, fee: u256) -> u256;
+    fn base() -> u256;
+}
+
+struct Quote {
+    amount: u256,
+}
+
+impl Priced for Quote {
+    fn raw(self) -> u256 {
+        return self.amount;
+    }
+
+    fn with_fee(self, fee: u256) -> u256 {
+        return self.raw();
+    }
+
+    fn base() -> u256 {
+        return 7;
+    }
+}
+
+contract TraitImplContractCall {
+    pub fn read(amount: u256) -> u256 {
+        let q: Quote = Quote { amount: amount };
+        return q.raw();
+    }
+
+    pub fn add_fee(amount: u256, fee: u256) -> u256 {
+        let q: Quote = Quote { amount: amount };
+        return q.with_fee(fee);
+    }
+
+    pub fn static_base() -> u256 {
+        return Quote.base();
+    }
+}

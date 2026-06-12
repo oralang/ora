@@ -364,6 +364,7 @@ const Lowerer = struct {
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
+    active_impl_contract_scope: ?ast.ItemId = null,
     current_statement_id: ?ast.StmtId = null,
     current_synthetic_index: ?u32 = null,
     current_synthetic_count: ?u32 = null,

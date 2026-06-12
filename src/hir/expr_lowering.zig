@@ -2313,6 +2313,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
+                @This().currentContractItemId(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -2448,6 +2449,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
+                @This().currentContractItemId(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -2614,7 +2616,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn currentContractParentBlock(self: *FunctionLowerer) ?mlir.MlirBlock {
             const function = self.function orelse return null;
-            const contract_id = function.parent_contract orelse return null;
+            const contract_id = function.parent_contract orelse self.parent.active_impl_contract_scope orelse return null;
             const block = self.parent.contract_body_blocks[contract_id.index()];
             if (mlir.oraBlockIsNull(block)) return null;
             return block;
@@ -2622,7 +2624,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn currentContractItemId(self: *FunctionLowerer) ?ast.ItemId {
             const function = self.function orelse return null;
-            return function.parent_contract;
+            return function.parent_contract orelse self.parent.active_impl_contract_scope;
         }
 
         fn calleeFunctionItem(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.FunctionItem {

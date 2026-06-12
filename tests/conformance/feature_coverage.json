@@ -72,6 +72,14 @@
       ]
     },
     {
+      "id": "dispatcher.narrow_error_union_return",
+      "area": "dispatcher_abi",
+      "behavior": "Narrow error-union dispatcher returns preserve bool Ok values and custom-error reverts",
+      "specs": [
+        "tests/conformance/dispatcher_narrow_error_union_return.spec.toml"
+      ]
+    },
+    {
       "id": "dispatcher.abi_roundtrip_static_types",
       "area": "dispatcher_abi",
       "behavior": "encode->call->decode identity for u256/i16/address/bool/bytes4/uint256[]",
@@ -396,7 +404,10 @@
     {
       "id": "traits.monomorphized_methods",
       "area": "traits_generics",
-      "skip": "BLOCKED: trait-impl methods cannot be called from contract fns at all (FINDINGS.md F-005, lowering gap) - spec ready to restore on fix"
+      "behavior": "Contract functions can call concrete trait impl receiver methods, including nested self-calls inside the impl body",
+      "specs": [
+        "tests/conformance/trait_impl_contract_call.spec.toml"
+      ]
     },
     {
       "id": "generics.comptime_instantiation",
