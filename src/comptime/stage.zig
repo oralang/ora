@@ -34,7 +34,7 @@ pub const Stage = enum {
         return switch (self) {
             .comptime_only => "comptime-only operation cannot be used at runtime",
             .runtime_only => "runtime-only operation cannot be used at comptime",
-            .comptime_ok => unreachable,
+            .comptime_ok => "operation is valid at comptime and runtime",
         };
     }
 };

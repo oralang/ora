@@ -3993,6 +3993,26 @@ const ConstEvaluator = struct {
         };
     }
 
+    fn compoundAssignBinaryOp(op: ast.AssignmentOp) ?ast.BinaryOp {
+        return switch (op) {
+            .add_assign => .add,
+            .sub_assign => .sub,
+            .mul_assign => .mul,
+            .div_assign => .div,
+            .mod_assign => .mod,
+            .bit_and_assign => .bit_and,
+            .bit_or_assign => .bit_or,
+            .bit_xor_assign => .bit_xor,
+            .shl_assign => .shl,
+            .shr_assign => .shr,
+            .pow_assign => .pow,
+            .wrapping_add_assign => .wrapping_add,
+            .wrapping_sub_assign => .wrapping_sub,
+            .wrapping_mul_assign => .wrapping_mul,
+            .assign => null,
+        };
+    }
+
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
         const rhs_const = try self.evalExprUncached(assign.value);
         const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse blk: {
@@ -4006,23 +4026,8 @@ const ConstEvaluator = struct {
                     return rhs_const;
                 }
                 const rhs = rhs_const orelse (try ctValueToConstValue(self.allocator, &self.env.heap, rhs_ct)) orelse return null;
-                const value = switch (assign.op) {
-                    .add_assign => (try evalBinary(self.allocator, .add, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .sub_assign => (try evalBinary(self.allocator, .sub, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .mul_assign => (try evalBinary(self.allocator, .mul, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .div_assign => (try evalBinary(self.allocator, .div, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .mod_assign => (try evalBinary(self.allocator, .mod, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_and_assign => (try evalBinary(self.allocator, .bit_and, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_or_assign => (try evalBinary(self.allocator, .bit_or, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_xor_assign => (try evalBinary(self.allocator, .bit_xor, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .shl_assign => (try evalBinary(self.allocator, .shl, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .shr_assign => (try evalBinary(self.allocator, .shr, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .pow_assign => (try evalBinary(self.allocator, .pow, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_add_assign => (try evalBinary(self.allocator, .wrapping_add, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_sub_assign => (try evalBinary(self.allocator, .wrapping_sub, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_mul_assign => (try evalBinary(self.allocator, .wrapping_mul, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .assign => unreachable,
-                };
+                const op = compoundAssignBinaryOp(assign.op) orelse return null;
+                const value = (try evalBinary(self.allocator, op, try self.readBoundName(name.name), rhs)) orelse return null;
                 const ct_value = (try self.constValueToCtValue(value)) orelse return null;
                 try self.env.set(name.name, ct_value);
                 return value;
@@ -4060,23 +4065,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4090,23 +4080,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4125,23 +4100,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current_value = current orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current_value, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current_value, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current_value, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current_value, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current_value, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current_value, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current_value, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current_value, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current_value, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current_value, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current_value, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current_value, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current_value, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current_value, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current_value, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4159,7 +4119,7 @@ const ConstEvaluator = struct {
                         }
                         return null;
                     },
-                    else => unreachable,
+                    else => return null,
                 });
             },
             .Field => |field| {
@@ -4176,23 +4136,8 @@ const ConstEvaluator = struct {
                     else => blk_op: {
                         const rhs = rhs_const orelse break :blk_op null;
                         const current = (try ctValueToConstValue(self.allocator, &self.env.heap, current_field)) orelse break :blk_op null;
-                        const computed = switch (assign.op) {
-                            .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                            .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                            .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                            .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                            .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                            .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                            .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                            .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                            .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                            .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                            .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                            .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                            .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                            .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                            .assign => unreachable,
-                        } orelse break :blk_op null;
+                        const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                        const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                         break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                     },
                 } orelse return null;
@@ -4286,13 +4231,21 @@ const ConstEvaluator = struct {
                 if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
             },
             .Assign => |assign| _ = self.evalExpr(assign.value) catch null,
+            .VariableDecl => |decl| {
+                if (decl.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+            },
+            .Return => |ret| {
+                if (ret.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+            },
+            .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
+            .Block => |block_stmt| self.visitBody(block_stmt.body),
+            .LabeledBlock => |labeled| self.visitBody(labeled.body),
             .Log => |log_stmt| {
                 for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
             },
             .Assert => |assert_stmt| _ = self.evalExpr(assert_stmt.condition) catch null,
             .Assume => |assume_stmt| _ = self.evalExpr(assume_stmt.condition) catch null,
             .Lock, .Unlock, .Break, .Continue, .Havoc, .Error => {},
-            .VariableDecl, .Return, .Expr, .Block, .LabeledBlock => unreachable,
         }
     }
 };
