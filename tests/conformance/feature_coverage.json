@@ -354,6 +354,14 @@
       "skip": "unconstrained checked arithmetic is rejected at COMPILE time (verifier SAT -> no bytecode); belongs to the expected-diagnostic negative corpus - T1.5"
     },
     {
+      "id": "verification.falsification_pairing",
+      "area": "verification",
+      "behavior": "Execution falsification (T3.4): the verified ensures(result==a+b) is checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
+      "specs": [
+        "tests/conformance/falsification_arith.spec.toml"
+      ]
+    },
+    {
       "id": "arithmetic.checked_arith_runtime_behavior",
       "area": "arithmetic",
       "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - S1 finding with audit",
