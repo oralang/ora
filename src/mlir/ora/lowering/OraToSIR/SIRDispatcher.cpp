@@ -590,13 +590,12 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value c32 = lowering::constU256(builder, loc, 32);
 
                 if (canonicalAbiLayoutSupportsDynamicArray(layout))
                 {
                     Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(layout)));
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(layout));
                     Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
                     Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
                     return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
@@ -619,14 +618,14 @@ namespace mlir
                     return c32;
                 }
 
-                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
+                Value total = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
                 int64_t headOffset = 0;
                 for (const auto &fieldPtr : layout.children)
                 {
                     const AbiLayoutNode &field = *fieldPtr;
                     if (canonicalAbiLayoutIsDynamic(field))
                     {
-                        Value headOff = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, headOffset));
+                        Value headOff = lowering::constU256(builder, loc, headOffset);
                         Value offPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, headOff);
                         Value relOff = builder.create<sir::LoadOp>(loc, u256Type, offPtr);
                         Value childPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, relOff);
@@ -675,8 +674,6 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
 
                 if (layout.kind == AbiLayoutKind::Static)
                 {
@@ -695,10 +692,7 @@ namespace mlir
                     {
                         if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, *child, sourcePtr, sourceCursor, destPtr, destCursor)))
                             return failure();
-                        Value childBytes = builder.create<sir::ConstOp>(
-                            loc,
-                            u256Type,
-                            IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(*child) * 32));
+                        Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(*child) * 32);
                         sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
                         destCursor = builder.create<sir::AddOp>(loc, u256Type, destCursor, childBytes);
                     }
@@ -711,7 +705,7 @@ namespace mlir
                     int64_t elementSlots = canonicalAbiLayoutHeadSlots(element);
                     if (elementSlots <= 0)
                         return failure();
-                    Value elementBytes = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, elementSlots * 32));
+                    Value elementBytes = lowering::constU256(builder, loc, elementSlots * 32);
                     Value sourceCursor = sourceOffset;
                     Value destCursor = destOffset;
                     for (unsigned i = 0; i < layout.arrayLen; ++i)
@@ -727,11 +721,10 @@ namespace mlir
                 int64_t words = canonicalAbiLayoutHeadSlots(layout);
                 if (words <= 0)
                     return failure();
-                Value bytes = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                Value bytes = lowering::constU256(builder, loc, words * 32);
                 Value src = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceOffset);
                 Value dst = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, destOffset);
                 builder.create<sir::MCopyOp>(loc, dst, src, bytes);
-                (void)c32;
                 return success();
             }
 
@@ -744,8 +737,7 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value c32 = lowering::constU256(builder, loc, 32);
 
                 if (layout.kind == AbiLayoutKind::DynamicBytes)
                 {
@@ -757,7 +749,7 @@ namespace mlir
                 if (canonicalAbiLayoutSupportsDynamicArray(layout))
                 {
                     Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
-                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(*layout.children.front())));
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(*layout.children.front()));
                     Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
                     Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
                     return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
@@ -765,11 +757,8 @@ namespace mlir
 
                 if (canonicalAbiLayoutIsTupleLike(layout))
                 {
-                    Value total = builder.create<sir::ConstOp>(
-                        loc,
-                        u256Type,
-                        IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
-                    Value sourceCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
+                    Value total = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
+                    Value sourceCursor = lowering::constU256(builder, loc, 0);
                     for (const auto &childPtr : layout.children)
                     {
                         const AbiLayoutNode &child = *childPtr;
@@ -784,10 +773,7 @@ namespace mlir
                         }
                         else
                         {
-                            Value childBytes = builder.create<sir::ConstOp>(
-                                loc,
-                                u256Type,
-                                IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(child) * 32));
+                            Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(child) * 32);
                             sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
                         }
                     }
@@ -795,10 +781,7 @@ namespace mlir
                 }
 
                 int64_t words = canonicalAbiLayoutHeadSlots(layout);
-                return builder.create<sir::ConstOp>(
-                    loc,
-                    u256Type,
-                    IntegerAttr::get(i64Type, (words > 0 ? words : 1) * 32));
+                return lowering::constU256(builder, loc, (words > 0 ? words : 1) * 32);
             }
 
             static LogicalResult emitPointerBackedAbiEncoding(
@@ -811,8 +794,7 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value c32 = lowering::constU256(builder, loc, 32);
 
                 if (layout.kind == AbiLayoutKind::DynamicBytes)
                 {
@@ -828,7 +810,7 @@ namespace mlir
                 if (canonicalAbiLayoutSupportsDynamicArray(layout))
                 {
                     Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
-                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, canonicalAbiLayoutStaticElementWordCount(*layout.children.front())));
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(*layout.children.front()));
                     Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
                     Value payloadBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
                     builder.create<sir::StoreOp>(loc, destPtr, length);
@@ -840,12 +822,9 @@ namespace mlir
 
                 if (canonicalAbiLayoutIsTupleLike(layout))
                 {
-                    Value tailOffset = builder.create<sir::ConstOp>(
-                        loc,
-                        u256Type,
-                        IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(layout) * 32));
-                    Value sourceCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
-                    Value headCursor = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0));
+                    Value tailOffset = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
+                    Value sourceCursor = lowering::constU256(builder, loc, 0);
+                    Value headCursor = lowering::constU256(builder, loc, 0);
                     for (const auto &childPtr : layout.children)
                     {
                         const AbiLayoutNode &child = *childPtr;
@@ -869,10 +848,7 @@ namespace mlir
                         {
                             if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, child, sourcePtr, sourceCursor, destPtr, headCursor)))
                                 return failure();
-                            Value childBytes = builder.create<sir::ConstOp>(
-                                loc,
-                                u256Type,
-                                IntegerAttr::get(i64Type, canonicalAbiLayoutHeadSlots(child) * 32));
+                            Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(child) * 32);
                             sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
                             headCursor = builder.create<sir::AddOp>(loc, u256Type, headCursor, childBytes);
                         }
@@ -886,9 +862,9 @@ namespace mlir
                     ctx,
                     layout,
                     sourcePtr,
-                    builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0)),
+                    lowering::constU256(builder, loc, 0),
                     destPtr,
-                    builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 0)));
+                    lowering::constU256(builder, loc, 0));
             }
 
             static FailureOr<AbiReturnBuffer> materializeSingleDynamicTupleAbiReturn(
@@ -900,8 +876,7 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value wordSize = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value wordSize = lowering::constU256(builder, loc, 32);
                 Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
                 Value tupleSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, sourcePtr, layout);
                 Value size = builder.create<sir::AddOp>(loc, u256Type, wordSize, tupleSize);
@@ -922,9 +897,8 @@ namespace mlir
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-                Value wordSize = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
-                Value twoWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 64));
+                Value wordSize = lowering::constU256(builder, loc, 32);
+                Value twoWords = lowering::constU256(builder, loc, 64);
                 Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
                 Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
                 Value payloadBytes = byteLengthPayload
@@ -977,13 +951,11 @@ namespace mlir
                 uint64_t paramCount = 0;
             };
 
-            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *ctx, uint32_t selector)
+            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *, uint32_t selector)
             {
-                auto u256Type = sir::U256Type::get(ctx);
-                auto u256IntType = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
                 llvm::APInt selectorWord(256, selector);
                 selectorWord = selectorWord.shl(224);
-                return builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(u256IntType, selectorWord));
+                return lowering::constU256(builder, loc, selectorWord);
             }
 
             struct SIRDispatcherPass : public PassWrapper<SIRDispatcherPass, OperationPass<ModuleOp>>

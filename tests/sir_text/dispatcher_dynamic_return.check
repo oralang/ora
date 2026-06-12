@@ -22,11 +22,10 @@
 // CHECK: v[[HEAD_OFFSET:[0-9]+]] = const 0x20
 // CHECK: v[[TAIL_OFFSET:[0-9]+]] = const 0x40
 // CHECK: v[[NAME_LEN:[0-9]+]] = mload256 v[[NAME_PTR]]
-// CHECK: v[[WORD_SIZE:[0-9]+]] = const 0x20
 // CHECK: v[[PAD_MASK:[0-9]+]] = const 0x1F
 // CHECK: v[[LEN_PLUS_PAD:[0-9]+]] = add v[[NAME_LEN]] v[[PAD_MASK]]
-// CHECK: v[[WORD_COUNT:[0-9]+]] = div v[[LEN_PLUS_PAD]] v[[WORD_SIZE]]
-// CHECK: v[[PADDED_LEN:[0-9]+]] = mul v[[WORD_COUNT]] v[[WORD_SIZE]]
+// CHECK: v[[WORD_COUNT:[0-9]+]] = div v[[LEN_PLUS_PAD]] v[[HEAD_OFFSET]]
+// CHECK: v[[PADDED_LEN:[0-9]+]] = mul v[[WORD_COUNT]] v[[HEAD_OFFSET]]
 // CHECK: v[[TOTAL_LEN:[0-9]+]] = add v[[TAIL_OFFSET]] v[[PADDED_LEN]]
 // CHECK: v[[RET_BUF:[0-9]+]] = mallocany v[[TOTAL_LEN]]
 // CHECK: mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]

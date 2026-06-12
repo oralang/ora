@@ -23,11 +23,12 @@
 // CHECK: return v[[RET]] v[[TOTAL]]
 
 // CHECK-LABEL:     echoQuote_exec {
-// CHECK: v[[TUPLE_PTR:[0-9]+]] v[[TUPLE_SIZE:[0-9]+]] = icall @echoQuote
 // CHECK: v[[OUTER_OFFSET:[0-9]+]] = const 0x20
+// CHECK: v[[TUPLE_PTR:[0-9]+]] v[[TUPLE_SIZE:[0-9]+]] = icall @echoQuote
 // CHECK: v[[TUPLE_HEAD_BYTES:[0-9]+]] = const 0x40
 // CHECK: v[[ZERO:[0-9]+]] = const 0x0
-// CHECK: v[[STRING_SOURCE_SLOT:[0-9]+]] = add v[[TUPLE_PTR]]
+// CHECK: v[[STRING_SOURCE_OFFSET:[0-9]+]] = add v[[ZERO]] v[[OUTER_OFFSET]]
+// CHECK: v[[STRING_SOURCE_SLOT:[0-9]+]] = add v[[TUPLE_PTR]] v[[STRING_SOURCE_OFFSET]]
 // CHECK: v[[STRING_PTR:[0-9]+]] = mload256 v[[STRING_SOURCE_SLOT]]
 // CHECK: v[[STRING_LEN:[0-9]+]] = mload256 v[[STRING_PTR]]
 // CHECK: v[[PAD_MASK:[0-9]+]] = const 0x1F
