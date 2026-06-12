@@ -26,6 +26,7 @@ const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
 const parseIntLiteral = support.parseIntLiteral;
+const reprIntegerType = support.reprIntegerType;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
 const LocalId = hir_locals.LocalId;
@@ -1846,7 +1847,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const target_type = if (decl.type_expr) |type_expr|
                 self.parent.lowerTypeExpr(type_expr)
             else switch (known_value) {
-                .integer => defaultIntegerType(self.parent.context),
+                .integer => reprIntegerType(self.parent.context),
                 .boolean => boolType(self.parent.context),
             };
             const loc = self.parent.location(decl.range);

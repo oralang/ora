@@ -703,14 +703,14 @@ const Lowerer = struct {
 
     pub fn lowerSemaType(self: *Lowerer, ty: sema.Type, range: source.TextRange) mlir.MlirType {
         return switch (ty) {
-            .never => support.defaultIntegerType(self.context),
+            .never => support.reprIntegerType(self.context),
             .bool => support.boolType(self.context),
             .integer => |integer| support.lowerIntegerType(self.context, integer),
             .comptime_integer => self.recordTypeFallback(.unsupported_syntax_type, range),
             .address => support.addressType(self.context),
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
-            .fixed_bytes => support.defaultIntegerType(self.context),
+            .fixed_bytes => support.reprIntegerType(self.context),
             .external_proxy => support.addressType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
             .array => |array| blk: {
@@ -725,11 +725,17 @@ const Lowerer = struct {
                 break :blk support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), @intCast(len));
             },
             .slice => |slice| support.sliceMemRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),
-            .map => |map| mlir.oraMapTypeGet(
-                self.context,
-                if (map.key_type) |key| self.lowerSemaType(key.*, range) else support.defaultIntegerType(self.context),
-                if (map.value_type) |value| self.lowerSemaType(value.*, range) else support.defaultIntegerType(self.context),
-            ),
+            .map => |map| blk: {
+                const key_type = if (map.key_type) |key|
+                    self.lowerSemaType(key.*, range)
+                else
+                    self.recordTypeFallback(.unsupported_syntax_type, range);
+                const value_type = if (map.value_type) |value|
+                    self.lowerSemaType(value.*, range)
+                else
+                    self.recordTypeFallback(.unsupported_syntax_type, range);
+                break :blk mlir.oraMapTypeGet(self.context, key_type, value_type);
+            },
             .refinement => |refinement| blk: {
                 const base_type = refinement.base_type.*;
                 if (base_type == .named) {
@@ -747,7 +753,7 @@ const Lowerer = struct {
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
-            .bitfield => support.defaultIntegerType(self.context),
+            .bitfield => support.reprIntegerType(self.context),
             .enum_ => |named| self.lowerEnumSemaType(named.name, range),
             .named => |named| if (self.substitutedType(named.name)) |substituted|
                 self.lowerSemaType(substituted, range)
@@ -815,15 +821,15 @@ const Lowerer = struct {
         if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
             if (enumInstHasPayload(instantiated)) return self.lowerInstantiatedEnumAdtType(instantiated, range);
             if (instantiated.repr_type) |repr| return self.lowerSemaType(repr, range);
-            return support.defaultIntegerType(self.context);
+            return support.reprIntegerType(self.context);
         }
-        const item_id = self.item_index.lookup(name) orelse return support.defaultIntegerType(self.context);
+        const item_id = self.item_index.lookup(name) orelse return self.recordTypeFallback(.unsupported_syntax_type, range);
         const enum_item = switch (self.file.item(item_id).*) {
             .Enum => |enum_item| enum_item,
-            else => return support.defaultIntegerType(self.context),
+            else => return self.recordTypeFallback(.unsupported_syntax_type, range),
         };
         if (enumItemHasPayload(enum_item)) return self.lowerEnumAdtType(enum_item, range);
-        const base_type = enum_item.base_type orelse return support.defaultIntegerType(self.context);
+        const base_type = enum_item.base_type orelse return support.reprIntegerType(self.context);
         const repr = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, base_type) catch
             return self.recordTypeFallback(.unsupported_syntax_type, range);
         return self.lowerSemaType(repr, range);
@@ -951,7 +957,7 @@ const Lowerer = struct {
         }
         if (self.item_index.lookup(name)) |item_id| {
             switch (self.file.item(item_id).*) {
-                .Bitfield => return support.defaultIntegerType(self.context),
+                .Bitfield => return support.reprIntegerType(self.context),
                 else => {},
             }
         }
@@ -1374,7 +1380,7 @@ const Lowerer = struct {
                 .range = range,
             },
         }) catch {};
-        return support.defaultIntegerType(self.context);
+        return support.unknownTypeFallbackI256(self.context);
     }
 
     pub fn recordPlaceholder(self: *Lowerer) void {

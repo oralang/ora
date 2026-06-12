@@ -96,7 +96,7 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     if (std.mem.eql(u8, trimmed, "string")) return stringType(ctx);
     if (std.mem.eql(u8, trimmed, "bytes")) return bytesType(ctx);
     if (std.mem.eql(u8, trimmed, "void")) return mlir.oraNoneTypeCreate(ctx);
-    if (type_builtin.parseFixedBytesName(trimmed) != null) return defaultIntegerType(ctx);
+    if (type_builtin.parseFixedBytesName(trimmed) != null) return reprIntegerType(ctx);
     if (parseBuiltinIntegerType(trimmed)) |int_info| {
         return mlir.oraIntegerTypeCreate(ctx, int_info.bits);
     }
@@ -110,7 +110,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: s
         .address => addressType(ctx),
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
-        .fixed_bytes => defaultIntegerType(ctx),
+        .fixed_bytes => reprIntegerType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
         .array => |array| blk: {
             const len = array.len orelse return error.UnresolvedArrayLength;
@@ -120,15 +120,15 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: s
         .slice => |slice| sliceMemRefType(ctx, try lowerTypeDescriptor(ctx, slice.element_type.*, allocator)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,
-            if (map.key_type) |key| try lowerTypeDescriptor(ctx, key.*, allocator) else defaultIntegerType(ctx),
-            if (map.value_type) |value| try lowerTypeDescriptor(ctx, value.*, allocator) else defaultIntegerType(ctx),
+            if (map.key_type) |key| try lowerTypeDescriptor(ctx, key.*, allocator) else return error.UnresolvedMapKeyType,
+            if (map.value_type) |value| try lowerTypeDescriptor(ctx, value.*, allocator) else return error.UnresolvedMapValueType,
         ),
         .refinement => |refinement| try lowerRefinementType(ctx, refinement, allocator),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.
-        .bitfield => defaultIntegerType(ctx),
-        .enum_ => defaultIntegerType(ctx),
+        .bitfield => reprIntegerType(ctx),
+        .enum_ => reprIntegerType(ctx),
         .named => |named| lowerPathType(ctx, named.name),
         .error_union => |error_union| blk: {
             const error_types = try allocator.alloc(mlir.MlirType, error_union.error_types.len);
@@ -143,7 +143,7 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: s
                 if (error_union.error_types.len == 0) null else error_types.ptr,
             );
         },
-        else => defaultIntegerType(ctx),
+        else => error.UnsupportedTypeDescriptor,
     };
 }
 
@@ -184,7 +184,7 @@ pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: m
         },
         .exact => mlir.oraExactTypeGet(ctx, base_type),
         .non_zero_address => mlir.oraNonZeroAddressTypeGet(ctx),
-        .non_zero, .basis_points => unreachable,
+        .non_zero, .basis_points => null,
     };
 }
 
@@ -217,7 +217,7 @@ test "HIR refinement type builder follows registry native type classification" {
     const ctx = try createContext();
     defer mlir.oraContextDestroy(ctx);
 
-    const base_type = defaultIntegerType(ctx);
+    const base_type = reprIntegerType(ctx);
     const type_arg: RefinementArg = .{ .Type = {} };
     const min_arg: RefinementArg = .{ .Integer = .{ .text = "1" } };
 
@@ -225,6 +225,22 @@ test "HIR refinement type builder follows registry native type classification" {
 
     const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));
+}
+
+test "HIR type descriptor lowering separates representation integers from unresolved map fallbacks" {
+    const ctx = try createContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const fixed_bytes_type: Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const fixed_bytes_repr = try lowerTypeDescriptor(ctx, fixed_bytes_type, std.testing.allocator);
+    try std.testing.expect(mlir.oraTypeIsAInteger(fixed_bytes_repr));
+
+    const u256_type: Type = .{ .integer = .{ .signed = false, .bits = 256, .spelling = "u256" } };
+    const missing_key_map: Type = .{ .map = .{ .key_type = null, .value_type = &u256_type } };
+    try std.testing.expectError(error.UnresolvedMapKeyType, lowerTypeDescriptor(ctx, missing_key_map, std.testing.allocator));
+
+    const missing_value_map: Type = .{ .map = .{ .key_type = &u256_type, .value_type = null } };
+    try std.testing.expectError(error.UnresolvedMapValueType, lowerTypeDescriptor(ctx, missing_value_map, std.testing.allocator));
 }
 
 test "HIR refinement type builder preserves negative bounds as u256 two's-complement limbs" {
@@ -355,7 +371,7 @@ fn operationIsKnownBlockTerminator(op: mlir.MlirOperation) bool {
 }
 
 pub fn createIntegerConstant(ctx: mlir.MlirContext, loc: mlir.MlirLocation, ty: mlir.MlirType, value: i64) mlir.MlirOperation {
-    const concrete_type = if (mlir.oraTypeIsAddressType(ty)) defaultIntegerType(ctx) else ty;
+    const concrete_type = if (mlir.oraTypeIsAddressType(ty)) reprIntegerType(ctx) else ty;
     const attr = mlir.oraIntegerAttrCreateI64FromType(concrete_type, value);
     return mlir.oraArithConstantOpCreate(ctx, loc, concrete_type, attr);
 }
@@ -371,6 +387,14 @@ pub fn zeroInitAttr(ty: mlir.MlirType) mlir.MlirAttribute {
 }
 
 pub fn defaultIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
+    return reprIntegerType(ctx);
+}
+
+pub fn unknownTypeFallbackI256(ctx: mlir.MlirContext) mlir.MlirType {
+    return reprIntegerType(ctx);
+}
+
+pub fn reprIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, 256);
 }
 

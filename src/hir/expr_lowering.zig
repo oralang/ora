@@ -23,7 +23,6 @@ const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
 const defaultIntegerType = support.defaultIntegerType;
 const exprRange = support.exprRange;
-const lowerTypeDescriptor = support.lowerTypeDescriptor;
 const nullStringRef = support.nullStringRef;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
@@ -202,7 +201,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     defer self.parent.allocator.free(values);
                     for (elements, 0..) |element, index| {
                         const element_sema_type = tuple_types[index];
-                        const element_type = try lowerTypeDescriptor(self.parent.context, element_sema_type, self.parent.allocator);
+                        const element_type = self.parent.lowerSemaType(element_sema_type, source.TextRange.empty(0));
                         values[index] = (try @This().lowerPersistedConstValue(self, element, element_sema_type, element_type, loc)) orelse break :blk null;
                     }
                     const op = mlir.oraTupleCreateOpCreate(self.parent.context, loc, values.ptr, values.len, tuple_result_type);

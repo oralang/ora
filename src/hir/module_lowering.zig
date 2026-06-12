@@ -21,6 +21,7 @@ const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
 const strRef = support.strRef;
 const zeroInitAttr = support.zeroInitAttr;
+const reprIntegerType = support.reprIntegerType;
 
 pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSymbolKind: type) type {
     return struct {
@@ -161,7 +162,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const repr_type = if (instantiated.repr_type) |resolved|
                 self.lowerSemaType(resolved, template_item.range)
             else
-                defaultIntegerType(self.context);
+                reprIntegerType(self.context);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(instantiated.mangled_name), repr_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
@@ -1205,7 +1206,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn lowerEnumReprType(self: *Lowerer, enum_item: ast.EnumItem) anyerror!mlir.MlirType {
-            const type_expr = enum_item.base_type orelse return defaultIntegerType(self.context);
+            const type_expr = enum_item.base_type orelse return reprIntegerType(self.context);
             return self.lowerSemaType(
                 try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr),
                 enum_item.range,
