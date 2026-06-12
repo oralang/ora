@@ -2060,7 +2060,7 @@ LogicalResult ConvertTStoreGuardOp::matchAndRewrite(
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
 
     rewriter.setInsertionPoint(op);
-    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockPrefix = constU256(rewriter, loc, getLockPrefixAPInt());
     Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
     Value val = rewriter.create<sir::TLoadOp>(loc, u256, lockKey);
     rewriter.create<sir::CondBrOp>(loc, val, ValueRange{}, ValueRange{}, revertBlock, afterBlock);
@@ -2098,7 +2098,7 @@ LogicalResult ConvertLockOp::matchAndRewrite(
     }
 
     rewriter.setInsertionPoint(op);
-    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockPrefix = constU256(rewriter, loc, getLockPrefixAPInt());
     Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
     Value one = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 1));
     rewriter.create<sir::TStoreOp>(loc, lockKey, one);
@@ -2136,7 +2136,7 @@ LogicalResult ConvertUnlockOp::matchAndRewrite(
     }
 
     rewriter.setInsertionPoint(op);
-    Value lockPrefix = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 256), getLockPrefixAPInt()));
+    Value lockPrefix = constU256(rewriter, loc, getLockPrefixAPInt());
     Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
     Value zero = rewriter.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64Type, 0));
     rewriter.create<sir::TStoreOp>(loc, lockKey, zero);
