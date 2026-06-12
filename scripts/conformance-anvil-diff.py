@@ -55,6 +55,18 @@ def cast_try(*args: str) -> tuple[bool, str]:
     return (p.returncode == 0, (p.stdout or p.stderr).strip())
 
 
+_funded: set[str] = set()
+
+
+def fund(addr: str) -> None:
+    """Give an impersonated caller enough balance for gas + value."""
+    a = addr.lower()
+    if a in _funded:
+        return
+    cast("rpc", "anvil_setBalance", addr, "0xffffffffffffffffffffffff")
+    _funded.add(a)
+
+
 # --- tiny spec reader (the [deploy]/[[call]]/[[call.storage]] subset) ---------
 
 def read_spec(path: Path) -> dict:
@@ -91,10 +103,48 @@ def parse_int(tok: str) -> int:
 
 
 def parse_args(tok: str) -> list[str]:
+    """Top-level comma split that respects nested [...] arrays and (...) tuples,
+    so `[[5, 8, 13]]` yields one array arg, not three."""
     tok = tok.strip()
     if tok in ("[]", ""):
         return []
-    return [a.strip().strip('"') for a in tok[1:-1].split(",") if a.strip()]
+    inner = tok[1:-1]
+    out: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in inner:
+        if ch in "[(":
+            depth += 1
+            cur += ch
+        elif ch in "])":
+            depth -= 1
+            cur += ch
+        elif ch == "," and depth == 0:
+            out.append(cur.strip().strip('"'))
+            cur = ""
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip().strip('"'))
+    # cast wants array literals comma-packed without spaces: [5,8,13]
+    return [re.sub(r"\s+", "", a) if a.startswith("[") else a for a in out]
+
+
+RET_TYPED = re.compile(r"\{\s*(u256|bool|address)\s*=\s*(.+?)\s*\}")
+
+
+def return_matches(rtype: str, expected_tok: str, raw_hex: str) -> tuple[bool, int]:
+    """Compare a 32-byte return word against the expected typed value."""
+    word = int(raw_hex, 16)
+    et = expected_tok.strip().strip('"')
+    if rtype == "u256":
+        return (word == parse_int(et), word)
+    if rtype == "bool":
+        want = et.lower() in ("true", "1")
+        return ((word != 0) == want, word)
+    if rtype == "address":
+        return ((word & ((1 << 160) - 1)) == parse_int(et), word)
+    return (False, word)
 
 
 # --- supported subset ---------------------------------------------------------
@@ -134,7 +184,10 @@ def main() -> int:
     if outdir.exists():
         shutil.rmtree(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    p = sh([str(ORA), "emit", "--emit=abi,bytecode", str(ora_path), "-o", str(outdir)])
+    # --no-verify: match the conformance harness (it deploys bytecode regardless
+    # of the SMT verifier, which has its own gate). Otherwise contracts with
+    # non-trivial obligations fail to compile here.
+    p = sh([str(ORA), "emit", "--no-verify", "--emit=abi,bytecode", str(ora_path), "-o", str(outdir)])
     if p.returncode != 0:
         print(f"diff: compile failed: {p.stderr[:300]}", file=sys.stderr)
         return 1
@@ -152,9 +205,14 @@ def main() -> int:
     for a in ctor_args:
         initcode += f"{parse_int(a):064x}"
 
-    # Deploy from the dev account.
-    receipt = cast("send", "--private-key", DEV_KEY, "--json", "--create", initcode)
+    # Deploy from the spec's deploy caller (impersonated), so msg.sender matches.
+    deployer = spec["deploy"].get("caller", "").strip('"') or None
     import json
+    if deployer:
+        fund(deployer)
+        receipt = cast("send", "--from", deployer, "--unlocked", "--json", "--create", initcode)
+    else:
+        receipt = cast("send", "--private-key", DEV_KEY, "--json", "--create", initcode)
     addr = json.loads(receipt)["contractAddress"]
     print(f"diff: deployed {ora_path.name} at {addr} on Anvil")
 
@@ -174,29 +232,39 @@ def main() -> int:
             skipped += 1
             continue
 
-        # Read-only (returns) -> eth_call; state-changing -> send then nothing to read.
+        caller = call.get("caller", "").strip('"') or deployer
+        value = parse_int(call.get("value", "0"))
+        from_flags = (["--from", caller, "--unlocked"] if caller else ["--private-key", DEV_KEY])
+        if caller:
+            fund(caller)
+        val_flags = (["--value", str(value)] if value else [])
+        # eth_call honors --from / --value for msg.sender / msg.value semantics.
+        call_ctx = (["--from", caller] if caller else []) + val_flags
+
+        # For every call: eth_call to read the return against committed state,
+        # then SEND to commit any state change (mirrors the harness, which both
+        # returns and commits per call).
         if "returns" in call:
             ret = call["returns"]
-            m = UINT_RET.search(ret)
             if EMPTY_RET.fullmatch(ret.strip()):
-                # state-changing void: send a tx.
-                cast("send", "--private-key", DEV_KEY, addr, data)
+                cast("send", *from_flags, *val_flags, addr, data)
                 checked += 1
                 continue
+            m = RET_TYPED.search(ret)
             if not m:
                 print(f"  [skip] {sig}: unsupported return {ret}")
                 skipped += 1
                 continue
-            expected = parse_int(m.group(1))
-            out = cast("call", addr, data)
-            actual = int(out, 16)
-            mark = "OK" if actual == expected else "DIVERGE"
-            if actual != expected:
+            out = cast("call", *call_ctx, addr, data)
+            ok, word = return_matches(m.group(1), m.group(2), out)
+            cast("send", *from_flags, *val_flags, addr, data)  # commit state change
+            mark = "OK" if ok else "DIVERGE"
+            if not ok:
                 diverged += 1
-            print(f"  [{mark}] {sig} -> anvil={actual} expected(lib/evm)={expected}")
+            print(f"  [{mark}] {sig} -> anvil={word} expected(lib/evm)={ret.strip()}")
             checked += 1
         elif "reverts" in call:
-            ok, out = cast_try("call", addr, data)
+            ok, out = cast_try("call", *call_ctx, addr, data)
             mark = "OK" if not ok else "DIVERGE"
             if ok:
                 diverged += 1
@@ -205,7 +273,7 @@ def main() -> int:
             checked += 1
             continue
         elif "succeeds" in call:
-            ok, _ = cast_try("send", "--private-key", DEV_KEY, addr, data)
+            ok, _ = cast_try("send", *from_flags, *val_flags, addr, data)
             mark = "OK" if ok else "DIVERGE"
             if not ok:
                 diverged += 1

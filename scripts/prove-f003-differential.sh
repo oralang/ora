@@ -32,7 +32,7 @@ grep -m1 "handlers_memory.zig" /tmp/f003_libevm.out | sed 's/^/  /' || true
 echo "== Anvil side (differential) =="
 STARTED_ANVIL=0
 if ! cast rpc eth_blockNumber --rpc-url http://127.0.0.1:8545 >/dev/null 2>&1; then
-  anvil --hardfork cancun --silent >/tmp/anvil.log 2>&1 &
+  anvil --hardfork cancun --auto-impersonate --silent >/tmp/anvil.log 2>&1 &
   STARTED_ANVIL=1
   sleep 3
 fi
