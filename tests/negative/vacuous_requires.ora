@@ -1,0 +1,12 @@
+// Negative (T3.3 vacuity): contradictory preconditions make the function
+// vacuously satisfy any postcondition. The verifier must REJECT this (base
+// obligation UNSAT -> VerificationFailed, no bytecode), never silently "verify"
+// a spec that holds only because its assumptions are unsatisfiable.
+contract VacuousRequires {
+    pub fn f(x: u256) -> u256
+        requires x > 10
+        requires x < 5
+    {
+        return x;
+    }
+}
