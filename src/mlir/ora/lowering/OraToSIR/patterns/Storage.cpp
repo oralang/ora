@@ -1110,13 +1110,9 @@ static mlir::IntegerAttr lookupErrorIdAttr(Operation *anchor, StringRef name)
     return foundId;
 }
 
-static Value storageU256Const(PatternRewriter &rewriter, Location loc, mlir::IntegerAttr value)
+static Value storageErrorIdConst(PatternRewriter &rewriter, Location loc, mlir::IntegerAttr value)
 {
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), 256, mlir::IntegerType::Unsigned);
-    auto normalized = value.getValue().zextOrTrunc(256);
-    auto attr = mlir::IntegerAttr::get(u256IntType, normalized);
-    Value result = rewriter.create<sir::ConstOp>(loc, u256Type, attr);
+    Value result = constU256(rewriter, loc, value);
     result.getDefiningOp()->setAttr("ora.error_id", value);
     return result;
 }
@@ -1217,7 +1213,7 @@ static FailureOr<std::pair<Value, Value>> getErrorUnionPartsForStorage(
             return failure();
         return std::pair<Value, Value>{
             constU256(rewriter, loc, 1),
-            storageU256Const(rewriter, loc, errorId)};
+            storageErrorIdConst(rewriter, loc, errorId)};
     }
 
     if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
@@ -1277,7 +1273,7 @@ static LogicalResult storePointerBackedErrorUnionCarrierToStorage(
         if (!errorId)
             return failure();
         rewriter.create<sir::SStoreOp>(loc, baseSlot, constU256(rewriter, loc, 1));
-        rewriter.create<sir::SStoreOp>(loc, payloadSlot, storageU256Const(rewriter, loc, errorId));
+        rewriter.create<sir::SStoreOp>(loc, payloadSlot, storageErrorIdConst(rewriter, loc, errorId));
         rewriter.eraseOp(op);
         return success();
     }

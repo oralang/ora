@@ -44,6 +44,11 @@ namespace mlir::ora::lowering
         return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, value.zextOrTrunc(256)));
     }
 
+    inline Value constU256(OpBuilder &rewriter, Location loc, mlir::IntegerAttr value)
+    {
+        return constU256(rewriter, loc, value.getValue());
+    }
+
     inline Value constU256(OpBuilder &rewriter, Location loc, uint64_t value)
     {
         return constU256(rewriter, loc, llvm::APInt(256, value));
