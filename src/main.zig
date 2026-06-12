@@ -2104,7 +2104,9 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
         if (parsed) |g| {
             if (refinements.hasGuardViolationExplanation(g.refinement_kind)) {
                 try stdout.print("     -> ", .{});
-                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) unreachable;
+                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) {
+                    try stdout.print("{s} guard failed for {s}", .{ g.refinement_kind, g.variable_name });
+                }
                 try stdout.print("\n", .{});
             }
         }
