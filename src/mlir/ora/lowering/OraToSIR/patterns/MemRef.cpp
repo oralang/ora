@@ -1710,45 +1710,15 @@ LogicalResult ConvertMemRefStoreOp::matchAndRewrite(
             {
                 value = converted;
             }
-            else if (llvm::isa<sir::U256Type, sir::PtrType>(desiredValueType))
-            {
-                if (mlir::ora::isDebugEnabled())
-                {
-                    llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp fallback bitcast loc=" << op.getLoc()
-                                 << " desiredType=" << desiredValueType
-                                 << " currentType=" << value.getType() << "\n";
-                }
-                value = rewriter.create<sir::BitcastOp>(loc, desiredValueType, value);
-            }
             else
             {
-                if (mlir::ora::isDebugEnabled())
-                {
-                    llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp failed materialization loc=" << op.getLoc()
-                                 << " desiredType=" << desiredValueType
-                                 << " currentType=" << value.getType() << "\n";
-                }
+                op.emitError("memref.store value conversion requires explicit lowering");
                 return failure();
             }
         }
-        else if (llvm::isa<sir::U256Type, sir::PtrType>(desiredValueType))
-        {
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp no typeConverter fallback bitcast loc=" << op.getLoc()
-                             << " desiredType=" << desiredValueType
-                             << " currentType=" << value.getType() << "\n";
-            }
-            value = rewriter.create<sir::BitcastOp>(loc, desiredValueType, value);
-        }
         else
         {
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] ConvertMemRefStoreOp no typeConverter failure loc=" << op.getLoc()
-                             << " desiredType=" << desiredValueType
-                             << " currentType=" << value.getType() << "\n";
-            }
+            op.emitError("memref.store value conversion requires a type converter");
             return failure();
         }
     }
