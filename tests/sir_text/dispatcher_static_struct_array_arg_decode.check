@@ -1,0 +1,41 @@
+// INPUT: tests/conformance/storage_slice_struct.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0x7EFB4312 => @set_
+
+// CHECK-LABEL:     set_ {
+// CHECK: cdsize_set = calldatasize
+// CHECK: valid_set = lt min_cdsize_1arg_0 cdsize_set
+// CHECK: => valid_set ? @bb0 : @revert_error
+
+// CHECK-LABEL:     set_exec {
+// CHECK: mallocany
+// CHECK: calldatacopy
+// CHECK: icall @set
+// CHECK: return
+
+// CHECK-LABEL:     bb0 {
+// CHECK: a_set = calldataload selector_offset_0
+// CHECK: v6 = const 0x20
+// CHECK: v8 = eq a_set v6
+// CHECK: => v8 ? @bb1 : @abi_decode_revert_11
+
+// CHECK-LABEL:     bb2 {
+// CHECK: calldataload
+// CHECK: large_const 0xFFFFFFFFFFFFFFFF
+// CHECK: gt
+// CHECK: => {{.*}} ? @bb3 : @abi_decode_revert_13
+
+// CHECK-LABEL:     bb3 {
+// CHECK: const 0x8000
+// CHECK: gt
+// CHECK: => {{.*}} ? @bb4 : @abi_decode_revert_9
+
+// CHECK-LABEL:     bb4 {
+// CHECK: const 0x60
+// CHECK: mul
+// CHECK: add
+// CHECK: calldatasize
+// CHECK: => {{.*}} ? @set_exec : @abi_decode_revert_0

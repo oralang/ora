@@ -1,0 +1,55 @@
+// INPUT: tests/conformance/storage_slice_dynamic_struct.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0x8848445A => @set_
+
+// CHECK-LABEL:     set_exec
+// CHECK: icall @set
+// CHECK: return
+
+// CHECK-LABEL:     bb0 {
+// CHECK: a_set = calldataload selector_offset_0
+// CHECK: const 0x20
+// CHECK: eq a_set
+// CHECK: => {{.*}} ? @bb1 : @abi_decode_revert_11
+
+// CHECK-LABEL:     bb4 {
+// CHECK: calldatasize
+// CHECK-NEXT: [[ELEMENT_OFFSET_BASE:v[0-9]+]] = add
+// CHECK-NEXT: [[ARRAY_HEAD_BYTES:v[0-9]+]] = mul
+// CHECK-NEXT: {{v[0-9]+}} = add [[ELEMENT_OFFSET_BASE]] [[ARRAY_HEAD_BYTES]]
+// CHECK: => {{.*}} ? @bb5 : @abi_decode_revert_0
+
+// CHECK: bb5 -> {{.*}} [[ARRAY_HEAD_BYTES]] {
+// CHECK: [[ROW_BYTES:v[0-9]+]] = const 0x60
+// CHECK: mul
+// CHECK: add
+// CHECK: mallocany
+// CHECK: mstore256
+
+// CHECK: bb9 [[IV:v[0-9]+]] [[EXPECTED_ELEMENT_OFFSET:v[0-9]+]] {
+// CHECK: [[ELEMENT_OFFSET:v[0-9]+]] = calldataload
+// CHECK: eq [[ELEMENT_OFFSET]] [[EXPECTED_ELEMENT_OFFSET]]
+// CHECK: => {{.*}} ? @bb10 : @abi_decode_revert_11
+
+// CHECK-LABEL:     bb10 {
+// CHECK: calldatasize
+// CHECK: [[TUPLE_HEAD_BYTES:v[0-9]+]] = const 0x60
+// CHECK: add
+// CHECK: => {{.*}} ? @bb11 : @abi_decode_revert_0
+
+// CHECK-LABEL:     bb11 {
+// CHECK: calldataload
+// CHECK: eq {{v[0-9]+}} [[TUPLE_HEAD_BYTES]]
+// CHECK: => {{.*}} ? @bb12 : @abi_decode_revert_11
+
+// CHECK-LABEL:     bb16
+// CHECK: [[ROW_PTR:v[0-9]+]] = mallocany
+// CHECK: calldatacopy [[ROW_PTR]]
+// CHECK: [[INNER_HEAD_PTR:v[0-9]+]] = add [[ROW_PTR]]
+// CHECK: [[INNER_OFFSET:v[0-9]+]] = mload256 [[INNER_HEAD_PTR]]
+// CHECK: [[INNER_PTR:v[0-9]+]] = add [[ROW_PTR]] [[INNER_OFFSET]]
+// CHECK: mstore256 [[INNER_HEAD_PTR]] [[INNER_PTR]]
+// CHECK: mcopy
