@@ -53,6 +53,9 @@ pub const DeploySpec = struct {
     args: []ArgValue,
     /// Repo-relative .ora source path; defaults to the spec's sibling <stem>.ora.
     source: ?[]const u8 = null,
+    /// When true, skip per-call event-log assertions (for app gas benchmarks
+    /// that care about gas/returns/state, not exact emitted event bytes).
+    ignore_logs: bool = false,
 
     pub fn deinit(self: DeploySpec, allocator: std.mem.Allocator) void {
         allocator.free(self.args);

@@ -477,6 +477,30 @@
       "specs": [
         "tests/conformance/tuple_static_return.spec.toml"
       ]
+    },
+    {
+      "id": "full_app.erc20_flow",
+      "area": "full_app",
+      "behavior": "ERC-20 (full_token) realistic flow: init supply, transfer, approve, transferFrom, balance/allowance reads \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_full_token.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.amm_pool",
+      "area": "full_app",
+      "behavior": "AMM pool: addLiquidity (shares==amountA), reserves/shares reads, swap executes \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_amm_pool.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.staking",
+      "area": "full_app",
+      "behavior": "Staking: stake, getStake/getTotalStaked, unstake, claimRewards \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_staking.spec.toml"
+      ]
     }
   ]
 }
