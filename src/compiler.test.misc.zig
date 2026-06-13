@@ -527,6 +527,53 @@ test "compiler parses log, error, and bitfield declarations" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error_decl\""));
 }
 
+test "compiler parses bitfield layout annotations without raw source substring matching" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        enabled: bool(1);
+        \\        mode: u8 @bits(1 .. 9);
+        \\        code: u16 @at(9, 16);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(ast_diags.isEmpty());
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const bitfield = ast_file.item(contract.members[0]).Bitfield;
+
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[0].width.?);
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[1].offset.?);
+    try testing.expectEqual(@as(u32, 8), bitfield.fields[1].width.?);
+    try testing.expectEqual(@as(u32, 9), bitfield.fields[2].offset.?);
+    try testing.expectEqual(@as(u32, 16), bitfield.fields[2].width.?);
+}
+
+test "compiler rejects malformed bitfield layout annotations" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        reversed: u8 @bits(5..2);
+        \\        spaced: u8 @at (2, 8);
+        \\        unknown: u8 @where(2, 8);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "@bits range end must be greater than start"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "bitfield layout annotation arguments must immediately follow the annotation name"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "unsupported bitfield layout annotation"));
+}
+
 test "compiler preserves typed local names in assignments" {
     const source_text =
         \\contract Wallet {

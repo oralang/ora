@@ -624,13 +624,192 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerTypeNode(self, type_node)
             else
                 try Lowering.malformedType(self, node, "missing bitfield field type");
+            const layout = try Lowering.lowerBitfieldFieldLayout(self, node);
             return .{
                 .range = node.range(),
                 .name = name,
                 .type_expr = type_expr,
-                .offset = parseBitfieldOffset(node),
-                .width = parseBitfieldWidth(node),
+                .offset = layout.offset,
+                .width = layout.width,
             };
+        }
+
+        fn lowerBitfieldFieldLayout(self: *Builder, node: SyntaxNode) !BitfieldLayout {
+            var layout: BitfieldLayout = .{};
+            var saw_layout = false;
+            var pending_at: ?SyntaxToken = null;
+            var pending_name: ?SyntaxToken = null;
+            var pending_invalid = false;
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => |token| switch (token.kind()) {
+                        .At => {
+                            if (saw_layout or pending_at != null) {
+                                try Lowering.emitBitfieldLayoutTokenError(self, token, "duplicate bitfield layout annotation");
+                                pending_invalid = true;
+                                continue;
+                            }
+                            pending_at = token;
+                            pending_name = null;
+                            pending_invalid = false;
+                        },
+                        else => if (pending_at != null and pending_name == null and isIdentifierLike(token.kind())) {
+                            pending_name = token;
+                            if (token.range().start != pending_at.?.range().end) {
+                                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield layout annotation must not contain whitespace after '@'");
+                                pending_invalid = true;
+                            }
+                        },
+                    },
+                    .node => |child_node| switch (child_node.kind()) {
+                        .GroupParen => {
+                            if (pending_at != null) {
+                                if (pending_name) |name_token| {
+                                    if (child_node.range().start != name_token.range().end) {
+                                        try Lowering.emitBitfieldLayoutError(self, child_node, "bitfield layout annotation arguments must immediately follow the annotation name");
+                                        pending_invalid = true;
+                                    }
+                                    if (!pending_invalid) {
+                                        layout = (try Lowering.parseBitfieldAnnotationGroup(self, name_token, child_node)) orelse .{};
+                                        saw_layout = true;
+                                    }
+                                } else {
+                                    try Lowering.emitBitfieldLayoutError(self, child_node, "expected bitfield layout annotation name after '@'");
+                                }
+                                pending_at = null;
+                                pending_name = null;
+                                pending_invalid = false;
+                                continue;
+                            }
+                            if (saw_layout) {
+                                try Lowering.emitBitfieldLayoutError(self, child_node, "duplicate bitfield layout annotation");
+                                continue;
+                            }
+                            saw_layout = true;
+                            layout.width = try Lowering.parseBitfieldWidthGroup(self, child_node);
+                        },
+                        else => if (pending_at != null) {
+                            try Lowering.emitBitfieldLayoutError(self, child_node, "expected bitfield layout annotation arguments");
+                            pending_at = null;
+                            pending_name = null;
+                            pending_invalid = false;
+                            continue;
+                        },
+                    },
+                }
+            }
+
+            if (pending_at) |token| {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "expected bitfield layout annotation arguments");
+            }
+            return layout;
+        }
+
+        fn parseBitfieldAnnotationGroup(self: *Builder, name_token: SyntaxToken, group: SyntaxNode) !?BitfieldLayout {
+            const name = tokenText(name_token);
+            if (std.mem.eql(u8, name, "at")) {
+                return try Lowering.parseBitfieldAtGroup(self, group);
+            }
+            if (std.mem.eql(u8, name, "bits")) {
+                return try Lowering.parseBitfieldBitsGroup(self, group);
+            }
+            try Lowering.emitBitfieldLayoutTokenError(self, name_token, "unsupported bitfield layout annotation");
+            return null;
+        }
+
+        fn parseBitfieldAtGroup(self: *Builder, group: SyntaxNode) !?BitfieldLayout {
+            if (nthDirectIntegerToken(group, 2) != null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects exactly two integer arguments");
+                return null;
+            }
+            if (firstDirectTokenOfKind(group, .DotDot) != null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            }
+            const first = nthDirectIntegerToken(group, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            };
+            const second = nthDirectIntegerToken(group, 1) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            };
+
+            const offset = try Lowering.parseBitfieldLayoutIntegerToken(self, first) orelse return null;
+            const width = try Lowering.parseBitfieldLayoutIntegerToken(self, second) orelse return null;
+            if (width == 0) {
+                try Lowering.emitBitfieldLayoutTokenError(self, second, "bitfield width must be greater than zero");
+                return null;
+            }
+            if (@addWithOverflow(offset, width)[1] != 0) {
+                try Lowering.emitBitfieldLayoutError(self, group, "bitfield layout range overflows u32");
+                return null;
+            }
+
+            return .{ .offset = offset, .width = width };
+        }
+
+        fn parseBitfieldBitsGroup(self: *Builder, group: SyntaxNode) !?BitfieldLayout {
+            if (nthDirectIntegerToken(group, 2) != null or firstDirectTokenOfKind(group, .DotDot) == null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits expects exactly one start..end range");
+                return null;
+            }
+            const first = nthDirectIntegerToken(group, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range is missing a start");
+                return null;
+            };
+            const second = nthDirectIntegerToken(group, 1) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range is missing an end");
+                return null;
+            };
+            const start = try Lowering.parseBitfieldLayoutIntegerToken(self, first) orelse return null;
+            const end = try Lowering.parseBitfieldLayoutIntegerToken(self, second) orelse return null;
+            if (end <= start) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range end must be greater than start");
+                return null;
+            }
+
+            return .{ .offset = start, .width = end - start };
+        }
+
+        fn parseBitfieldWidthGroup(self: *Builder, node: SyntaxNode) !?u32 {
+            const token = nthDirectIntegerToken(node, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, node, "bitfield width group expects one integer literal");
+                return null;
+            };
+            if (nthDirectIntegerToken(node, 1) != null) {
+                try Lowering.emitBitfieldLayoutError(self, node, "bitfield width group expects exactly one integer literal");
+                return null;
+            }
+            const width = try Lowering.parseBitfieldLayoutIntegerToken(self, token) orelse return null;
+            if (width == 0) {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield width must be greater than zero");
+                return null;
+            }
+            return width;
+        }
+
+        fn parseBitfieldLayoutIntegerToken(self: *Builder, token: SyntaxToken) !?u32 {
+            return parseBitfieldLayoutU32(token.text()) orelse {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield layout integer must fit in u32");
+                return null;
+            };
+        }
+
+        fn emitBitfieldLayoutError(self: *Builder, node: SyntaxNode, message: []const u8) !void {
+            try self.diagnostics.appendErrorWithDebug(message, "invalid bitfield layout annotation", .{
+                .file_id = self.file.file_id,
+                .range = node.range(),
+            });
+        }
+
+        fn emitBitfieldLayoutTokenError(self: *Builder, token: SyntaxToken, message: []const u8) !void {
+            try self.diagnostics.appendErrorWithDebug(message, "invalid bitfield layout annotation", .{
+                .file_id = self.file.file_id,
+                .range = token.range(),
+            });
         }
 
         fn lowerParameterListNode(self: *Builder, node: SyntaxNode, allow_bare_self: bool) ![]Parameter {
@@ -2538,13 +2717,17 @@ fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
     };
 }
 
-fn firstDirectIntegerToken(node: SyntaxNode) ?SyntaxToken {
+fn nthDirectIntegerToken(node: SyntaxNode, ordinal: usize) ?SyntaxToken {
+    var remaining = ordinal;
     var it = node.children();
     while (it.next()) |child| {
         switch (child) {
             .node => {},
             .token => |token| switch (token.kind()) {
-                .IntegerLiteral, .BinaryLiteral, .HexLiteral => return token,
+                .IntegerLiteral, .BinaryLiteral, .HexLiteral => {
+                    if (remaining == 0) return token;
+                    remaining -= 1;
+                },
                 else => {},
             },
         }
@@ -2690,6 +2873,11 @@ const ForBindings = struct {
     index: ?SyntaxToken,
 };
 
+const BitfieldLayout = struct {
+    offset: ?u32 = null,
+    width: ?u32 = null,
+};
+
 fn parseForBindings(node: SyntaxNode) ?ForBindings {
     var seen_first_pipe = false;
     var seen_second_pipe = false;
@@ -2727,59 +2915,21 @@ fn parseForBindings(node: SyntaxNode) ?ForBindings {
     return null;
 }
 
-fn parseBitfieldOffset(node: SyntaxNode) ?u32 {
-    const at_token = firstDirectTokenOfKind(node, .At) orelse return null;
-    const start = at_token.range().start;
-    const text = node.tree.sourceSlice(.{ .start = start, .end = node.range().end });
-    if (std.mem.indexOf(u8, text, "@at(")) |idx| {
-        return parseFirstU32(text[idx + 4 ..]);
+fn parseBitfieldLayoutU32(text: []const u8) ?u32 {
+    var compact: [128]u8 = undefined;
+    if (text.len > compact.len) return null;
+    var len: usize = 0;
+    for (text) |c| {
+        if (c == '_') continue;
+        compact[len] = c;
+        len += 1;
     }
-    if (std.mem.indexOf(u8, text, "@bits(")) |idx| {
-        return parseFirstU32(text[idx + 6 ..]);
+    const value = compact[0..len];
+    if (std.mem.startsWith(u8, value, "0x") or std.mem.startsWith(u8, value, "0X")) {
+        return std.fmt.parseInt(u32, value[2..], 16) catch null;
     }
-    return null;
-}
-
-fn parseBitfieldWidth(node: SyntaxNode) ?u32 {
-    const at_token = firstDirectTokenOfKind(node, .At) orelse {
-        if (firstDirectChildOfKind(node, .GroupParen) != null or firstDirectTokenOfKind(node, .LeftParen) != null) {
-            return parseFirstU32(node.tree.sourceSlice(node.range()));
-        }
-        return null;
-    };
-    const start = at_token.range().start;
-    const text = node.tree.sourceSlice(.{ .start = start, .end = node.range().end });
-    if (std.mem.indexOf(u8, text, "@at(")) |idx| {
-        const tail = text[idx + 4 ..];
-        if (std.mem.indexOfScalar(u8, tail, ',')) |comma| {
-            return parseFirstU32(tail[comma + 1 ..]);
-        }
-        return null;
+    if (std.mem.startsWith(u8, value, "0b") or std.mem.startsWith(u8, value, "0B")) {
+        return std.fmt.parseInt(u32, value[2..], 2) catch null;
     }
-    if (std.mem.indexOf(u8, text, "@bits(")) |idx| {
-        const tail = text[idx + 6 ..];
-        const start_bit = parseFirstU32(tail) orelse return null;
-        if (std.mem.indexOf(u8, tail, "..")) |dots| {
-            const end_bit = parseFirstU32(tail[dots + 2 ..]) orelse return null;
-            return end_bit - start_bit;
-        }
-    }
-    return null;
-}
-
-fn parseFirstU32(text: []const u8) ?u32 {
-    var start: ?usize = null;
-    var end: usize = 0;
-    for (text, 0..) |c, idx| {
-        if (std.ascii.isDigit(c)) {
-            if (start == null) start = idx;
-            end = idx + 1;
-        } else if (start != null) {
-            break;
-        }
-    }
-    if (start) |s| {
-        return std.fmt.parseInt(u32, text[s..end], 10) catch null;
-    }
-    return null;
+    return std.fmt.parseInt(u32, value, 10) catch null;
 }
