@@ -2675,9 +2675,10 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @run"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Test.Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
@@ -2711,8 +2712,9 @@ test "compiler lowers generic impl methods for trait-bound calls" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked__"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked__7(%arg0: !ora.struct<\"Box\">"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Test.Marker.Box.marked__"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
 }
 
@@ -2897,7 +2899,8 @@ test "compiler lowers associated trait impl calls to concrete symbols" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Factory.Box.make"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Factory.Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Factory.Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Test.Factory.Box.make"));
 }
 
 test "compiler const eval executes comptime associated trait methods" {

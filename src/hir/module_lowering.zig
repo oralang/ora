@@ -21,6 +21,7 @@ const namedTypeAttr = support.namedTypeAttr;
 const strRef = support.strRef;
 const zeroInitAttr = support.zeroInitAttr;
 const reprIntegerType = support.reprIntegerType;
+const descriptorFromPathName = sema.descriptorFromPathName;
 
 const no_public_result_input_error_id: i64 = 0;
 const no_abi_param_enum_count: usize = 0;
@@ -412,8 +413,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const symbol_name = try self.mangleGenericFunctionName(scoped_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
                     const previous_impl_contract_scope = self.active_impl_contract_scope;
+                    const previous_impl_self_type = self.active_impl_self_type;
                     self.active_impl_contract_scope = caller_contract_id;
+                    self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                     defer self.active_impl_contract_scope = previous_impl_contract_scope;
+                    defer self.active_impl_self_type = previous_impl_self_type;
                     try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, null, null);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
@@ -423,8 +427,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const symbol_name = scoped_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
                 const previous_impl_contract_scope = self.active_impl_contract_scope;
+                const previous_impl_self_type = self.active_impl_self_type;
                 self.active_impl_contract_scope = caller_contract_id;
+                self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                 defer self.active_impl_contract_scope = previous_impl_contract_scope;
+                defer self.active_impl_self_type = previous_impl_self_type;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
@@ -511,7 +518,13 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
             for (parameters, 0..) |parameter, index| {
-                const param_type = if (concrete_runtime_parameter_types) |resolved|
+                const impl_self_param_type: ?mlir.MlirType = if (self.active_impl_self_type) |self_type| blk: {
+                    if (std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) {
+                        break :blk self.lowerSemaType(self_type, parameter.range);
+                    }
+                    break :blk null;
+                } else null;
+                const param_type = impl_self_param_type orelse if (concrete_runtime_parameter_types) |resolved|
                     self.lowerSemaType(resolved[index], parameter.range)
                 else if (type_bindings.len == 0)
                     self.lowerSemaType(self.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
