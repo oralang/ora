@@ -1,1 +1,5 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/transient/basic_transient.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/transient/basic_transient.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {operation_state = 2 : ui64, persistent_counter = 0 : ui64, temp_counter = 1 : ui64, temp_map = 3 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT: } loc("{{.*}}/ora-example/transient/basic_transient.ora":7:1)

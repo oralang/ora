@@ -29,7 +29,7 @@ pub const OpcodeOverride = struct {
 /// focusing on constants and basic settings
 pub const EvmConfig = struct {
     /// Default hardfork for the EVM
-    hardfork: Hardfork = Hardfork.DEFAULT,
+    hardfork: Hardfork = .OSAKA,
 
     /// The maximum stack size for the EVM. Defaults to 1024
     stack_size: u12 = 1024,
@@ -97,21 +97,7 @@ pub const EvmConfig = struct {
 
     /// Get the hardfork enum from a string
     fn getHardforkFromString(hardfork_str: []const u8) Hardfork {
-        if (std.mem.eql(u8, hardfork_str, "FRONTIER")) return .FRONTIER;
-        if (std.mem.eql(u8, hardfork_str, "HOMESTEAD")) return .HOMESTEAD;
-        if (std.mem.eql(u8, hardfork_str, "TANGERINE")) return .TANGERINE;
-        if (std.mem.eql(u8, hardfork_str, "SPURIOUS")) return .SPURIOUS;
-        if (std.mem.eql(u8, hardfork_str, "BYZANTIUM")) return .BYZANTIUM;
-        if (std.mem.eql(u8, hardfork_str, "CONSTANTINOPLE")) return .CONSTANTINOPLE;
-        if (std.mem.eql(u8, hardfork_str, "ISTANBUL")) return .ISTANBUL;
-        if (std.mem.eql(u8, hardfork_str, "BERLIN")) return .BERLIN;
-        if (std.mem.eql(u8, hardfork_str, "LONDON")) return .LONDON;
-        if (std.mem.eql(u8, hardfork_str, "MERGE")) return .MERGE;
-        if (std.mem.eql(u8, hardfork_str, "SHANGHAI")) return .SHANGHAI;
-        if (std.mem.eql(u8, hardfork_str, "CANCUN")) return .CANCUN;
-        if (std.mem.eql(u8, hardfork_str, "PRAGUE")) return .PRAGUE;
-        // Default to CANCUN if unknown
-        return .CANCUN;
+        return Hardfork.fromString(hardfork_str) orelse .OSAKA;
     }
 };
 
@@ -124,7 +110,7 @@ const testing = std.testing;
 test "EvmConfig - default initialization" {
     const config = EvmConfig{};
 
-    try testing.expectEqual(Hardfork.DEFAULT, config.hardfork);
+    try testing.expectEqual(Hardfork.OSAKA, config.hardfork);
     try testing.expectEqual(@as(u12, 1024), config.stack_size);
     try testing.expectEqual(@as(u32, 24576), config.max_bytecode_size);
     try testing.expectEqual(@as(u32, 49152), config.max_initcode_size);
@@ -158,6 +144,7 @@ test "EvmConfig - hardfork variations" {
         EvmConfig{ .hardfork = .SHANGHAI },
         EvmConfig{ .hardfork = .CANCUN },
         EvmConfig{ .hardfork = .PRAGUE },
+        EvmConfig{ .hardfork = .OSAKA },
     };
 
     inline for (configs) |config| {

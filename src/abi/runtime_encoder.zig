@@ -1,7 +1,7 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const mlir_helpers = @import("mlir_helpers");
-const sema = @import("../sema/mod.zig");
+const Type = @import("ora_types").SemanticType;
 const abi_layout = @import("layout.zig");
 const abi_layout_context = @import("layout_context.zig");
 const hir_abi = @import("../hir/abi.zig");
@@ -14,7 +14,7 @@ pub fn createAbiEncodeWithSelectorOp(
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
     method_name: []const u8,
-    param_types: []const sema.Type,
+    param_types: []const Type,
     operands: []const mlir.MlirValue,
     result_type: mlir.MlirType,
 ) !mlir.MlirOperation {
@@ -49,7 +49,7 @@ pub fn createAbiEncodeOp(
     mlir_context: mlir.MlirContext,
     loc: mlir.MlirLocation,
     layout_context: abi_layout_context.LayoutContext,
-    param_types: []const sema.Type,
+    param_types: []const Type,
     operands: []const mlir.MlirValue,
     result_type: mlir.MlirType,
 ) !mlir.MlirOperation {
@@ -74,9 +74,9 @@ fn layoutAttrForParamTypes(
     allocator: std.mem.Allocator,
     mlir_context: mlir.MlirContext,
     layout_context: abi_layout_context.LayoutContext,
-    param_types: []const sema.Type,
+    param_types: []const Type,
 ) !mlir.MlirAttribute {
-    const tuple_ty: sema.Type = .{ .tuple = param_types };
+    const tuple_ty: Type = .{ .tuple = param_types };
     var layout = try layout_context.layoutForType(tuple_ty);
     defer layout.deinit(allocator);
     const serialized = try abi_layout.serializeForMlirAttr(allocator, layout);
@@ -89,7 +89,7 @@ fn externalCallAbiAttrs(
     mlir_context: mlir.MlirContext,
     layout_context: abi_layout_context.LayoutContext,
     method_name: []const u8,
-    param_types: []const sema.Type,
+    param_types: []const Type,
 ) !struct { mlir.MlirAttribute, mlir.MlirAttribute } {
     var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
     defer arg_type_attrs.deinit(allocator);

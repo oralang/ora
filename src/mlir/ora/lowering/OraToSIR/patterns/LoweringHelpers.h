@@ -1,21 +1,22 @@
 #pragma once
 
+#include "OraMaterializationKinds.h"
 #include "SIR/SIRDialect.h"
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
 
 namespace mlir::ora::lowering
 {
-    inline constexpr uint64_t kSIRTextLegalizerScratchStartBytes = 0x1000;
+    // Constructor dynamic-tail decode uses bounded temporary memory before the
+    // runtime heap is initialized; keep the free pointer above that region.
     inline constexpr uint64_t kConstructorDecodeScratchFenceBytes = 64 * 1024;
 
-    static_assert(kSIRTextLegalizerScratchStartBytes % 32 == 0,
-                  "SIR text legalizer scratch start must be word-aligned");
     static_assert(kConstructorDecodeScratchFenceBytes % 32 == 0,
                   "constructor decode scratch fence must be word-aligned");
-    static_assert(kSIRTextLegalizerScratchStartBytes < kConstructorDecodeScratchFenceBytes,
-                  "SIR text legalizer scratch range must start below the constructor decode scratch fence");
 
     enum class AbiDecodeError : uint64_t
     {
@@ -43,9 +44,21 @@ namespace mlir::ora::lowering
         return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(u256IntType, value.zextOrTrunc(256)));
     }
 
+    inline Value constU256(OpBuilder &rewriter, Location loc, mlir::IntegerAttr value)
+    {
+        return constU256(rewriter, loc, value.getValue());
+    }
+
     inline Value constU256(OpBuilder &rewriter, Location loc, uint64_t value)
     {
         return constU256(rewriter, loc, llvm::APInt(256, value));
+    }
+
+    inline Value createPtrViewMaterializationCast(OpBuilder &rewriter, Location loc, Type resultType, Value input)
+    {
+        auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
+        cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));
+        return cast.getResult(0);
     }
 
     inline Value maskLowBits(OpBuilder &rewriter, Location loc, Value value, unsigned bits)
@@ -134,12 +147,46 @@ namespace mlir::ora::lowering
         return rewriter.create<sir::IsZeroOp>(loc, u256Type, gt);
     }
 
-    inline Value ensureU256(OpBuilder &rewriter, Location loc, Value value)
+    inline Value existingU256Value(Value value)
     {
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
         if (llvm::isa<sir::U256Type>(value.getType()))
             return value;
+        if (auto bitcast = value.getDefiningOp<sir::BitcastOp>())
+        {
+            Value input = bitcast.getInput();
+            if (llvm::isa<sir::U256Type>(input.getType()))
+                return input;
+        }
+        if (auto cast = value.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+        {
+            if (cast.getNumOperands() == 1)
+            {
+                Value input = cast.getOperand(0);
+                if (llvm::isa<sir::U256Type>(input.getType()))
+                    return input;
+            }
+        }
+        return Value();
+    }
+
+    // Explicit carrier relabel. Use only at sites that have already established
+    // the value is representable as a u256 carrier.
+    inline Value coerceToU256(OpBuilder &rewriter, Location loc, Value value)
+    {
+        if (Value existing = existingU256Value(value))
+            return existing;
+        auto u256Type = sir::U256Type::get(rewriter.getContext());
         return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
+    }
+
+    inline Value ensureU256(PatternRewriter &rewriter, Location loc, Operation *anchor, Value value, llvm::StringRef context)
+    {
+        (void)loc;
+        if (Value existing = existingU256Value(value))
+            return existing;
+        if (anchor)
+            (void)rewriter.notifyMatchFailure(anchor, llvm::Twine(context) + " requires u256 value");
+        return Value();
     }
 
     inline Value ceil32(OpBuilder &rewriter, Location loc, Value length)

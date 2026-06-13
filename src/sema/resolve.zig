@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const builtin_types = @import("ora_types").builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
@@ -484,29 +485,12 @@ const Resolver = struct {
 
     fn isRecognizedTypeValueName(self: *const Resolver, name: []const u8) bool {
         const trimmed = std.mem.trim(u8, name, " \t\n\r");
-        if (std.mem.eql(u8, trimmed, "void") or
-            std.mem.eql(u8, trimmed, "bool") or
-            std.mem.eql(u8, trimmed, "string") or
-            std.mem.eql(u8, trimmed, "address") or
-            std.mem.eql(u8, trimmed, "bytes") or
+        if (builtin_types.isBuiltinTypeName(trimmed) or
             std.mem.eql(u8, trimmed, "std") or
             std.mem.eql(u8, trimmed, "Ok") or
             std.mem.eql(u8, trimmed, "Err"))
         {
             return true;
-        }
-
-        if (trimmed.len >= 2 and (trimmed[0] == 'u' or trimmed[0] == 'i')) {
-            const bits = trimmed[1..];
-            if (std.mem.eql(u8, bits, "8") or
-                std.mem.eql(u8, bits, "16") or
-                std.mem.eql(u8, bits, "32") or
-                std.mem.eql(u8, bits, "64") or
-                std.mem.eql(u8, bits, "128") or
-                std.mem.eql(u8, bits, "256"))
-            {
-                return true;
-            }
         }
 
         if (self.lookupTypeValueItem(trimmed)) |_| return true;

@@ -1,7 +1,9 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const lookup_index = @import("lookup.zig");
 const source = @import("../source/mod.zig");
+
 const BigInt = std.math.big.int.Managed;
 
 pub const ModuleImport = struct {
@@ -38,6 +40,64 @@ pub const ImplEntry = struct {
     item_id: ast.ItemId,
 };
 
+pub fn functionRuntimeSelfParameterIndex(file: *const ast.AstFile, function: ast.FunctionItem) ?usize {
+    for (function.parameters, 0..) |parameter, index| {
+        if (parameter.is_comptime) continue;
+        const name = switch (file.pattern(parameter.pattern).*) {
+            .Name => |pattern| pattern.name,
+            else => null,
+        };
+        return if (std.mem.eql(u8, name orelse "", "self")) index else null;
+    }
+    return null;
+}
+
+pub fn functionHasRuntimeSelf(file: *const ast.AstFile, function: ast.FunctionItem) bool {
+    return functionRuntimeSelfParameterIndex(file, function) != null;
+}
+
+pub const ContractMemberRole = enum {
+    field,
+    constant,
+    function,
+    struct_,
+    bitfield,
+    enum_,
+    type_alias,
+    trait_,
+    log_decl,
+    error_decl,
+};
+
+pub const ContractMemberRoles = packed struct(u16) {
+    field: bool = false,
+    constant: bool = false,
+    function: bool = false,
+    struct_: bool = false,
+    bitfield: bool = false,
+    enum_: bool = false,
+    type_alias: bool = false,
+    trait_: bool = false,
+    log_decl: bool = false,
+    error_decl: bool = false,
+    _padding: u6 = 0,
+
+    pub fn contains(self: ContractMemberRoles, role: ContractMemberRole) bool {
+        return switch (role) {
+            .field => self.field,
+            .constant => self.constant,
+            .function => self.function,
+            .struct_ => self.struct_,
+            .bitfield => self.bitfield,
+            .enum_ => self.enum_,
+            .type_alias => self.type_alias,
+            .trait_ => self.trait_,
+            .log_decl => self.log_decl,
+            .error_decl => self.error_decl,
+        };
+    }
+};
+
 pub const TraitMethodSignature = struct {
     name: []const u8,
     receiver_kind: ast.ReceiverKind,
@@ -53,6 +113,17 @@ pub const TraitInterface = struct {
     name: []const u8,
     is_extern: bool = false,
     methods: []const TraitMethodSignature,
+    method_lookup: []lookup_index.NamedEntry,
+
+    pub fn methodByName(self: TraitInterface, name: []const u8) ?TraitMethodSignature {
+        const index = findMethodIndexByName(self.methods, self.method_lookup, name) orelse return null;
+        return self.methods[index];
+    }
+
+    pub fn methodByNameAndReceiver(self: TraitInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?TraitMethodSignature {
+        const index = findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind) orelse return null;
+        return self.methods[index];
+    }
 };
 
 pub const ImplInterface = struct {
@@ -62,7 +133,64 @@ pub const ImplInterface = struct {
     trait_name: []const u8,
     target_name: []const u8,
     methods: []const TraitMethodSignature,
+    method_lookup: []lookup_index.NamedEntry,
+
+    pub fn methodByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?TraitMethodSignature {
+        const index = findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind) orelse return null;
+        return self.methods[index];
+    }
+
+    pub fn methodIndexByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) ?usize {
+        return findMethodIndexByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind);
+    }
+
+    pub fn hasMethodByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) bool {
+        return self.methodIndexByNameAndReceiver(name, receiver_kind) != null;
+    }
+
+    pub fn methodCountByNameAndReceiver(self: ImplInterface, name: []const u8, receiver_kind: ast.ReceiverKind) usize {
+        return countMethodsByNameAndReceiver(self.methods, self.method_lookup, name, receiver_kind);
+    }
 };
+
+fn findMethodIndexByName(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+) ?usize {
+    const index = lookup_index.findNamed(method_lookup, name) orelse return null;
+    if (index >= methods.len) return null;
+    return index;
+}
+
+fn findMethodIndexByNameAndReceiver(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+    receiver_kind: ast.ReceiverKind,
+) ?usize {
+    const range = lookup_index.findNamedRange(method_lookup, name) orelse return null;
+    for (method_lookup[range.start..range.end]) |entry| {
+        if (entry.index >= methods.len) return null;
+        if (methods[entry.index].receiver_kind == receiver_kind) return entry.index;
+    }
+    return null;
+}
+
+fn countMethodsByNameAndReceiver(
+    methods: []const TraitMethodSignature,
+    method_lookup: []const lookup_index.NamedEntry,
+    name: []const u8,
+    receiver_kind: ast.ReceiverKind,
+) usize {
+    const range = lookup_index.findNamedRange(method_lookup, name) orelse return 0;
+    var count: usize = 0;
+    for (method_lookup[range.start..range.end]) |entry| {
+        if (entry.index >= methods.len) return count;
+        if (methods[entry.index].receiver_kind == receiver_kind) count += 1;
+    }
+    return count;
+}
 
 pub const InstantiatedStructField = struct {
     name: []const u8,
@@ -73,6 +201,16 @@ pub const InstantiatedStruct = struct {
     template_item_id: ast.ItemId,
     mangled_name: []const u8,
     fields: []const InstantiatedStructField,
+    field_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn fieldIndex(self: InstantiatedStruct, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.field_lookup, name);
+    }
+
+    pub fn fieldByName(self: InstantiatedStruct, name: []const u8) ?InstantiatedStructField {
+        const index = self.fieldIndex(name) orelse return null;
+        return self.fields[index];
+    }
 };
 
 pub const InstantiatedEnum = struct {
@@ -80,6 +218,16 @@ pub const InstantiatedEnum = struct {
     mangled_name: []const u8,
     repr_type: ?Type = null,
     variants: []const InstantiatedEnumVariant = &.{},
+    variant_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn variantIndex(self: InstantiatedEnum, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.variant_lookup, name);
+    }
+
+    pub fn variantByName(self: InstantiatedEnum, name: []const u8) ?InstantiatedEnumVariant {
+        const index = self.variantIndex(name) orelse return null;
+        return self.variants[index];
+    }
 };
 
 pub const InstantiatedEnumVariant = struct {
@@ -89,7 +237,7 @@ pub const InstantiatedEnumVariant = struct {
 };
 
 pub const ExplicitEnumValue = union(enum) {
-    integer: i64,
+    integer: BigInt,
     string: []const u8,
     bytes: []const u8,
 };
@@ -106,6 +254,16 @@ pub const InstantiatedBitfield = struct {
     mangled_name: []const u8,
     base_type: ?Type,
     fields: []const InstantiatedBitfieldField,
+    field_lookup: []lookup_index.NamedEntry = &.{},
+
+    pub fn fieldIndex(self: InstantiatedBitfield, name: []const u8) ?usize {
+        return lookup_index.findNamed(self.field_lookup, name);
+    }
+
+    pub fn fieldByName(self: InstantiatedBitfield, name: []const u8) ?InstantiatedBitfieldField {
+        const index = self.fieldIndex(name) orelse return null;
+        return self.fields[index];
+    }
 };
 
 pub const Binding = union(enum) {
@@ -115,239 +273,34 @@ pub const Binding = union(enum) {
 
 pub const ResolvedBinding = Binding;
 
-pub const TypeKind = enum {
-    unknown,
-    never,
-    void,
-    bool,
-    integer,
-    string,
-    address,
-    bytes,
-    fixed_bytes,
-    external_proxy,
-    named,
-    function,
-    contract,
-    struct_,
-    bitfield,
-    enum_,
-    tuple,
-    anonymous_struct,
-    array,
-    slice,
-    map,
-    error_union,
-    refinement,
-};
+pub const semantic_types = @import("ora_types").semantic;
+pub const semantic_values = @import("ora_types").value;
 
-pub const Region = enum {
-    none,
-    storage,
-    memory,
-    transient,
-    calldata,
-};
-
-pub const Provenance = enum {
-    local,
-    calldata,
-    storage,
-    external,
-};
-
-pub const NamedType = struct {
-    name: []const u8,
-};
-
-pub const ExternalProxyType = struct {
-    trait_name: []const u8,
-};
-
-pub const IntegerType = struct {
-    bits: ?u16 = null,
-    signed: ?bool = null,
-    spelling: ?[]const u8 = null,
-};
-
-pub const FixedBytesType = struct {
-    len: u8,
-    spelling: ?[]const u8 = null,
-};
-
-pub const FunctionType = struct {
-    name: ?[]const u8 = null,
-    param_types: []const Type = &.{},
-    return_types: []const Type = &.{},
-};
-
-pub const ArrayType = struct {
-    element_type: *const Type,
-    len: ?u32 = null,
-};
-
-pub const SliceType = struct {
-    element_type: *const Type,
-};
-
-pub const MapType = struct {
-    key_type: ?*const Type = null,
-    value_type: ?*const Type = null,
-};
-
-pub const AnonymousStructField = struct {
-    name: []const u8,
-    ty: Type,
-};
-
-pub const AnonymousStructType = struct {
-    fields: []const AnonymousStructField,
-};
-
-pub const ErrorUnionType = struct {
-    payload_type: *const Type,
-    error_types: []const Type = &.{},
-};
-
-pub const RefinementType = struct {
-    name: []const u8,
-    base_type: *const Type,
-    args: []const ast.TypeArg = &.{},
-};
-
-pub const Type = union(TypeKind) {
-    unknown: void,
-    never: void,
-    void: void,
-    bool: void,
-    integer: IntegerType,
-    string: void,
-    address: void,
-    bytes: void,
-    fixed_bytes: FixedBytesType,
-    external_proxy: ExternalProxyType,
-    named: NamedType,
-    function: FunctionType,
-    contract: NamedType,
-    struct_: NamedType,
-    bitfield: NamedType,
-    enum_: NamedType,
-    tuple: []const Type,
-    anonymous_struct: AnonymousStructType,
-    array: ArrayType,
-    slice: SliceType,
-    map: MapType,
-    error_union: ErrorUnionType,
-    refinement: RefinementType,
-
-    pub fn kind(self: Type) TypeKind {
-        return std.meta.activeTag(self);
-    }
-
-    pub fn name(self: *const Type) ?[]const u8 {
-        return switch (self.*) {
-            .integer => |integer| integer.spelling,
-            .fixed_bytes => |fixed_bytes| fixed_bytes.spelling,
-            .external_proxy => |proxy| proxy.trait_name,
-            .named => |named| named.name,
-            .function => |function| function.name,
-            .contract => |named| named.name,
-            .struct_ => |named| named.name,
-            .bitfield => |named| named.name,
-            .enum_ => |named| named.name,
-            .refinement => |refinement| refinement.name,
-            else => null,
-        };
-    }
-
-    pub fn elementType(self: *const Type) ?*const Type {
-        return switch (self.*) {
-            .array => |array| array.element_type,
-            .slice => |slice| slice.element_type,
-            else => null,
-        };
-    }
-
-    pub fn keyType(self: *const Type) ?*const Type {
-        return switch (self.*) {
-            .map => |map| map.key_type,
-            else => null,
-        };
-    }
-
-    pub fn valueType(self: *const Type) ?*const Type {
-        return switch (self.*) {
-            .map => |map| map.value_type,
-            else => null,
-        };
-    }
-
-    pub fn payloadType(self: *const Type) ?*const Type {
-        return switch (self.*) {
-            .error_union => |error_union| error_union.payload_type,
-            else => null,
-        };
-    }
-
-    pub fn refinementBaseType(self: *const Type) ?*const Type {
-        return switch (self.*) {
-            .refinement => |refinement| refinement.base_type,
-            else => null,
-        };
-    }
-
-    pub fn arrayLen(self: *const Type) ?u32 {
-        return switch (self.*) {
-            .array => |array| array.len,
-            else => null,
-        };
-    }
-
-    pub fn tupleTypes(self: *const Type) []const Type {
-        return switch (self.*) {
-            .tuple => |tuple| tuple,
-            else => &.{},
-        };
-    }
-
-    pub fn anonymousStructFields(self: *const Type) []const AnonymousStructField {
-        return switch (self.*) {
-            .anonymous_struct => |struct_type| struct_type.fields,
-            else => &.{},
-        };
-    }
-
-    pub fn errorTypes(self: *const Type) []const Type {
-        return switch (self.*) {
-            .error_union => |error_union| error_union.error_types,
-            else => &.{},
-        };
-    }
-
-    pub fn paramTypes(self: *const Type) []const Type {
-        return switch (self.*) {
-            .function => |function| function.param_types,
-            else => &.{},
-        };
-    }
-
-    pub fn returnTypes(self: *const Type) []const Type {
-        return switch (self.*) {
-            .function => |function| function.return_types,
-            else => &.{},
-        };
-    }
-};
-
-pub const GenericBindingValue = union(enum) {
-    ty: Type,
-    integer: []const u8,
-};
-
-pub const GenericTypeBinding = struct {
-    name: []const u8,
-    value: GenericBindingValue,
-};
+pub const TypeKind = semantic_types.TypeKind;
+pub const Region = semantic_types.Region;
+pub const Provenance = semantic_types.Provenance;
+pub const NamedType = semantic_types.NamedType;
+pub const ExternalProxyType = semantic_types.ExternalProxyType;
+pub const IntegerType = semantic_types.IntegerType;
+pub const ComptimeIntegerType = semantic_types.ComptimeIntegerType;
+pub const FixedBytesType = semantic_types.FixedBytesType;
+pub const FunctionType = semantic_types.FunctionType;
+pub const ArrayType = semantic_types.ArrayType;
+pub const SliceType = semantic_types.SliceType;
+pub const MapType = semantic_types.MapType;
+pub const AnonymousStructField = semantic_types.AnonymousStructField;
+pub const AnonymousStructType = semantic_types.AnonymousStructType;
+pub const anonymousStructFieldIndex = semantic_types.anonymousStructFieldIndex;
+pub const anonymousStructFieldByName = semantic_types.anonymousStructFieldByName;
+pub const ErrorUnionType = semantic_types.ErrorUnionType;
+pub const RefinementArg = semantic_types.RefinementArg;
+pub const RefinementIntegerArg = semantic_types.RefinementIntegerArg;
+pub const RefinementType = semantic_types.RefinementType;
+pub const Type = semantic_types.Type;
+pub const GenericBindingValue = semantic_types.GenericBindingValue;
+pub const GenericTypeBinding = semantic_types.GenericTypeBinding;
+pub const LocatedType = semantic_types.LocatedType;
+pub const appendTypeMangleName = semantic_types.appendTypeMangleName;
 
 pub const ResolvedCall = struct {
     module_id: source.ModuleId,
@@ -357,158 +310,110 @@ pub const ResolvedCall = struct {
     return_type: Type = .{ .unknown = {} },
 };
 
-pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
-    switch (ty) {
-        .never => try buffer.appendSlice(allocator, "never"),
-        .bool => try buffer.appendSlice(allocator, "bool"),
-        .address => try buffer.appendSlice(allocator, "address"),
-        .string => try buffer.appendSlice(allocator, "string"),
-        .bytes => try buffer.appendSlice(allocator, "bytes"),
-        .fixed_bytes => |fixed_bytes| try buffer.writer(allocator).print("bytes{d}", .{fixed_bytes.len}),
-        .external_proxy => |proxy| try buffer.writer(allocator).print("external_{s}", .{proxy.trait_name}),
-        .void => try buffer.appendSlice(allocator, "void"),
-        .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "int"),
-        .named => |named| try buffer.appendSlice(allocator, named.name),
-        .struct_ => |named| try buffer.appendSlice(allocator, named.name),
-        .contract => |named| try buffer.appendSlice(allocator, named.name),
-        .bitfield => |named| try buffer.appendSlice(allocator, named.name),
-        .enum_ => |named| try buffer.appendSlice(allocator, named.name),
-        .refinement => |refinement| try buffer.appendSlice(allocator, refinement.name),
-        .anonymous_struct => |struct_type| {
-            try buffer.appendSlice(allocator, "anon_struct");
-            for (struct_type.fields) |field| {
-                try buffer.append(allocator, '_');
-                try buffer.appendSlice(allocator, field.name);
-                try buffer.append(allocator, '_');
-                try appendTypeMangleName(allocator, buffer, field.ty);
-            }
-        },
-        .slice => |slice| {
-            try buffer.appendSlice(allocator, "slice_");
-            try appendTypeMangleName(allocator, buffer, slice.element_type.*);
-        },
-        .array => |array| {
-            try buffer.appendSlice(allocator, "array_");
-            try appendTypeMangleName(allocator, buffer, array.element_type.*);
-            if (array.len) |len| {
-                try buffer.append(allocator, '_');
-                try buffer.writer(allocator).print("{d}", .{len});
-            }
-        },
-        .map => |map| {
-            try buffer.appendSlice(allocator, "map");
-            if (map.key_type) |key| {
-                try buffer.append(allocator, '_');
-                try appendTypeMangleName(allocator, buffer, key.*);
-            }
-            if (map.value_type) |value| {
-                try buffer.append(allocator, '_');
-                try appendTypeMangleName(allocator, buffer, value.*);
-            }
-        },
-        .tuple => |elements| {
-            try buffer.appendSlice(allocator, "tuple");
-            for (elements) |element| {
-                try buffer.append(allocator, '_');
-                try appendTypeMangleName(allocator, buffer, element);
-            }
-        },
-        .error_union => |error_union| {
-            try buffer.appendSlice(allocator, "error_union_");
-            try appendTypeMangleName(allocator, buffer, error_union.payload_type.*);
-        },
-        .function => |function| try buffer.appendSlice(allocator, function.name orelse "fn"),
-        .unknown => try buffer.appendSlice(allocator, "type"),
-    }
-}
+pub const ConstValue = semantic_values.ConstValue;
 
-pub const LocatedType = struct {
-    type: Type,
-    region: Region = .none,
-    provenance: Provenance = .local,
+pub const VerificationFactKind = enum {
+    requires,
+    guard,
+    ensures,
+    ensures_ok,
+    ensures_err,
+    modifies,
+    contract_invariant,
+    loop_invariant,
+    assert,
+    assume,
+    havoc,
+    ghost_function,
+    ghost_field,
+    ghost_constant,
+    ghost_block,
+    ghost_axiom,
+    old,
+    quantified,
 
-    pub fn unlocated(ty: Type) LocatedType {
-        return .{
-            .type = ty,
-            .region = .none,
-            .provenance = .local,
+    pub fn fromSpecClause(kind: ast.SpecClauseKind) ?VerificationFactKind {
+        return switch (kind) {
+            .requires => .requires,
+            .guard => .guard,
+            .ensures => .ensures,
+            .ensures_ok => .ensures_ok,
+            .ensures_err => .ensures_err,
+            .modifies => .modifies,
+            .invariant => null,
         };
     }
 
-    pub fn withRegion(ty: Type, region: Region) LocatedType {
-        return .{
-            .type = ty,
-            .region = region,
-            .provenance = .local,
+    pub fn specClauseKind(self: VerificationFactKind) ?ast.SpecClauseKind {
+        return switch (self) {
+            .requires => .requires,
+            .guard => .guard,
+            .ensures => .ensures,
+            .ensures_ok => .ensures_ok,
+            .ensures_err => .ensures_err,
+            .modifies => .modifies,
+            .contract_invariant => .invariant,
+            else => null,
         };
-    }
-
-    pub fn withRegionAndProvenance(ty: Type, region: Region, provenance: Provenance) LocatedType {
-        return .{
-            .type = ty,
-            .region = region,
-            .provenance = provenance,
-        };
-    }
-
-    pub fn kind(self: LocatedType) TypeKind {
-        return self.type.kind();
-    }
-
-    pub fn name(self: *const LocatedType) ?[]const u8 {
-        return self.type.name();
-    }
-
-    pub fn elementType(self: *const LocatedType) ?*const Type {
-        return self.type.elementType();
-    }
-
-    pub fn keyType(self: *const LocatedType) ?*const Type {
-        return self.type.keyType();
-    }
-
-    pub fn valueType(self: *const LocatedType) ?*const Type {
-        return self.type.valueType();
-    }
-
-    pub fn payloadType(self: *const LocatedType) ?*const Type {
-        return self.type.payloadType();
-    }
-
-    pub fn arrayLen(self: *const LocatedType) ?u32 {
-        return self.type.arrayLen();
-    }
-
-    pub fn tupleTypes(self: *const LocatedType) []const Type {
-        return self.type.tupleTypes();
-    }
-
-    pub fn errorTypes(self: *const LocatedType) []const Type {
-        return self.type.errorTypes();
-    }
-
-    pub fn paramTypes(self: *const LocatedType) []const Type {
-        return self.type.paramTypes();
-    }
-
-    pub fn returnTypes(self: *const LocatedType) []const Type {
-        return self.type.returnTypes();
     }
 };
 
-pub const ConstValue = union(enum) {
-    integer: BigInt,
-    boolean: bool,
-    address: u160,
-    fixed_bytes: []const u8,
-    string: []const u8,
-    tuple: []const ConstValue,
+pub const VerificationContext = enum {
+    source,
+    contract,
+    loop,
+    ghost_block,
+    trait_ghost_block,
+    ghost_declaration,
+    trait_method_contract,
+};
+
+pub const VerificationTraitMethodOwner = struct {
+    trait_item: ast.ItemId,
+    method_index: usize,
+};
+
+pub const VerificationStatementOwner = struct {
+    item: ast.ItemId,
+    stmt: ast.StmtId,
+};
+
+pub const VerificationFactOwner = union(enum) {
+    none,
+    item: ast.ItemId,
+    trait_method: VerificationTraitMethodOwner,
+    statement: VerificationStatementOwner,
+
+    pub fn itemId(self: VerificationFactOwner) ?ast.ItemId {
+        return switch (self) {
+            .item => |item_id| item_id,
+            else => null,
+        };
+    }
+
+    pub fn traitMethod(self: VerificationFactOwner) ?VerificationTraitMethodOwner {
+        return switch (self) {
+            .trait_method => |owner| owner,
+            else => null,
+        };
+    }
+
+    pub fn statementOwner(self: VerificationFactOwner) ?VerificationStatementOwner {
+        return switch (self) {
+            .statement => |owner| owner,
+            else => null,
+        };
+    }
 };
 
 pub const VerificationFact = struct {
-    kind: ast.SpecClauseKind,
-    expr: ast.ExprId,
+    kind: VerificationFactKind,
+    owner: VerificationFactOwner = .none,
+    expr: ?ast.ExprId = null,
+    label: ?[]const u8 = null,
+    target_name: ?[]const u8 = null,
     range: source.TextRange,
+    context: VerificationContext = .source,
 };
 
 pub const EffectSlot = struct {
@@ -565,41 +470,94 @@ pub fn effectSlotPathRoot(path: []const u8) []const u8 {
     return path;
 }
 
+pub const EffectFlags = struct {
+    has_external: bool = false,
+    has_log: bool = false,
+    has_havoc: bool = false,
+    has_lock: bool = false,
+    has_unlock: bool = false,
+
+    pub fn any(self: EffectFlags) bool {
+        return self.has_external or self.has_log or self.has_havoc or self.has_lock or self.has_unlock;
+    }
+
+    pub fn externalOnly(self: EffectFlags) bool {
+        return self.has_external and !self.has_log and !self.has_havoc and !self.has_lock and !self.has_unlock;
+    }
+
+    pub fn merge(self: *EffectFlags, other: EffectFlags) void {
+        self.has_external = self.has_external or other.has_external;
+        self.has_log = self.has_log or other.has_log;
+        self.has_havoc = self.has_havoc or other.has_havoc;
+        self.has_lock = self.has_lock or other.has_lock;
+        self.has_unlock = self.has_unlock or other.has_unlock;
+    }
+};
+
 pub const Effect = union(enum) {
     pure,
     external,
-    side_effects: struct {
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
-    },
+    side_effects: EffectFlags,
     writes: struct {
         slots: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
     reads: struct {
         slots: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
     reads_writes: struct {
         reads: []const EffectSlot,
         writes: []const EffectSlot,
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
     },
+
+    pub fn readSlots(self: Effect) []const EffectSlot {
+        return switch (self) {
+            .pure, .external, .side_effects, .writes => &.{},
+            .reads => |read_effect| read_effect.slots,
+            .reads_writes => |read_write| read_write.reads,
+        };
+    }
+
+    pub fn writeSlots(self: Effect) []const EffectSlot {
+        return switch (self) {
+            .pure, .external, .side_effects, .reads => &.{},
+            .writes => |write_effect| write_effect.slots,
+            .reads_writes => |read_write| read_write.writes,
+        };
+    }
+
+    pub fn flags(self: Effect) EffectFlags {
+        return switch (self) {
+            .pure => .{},
+            .external => .{ .has_external = true },
+            .side_effects => |effect_flags| effect_flags,
+            .reads => |read_effect| read_effect.flags,
+            .writes => |write_effect| write_effect.flags,
+            .reads_writes => |read_write| read_write.flags,
+        };
+    }
+
+    pub fn hasExternal(self: Effect) bool {
+        return self.flags().has_external;
+    }
+
+    pub fn hasLog(self: Effect) bool {
+        return self.flags().has_log;
+    }
+
+    pub fn hasHavoc(self: Effect) bool {
+        return self.flags().has_havoc;
+    }
+
+    pub fn hasLock(self: Effect) bool {
+        return self.flags().has_lock;
+    }
+
+    pub fn hasUnlock(self: Effect) bool {
+        return self.flags().has_unlock;
+    }
 };
 
 pub const TypeCheckKey = union(enum) {
@@ -610,6 +568,8 @@ pub const TypeCheckKey = union(enum) {
 pub const VerificationFactsKey = union(enum) {
     item: ast.ItemId,
     body: ast.BodyId,
+    trait_method: VerificationTraitMethodOwner,
+    statement: VerificationStatementOwner,
 };
 
 pub const ModuleGraphResult = struct {
@@ -628,6 +588,14 @@ pub const ItemIndexResult = struct {
     arena: std.heap.ArenaAllocator,
     entries: []NamedItem,
     impl_entries: []ImplEntry,
+    impl_lookup: []lookup_index.PairEntry,
+    trait_method_lookup: []lookup_index.MemberEntry,
+    impl_method_lookup: []lookup_index.MemberEntry,
+    impl_method_owner_lookup: []lookup_index.IndexEntry,
+    struct_field_lookup: []lookup_index.MemberEntry,
+    bitfield_field_lookup: []lookup_index.MemberEntry,
+    enum_variant_lookup: []lookup_index.MemberEntry,
+    contract_member_lookup: []lookup_index.MemberEntry,
 
     pub fn deinit(self: *ItemIndexResult) void {
         self.arena.deinit();
@@ -648,14 +616,164 @@ pub const ItemIndexResult = struct {
     }
 
     pub fn lookupImpl(self: *const ItemIndexResult, trait_name: []const u8, target_name: []const u8) ?ast.ItemId {
-        for (self.impl_entries) |entry| {
-            if (std.mem.eql(u8, entry.trait_name, trait_name) and std.mem.eql(u8, entry.target_name, target_name)) {
-                return entry.item_id;
-            }
+        const index = lookup_index.findPair(self.impl_lookup, trait_name, target_name) orelse return null;
+        return self.impl_entries[index].item_id;
+    }
+
+    pub fn lookupTraitMethod(self: *const ItemIndexResult, file: *const ast.AstFile, trait_item_id: ast.ItemId, name: []const u8) ?ast.nodes.TraitMethod {
+        const method_index = self.lookupTraitMethodIndex(trait_item_id, name) orelse return null;
+        const trait_item = switch (file.item(trait_item_id).*) {
+            .Trait => |trait_item| trait_item,
+            else => return null,
+        };
+        if (method_index >= trait_item.methods.len) return null;
+        return trait_item.methods[method_index];
+    }
+
+    pub fn lookupTraitMethodIndex(self: *const ItemIndexResult, trait_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.trait_method_lookup, trait_item_id.index(), name);
+    }
+
+    pub fn lookupImplMethod(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) ?ast.ItemId {
+        const method_index = lookup_index.findMember(self.impl_method_lookup, impl_item_id.index(), name) orelse return null;
+        return implMethodAt(file, impl_item_id, method_index);
+    }
+
+    pub fn lookupImplContainingMethod(self: *const ItemIndexResult, method_item_id: ast.ItemId) ?ast.ItemId {
+        const impl_index = lookup_index.findIndex(self.impl_method_owner_lookup, method_item_id.index()) orelse return null;
+        return ast.ItemId.fromIndex(impl_index);
+    }
+
+    pub fn lookupStructFieldIndex(self: *const ItemIndexResult, struct_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.struct_field_lookup, struct_item_id.index(), name);
+    }
+
+    pub fn lookupStructField(self: *const ItemIndexResult, file: *const ast.AstFile, struct_item_id: ast.ItemId, name: []const u8) ?ast.StructField {
+        const field_index = self.lookupStructFieldIndex(struct_item_id, name) orelse return null;
+        const struct_item = switch (file.item(struct_item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return null,
+        };
+        if (field_index >= struct_item.fields.len) return null;
+        return struct_item.fields[field_index];
+    }
+
+    pub fn lookupBitfieldFieldIndex(self: *const ItemIndexResult, bitfield_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.bitfield_field_lookup, bitfield_item_id.index(), name);
+    }
+
+    pub fn lookupBitfieldField(self: *const ItemIndexResult, file: *const ast.AstFile, bitfield_item_id: ast.ItemId, name: []const u8) ?ast.BitfieldField {
+        const field_index = self.lookupBitfieldFieldIndex(bitfield_item_id, name) orelse return null;
+        const bitfield_item = switch (file.item(bitfield_item_id).*) {
+            .Bitfield => |bitfield_item| bitfield_item,
+            else => return null,
+        };
+        if (field_index >= bitfield_item.fields.len) return null;
+        return bitfield_item.fields[field_index];
+    }
+
+    pub fn countImplMethods(self: *const ItemIndexResult, file: *const ast.AstFile, impl_item_id: ast.ItemId, name: []const u8) usize {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return 0;
+        var count: usize = 0;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            if (implMethodAt(file, impl_item_id, entry.index) != null) count += 1;
+        }
+        return count;
+    }
+
+    pub fn lookupImplMethodByReceiver(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        impl_item_id: ast.ItemId,
+        name: []const u8,
+        receiver_kind: ast.ReceiverKind,
+    ) ?ast.ItemId {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return null;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            const method_id = implMethodAt(file, impl_item_id, entry.index) orelse continue;
+            const function = switch (file.item(method_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (functionReceiverKind(file, function) == receiver_kind) return method_id;
+        }
+        return null;
+    }
+
+    pub fn countImplMethodsByReceiver(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        impl_item_id: ast.ItemId,
+        name: []const u8,
+        receiver_kind: ast.ReceiverKind,
+    ) usize {
+        const range = lookup_index.findMemberRange(self.impl_method_lookup, impl_item_id.index(), name) orelse return 0;
+        var count: usize = 0;
+        for (self.impl_method_lookup[range.start..range.end]) |entry| {
+            const method_id = implMethodAt(file, impl_item_id, entry.index) orelse continue;
+            const function = switch (file.item(method_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (functionReceiverKind(file, function) == receiver_kind) count += 1;
+        }
+        return count;
+    }
+
+    pub fn lookupEnumVariantIndex(self: *const ItemIndexResult, enum_item_id: ast.ItemId, name: []const u8) ?usize {
+        return lookup_index.findMember(self.enum_variant_lookup, enum_item_id.index(), name);
+    }
+
+    pub fn lookupContractMemberWithRoles(
+        self: *const ItemIndexResult,
+        file: *const ast.AstFile,
+        contract_item_id: ast.ItemId,
+        name: []const u8,
+        roles: ContractMemberRoles,
+    ) ?ast.ItemId {
+        const range = lookup_index.findMemberRange(self.contract_member_lookup, contract_item_id.index(), name) orelse return null;
+        const contract = switch (file.item(contract_item_id).*) {
+            .Contract => |contract| contract,
+            else => return null,
+        };
+        for (self.contract_member_lookup[range.start..range.end]) |entry| {
+            if (entry.index >= contract.members.len) return null;
+            const member_id = contract.members[entry.index];
+            const role = contractMemberRole(file.item(member_id).*) orelse continue;
+            if (roles.contains(role)) return member_id;
         }
         return null;
     }
 };
+
+fn implMethodAt(file: *const ast.AstFile, impl_item_id: ast.ItemId, method_index: usize) ?ast.ItemId {
+    const impl_item = switch (file.item(impl_item_id).*) {
+        .Impl => |impl_item| impl_item,
+        else => return null,
+    };
+    if (method_index >= impl_item.methods.len) return null;
+    return impl_item.methods[method_index];
+}
+
+fn functionReceiverKind(file: *const ast.AstFile, function: ast.FunctionItem) ast.ReceiverKind {
+    return if (functionHasRuntimeSelf(file, function)) .value_self else .none;
+}
+
+fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
+    return switch (item) {
+        .Field => .field,
+        .Constant => .constant,
+        .Function => .function,
+        .Struct => .struct_,
+        .Bitfield => .bitfield,
+        .Enum => .enum_,
+        .TypeAlias => .type_alias,
+        .Trait => .trait_,
+        .LogDecl => .log_decl,
+        .ErrorDecl => .error_decl,
+        else => null,
+    };
+}
 
 pub const NameResolutionResult = struct {
     arena: std.heap.ArenaAllocator,
@@ -676,15 +794,22 @@ pub const TypeCheckResult = struct {
     item_effects: []Effect,
     item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
+    pattern_initializers: []?ast.ExprId,
+    pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []Effect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
+    instantiated_struct_lookup: []lookup_index.NamedEntry,
     instantiated_enums: []const InstantiatedEnum,
+    instantiated_enum_lookup: []lookup_index.NamedEntry,
     instantiated_bitfields: []const InstantiatedBitfield,
+    instantiated_bitfield_lookup: []lookup_index.NamedEntry,
     trait_interfaces: []const TraitInterface,
+    trait_interface_lookup: []lookup_index.NamedEntry,
     impl_interfaces: []const ImplInterface,
+    impl_interface_lookup: []lookup_index.PairEntry,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *TypeCheckResult) void {
@@ -694,6 +819,14 @@ pub const TypeCheckResult = struct {
 
     pub fn exprType(self: *const TypeCheckResult, id: ast.ExprId) Type {
         return self.expr_types[id.index()];
+    }
+
+    pub fn patternInitializer(self: *const TypeCheckResult, id: ast.PatternId) ?ast.ExprId {
+        return self.pattern_initializers[id.index()];
+    }
+
+    pub fn patternBindingKind(self: *const TypeCheckResult, id: ast.PatternId) ?ast.BindingKind {
+        return self.pattern_binding_kinds[id.index()];
     }
 
     pub fn exprCallResolution(self: *const TypeCheckResult, id: ast.ExprId) ?ResolvedCall {
@@ -720,42 +853,28 @@ pub const TypeCheckResult = struct {
     }
 
     pub fn instantiatedStructByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedStruct {
-        for (self.instantiated_structs) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_struct_lookup, name) orelse return null;
+        return self.instantiated_structs[index];
     }
 
     pub fn instantiatedEnumByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedEnum {
-        for (self.instantiated_enums) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_enum_lookup, name) orelse return null;
+        return self.instantiated_enums[index];
     }
 
     pub fn instantiatedBitfieldByName(self: *const TypeCheckResult, name: []const u8) ?InstantiatedBitfield {
-        for (self.instantiated_bitfields) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.instantiated_bitfield_lookup, name) orelse return null;
+        return self.instantiated_bitfields[index];
     }
 
     pub fn traitInterfaceByName(self: *const TypeCheckResult, name: []const u8) ?TraitInterface {
-        for (self.trait_interfaces) |trait_interface| {
-            if (std.mem.eql(u8, trait_interface.name, name)) return trait_interface;
-        }
-        return null;
+        const index = lookup_index.findNamed(self.trait_interface_lookup, name) orelse return null;
+        return self.trait_interfaces[index];
     }
 
     pub fn implInterfaceByNames(self: *const TypeCheckResult, trait_name: []const u8, target_name: []const u8) ?ImplInterface {
-        for (self.impl_interfaces) |impl_interface| {
-            if (std.mem.eql(u8, impl_interface.trait_name, trait_name) and
-                std.mem.eql(u8, impl_interface.target_name, target_name))
-            {
-                return impl_interface;
-            }
-        }
-        return null;
+        const index = lookup_index.findPair(self.impl_interface_lookup, trait_name, target_name) orelse return null;
+        return self.impl_interfaces[index];
     }
 };
 
@@ -793,6 +912,15 @@ test "LocatedType defaults to none region" {
     const ty = LocatedType.unlocated(.{ .integer = .{ .bits = 256, .signed = false } });
     try std.testing.expectEqual(Region.none, ty.region);
     try std.testing.expectEqual(TypeKind.integer, ty.type.kind());
+}
+
+test "IntegerType is resolved by construction" {
+    const u256_integer = IntegerType{ .bits = 256, .signed = false, .spelling = "u256" };
+
+    try std.testing.expectEqual(@as(u16, 256), u256_integer.bits);
+    try std.testing.expect(!u256_integer.signed);
+    try std.testing.expect(u256_integer.isUnsignedBits(256));
+    try std.testing.expect(u256_integer.builtinSpec() != null);
 }
 
 test "LocatedType supports explicit regions" {
@@ -869,22 +997,23 @@ test "Effect supports external call marker" {
     const external_only: Effect = .external;
     const reads_external: Effect = .{ .reads = .{
         .slots = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
     const writes_external: Effect = .{ .writes = .{
         .slots = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
     const mixed_external: Effect = .{ .reads_writes = .{
         .reads = &slots,
         .writes = &slots,
-        .has_external = true,
+        .flags = .{ .has_external = true },
     } };
 
     try std.testing.expect(external_only == .external);
-    try std.testing.expect(reads_external.reads.has_external);
-    try std.testing.expect(writes_external.writes.has_external);
-    try std.testing.expect(mixed_external.reads_writes.has_external);
+    try std.testing.expect(external_only.hasExternal());
+    try std.testing.expect(reads_external.hasExternal());
+    try std.testing.expect(writes_external.hasExternal());
+    try std.testing.expect(mixed_external.hasExternal());
 }
 
 test "Effect supports log and havoc markers" {
@@ -893,23 +1022,25 @@ test "Effect supports log and havoc markers" {
     };
     const reads_log: Effect = .{ .reads = .{
         .slots = &slots,
-        .has_log = true,
+        .flags = .{ .has_log = true },
     } };
     const writes_havoc: Effect = .{ .writes = .{
         .slots = &slots,
-        .has_havoc = true,
+        .flags = .{ .has_havoc = true },
     } };
     const mixed: Effect = .{ .reads_writes = .{
         .reads = &slots,
         .writes = &slots,
-        .has_log = true,
-        .has_havoc = true,
+        .flags = .{
+            .has_log = true,
+            .has_havoc = true,
+        },
     } };
 
-    try std.testing.expect(reads_log.reads.has_log);
-    try std.testing.expect(writes_havoc.writes.has_havoc);
-    try std.testing.expect(mixed.reads_writes.has_log);
-    try std.testing.expect(mixed.reads_writes.has_havoc);
+    try std.testing.expect(reads_log.hasLog());
+    try std.testing.expect(writes_havoc.hasHavoc());
+    try std.testing.expect(mixed.hasLog());
+    try std.testing.expect(mixed.hasHavoc());
 }
 
 test "Effect supports side-effect-only marker" {
@@ -920,8 +1051,8 @@ test "Effect supports side-effect-only marker" {
         .has_unlock = true,
     } };
 
-    try std.testing.expect(effect.side_effects.has_log);
-    try std.testing.expect(effect.side_effects.has_havoc);
-    try std.testing.expect(effect.side_effects.has_lock);
-    try std.testing.expect(effect.side_effects.has_unlock);
+    try std.testing.expect(effect.hasLog());
+    try std.testing.expect(effect.hasHavoc());
+    try std.testing.expect(effect.hasLock());
+    try std.testing.expect(effect.hasUnlock());
 }

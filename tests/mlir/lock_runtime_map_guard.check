@@ -2,17 +2,23 @@
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @write_balance
 // CHECK: ora.tstore.guard
-// CHECK: balances[user]
+// CHECK-SAME: "balances[]"
 // CHECK: ora.map_store
 //
 // CHECK-LABEL: func.func @safe_different_slot
 // CHECK: ora.lock
-// CHECK: balances[locked_user]
-// CHECK: call @write_balance
+// CHECK-SAME: key = "balances[]"
 // CHECK: ora.unlock
-//
-// CHECK-LABEL: func.func @unsafe_same_slot
-// CHECK: ora.lock
-// CHECK: balances[user]
+// CHECK-SAME: key = "balances[]"
 // CHECK: call @write_balance
+//
+// CHECK-LABEL: func.func @safe_read_then_write
+// CHECK: ora.lock
+// CHECK-SAME: key = "balances[]"
+// CHECK: ora.unlock
+// CHECK: call @write_balance
+//
+// CHECK-LABEL: func.func @lock_and_read
+// CHECK: ora.lock
+// CHECK-SAME: key = "balances[]"
 // CHECK: ora.unlock

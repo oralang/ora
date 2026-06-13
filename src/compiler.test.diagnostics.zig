@@ -31,6 +31,161 @@ const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
 
+const ORA_BINARY_REL = "zig-out/bin/ora";
+
+fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_path: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
+}
+
+fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "undefined type 'Bogus'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "undefined type 'Bogus'"));
+}
+
+fn expectSingleUndefinedErrorDiagnostic(source_text: []const u8, name: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const message = try std.fmt.allocPrint(testing.allocator, "undefined error '{s}'", .{name});
+    defer testing.allocator.free(message);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, message));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, message));
+}
+
+fn expectSingleBarePipeTypeDiagnostic(source_text: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(syntax_diags, "error-union types must start with '!'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(syntax_diags, "error-union types must start with '!'"));
+}
+
+fn expectTypecheckOmits(source_text: []const u8, must_not_contain: []const u8) !void {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, must_not_contain));
+}
+
+test "compiler accepts contextual short integer literals for address declarations only" {
+    const positive =
+        \\pub fn zero() -> address {
+        \\    let short_zero: address = 0x0;
+        \\    let byte_zero: address = 0x00;
+        \\    return short_zero;
+        \\}
+    ;
+    var positive_compilation = try compileText(positive);
+    defer positive_compilation.deinit();
+
+    const positive_typecheck = try positive_compilation.db.moduleTypeCheck(positive_compilation.root_module_id);
+    try testing.expect(positive_typecheck.diagnostics.isEmpty());
+
+    const negative =
+        \\pub fn bad(value: u256) -> address {
+        \\    return value;
+        \\}
+    ;
+    var negative_compilation = try compileText(negative);
+    defer negative_compilation.deinit();
+
+    const negative_typecheck = try negative_compilation.db.moduleTypeCheck(negative_compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&negative_typecheck.diagnostics, "return expects type 'address', found 'u256'"));
+
+    const too_wide =
+        \\pub fn bad() -> address {
+        \\    let addr: address = 0x10000000000000000000000000000000000000000;
+        \\    return addr;
+        \\}
+    ;
+    var too_wide_compilation = try compileText(too_wide);
+    defer too_wide_compilation.deinit();
+
+    const too_wide_typecheck = try too_wide_compilation.db.moduleTypeCheck(too_wide_compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&too_wide_typecheck.diagnostics, "does not fit in type 'address'"));
+}
+
+// Locks the fail-closed contract for cast-like / overflow builtins: a malformed
+// shape MUST be rejected at type-check, never slide through to the HIR lowering
+// fallback ("reached HIR lowering without ...") or an ICE. Each needle here was
+// confirmed against a freshly built `ora` binary (EXIT=1 at sema, not EXIT=0).
+test "cast-like and overflow builtins reject malformed shapes at sema (fail-closed)" {
+    // Overflow: wrong arity (binary form needs 2 operands).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        let r = @addWithOverflow(x);
+        \\        return x;
+        \\    }
+        \\}
+    , .typecheck, "@addWithOverflow expects 2 arguments");
+
+    // Overflow: wrong arity (unary negWithOverflow needs exactly 1 operand).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        let r = @negWithOverflow(x, x);
+        \\        return x;
+        \\    }
+        \\}
+    , .typecheck, "@negWithOverflow expects 1 arguments");
+
+    // Overflow: non-integer operands.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f() -> u256 {
+        \\        let r = @addWithOverflow(true, false);
+        \\        return 0;
+        \\    }
+        \\}
+    , .typecheck, "@addWithOverflow expects integer operands");
+
+    // Cast-like: too many value arguments (type slot + 1 value is the only shape).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        return @bitCast(u256, x, x);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast expects a type argument and 1 value argument");
+
+    // Cast-like: missing value argument.
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u256 {
+        \\        return @bitCast(u256);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast expects a type argument and 1 value argument");
+
+    // Cast-like: a non-type in the type slot fails closed via type resolution
+    // (@truncate(x) parses `x` as the type argument).
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u128 {
+        \\        return @truncate(x);
+        \\    }
+        \\}
+    , .typecheck, "undefined type 'x'");
+
+    // Positive control: a well-formed cast must NOT trip the shape check.
+    try expectTypecheckOmits(
+        \\contract C {
+        \\    pub fn f(x: u256) -> u128 {
+        \\        return @truncate(u128, x);
+        \\    }
+        \\}
+    , "expects");
+}
+
 test "compiler diagnostic release matrix stays readable" {
     try expectDiagnosticProbeContains(
         \\trait Plain {
@@ -97,6 +252,640 @@ test "compiler diagnostic release matrix stays readable" {
         .typecheck,
         "cannot write storage slot 'balance' after external call because it was written before the call",
     );
+}
+
+test "compiler reports undefined type names in every annotation position" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "function parameter",
+            .source =
+            \\pub fn run(value: Bogus) {
+            \\    _ = value;
+            \\}
+            ,
+        },
+        .{
+            .name = "struct field",
+            .source =
+            \\struct Holder {
+            \\    value: Bogus,
+            \\}
+            ,
+        },
+        .{
+            .name = "nested struct field",
+            .source =
+            \\struct Holder {
+            \\    value: struct { child: Bogus },
+            \\}
+            ,
+        },
+        .{
+            .name = "storage var",
+            .source =
+            \\contract Vault {
+            \\    storage var value: Bogus;
+            \\}
+            ,
+        },
+        .{
+            .name = "map key",
+            .source =
+            \\contract Vault {
+            \\    storage var values: map<Bogus, u256>;
+            \\}
+            ,
+        },
+        .{
+            .name = "map value",
+            .source =
+            \\contract Vault {
+            \\    storage var values: map<u256, Bogus>;
+            \\}
+            ,
+        },
+        .{
+            .name = "array element",
+            .source =
+            \\contract Vault {
+            \\    storage var values: [Bogus; 4];
+            \\}
+            ,
+        },
+        .{
+            .name = "slice element",
+            .source =
+            \\contract Vault {
+            \\    storage var values: slice[Bogus];
+            \\}
+            ,
+        },
+        .{
+            .name = "tuple member",
+            .source =
+            \\contract Vault {
+            \\    storage var values: (u256, Bogus);
+            \\}
+            ,
+        },
+        .{
+            .name = "log field",
+            .source =
+            \\contract Vault {
+            \\    log Transfer(value: Bogus);
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined type matrix case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedBogusTypeDiagnostic(case.source);
+    }
+}
+
+test "compiler reports undefined error-union errors once" {
+    const cases = [_]struct {
+        name: []const u8,
+        error_name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .error_name = "BadErr",
+            .source =
+            \\pub fn run() -> !u256 | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "function parameter",
+            .error_name = "BadErr",
+            .source =
+            \\pub fn run(value: !u256 | BadErr) -> u256 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "one of several",
+            .error_name = "BadErr",
+            .source =
+            \\error Good;
+            \\
+            \\pub fn run() -> !u256 | Good | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "non-error symbol",
+            .error_name = "S",
+            .source =
+            \\struct S {}
+            \\
+            \\pub fn run() -> !u256 | S {
+            \\    return 0;
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined error-union error case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedErrorDiagnostic(case.source, case.error_name);
+    }
+}
+
+test "compiler accepts imported error-union error names" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract StdBytesHelpers {
+        \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
+        \\        return std.bytes.at(data, 0);
+        \\    }
+        \\
+        \\    pub fn decodeWord(data: bytes) -> !u256 | std.bytes.InvalidLength {
+        \\        return std.bytes.decodeU256BE(data);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects error-union pipes without bang" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .source =
+            \\pub fn run() -> u256 | BadErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "function parameter",
+            .source =
+            \\pub fn run(value: u256 | BadErr) -> u256 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "defined error still requires bang",
+            .source =
+            \\error MyErr;
+            \\
+            \\pub fn run() -> u256 | MyErr {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "non-error symbol",
+            .source =
+            \\struct S {}
+            \\
+            \\pub fn run() -> u256 | S {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "numeric suffix",
+            .source =
+            \\pub fn run() -> u256 | 123 {
+            \\    return 0;
+            \\}
+            ,
+        },
+        .{
+            .name = "empty suffix",
+            .source =
+            \\pub fn run() -> u256 | {
+            \\    return 0;
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("bare pipe type case failed: {s}\n", .{case.name});
+        try expectSingleBarePipeTypeDiagnostic(case.source);
+    }
+}
+
+test "compiler rejects non-name error-union error members" {
+    const source_text =
+        \\pub fn run() -> !u256 | (u8, u8) {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "error-union error must be a declared error name"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "error-union error must be a declared error name"));
+}
+
+test "compiler accepts defined error-union errors and preserves lowering" {
+    const source_text =
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract Vault {
+        \\    pub fn withdraw(amount: u256) -> !u256 | InsufficientBalance {
+        \\        return error InsufficientBalance(amount, amount);
+        \\    }
+        \\}
+    ;
+
+    {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+        try testing.expect(typecheck.diagnostics.isEmpty());
+    }
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @withdraw"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.returns_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.error_selector"));
+}
+
+test "compiler reports unsupported storage Result payload shapes" {
+    const dynamic_payload_source =
+        \\error Failure;
+        \\
+        \\contract Vault {
+        \\    storage var saved: Result<(u256, u256), Failure>;
+        \\}
+    ;
+
+    var dynamic_payload = try compileText(dynamic_payload_source);
+    defer dynamic_payload.deinit();
+
+    const dynamic_typecheck = try dynamic_payload.db.moduleTypeCheck(dynamic_payload.root_module_id);
+    try testing.expect(diagnosticMessagesContain(
+        &dynamic_typecheck.diagnostics,
+        "storage Result values currently support only scalar, string, bytes, or slice success payloads",
+    ));
+    try testing.expectEqual(
+        @as(usize, 1),
+        countDiagnosticMessages(
+            &dynamic_typecheck.diagnostics,
+            "storage Result values currently support only scalar, string, bytes, or slice success payloads",
+        ),
+    );
+
+    const error_payload_source =
+        \\error Failure(code: u256);
+        \\
+        \\contract Vault {
+        \\    storage var saved: Result<u256, Failure>;
+        \\}
+    ;
+
+    var error_payload = try compileText(error_payload_source);
+    defer error_payload.deinit();
+
+    const error_typecheck = try error_payload.db.moduleTypeCheck(error_payload.root_module_id);
+    try testing.expect(diagnosticMessagesContain(
+        &error_typecheck.diagnostics,
+        "storage Result values currently require payloadless error types",
+    ));
+    try testing.expectEqual(
+        @as(usize, 1),
+        countDiagnosticMessages(
+            &error_typecheck.diagnostics,
+            "storage Result values currently require payloadless error types",
+        ),
+    );
+}
+
+test "compiler abi emit barrier rejects undefined types without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    storage var value: Bogus;
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi:extras",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined type 'Bogus'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "undefined type 'Bogus'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler abi emit barrier rejects undefined error-union errors without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    pub fn run() -> !u256 | BadErr {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined error 'BadErr'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "undefined error 'BadErr'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler abi emit barrier rejects error-union pipes without bang without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Vault {
+        \\    pub fn run() -> u256 | BadErr {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "emit",
+            "--emit=abi",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "error-union types must start with '!'") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "error-union types must start with '!'"));
+
+    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
+    defer out_dir.close();
+    var iter = out_dir.iterate();
+    try testing.expect((try iter.next()) == null);
+}
+
+test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\error Failure;
+        \\
+        \\contract ResultStringMemRefDead {
+        \\    pub fn run() -> u256 {
+        \\        var values: [Result<string, Failure>; 1] = [Err(Failure())];
+        \\        values[0] = Ok("abc");
+        \\        return 7;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "local Result aggregate values currently require a scalar success payload") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "local Result aggregate values currently require a scalar success payload"));
+
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+}
+
+test "compiler build removes partial artifacts when native SIR lowering fails" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn take_nested(values: slice[slice[u256]]) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic ABI type for dispatcher") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "unsupported dynamic ABI type for dispatcher"));
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
+
+    try tmp.dir.access("out", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+}
+
+test "compiler reports undefined type names at value resolution positions once" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+    }{
+        .{
+            .name = "return type",
+            .source =
+            \\pub fn run() -> Bogus {
+            \\    return 1;
+            \\}
+            ,
+        },
+        .{
+            .name = "typed local initializer",
+            .source =
+            \\pub fn run() {
+            \\    let value: Bogus = 1;
+            \\    _ = value;
+            \\}
+            ,
+        },
+        .{
+            .name = "cast target",
+            .source =
+            \\pub fn run(value: u256) -> u256 {
+            \\    return @cast(Bogus, value);
+            \\}
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        errdefer std.debug.print("undefined type value-position case failed: {s}\n", .{case.name});
+        try expectSingleUndefinedBogusTypeDiagnostic(case.source);
+    }
 }
 
 test "compiler treats result as an ensures-only reserved pseudo variable" {
@@ -280,6 +1069,26 @@ test "compiler rejects bytes enums without explicit values for every variant" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "bytes enums currently require explicit values for every variant"));
 }
 
+test "compiler rejects unsupported integer type widths" {
+    try expectDiagnosticProbeContains(
+        \\pub fn bad(value: u24) -> u24 {
+        \\    return value;
+        \\}
+    ,
+        .typecheck,
+        "invalid integer type 'u24'; supported integer types are u8, u16, u32, u64, u128, u160, u256, i8, i16, i32, i64, i128, and i256",
+    );
+
+    try expectDiagnosticProbeContains(
+        \\pub fn bad(value: i96) -> i96 {
+        \\    return value;
+        \\}
+    ,
+        .typecheck,
+        "invalid integer type 'i96'",
+    );
+}
+
 test "compiler parses enum explicit value expressions without syntax diagnostics" {
     const source_text =
         \\contract T {
@@ -456,10 +1265,10 @@ test "compiler reports sema diagnostics for unresolved names and invalid operati
 test "compiler reports heterogeneous array literals and keeps tuple element types" {
     const source_text =
         \\pub fn build(flag: bool, small: u8, big: u256) -> bool {
-        \\    let ok = [1, 2, 3];
-        \\    let widened = [small, big, 3];
-        \\    let bad = [1, false];
-        \\    let pair = (flag, 7);
+        \\    let ok: [u256; 3] = [1, 2, 3];
+        \\    let widened: [u256; 3] = [small, big, 3];
+        \\    let bad = [big, false];
+        \\    let pair: (bool, u256) = (flag, 7);
         \\    return pair[0];
         \\}
     ;
@@ -471,7 +1280,7 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
     try testing.expectEqual(@as(usize, 1), type_diags.len());
-    try testing.expectEqualStrings("array literal elements have incompatible types 'integer' and 'bool'", type_diags.items.items[0].message);
+    try testing.expectEqualStrings("array literal elements have incompatible types 'u256' and 'bool'", type_diags.items.items[0].message);
 
     const function = ast_file.item(ast_file.root_items[0]).Function;
     const body = ast_file.body(function.body);
@@ -616,8 +1425,32 @@ test "compiler reports integer constant overflow against declared widths" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
-    try testing.expectEqual(@as(usize, 4), type_diags.len());
-    try testing.expectEqual(@as(usize, 4), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
+    try testing.expectEqual(@as(usize, 5), type_diags.len());
+    try testing.expectEqual(@as(usize, 5), countDiagnosticMessages(type_diags, "constant value 256 does not fit in type 'u8'"));
+}
+
+test "compiler reports signed integer constant overflow at 256-bit boundaries" {
+    const signed_source =
+        \\pub fn signed_too_large() -> i256 {
+        \\    let value: i256 = 0x8000000000000000000000000000000000000000000000000000000000000000;
+        \\    return value;
+        \\}
+        \\
+        \\pub fn signed_too_small() -> i256 {
+        \\    let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819969;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(signed_source);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const too_large_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const too_small_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+    try testing.expect(diagnosticMessagesContain(too_large_diags, "does not fit in type 'i256'"));
+    try testing.expect(diagnosticMessagesContain(too_small_diags, "does not fit in type 'i256'"));
 }
 
 test "compiler reports integer constant overflow at call sites" {
@@ -667,6 +1500,79 @@ test "compiler reports constant cast overflow against target integer widths" {
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[ok_pattern.index()].kind());
     try testing.expectEqualStrings("u8", typecheck.pattern_types[ok_pattern.index()].name().?);
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bad_pattern.index()].kind());
+}
+
+test "compiler resolves comptime integer operands through concrete integer contexts" {
+    const source_text =
+        \\pub fn narrow(x: u8) -> u8 {
+        \\    let a: u8 = 1 + 2;
+        \\    let b = x + 3;
+        \\    let c = 4 + x;
+        \\    return a + b + c;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(@as(usize, 0), type_diags.len());
+
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const a_pattern = findVariablePatternByName(ast_file, body.statements, "a").?;
+    const b_pattern = findVariablePatternByName(ast_file, body.statements, "b").?;
+    const c_pattern = findVariablePatternByName(ast_file, body.statements, "c").?;
+
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[a_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[a_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[b_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[b_pattern.index()].name().?);
+    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[c_pattern.index()].kind());
+    try testing.expectEqualStrings("u8", typecheck.pattern_types[c_pattern.index()].name().?);
+}
+
+test "compiler pins integer coercion and error matrix" {
+    const source_text =
+        \\pub fn declaredOverflow() {
+        \\    let x: u8 = 300;
+        \\    _ = x;
+        \\}
+        \\
+        \\pub fn contextOverflow() -> u8 {
+        \\    return 256;
+        \\}
+        \\
+        \\pub fn negativeToUnsigned() -> u8 {
+        \\    return -1;
+        \\}
+        \\
+        \\pub fn mixedArithmetic(a: u32, b: u64) -> u64 {
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn mixedComparison(a: u32, b: i32) -> bool {
+        \\    return a < b;
+        \\}
+        \\
+        \\pub fn peerOverflow(x: u8) -> u8 {
+        \\    return 1231231231 + x;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 256 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value -1 does not fit in type 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u32' and 'u64'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u32' and 'i32'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 1231231231 does not fit in type 'u8'"));
 }
 
 test "compiler rejects directly recursive runtime structs" {

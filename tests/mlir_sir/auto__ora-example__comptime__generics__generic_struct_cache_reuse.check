@@ -1,6 +1,35 @@
 // AUTO-GENERATED. Do not edit by hand.
 // INPUT: ora-example/comptime/generics/generic_struct_cache_reuse.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
-// CHECK-LABEL: func.func @make_pair_one
-// CHECK-LABEL: func.func @make_pair_two
-// CHECK-LABEL: func.func @make_pair_u8
+// CHECK: module {
+// CHECK-NEXT:   func.func @make_pair_one(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":7:26), %arg1: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":7:35)) -> !ora.struct<"Pair__u256"> attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "tuple", ora.abi_return_layout = "(uint256,uint256)", ora.abi_return_words = 2 : i256, ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xe6b97a75", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 64 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     %3 = sir.addptr %1 : !sir.ptr<1>, %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":8:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":7:5)
+// CHECK-NEXT:   func.func @make_pair_two(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":11:26), %arg1: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":11:35)) -> !ora.struct<"Pair__u256"> attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.abi_return = "tuple", ora.abi_return_layout = "(uint256,uint256)", ora.abi_return_words = 2 : i256, ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x9b372b9a", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 64 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     %3 = sir.addptr %1 : !sir.ptr<1>, %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %arg1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":13:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":11:5)
+// CHECK-NEXT:   func.func @make_pair_u8(%arg0: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:25), %arg1: !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:32)) -> !ora.struct<"Pair__u8"> attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint8", "uint8"], ora.abi_return = "tuple", ora.abi_return_layout = "(uint8,uint8)", ora.abi_return_words = 2 : i256, ora.param_names = ["a", "b"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0x9da88387", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:32)
+// CHECK-NEXT:     %1 = sir.and %arg1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:32)
+// CHECK-NEXT:     %2 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:25)
+// CHECK-NEXT:     %3 = sir.const 64 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     %5 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     %6 = sir.addptr %4 : !sir.ptr<1>, %5 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:     sir.return %4 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":17:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":16:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/comptime/generics/generic_struct_cache_reuse.ora":1:1)

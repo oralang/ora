@@ -54,6 +54,46 @@ contract MutationVault {
 """
 
 
+BASE_SIGNED = """\
+contract MutationSigned {
+    pub fn addSigned(a: i256, b: i256) -> i256
+        requires(a >= 0)
+        requires(b >= 0)
+        requires(a <= 1000)
+        requires(b <= 1000)
+        ensures(result == a + b)
+    {
+        return a + b;
+    }
+}
+"""
+
+
+BASE_REFINEMENT = """\
+contract MutationRefinement {
+    pub fn atLeast(x: MinValue<u256, 100>) -> u256
+        ensures(result >= 100)
+    {
+        return x;
+    }
+}
+"""
+
+
+BASE_ERROR_UNION = """\
+contract MutationErrorUnion {
+    error E;
+
+    pub fn get(v: u256) -> !u256 | E
+        requires(v <= 1000)
+        ensures_ok(result == v)
+    {
+        return v;
+    }
+}
+"""
+
+
 @dataclasses.dataclass(frozen=True)
 class MutationCase:
     name: str
@@ -96,6 +136,39 @@ CASES = (
         find="requires(amount <= 10)",
         replace="requires(false)",
         reason="contradictory assumptions must fail vacuity checks",
+    ),
+    # Per-construct mutants (T3.2): broaden beyond the counter/vault shapes.
+    MutationCase(
+        name="signed_postcondition_flip",
+        source=BASE_SIGNED,
+        function="addSigned",
+        find="ensures(result == a + b)",
+        replace="ensures(result == a - b)",
+        reason="signed-arithmetic postcondition no longer matches the body",
+    ),
+    MutationCase(
+        name="signed_body_corruption",
+        source=BASE_SIGNED,
+        function="addSigned",
+        find="return a + b;",
+        replace="return a - b;",
+        reason="signed body changed so it no longer proves the postcondition",
+    ),
+    MutationCase(
+        name="refinement_bound_overclaim",
+        source=BASE_REFINEMENT,
+        function="atLeast",
+        find="ensures(result >= 100)",
+        replace="ensures(result >= 200)",
+        reason="postcondition overclaims a tighter bound than the refinement gives",
+    ),
+    MutationCase(
+        name="error_union_ok_postcondition_flip",
+        source=BASE_ERROR_UNION,
+        function="get",
+        find="ensures_ok(result == v)",
+        replace="ensures_ok(result == v + 1)",
+        reason="error-union Ok postcondition no longer matches the returned value",
     ),
 )
 

@@ -11,6 +11,105 @@ const std = @import("std");
 const LLVM_REPO_URL = "https://github.com/llvm/llvm-project.git";
 const LLVM_COMMIT = "ee8c14be14deabace692ab51f5d5d432b0a83d58";
 
+const NativeSanitizer = enum {
+    none,
+    address,
+    undefined,
+    address_undefined,
+
+    fn enabled(self: NativeSanitizer) bool {
+        return self != .none;
+    }
+
+    fn suffix(self: NativeSanitizer) []const u8 {
+        return switch (self) {
+            .none => "release",
+            .address => "asan",
+            .undefined => "ubsan",
+            .address_undefined => "asan-ubsan",
+        };
+    }
+
+    fn cmakeFlags(self: NativeSanitizer) []const u8 {
+        return switch (self) {
+            .none => "",
+            .address => "-fsanitize=address -fno-omit-frame-pointer -g",
+            .undefined => "-fsanitize=undefined -fno-omit-frame-pointer -g",
+            .address_undefined => "-fsanitize=address,undefined -fno-omit-frame-pointer -g",
+        };
+    }
+};
+
+const NativeCMakeStep = struct {
+    step: std.Build.Step,
+    sanitizer: NativeSanitizer,
+};
+
+fn parseNativeSanitizer(value: []const u8) NativeSanitizer {
+    if (std.mem.eql(u8, value, "none")) return .none;
+    if (std.mem.eql(u8, value, "address") or std.mem.eql(u8, value, "asan")) return .address;
+    if (std.mem.eql(u8, value, "undefined") or std.mem.eql(u8, value, "ubsan")) return .undefined;
+    if (std.mem.eql(u8, value, "address,undefined") or
+        std.mem.eql(u8, value, "undefined,address") or
+        std.mem.eql(u8, value, "asan,ubsan") or
+        std.mem.eql(u8, value, "asan-ubsan"))
+    {
+        return .address_undefined;
+    }
+    std.debug.panic("invalid -Dnative-sanitize value '{s}' (expected none, address, undefined, or address,undefined)", .{value});
+}
+
+fn nativeMlirInstallPrefix(b: *std.Build, sanitizer: NativeSanitizer) []const u8 {
+    return if (sanitizer.enabled())
+        b.fmt("vendor/mlir-{s}", .{sanitizer.suffix()})
+    else
+        "vendor/mlir";
+}
+
+fn nativeDialectBuildDir(b: *std.Build, base: []const u8, sanitizer: NativeSanitizer) []const u8 {
+    return if (sanitizer.enabled())
+        b.fmt("{s}-{s}", .{ base, sanitizer.suffix() })
+    else
+        base;
+}
+
+fn joinCmakeFlags(b: *std.Build, base: []const u8, extra: []const u8) []const u8 {
+    if (base.len == 0) return extra;
+    if (extra.len == 0) return base;
+    return b.fmt("{s} {s}", .{ base, extra });
+}
+
+fn appendCmakeDefine(cmake_args: *std.array_list.Managed([]const u8), b: *std.Build, name: []const u8, value: []const u8) !void {
+    try cmake_args.append(b.fmt("-D{s}={s}", .{ name, value }));
+}
+
+fn appendNativeCmakeToolchainFlags(cmake_args: *std.array_list.Managed([]const u8), b: *std.Build, sanitizer: NativeSanitizer) !void {
+    const builtin = @import("builtin");
+    const sanitizer_flags = sanitizer.cmakeFlags();
+
+    if (sanitizer.enabled() and builtin.os.tag == .windows) {
+        std.debug.panic("-Dnative-sanitize is currently supported on macOS/Linux CMake builds only", .{});
+    }
+
+    if (builtin.os.tag == .linux) {
+        try appendCmakeDefine(cmake_args, b, "CMAKE_CXX_FLAGS", joinCmakeFlags(b, "-stdlib=libc++", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_EXE_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_SHARED_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try appendCmakeDefine(cmake_args, b, "CMAKE_MODULE_LINKER_FLAGS", joinCmakeFlags(b, "-stdlib=libc++ -lc++abi", sanitizer_flags));
+        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
+        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
+    } else if (builtin.os.tag == .macos) {
+        try appendCmakeDefine(cmake_args, b, "CMAKE_CXX_FLAGS", joinCmakeFlags(b, "-stdlib=libc++", sanitizer_flags));
+        if (sanitizer.enabled()) {
+            try appendCmakeDefine(cmake_args, b, "CMAKE_EXE_LINKER_FLAGS", sanitizer_flags);
+            try appendCmakeDefine(cmake_args, b, "CMAKE_SHARED_LINKER_FLAGS", sanitizer_flags);
+            try appendCmakeDefine(cmake_args, b, "CMAKE_MODULE_LINKER_FLAGS", sanitizer_flags);
+        }
+    } else if (builtin.os.tag == .windows) {
+        try cmake_args.append("-DCMAKE_CXX_FLAGS=/std:c++20");
+    }
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -32,6 +131,7 @@ pub fn build(b: *std.Build) void {
     const mlir_opt_level = b.option([]const u8, "mlir-opt", "Default MLIR optimization level (none, basic, aggressive)") orelse "basic";
     const enable_mlir_passes = b.option([]const u8, "mlir-passes", "Default MLIR pass pipeline") orelse null;
     const skip_mlir_build = b.option(bool, "skip-mlir", "Skip MLIR/SIR/Ora dialect CMake builds (use existing libs)") orelse false;
+    const native_sanitize = parseNativeSanitizer(b.option([]const u8, "native-sanitize", "Build native MLIR dialect libraries with sanitizer (none, address, undefined, address,undefined)") orelse "none");
 
     // this creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -81,6 +181,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    ora_lexer_mod.addImport("ora_types", ora_types_mod);
 
     const ora_imports_mod = b.createModule(.{
         .root_source_file = b.path("src/imports/mod.zig"),
@@ -108,6 +209,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
+    if (native_sanitize.enabled()) {
+        mlir_c_mod.addIncludePath(b.path(b.fmt("{s}/include", .{nativeMlirInstallPrefix(b, native_sanitize)})));
+    }
     mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
     mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
     const mlir_helpers_mod = b.createModule(.{
@@ -117,6 +221,31 @@ pub fn build(b: *std.Build) void {
     });
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
+
+    const voltaire_dep = b.dependency("voltaire", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const evm_primitives_mod = voltaire_dep.module("primitives");
+    const evm_crypto_mod = voltaire_dep.module("crypto");
+    const evm_precompiles_mod = voltaire_dep.module("precompiles");
+    const bootstrap_voltaire_crypto = b.addSystemCommand(&.{
+        "cargo",
+        "build",
+        "--manifest-path",
+        b.pathJoin(&.{ "../voltaire", "Cargo.toml" }),
+        "--release",
+    });
+    bootstrap_voltaire_crypto.setName("bootstrap-voltaire-crypto");
+
+    const ora_evm_mod = b.createModule(.{
+        .root_source_file = b.path("lib/evm/src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ora_evm_mod.addImport("voltaire", evm_primitives_mod);
+    ora_evm_mod.addImport("crypto", evm_crypto_mod);
+    ora_evm_mod.addImport("precompiles", evm_precompiles_mod);
 
     // modules can depend on one another using the `std.Build.Module.addImport` function.
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
@@ -174,6 +303,99 @@ pub fn build(b: *std.Build) void {
         .root_module = lsp_exe_mod,
     });
 
+    const lsp_release_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const lsp_release_refinements_mod = b.createModule(.{
+        .root_source_file = b.path("src/refinements/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/types/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_types_mod.addImport("ora_refinements", lsp_release_refinements_mod);
+
+    const lsp_release_lexer_mod = b.createModule(.{
+        .root_source_file = b.path("src/lexer.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_lexer_mod.addImport("ora_types", lsp_release_types_mod);
+
+    const lsp_release_stdlib_embedded_mod = b.createModule(.{
+        .root_source_file = b.path("src/stdlib_embedded.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_imports_mod = b.createModule(.{
+        .root_source_file = b.path("src/imports/mod.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_imports_mod.addImport("ora_lexer", lsp_release_lexer_mod);
+    lsp_release_imports_mod.addImport("stdlib_embedded", lsp_release_stdlib_embedded_mod);
+
+    const lsp_release_mlir_c_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/c.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_mlir_c_mod.addIncludePath(b.path("vendor/mlir/include"));
+    if (native_sanitize.enabled()) {
+        lsp_release_mlir_c_mod.addIncludePath(b.path(b.fmt("{s}/include", .{nativeMlirInstallPrefix(b, native_sanitize)})));
+    }
+    lsp_release_mlir_c_mod.addIncludePath(b.path("src/mlir/ora/include"));
+    lsp_release_mlir_c_mod.addIncludePath(b.path("src/mlir/IR/include"));
+
+    const lsp_release_mlir_helpers_mod = b.createModule(.{
+        .root_source_file = b.path("src/mlir/helpers.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_mlir_helpers_mod.addImport("mlir_c_api", lsp_release_mlir_c_mod);
+    lsp_release_mlir_helpers_mod.addImport("ora_types", lsp_release_types_mod);
+
+    const lsp_release_log_mod = b.createModule(.{
+        .root_source_file = b.path("src/logging.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    const lsp_release_lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_lib_mod.addImport("mlir_c_api", lsp_release_mlir_c_mod);
+    lsp_release_lib_mod.addImport("mlir_helpers", lsp_release_mlir_helpers_mod);
+    lsp_release_lib_mod.addImport("log", lsp_release_log_mod);
+    lsp_release_lib_mod.addImport("ora_types", lsp_release_types_mod);
+    lsp_release_lib_mod.addImport("ora_refinements", lsp_release_refinements_mod);
+    lsp_release_lib_mod.addImport("ora_lexer", lsp_release_lexer_mod);
+    lsp_release_lib_mod.addImport("ora_imports", lsp_release_imports_mod);
+
+    const lsp_release_fmt_mod = b.createModule(.{
+        .root_source_file = b.path("src/fmt/mod.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_fmt_mod.addImport("ora_lib", lsp_release_lib_mod);
+
+    const lsp_release_exe_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/main.zig"),
+        .target = target,
+        .optimize = lsp_release_optimize,
+    });
+    lsp_release_exe_mod.addImport("ora_root", lsp_release_lib_mod);
+    lsp_release_exe_mod.addImport("ora_lib", lsp_release_lib_mod);
+    lsp_release_exe_mod.addImport("ora_fmt", lsp_release_fmt_mod);
+    lsp_release_exe_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+
+    const lsp_release_exe = b.addExecutable(.{
+        .name = "ora-lsp-release",
+        .root_module = lsp_release_exe_mod,
+    });
+
     // add MLIR build options as compile-time constants
     const mlir_options = b.addOptions();
     mlir_options.addOption(bool, "mlir_debug", enable_mlir_debug);
@@ -187,6 +409,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addOptions("build_options", mlir_options);
     lib_mod.addOptions("build_options", mlir_options);
+    lsp_release_lib_mod.addOptions("build_options", mlir_options);
 
     // add include paths
     exe.addIncludePath(b.path("src"));
@@ -203,9 +426,9 @@ pub fn build(b: *std.Build) void {
     // build and link MLIR (required) - only for executable, not library
     const mlir_step = if (skip_mlir_build) null else buildMlirLibraries(b, target, optimize);
     // build SIR dialect first (Ora dialect depends on it)
-    const sir_dialect_step = if (skip_mlir_build) null else buildSIRDialectLibrary(b, mlir_step.?, target, optimize);
-    const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize);
-    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    const sir_dialect_step = if (skip_mlir_build) null else buildSIRDialectLibrary(b, mlir_step.?, target, optimize, native_sanitize);
+    const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize, native_sanitize);
+    linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
 
     // build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
@@ -275,6 +498,7 @@ pub fn build(b: *std.Build) void {
     // Sensei SIR CLI integration (vendored Rust tool)
     const sensei_root = "vendor/sensei/senseic";
     const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});
+    var sensei_build_dependency: ?*std.Build.Step = null;
     if (std.fs.cwd().access(sensei_cargo, .{}) catch null) |_| {
         const sensei_build_cmd = b.addSystemCommand(&[_][]const u8{
             "cargo",
@@ -284,6 +508,7 @@ pub fn build(b: *std.Build) void {
             "--release",
         });
         sensei_build_cmd.setCwd(b.path(sensei_root));
+        sensei_build_dependency = &sensei_build_cmd.step;
 
         const sensei_build_step = b.step("sensei-sir", "Build Sensei SIR CLI");
         sensei_build_step.dependOn(&sensei_build_cmd.step);
@@ -364,6 +589,74 @@ pub fn build(b: *std.Build) void {
     // tests are added to build.zig as they are created (e.g., src/lexer.test.zig)
     const test_step = b.step("test", "Run all tests");
 
+    // Runtime conformance harness: compile Ora through the installed CLI,
+    // deploy the emitted bytecode into lib/evm, and assert sidecar outcomes.
+    const conformance_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    conformance_test_mod.addImport("ora_evm", ora_evm_mod);
+    conformance_test_mod.addImport("voltaire", evm_primitives_mod);
+    const conformance_tests = b.addTest(.{
+        .name = "ora-conformance-tests",
+        .root_module = conformance_test_mod,
+    });
+    conformance_tests.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const conformance_tests_run = b.addRunArtifact(conformance_tests);
+    conformance_tests_run.step.dependOn(b.getInstallStep());
+    if (sensei_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
+
+    const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
+    test_conformance_step.dependOn(&conformance_tests_run.step);
+
+    // Single-spec lib/evm runner — runs ONE .ora+.spec.toml outside the harness
+    // (used by the Anvil differential proof to observe lib/evm on one call).
+    const conformance_one_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/single_spec.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    conformance_one_mod.addImport("ora_evm", ora_evm_mod);
+    conformance_one_mod.addImport("voltaire", evm_primitives_mod);
+    const conformance_one_exe = b.addExecutable(.{
+        .name = "conformance-one",
+        .root_module = conformance_one_mod,
+    });
+    conformance_one_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const conformance_one_install = b.addInstallArtifact(conformance_one_exe, .{});
+    const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
+    conformance_one_step.dependOn(&conformance_one_install.step);
+
+    // Metrics snapshot harness — prints gas + bytecode-size metrics per corpus
+    // entry for the change-quality benchmark.
+    const metrics_snapshot_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/metrics_snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    metrics_snapshot_mod.addImport("ora_evm", ora_evm_mod);
+    metrics_snapshot_mod.addImport("voltaire", evm_primitives_mod);
+    const metrics_snapshot_exe = b.addExecutable(.{
+        .name = "metrics-snapshot",
+        .root_module = metrics_snapshot_mod,
+    });
+    metrics_snapshot_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const metrics_snapshot_install = b.addInstallArtifact(metrics_snapshot_exe, .{});
+    const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
+    metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
+
+    const evm_tests_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build",
+        "unit",
+        "--summary",
+        "all",
+    });
+    evm_tests_cmd.setCwd(b.path("lib/evm"));
+    const test_evm_step = b.step("test-evm", "Run lib/evm unit tests");
+    test_evm_step.dependOn(&evm_tests_cmd.step);
+
     // lexer tests
     const lexer_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lexer.test.zig"),
@@ -400,8 +693,9 @@ pub fn build(b: *std.Build) void {
     });
     abi_test_mod.addImport("ora_root", lib_mod);
     abi_test_mod.addImport("mlir_c_api", mlir_c_mod);
+    abi_test_mod.addImport("ora_types", ora_types_mod);
     const abi_tests = b.addTest(.{ .root_module = abi_test_mod });
-    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, abi_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, abi_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(abi_tests).step);
 
@@ -447,17 +741,28 @@ pub fn build(b: *std.Build) void {
     const import_resolver_tests = b.addTest(.{ .root_module = import_resolver_test_mod });
     test_step.dependOn(&b.addRunArtifact(import_resolver_tests).step);
 
-    // z3 encoder tests (requires MLIR + Z3)
-    const z3_encoder_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/z3/encoder.test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    z3_encoder_test_mod.addImport("mlir_c_api", mlir_c_mod);
-    const z3_encoder_tests = b.addTest(.{ .root_module = z3_encoder_test_mod });
-    linkMlirLibraries(b, z3_encoder_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
-    linkZ3Libraries(b, z3_encoder_tests, z3_step, target);
-    test_step.dependOn(&b.addRunArtifact(z3_encoder_tests).step);
+    // z3 encoder tests (requires MLIR + Z3). Split by category from the former
+    // 22K-line encoder.test.zig; all share encoder_test_prelude.zig.
+    const z3_encoder_test_files = [_][]const u8{
+        "src/z3/encoder.test.types.zig",
+        "src/z3/encoder.test.arith.zig",
+        "src/z3/encoder.test.controlflow.zig",
+        "src/z3/encoder.test.summaries.zig",
+        "src/z3/encoder.test.storage.zig",
+        "src/z3/encoder.test.misc.zig",
+    };
+    for (z3_encoder_test_files) |test_file| {
+        const enc_mod = b.createModule(.{
+            .root_source_file = b.path(test_file),
+            .target = target,
+            .optimize = optimize,
+        });
+        enc_mod.addImport("mlir_c_api", mlir_c_mod);
+        const enc_tests = b.addTest(.{ .root_module = enc_mod });
+        linkMlirLibraries(b, enc_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+        linkZ3Libraries(b, enc_tests, z3_step, target);
+        test_step.dependOn(&b.addRunArtifact(enc_tests).step);
+    }
 
     // z3 verification tests (requires MLIR + Z3)
     const z3_verification_test_mod = b.createModule(.{
@@ -467,8 +772,9 @@ pub fn build(b: *std.Build) void {
     });
     z3_verification_test_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_test_mod.addImport("ora_lib", lib_mod);
+    z3_verification_test_mod.addImport("ora_types", ora_types_mod);
     const z3_verification_tests = b.addTest(.{ .root_module = z3_verification_test_mod });
-    linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, z3_verification_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, z3_verification_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(z3_verification_tests).step);
 
@@ -482,7 +788,7 @@ pub fn build(b: *std.Build) void {
     mlir_verifiers_test_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_verifiers_test_mod.addImport("log", log_mod);
     const mlir_verifiers_tests = b.addTest(.{ .root_module = mlir_verifiers_test_mod });
-    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, mlir_verifiers_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     test_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
     test_mlir_step.dependOn(&b.addRunArtifact(mlir_verifiers_tests).step);
 
@@ -559,6 +865,16 @@ pub fn build(b: *std.Build) void {
     const lsp_references_tests = b.addTest(.{ .root_module = lsp_references_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
 
+    const lsp_document_highlight_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_highlight.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_highlight_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_highlight_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_highlight_tests = b.addTest(.{ .root_module = lsp_document_highlight_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_highlight_tests).step);
+
     const lsp_rename_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/rename.test.zig"),
         .target = target,
@@ -574,8 +890,360 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lsp_completion_test_mod.addImport("ora_root", lib_mod);
+    lsp_completion_test_mod.addImport("ora_types", ora_types_mod);
     const lsp_completion_tests = b.addTest(.{ .root_module = lsp_completion_test_mod });
     test_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+
+    const lsp_signature_help_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/signature_help.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_signature_help_test_mod.addImport("ora_root", lib_mod);
+    const lsp_signature_help_tests = b.addTest(.{ .root_module = lsp_signature_help_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_signature_help_tests).step);
+
+    const lsp_semantic_tokens_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/semantic_tokens.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_semantic_tokens_test_mod.addImport("ora_root", lib_mod);
+    const lsp_semantic_tokens_tests = b.addTest(.{ .root_module = lsp_semantic_tokens_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_tests).step);
+
+    const lsp_token_cache_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/token_cache.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_token_cache_test_mod.addImport("ora_root", lib_mod);
+    const lsp_token_cache_tests = b.addTest(.{ .root_module = lsp_token_cache_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_token_cache_tests).step);
+
+    const lsp_code_lens_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_lens.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_lens_test_mod.addImport("ora_root", lib_mod);
+    const lsp_code_lens_tests = b.addTest(.{ .root_module = lsp_code_lens_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_lens_tests).step);
+
+    const lsp_folding_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/folding.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_folding_test_mod.addImport("ora_root", lib_mod);
+    const lsp_folding_tests = b.addTest(.{ .root_module = lsp_folding_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_folding_tests).step);
+
+    const lsp_cache_stats_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/cache_stats_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_cache_stats_response_tests = b.addTest(.{ .root_module = lsp_cache_stats_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_cache_stats_response_tests).step);
+
+    const lsp_allocation_stats_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/allocation_stats.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_allocation_stats_test_mod.addImport("ora_root", lib_mod);
+    const lsp_allocation_stats_tests = b.addTest(.{ .root_module = lsp_allocation_stats_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_allocation_stats_tests).step);
+
+    const lsp_signature_help_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/signature_help_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_signature_help_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_signature_help_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_signature_help_response_tests = b.addTest(.{ .root_module = lsp_signature_help_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_signature_help_response_tests).step);
+
+    const lsp_builtin_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/builtin_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_builtin_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_builtin_docs_tests = b.addTest(.{ .root_module = lsp_builtin_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_builtin_docs_tests).step);
+
+    const lsp_keyword_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/keyword_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_keyword_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_keyword_docs_tests = b.addTest(.{ .root_module = lsp_keyword_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_keyword_docs_tests).step);
+
+    const lsp_std_docs_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/std_docs.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_std_docs_test_mod.addImport("ora_root", lib_mod);
+    const lsp_std_docs_tests = b.addTest(.{ .root_module = lsp_std_docs_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_std_docs_tests).step);
+
+    const lsp_call_hierarchy_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_test_mod.addImport("ora_root", lib_mod);
+    const lsp_call_hierarchy_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_tests).step);
+
+    const lsp_call_hierarchy_prepare_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy_prepare.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_prepare_test_mod.addImport("ora_root", lib_mod);
+    lsp_call_hierarchy_prepare_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_call_hierarchy_prepare_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_prepare_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_prepare_tests).step);
+
+    const lsp_call_hierarchy_calls_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/call_hierarchy_calls.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_call_hierarchy_calls_test_mod.addImport("ora_root", lib_mod);
+    lsp_call_hierarchy_calls_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_call_hierarchy_calls_tests = b.addTest(.{ .root_module = lsp_call_hierarchy_calls_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_calls_tests).step);
+
+    const lsp_code_action_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_action.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_action_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_code_action_tests = b.addTest(.{ .root_module = lsp_code_action_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_action_tests).step);
+
+    const lsp_code_lens_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/code_lens_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_code_lens_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_code_lens_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_code_lens_response_tests = b.addTest(.{ .root_module = lsp_code_lens_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_code_lens_response_tests).step);
+
+    const lsp_completion_items_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/completion_items.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_completion_items_test_mod.addImport("ora_root", lib_mod);
+    lsp_completion_items_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_completion_items_tests = b.addTest(.{ .root_module = lsp_completion_items_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_completion_items_tests).step);
+
+    const lsp_definition_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/definition_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_definition_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_definition_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_definition_response_tests = b.addTest(.{ .root_module = lsp_definition_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
+
+    const lsp_diagnostics_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/diagnostics_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_diagnostics_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_diagnostics_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_diagnostics_response_tests = b.addTest(.{ .root_module = lsp_diagnostics_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_diagnostics_response_tests).step);
+
+    const lsp_diagnostic_debounce_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/diagnostic_debounce.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lsp_diagnostic_debounce_tests = b.addTest(.{ .root_module = lsp_diagnostic_debounce_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_diagnostic_debounce_tests).step);
+
+    const lsp_document_link_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_link.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_link_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_link_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_link_tests = b.addTest(.{ .root_module = lsp_document_link_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_link_tests).step);
+
+    const lsp_document_symbol_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/document_symbol.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_document_symbol_test_mod.addImport("ora_root", lib_mod);
+    lsp_document_symbol_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_document_symbol_tests = b.addTest(.{ .root_module = lsp_document_symbol_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_document_symbol_tests).step);
+
+    const lsp_folding_ranges_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/folding_ranges_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_folding_ranges_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_folding_ranges_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_folding_ranges_response_tests = b.addTest(.{ .root_module = lsp_folding_ranges_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_folding_ranges_response_tests).step);
+
+    const lsp_formatting_edits_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/formatting_edits.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_formatting_edits_test_mod.addImport("ora_root", lib_mod);
+    lsp_formatting_edits_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_formatting_edits_tests = b.addTest(.{ .root_module = lsp_formatting_edits_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_formatting_edits_tests).step);
+
+    const lsp_hover_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/hover_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_hover_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_hover_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_hover_response_tests = b.addTest(.{ .root_module = lsp_hover_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_hover_response_tests).step);
+
+    const lsp_inlay_hint_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/inlay_hint_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_inlay_hint_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_inlay_hint_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_inlay_hint_response_tests = b.addTest(.{ .root_module = lsp_inlay_hint_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_inlay_hint_response_tests).step);
+
+    const lsp_inlay_hints_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/inlay_hints.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_inlay_hints_test_mod.addImport("ora_root", lib_mod);
+    const lsp_inlay_hints_tests = b.addTest(.{ .root_module = lsp_inlay_hints_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_inlay_hints_tests).step);
+
+    const lsp_line_index_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/line_index.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_line_index_test_mod.addImport("ora_root", lib_mod);
+    const lsp_line_index_tests = b.addTest(.{ .root_module = lsp_line_index_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_line_index_tests).step);
+
+    const lsp_protocol_ranges_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/protocol_ranges.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_protocol_ranges_test_mod.addImport("ora_root", lib_mod);
+    lsp_protocol_ranges_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_protocol_ranges_tests = b.addTest(.{ .root_module = lsp_protocol_ranges_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_protocol_ranges_tests).step);
+
+    const lsp_references_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/references_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_references_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_references_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_references_response_tests = b.addTest(.{ .root_module = lsp_references_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_references_response_tests).step);
+
+    const lsp_rename_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/rename_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_rename_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_rename_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_rename_response_tests = b.addTest(.{ .root_module = lsp_rename_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_rename_response_tests).step);
+
+    const lsp_selection_range_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/selection_range.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_selection_range_test_mod.addImport("ora_root", lib_mod);
+    lsp_selection_range_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_selection_range_tests = b.addTest(.{ .root_module = lsp_selection_range_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_selection_range_tests).step);
+
+    const lsp_semantic_tokens_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/semantic_tokens_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_semantic_tokens_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_semantic_tokens_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_semantic_tokens_response_tests = b.addTest(.{ .root_module = lsp_semantic_tokens_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
+
+    const lsp_uri_ranges_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/uri_ranges.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_uri_ranges_test_mod.addImport("ora_root", lib_mod);
+    lsp_uri_ranges_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_uri_ranges_tests = b.addTest(.{ .root_module = lsp_uri_ranges_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+
+    const lsp_workspace_discovery_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_discovery.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_discovery_test_mod.addImport("ora_root", lib_mod);
+    const lsp_workspace_discovery_tests = b.addTest(.{ .root_module = lsp_workspace_discovery_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_discovery_tests).step);
+
+    const lsp_workspace_index_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_index.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_index_test_mod.addImport("ora_root", lib_mod);
+    const lsp_workspace_index_tests = b.addTest(.{ .root_module = lsp_workspace_index_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_index_tests).step);
+
+    const lsp_workspace_symbol_response_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/lsp/workspace_symbol_response.test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lsp_workspace_symbol_response_test_mod.addImport("ora_root", lib_mod);
+    lsp_workspace_symbol_response_test_mod.addImport("lsp", b.dependency("lsp_kit", .{}).module("lsp"));
+    const lsp_workspace_symbol_response_tests = b.addTest(.{ .root_module = lsp_workspace_symbol_response_test_mod });
+    test_step.dependOn(&b.addRunArtifact(lsp_workspace_symbol_response_tests).step);
 
     const lsp_formatting_test_mod = b.createModule(.{
         .root_source_file = b.path("src/lsp/formatting.test.zig"),
@@ -599,6 +1267,7 @@ pub fn build(b: *std.Build) void {
     });
     z3_verification_mod.addImport("mlir_c_api", mlir_c_mod);
     z3_verification_mod.addImport("ora_lib", lib_mod);
+    z3_verification_mod.addImport("ora_types", ora_types_mod);
     compiler_test_mod.addImport("ora_root", lib_mod);
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
@@ -610,7 +1279,7 @@ pub fn build(b: *std.Build) void {
             b.option([]const u8, "compiler-test-filter", "Filter compiler tests by test name substring"),
         ),
     });
-    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
+    linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, compiler_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
@@ -654,9 +1323,85 @@ pub fn build(b: *std.Build) void {
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_hover_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_references_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_highlight_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_signature_help_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_token_cache_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_lens_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_folding_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_cache_stats_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_allocation_stats_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_signature_help_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_builtin_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_keyword_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_std_docs_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_prepare_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_call_hierarchy_calls_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_action_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_code_lens_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_completion_items_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_definition_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_diagnostics_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_diagnostic_debounce_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_link_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_document_symbol_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_folding_ranges_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_edits_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_hover_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_inlay_hint_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_inlay_hints_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_line_index_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_protocol_ranges_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_references_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_rename_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_selection_range_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_semantic_tokens_response_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_uri_ranges_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_discovery_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_index_tests).step);
+    test_lsp_step.dependOn(&b.addRunArtifact(lsp_workspace_symbol_response_tests).step);
     test_lsp_step.dependOn(&b.addRunArtifact(lsp_formatting_tests).step);
+
+    const lsp_smoke_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-smoke.py",
+    });
+    lsp_smoke_cmd.addArtifactArg(lsp_exe);
+    const lsp_smoke_step = b.step("lsp-smoke", "Run LSP JSON-RPC smoke test");
+    lsp_smoke_step.dependOn(&lsp_smoke_cmd.step);
+
+    const lsp_build_mode = optimizeModeName(optimize);
+
+    const lsp_bench_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-benchmark.py",
+        "--profile",
+        "quick",
+        "--build-mode",
+        lsp_build_mode,
+        "--strict-future-gates",
+    });
+    lsp_bench_cmd.addArtifactArg(lsp_exe);
+    const lsp_bench_step = b.step("lsp-bench", "Run LSP JSON-RPC benchmark");
+    lsp_bench_step.dependOn(&lsp_bench_cmd.step);
+
+    const lsp_bench_release_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/lsp-jsonrpc-benchmark.py",
+        "--profile",
+        "release",
+        "--build-mode",
+        optimizeModeName(lsp_release_optimize),
+        "--require-build-mode",
+        "ReleaseFast",
+        "--strict-future-gates",
+    });
+    lsp_bench_release_cmd.addArtifactArg(lsp_release_exe);
+    const lsp_bench_release_step = b.step("lsp-bench-release", "Run LSP JSON-RPC benchmark in ReleaseFast");
+    lsp_bench_release_step.dependOn(&lsp_bench_release_cmd.step);
 
     // zig build check-verifier-introspection
     const verifier_introspection_cmd = b.addSystemCommand(&[_][]const u8{
@@ -691,6 +1436,127 @@ pub fn build(b: *std.Build) void {
     check_abi_layout_ownership_step.dependOn(&abi_layout_ownership_cmd.step);
     test_step.dependOn(&abi_layout_ownership_cmd.step);
 
+    // zig build check-no-duplicate-fixed-bytes-parsers
+    const no_duplicate_fixed_bytes_parsers_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-duplicate-fixed-bytes-parsers.sh",
+    });
+    const check_no_duplicate_fixed_bytes_parsers_step = b.step("check-no-duplicate-fixed-bytes-parsers", "Run fixed-bytes parser ownership static checks");
+    check_no_duplicate_fixed_bytes_parsers_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
+    test_step.dependOn(&no_duplicate_fixed_bytes_parsers_cmd.step);
+
+    // zig build check-no-width-defaults
+    const no_width_defaults_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-width-defaults.sh",
+    });
+    const check_no_width_defaults_step = b.step("check-no-width-defaults", "Run integer width/signedness default static checks");
+    check_no_width_defaults_step.dependOn(&no_width_defaults_cmd.step);
+    test_step.dependOn(&no_width_defaults_cmd.step);
+
+    // zig build check-no-hir-op-null-fallbacks
+    const no_hir_op_null_fallbacks_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-hir-op-null-fallbacks.sh",
+    });
+    const check_no_hir_op_null_fallbacks_step = b.step("check-no-hir-op-null-fallbacks", "Run HIR op-creation fail-closed static checks");
+    check_no_hir_op_null_fallbacks_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
+    test_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
+
+    // zig build check-query-view-ownership
+    const query_view_ownership_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-query-view-ownership.sh",
+    });
+    const check_query_view_ownership_step = b.step("check-query-view-ownership", "Run compiler query-view ownership static checks");
+    check_query_view_ownership_step.dependOn(&query_view_ownership_cmd.step);
+    test_step.dependOn(&query_view_ownership_cmd.step);
+
+    // zig build check-oratosir-coverage
+    const oratosir_coverage_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-oratosir-coverage.py",
+        "tests/oratosir_debloat_coverage.json",
+    });
+    const check_oratosir_coverage_step = b.step("check-oratosir-coverage", "Validate OraToSIR de-bloat coverage manifest");
+    check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
+    test_step.dependOn(&oratosir_coverage_cmd.step);
+
+    // zig build check-feature-execution-coverage
+    const feature_coverage_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-feature-execution-coverage.py",
+        "tests/conformance/feature_coverage.json",
+    });
+    const check_feature_coverage_step = b.step("check-feature-execution-coverage", "Validate the feature-execution coverage manifest");
+    check_feature_coverage_step.dependOn(&feature_coverage_cmd.step);
+    test_step.dependOn(&feature_coverage_cmd.step);
+
+    // zig build check-negative-corpus
+    const negative_corpus_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-negative-corpus.py",
+    });
+    negative_corpus_cmd.step.dependOn(b.getInstallStep());
+    const check_negative_corpus_step = b.step("check-negative-corpus", "Run the negative expected-diagnostic corpus");
+    check_negative_corpus_step.dependOn(&negative_corpus_cmd.step);
+
+    // zig build check-findings-ledger — surfaces known defects the green gate masks
+    const findings_ledger_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-findings-ledger.py",
+    });
+    const check_findings_ledger_step = b.step("check-findings-ledger", "Validate the findings ledger and report masked known defects");
+    check_findings_ledger_step.dependOn(&findings_ledger_cmd.step);
+
+    // zig build check-verifier-mutations — bounded deterministic verifier soundness
+    const verifier_mutations_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/verify_mutations.py",
+        "--compiler",
+        "./zig-out/bin/ora",
+        "--timeout",
+        "60",
+    });
+    verifier_mutations_cmd.step.dependOn(b.getInstallStep());
+    const check_verifier_mutations_step = b.step("check-verifier-mutations", "Run the bounded verifier soundness mutation set");
+    check_verifier_mutations_step.dependOn(&verifier_mutations_cmd.step);
+
+    // zig build check-mlir-ora
+    const mlir_ora_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-mlir-checks.sh",
+    });
+    mlir_ora_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_mlir_ora_step = b.step("check-mlir-ora", "Run Ora MLIR FileCheck snapshots");
+    check_mlir_ora_step.dependOn(&mlir_ora_checks_cmd.step);
+
+    // zig build check-mlir-sir
+    const mlir_sir_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-mlir-checks-sir.sh",
+    });
+    mlir_sir_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_mlir_sir_step = b.step("check-mlir-sir", "Run SIR MLIR FileCheck snapshots");
+    check_mlir_sir_step.dependOn(&mlir_sir_checks_cmd.step);
+
+    // zig build check-sir-text
+    const sir_text_checks_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/run-sir-text-checks.sh",
+    });
+    sir_text_checks_cmd.step.dependOn(b.getInstallStep());
+    const check_sir_text_step = b.step("check-sir-text", "Run SIR text FileCheck snapshots");
+    check_sir_text_step.dependOn(&sir_text_checks_cmd.step);
+
+    // zig build gate-oratosir-debloat
+    const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR de-bloat merge gate");
+    oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
+    oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
+    oratosir_debloat_gate_step.dependOn(check_sir_text_step);
+    oratosir_debloat_gate_step.dependOn(test_conformance_step);
+    oratosir_debloat_gate_step.dependOn(test_evm_step);
+
     // zig build check-sir-shift-operand-order
     const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
@@ -708,6 +1574,17 @@ pub fn build(b: *std.Build) void {
     const check_smt_modifies_corpus_step = b.step("check-smt-modifies-corpus", "Run SMT modifies corpus checks");
     smt_modifies_corpus_cmd.step.dependOn(b.getInstallStep());
     check_smt_modifies_corpus_step.dependOn(&smt_modifies_corpus_cmd.step);
+
+    // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
+    const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
+    gate_step.dependOn(test_step);
+    gate_step.dependOn(oratosir_debloat_gate_step);
+    gate_step.dependOn(check_mlir_ora_step);
+    gate_step.dependOn(check_negative_corpus_step);
+    gate_step.dependOn(check_findings_ledger_step);
+    gate_step.dependOn(check_verifier_mutations_step);
+    gate_step.dependOn(check_smt_modifies_corpus_step);
+    gate_step.dependOn(lsp_smoke_step);
 }
 
 /// Create a step that runs the installed lexer test suite with --verbose
@@ -804,7 +1681,6 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
     const install_prefix = "vendor/mlir";
     try root.makePath(install_prefix);
 
-    // platform-specific flags
     const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
@@ -963,17 +1839,28 @@ fn buildMlirLibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOpt
 }
 
 /// Build Ora dialect library using CMake
-fn buildOraDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, sir_dialect_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+fn buildOraDialectLibrary(
+    b: *std.Build,
+    mlir_step: *std.Build.Step,
+    sir_dialect_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitizer: NativeSanitizer,
+) *std.Build.Step {
     _ = target;
     _ = optimize;
 
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "cmake-build-ora-dialect",
-        .owner = b,
-        .makeFn = buildOraDialectLibraryImpl,
-    });
+    const native_step = b.allocator.create(NativeCMakeStep) catch @panic("OOM");
+    native_step.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = if (sanitizer.enabled()) b.fmt("cmake-build-ora-dialect-{s}", .{sanitizer.suffix()}) else "cmake-build-ora-dialect",
+            .owner = b,
+            .makeFn = buildOraDialectLibraryImpl,
+        }),
+        .sanitizer = sanitizer,
+    };
+    const step = &native_step.step;
     step.dependOn(mlir_step);
     step.dependOn(sir_dialect_step); // Ora dialect needs SIR headers
     return step;
@@ -987,15 +1874,16 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const root = b.build_root.handle;
     const build_root = b.build_root.path orelse ".";
+    const native_step: *NativeCMakeStep = @fieldParentPtr("step", step);
+    const sanitizer = native_step.sanitizer;
 
-    const build_dir = "vendor/ora-dialect-build";
+    const build_dir = nativeDialectBuildDir(b, "vendor/ora-dialect-build", sanitizer);
     try root.makePath(build_dir);
 
-    const install_prefix = "vendor/mlir";
-    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+    const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
+    const mlir_dir = b.fmt("{s}/vendor/mlir/lib/cmake/mlir", .{build_root});
 
-    // platform-specific flags
-    const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
@@ -1026,19 +1914,10 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
-        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix_abs}),
     });
 
-    if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
-        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
-    } else if (builtin.os.tag == .macos) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-    }
+    try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
     cfg_child.cwd = build_root;
@@ -1086,17 +1965,27 @@ fn buildOraDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
 }
 
 /// Build SIR dialect library using CMake
-fn buildSIRDialectLibrary(b: *std.Build, mlir_step: *std.Build.Step, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step {
+fn buildSIRDialectLibrary(
+    b: *std.Build,
+    mlir_step: *std.Build.Step,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    sanitizer: NativeSanitizer,
+) *std.Build.Step {
     _ = target;
     _ = optimize;
 
-    const step = b.allocator.create(std.Build.Step) catch @panic("OOM");
-    step.* = std.Build.Step.init(.{
-        .id = .custom,
-        .name = "cmake-build-sir-dialect",
-        .owner = b,
-        .makeFn = buildSIRDialectLibraryImpl,
-    });
+    const native_step = b.allocator.create(NativeCMakeStep) catch @panic("OOM");
+    native_step.* = .{
+        .step = std.Build.Step.init(.{
+            .id = .custom,
+            .name = if (sanitizer.enabled()) b.fmt("cmake-build-sir-dialect-{s}", .{sanitizer.suffix()}) else "cmake-build-sir-dialect",
+            .owner = b,
+            .makeFn = buildSIRDialectLibraryImpl,
+        }),
+        .sanitizer = sanitizer,
+    };
+    const step = &native_step.step;
     step.dependOn(mlir_step);
     return step;
 }
@@ -1109,15 +1998,16 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
     const allocator = b.allocator;
     const root = b.build_root.handle;
     const build_root = b.build_root.path orelse ".";
+    const native_step: *NativeCMakeStep = @fieldParentPtr("step", step);
+    const sanitizer = native_step.sanitizer;
 
-    const build_dir = "vendor/sir-dialect-build";
+    const build_dir = nativeDialectBuildDir(b, "vendor/sir-dialect-build", sanitizer);
     try root.makePath(build_dir);
 
-    const install_prefix = "vendor/mlir";
-    const mlir_dir = b.fmt("{s}/lib/cmake/mlir", .{install_prefix});
+    const install_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const install_prefix_abs = b.fmt("{s}/{s}", .{ build_root, install_prefix });
+    const mlir_dir = b.fmt("{s}/vendor/mlir/lib/cmake/mlir", .{build_root});
 
-    // platform-specific flags
-    const builtin = @import("builtin");
     var cmake_args = std.array_list.Managed([]const u8).init(allocator);
     defer cmake_args.deinit();
 
@@ -1148,19 +2038,10 @@ fn buildSIRDialectLibraryImpl(step: *std.Build.Step, options: std.Build.Step.Mak
         "-DCMAKE_BUILD_TYPE=Release",
         "-DBUILD_SHARED_LIBS=ON",
         b.fmt("-DMLIR_DIR={s}", .{mlir_dir}),
-        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix}),
+        b.fmt("-DCMAKE_INSTALL_PREFIX={s}", .{install_prefix_abs}),
     });
 
-    if (builtin.os.tag == .linux) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-        try cmake_args.append("-DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++ -lc++abi");
-        try cmake_args.append("-DCMAKE_CXX_COMPILER=clang++");
-        try cmake_args.append("-DCMAKE_C_COMPILER=clang");
-    } else if (builtin.os.tag == .macos) {
-        try cmake_args.append("-DCMAKE_CXX_FLAGS=-stdlib=libc++");
-    }
+    try appendNativeCmakeToolchainFlags(&cmake_args, b, sanitizer);
 
     var cfg_child = std.process.Child.init(cmake_args.items, allocator);
     cfg_child.cwd = build_root;
@@ -1215,6 +2096,7 @@ fn linkMlirLibraries(
     ora_dialect_step: ?*std.Build.Step,
     sir_dialect_step: ?*std.Build.Step,
     target: std.Build.ResolvedTarget,
+    sanitizer: NativeSanitizer,
 ) void {
     // depend on MLIR build and dialect builds when requested
     if (mlir_step) |step| exe.step.dependOn(step);
@@ -1223,9 +2105,17 @@ fn linkMlirLibraries(
 
     const include_path = b.path("vendor/mlir/include");
     const lib_path = b.path("vendor/mlir/lib");
+    const native_prefix = nativeMlirInstallPrefix(b, sanitizer);
+    const native_include_path = b.path(b.fmt("{s}/include", .{native_prefix}));
+    const native_lib_path = b.path(b.fmt("{s}/lib", .{native_prefix}));
     const ora_dialect_include_path = b.path("src/mlir/ora/include");
     const sir_dialect_include_path = b.path("src/mlir/IR/include");
 
+    if (sanitizer.enabled()) {
+        exe.addIncludePath(native_include_path);
+        exe.addLibraryPath(native_lib_path);
+        exe.addRPath(native_lib_path);
+    }
     exe.addIncludePath(include_path);
     exe.addIncludePath(ora_dialect_include_path);
     exe.addIncludePath(sir_dialect_include_path);
@@ -1739,6 +2629,15 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+fn optimizeModeName(optimize: std.builtin.OptimizeMode) []const u8 {
+    return switch (optimize) {
+        .Debug => "Debug",
+        .ReleaseSafe => "ReleaseSafe",
+        .ReleaseFast => "ReleaseFast",
+        .ReleaseSmall => "ReleaseSmall",
+    };
 }
 
 fn compilerTestFilters(b: *std.Build, option_filter: ?[]const u8) []const []const u8 {

@@ -1,0 +1,30 @@
+error Failure;
+error Rich(code: u256, seen: u256);
+
+contract DispatcherNarrowErrorUnionReturn {
+    fn failure_value() -> Failure {
+        return Failure();
+    }
+
+    pub fn flag(mode: u256) -> !bool | Failure {
+        if (mode == 0) {
+            return false;
+        }
+        if (mode == 1) {
+            return true;
+        }
+        return Failure();
+    }
+
+    pub fn runtime_error_value() -> !bool | Failure {
+        let failure = failure_value();
+        return failure;
+    }
+
+    pub fn rich(mode: u256) -> !bool | Rich {
+        if (mode == 0) {
+            return true;
+        }
+        return Rich(7, 9);
+    }
+}

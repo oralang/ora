@@ -1,0 +1,2 @@
+# The compiler must reject this source with a diagnostic and emit no bytecode.
+expect_error = "undefined type 'Frobnicator'"

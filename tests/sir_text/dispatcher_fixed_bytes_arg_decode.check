@@ -1,0 +1,28 @@
+// INPUT: tests/sir_text/inputs/dispatcher_fixed_bytes_arg.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0x445D858C => @take_
+
+// CHECK-LABEL:     take_ {
+// CHECK: cdsize_take = calldatasize
+// CHECK: valid_take = lt min_cdsize_1arg_0 cdsize_take
+// CHECK: => valid_take ? @bb0 : @revert_error
+
+// CHECK-LABEL:     bb0 {
+// CHECK: a_take = calldataload selector_offset_0
+// CHECK: v4 = const 0xE0
+// CHECK: v5 = shr v4 a_take
+// CHECK: v6 = shl v4 v5
+// CHECK: v7 = eq a_take v6
+// CHECK: => v7 ? @take_exec : @abi_decode_revert_6
+
+// CHECK-LABEL:     take_exec {
+// CHECK: icall @take v5
+// CHECK: return
+
+// CHECK-LABEL:     abi_decode_revert_6 {
+// CHECK: const 0x6
+// CHECK: mstore256
+// CHECK: revert

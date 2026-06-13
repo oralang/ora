@@ -1,6 +1,11 @@
 const std = @import("std");
-const sema = @import("../sema/mod.zig");
-const sema_model = @import("../sema/model.zig");
+const ora_types = @import("ora_types");
+const builtin = ora_types.builtin;
+const abi_type_names = @import("type_names.zig");
+
+const Type = ora_types.SemanticType;
+const FixedBytesType = ora_types.FixedBytesType;
+const IntegerType = ora_types.IntegerType;
 
 pub const LayoutError = error{
     UnsupportedAbiType,
@@ -122,11 +127,11 @@ pub const LayoutNode = union(enum) {
     }
 };
 
-pub fn fromType(allocator: std.mem.Allocator, ty: sema.Type) anyerror!LayoutNode {
+pub fn fromType(allocator: std.mem.Allocator, ty: Type) anyerror!LayoutNode {
     return fromTypeAtPath(allocator, ty, &.{});
 }
 
-fn fromTypeAtPath(allocator: std.mem.Allocator, ty: sema.Type, path: []const ValuePathSegment) anyerror!LayoutNode {
+fn fromTypeAtPath(allocator: std.mem.Allocator, ty: Type, path: []const ValuePathSegment) anyerror!LayoutNode {
     return switch (ty) {
         .void => .{ .tuple = .{ .path = try clonePath(allocator, path), .elements = try allocator.alloc(LayoutNode, 0) } },
         .bool => staticWordNode(allocator, path, .bool),
@@ -200,17 +205,8 @@ fn fromTypeAtPath(allocator: std.mem.Allocator, ty: sema.Type, path: []const Val
 
 pub fn canonicalAbiType(allocator: std.mem.Allocator, node: LayoutNode) ![]const u8 {
     return switch (node) {
-        .static_word => |word| switch (word.encoding) {
-            .uint => |bits| std.fmt.allocPrint(allocator, "uint{d}", .{bits}),
-            .int => |bits| std.fmt.allocPrint(allocator, "int{d}", .{bits}),
-            .bool => allocator.dupe(u8, "bool"),
-            .address => allocator.dupe(u8, "address"),
-            .fixed_bytes => |len| std.fmt.allocPrint(allocator, "bytes{d}", .{len}),
-        },
-        .dynamic_bytes => |bytes| allocator.dupe(u8, switch (bytes.kind) {
-            .bytes => "bytes",
-            .string => "string",
-        }),
+        .static_word => |word| allocator.dupe(u8, try staticEncodingAbiName(word.encoding)),
+        .dynamic_bytes => |bytes| allocator.dupe(u8, dynamicBytesAbiName(bytes.kind)),
         .dynamic_array => |array| blk: {
             const element_text = try canonicalAbiType(allocator, array.element.*);
             defer allocator.free(element_text);
@@ -235,21 +231,23 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, node: LayoutNode) ![]const
     };
 }
 
-pub fn canonicalAbiTypeFromType(allocator: std.mem.Allocator, ty: sema.Type) ![]const u8 {
+pub fn canonicalAbiTypeFromType(allocator: std.mem.Allocator, ty: Type) ![]const u8 {
     const layout = try fromType(allocator, ty);
     defer layout.deinit(allocator);
     return canonicalAbiType(allocator, layout);
 }
 
-pub fn staticWordCountFromType(allocator: std.mem.Allocator, ty: sema.Type) !?usize {
+pub fn staticWordCountFromType(allocator: std.mem.Allocator, ty: Type) !?usize {
     const layout = try fromType(allocator, ty);
     defer layout.deinit(allocator);
     return layout.staticWordCount();
 }
 
-pub fn staticWordCountForType(ty: sema.Type) ?usize {
+pub fn staticWordCountForType(ty: Type) ?usize {
     return switch (ty) {
-        .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
+        .bool, .address, .enum_, .bitfield => 1,
+        .fixed_bytes => |fixed_bytes| if (fixedBytesLen(fixed_bytes)) |_| 1 else |_| null,
+        .integer => |integer| if (integerEncoding(integer)) |_| 1 else |_| null,
         .named => |named| if (parseFixedBytesSpelling(named.name) != null) 1 else null,
         .refinement => |refinement| staticWordCountForType(refinement.base_type.*),
         // Keep the legacy API boundary: `hir.abi.staticAbiWordCount` did not
@@ -278,17 +276,8 @@ pub fn staticWordCountForType(ty: sema.Type) ?usize {
 
 pub fn serializeForMlirAttr(allocator: std.mem.Allocator, node: LayoutNode) ![]const u8 {
     return switch (node) {
-        .static_word => |word| switch (word.encoding) {
-            .uint => |bits| std.fmt.allocPrint(allocator, "static(uint{d})", .{bits}),
-            .int => |bits| std.fmt.allocPrint(allocator, "static(int{d})", .{bits}),
-            .bool => allocator.dupe(u8, "static(bool)"),
-            .address => allocator.dupe(u8, "static(address)"),
-            .fixed_bytes => |len| std.fmt.allocPrint(allocator, "static(bytes{d})", .{len}),
-        },
-        .dynamic_bytes => |bytes| allocator.dupe(u8, switch (bytes.kind) {
-            .bytes => "dynamic(bytes)",
-            .string => "dynamic(string)",
-        }),
+        .static_word => |word| std.fmt.allocPrint(allocator, "static({s})", .{try staticEncodingAbiName(word.encoding)}),
+        .dynamic_bytes => |bytes| std.fmt.allocPrint(allocator, "dynamic({s})", .{dynamicBytesAbiName(bytes.kind)}),
         .dynamic_array => |array| blk: {
             const element = try serializeForMlirAttr(allocator, array.element.*);
             defer allocator.free(element);
@@ -314,22 +303,35 @@ pub fn serializeForMlirAttr(allocator: std.mem.Allocator, node: LayoutNode) ![]c
 }
 
 pub fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-    if (!std.mem.startsWith(u8, name, "bytes")) return null;
-    if (name.len <= "bytes".len) return null;
-    const digits = name["bytes".len..];
-    if (digits.len > 1 and digits[0] == '0') return null;
-    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-    if (len < 1 or len > 32) return null;
-    return len;
+    return builtin.parseFixedBytesName(name);
 }
 
-fn fixedBytesLen(fixed_bytes: sema.FixedBytesType) !u8 {
-    if (fixed_bytes.len < 1 or fixed_bytes.len > 32) return error.InvalidFixedBytesWidth;
+fn fixedBytesLen(fixed_bytes: FixedBytesType) !u8 {
+    if (fixed_bytes.len < builtin.fixed_bytes_min_len or fixed_bytes.len > builtin.fixed_bytes_max_len) {
+        return error.InvalidFixedBytesWidth;
+    }
     return fixed_bytes.len;
 }
 
 fn staticWordNode(allocator: std.mem.Allocator, path: []const ValuePathSegment, encoding: StaticEncoding) !LayoutNode {
     return .{ .static_word = .{ .path = try clonePath(allocator, path), .encoding = encoding } };
+}
+
+fn staticEncodingAbiName(encoding: StaticEncoding) LayoutError![]const u8 {
+    return switch (encoding) {
+        .uint => |bits| abi_type_names.integerAbiName(false, bits) orelse error.InvalidIntegerWidth,
+        .int => |bits| abi_type_names.integerAbiName(true, bits) orelse error.InvalidIntegerWidth,
+        .bool => abi_type_names.builtinAbiName(.bool),
+        .address => abi_type_names.builtinAbiName(.address),
+        .fixed_bytes => |len| abi_type_names.fixedBytesAbiName(len) orelse error.InvalidFixedBytesWidth,
+    };
+}
+
+fn dynamicBytesAbiName(kind: DynamicBytesKind) []const u8 {
+    return switch (kind) {
+        .bytes => abi_type_names.builtinAbiName(.bytes),
+        .string => abi_type_names.builtinAbiName(.string),
+    };
 }
 
 fn clonePath(allocator: std.mem.Allocator, path: []const ValuePathSegment) !ValuePath {
@@ -343,23 +345,13 @@ fn childPath(allocator: std.mem.Allocator, parent: []const ValuePathSegment, seg
     return path;
 }
 
-fn integerEncoding(integer: sema_model.IntegerType) !StaticEncoding {
-    const signed = integer.signed orelse signedFromSpelling(integer.spelling) orelse false;
-    const bits = integer.bits orelse bitsFromSpelling(integer.spelling) orelse 256;
-    if (bits == 0 or bits > 256 or bits % 8 != 0) return error.InvalidIntegerWidth;
-    return if (signed) .{ .int = bits } else .{ .uint = bits };
-}
-
-fn signedFromSpelling(spelling: ?[]const u8) ?bool {
-    const text = spelling orelse return null;
-    if (std.mem.startsWith(u8, text, "u")) return false;
-    if (std.mem.startsWith(u8, text, "i")) return true;
-    return null;
-}
-
-fn bitsFromSpelling(spelling: ?[]const u8) ?u16 {
-    const text = spelling orelse return null;
-    if (text.len < 2) return null;
-    if (text[0] != 'u' and text[0] != 'i') return null;
-    return std.fmt.parseUnsigned(u16, text[1..], 10) catch null;
+fn integerEncoding(integer: IntegerType) !StaticEncoding {
+    const signed = integer.signed;
+    const bits = integer.bits;
+    const spec = builtin.lookupIntegerBuiltin(signed, bits) orelse return error.InvalidIntegerWidth;
+    const width = spec.bit_width orelse return error.InvalidIntegerWidth;
+    return if (signed)
+        .{ .int = width }
+    else
+        .{ .uint = width };
 }

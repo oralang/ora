@@ -1,0 +1,23 @@
+// INPUT: tests/conformance/result_memref_opaque.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn choose:
+// CHECK: iret
+
+// CHECK-LABEL: fn run:
+// CHECK: alloc_size = const 0x80
+// CHECK: arr_base = malloc alloc_size
+// CHECK: mstore256 elem0_ptr
+// CHECK: mstore256 elem1_ptr
+// CHECK: const 0xFF7E9F57
+// CHECK: mstore256 elem2_ptr
+// CHECK: mstore256 elem3_ptr
+// CHECK: v[[TAG:[0-9]+]] v[[PAYLOAD:[0-9]+]] = icall @choose
+// CHECK: v[[MASKED_TAG:[0-9]+]] = and v[[TAG]] c1
+// CHECK: v[[IS_ERR:[0-9]+]] = eq v[[MASKED_TAG]] c1
+// CHECK: mstore256 elem4_ptr v[[IS_ERR]]
+// CHECK: mstore256 elem5_ptr v[[PAYLOAD]]
+// CHECK: elem7 = mload256
+// CHECK: elem9 = mload256
+// CHECK: v[[LOADED_TAG:[0-9]+]] = and elem7 c1
+// CHECK: bb1 -> elem9

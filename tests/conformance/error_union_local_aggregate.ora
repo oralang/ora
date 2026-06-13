@@ -1,0 +1,58 @@
+// see FINDINGS.md#f-004
+error Failure;
+
+contract ErrorUnionLocalAggregate {
+    fn pick(flag: bool) -> !string | Failure {
+        if (flag) {
+            return "ora";
+        }
+        return Failure;
+    }
+
+    pub fn ok_len() -> u256 {
+        try {
+            let s: string = try pick(true);
+            return s.len;
+        } catch (e) {
+            return 999;
+        }
+    }
+
+    pub fn err_marker() -> u256 {
+        try {
+            let s: string = try pick(false);
+            return s.len;
+        } catch (e) {
+            return 999;
+        }
+    }
+
+    pub fn public_err() -> !string | Failure {
+        return Failure;
+    }
+
+    pub fn match_local() -> u256 {
+        let r: Result<string, Failure> = Ok("ora");
+        return match (r) {
+            Ok(s) => s.len,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn content() -> (u256, string) {
+        let r: Result<string, Failure> = Ok("ora");
+        return match (r) {
+            Ok(s) => (1, s),
+            Err(_) => (0, "none"),
+        };
+    }
+
+    pub fn catch_content() -> (u256, string) {
+        try {
+            let s: string = try pick(false);
+            return (1, s);
+        } catch {
+            return (0, "none");
+        }
+    }
+}

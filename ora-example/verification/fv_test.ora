@@ -60,7 +60,7 @@ contract FVTest {
         while (i <= n)
             invariant(i >= 1)
             invariant(i <= n + 1)
-            invariant(sum <= 5050)
+            invariant(sum <= 100 * (i - 1))
         {
             sum = sum + i;
             i = i + 1;

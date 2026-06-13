@@ -1,10 +1,15 @@
 const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
-const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
-const hir_abi = @import("abi.zig");
+const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
+const refinements = ora_types.refinement_semantics;
 const hir_locals = @import("locals.zig");
+const Type = ora_types.SemanticType;
+const IntegerType = ora_types.IntegerType;
+const RefinementType = ora_types.RefinementType;
+const RefinementArg = ora_types.RefinementArg;
 
 pub const LoopContext = struct {
     parent: ?*const LoopContext,
@@ -91,35 +96,39 @@ pub fn lowerPathType(ctx: mlir.MlirContext, name: []const u8) mlir.MlirType {
     if (std.mem.eql(u8, trimmed, "string")) return stringType(ctx);
     if (std.mem.eql(u8, trimmed, "bytes")) return bytesType(ctx);
     if (std.mem.eql(u8, trimmed, "void")) return mlir.oraNoneTypeCreate(ctx);
-    if (hir_abi.parseFixedBytesSpelling(trimmed) != null) return defaultIntegerType(ctx);
-    if (parseSignedIntegerType(trimmed)) |int_info| {
+    if (type_builtin.parseFixedBytesName(trimmed) != null) return reprIntegerType(ctx);
+    if (parseBuiltinIntegerType(trimmed)) |int_info| {
         return mlir.oraIntegerTypeCreate(ctx, int_info.bits);
     }
     return mlir.oraStructTypeGet(ctx, strRef(trimmed));
 }
 
-pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
+pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: Type, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     return switch (descriptor) {
         .bool => boolType(ctx),
-        .integer => |integer| if (integer.spelling) |name| lowerPathType(ctx, name) else defaultIntegerType(ctx),
+        .integer => |integer| lowerIntegerType(ctx, integer),
         .address => addressType(ctx),
         .string => stringType(ctx),
         .bytes => bytesType(ctx),
-        .fixed_bytes => defaultIntegerType(ctx),
+        .fixed_bytes => reprIntegerType(ctx),
         .void => mlir.oraNoneTypeCreate(ctx),
-        .array => |array| arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), array.len orelse 0),
+        .array => |array| blk: {
+            const len = array.len orelse return error.UnresolvedArrayLength;
+            if (len > std.math.maxInt(u32)) return error.ArrayLengthOutOfRange;
+            break :blk arrayMemRefType(ctx, try lowerTypeDescriptor(ctx, array.element_type.*, allocator), @intCast(len));
+        },
         .slice => |slice| sliceMemRefType(ctx, try lowerTypeDescriptor(ctx, slice.element_type.*, allocator)),
         .map => |map| mlir.oraMapTypeGet(
             ctx,
-            if (map.key_type) |key| try lowerTypeDescriptor(ctx, key.*, allocator) else defaultIntegerType(ctx),
-            if (map.value_type) |value| try lowerTypeDescriptor(ctx, value.*, allocator) else defaultIntegerType(ctx),
+            if (map.key_type) |key| try lowerTypeDescriptor(ctx, key.*, allocator) else return error.UnresolvedMapKeyType,
+            if (map.value_type) |value| try lowerTypeDescriptor(ctx, value.*, allocator) else return error.UnresolvedMapValueType,
         ),
         .refinement => |refinement| try lowerRefinementType(ctx, refinement, allocator),
         .struct_ => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         .contract => |named| mlir.oraStructTypeGet(ctx, strRef(named.name)),
         // Bitfields are carried on the wire as the base packed integer plus attrs.
-        .bitfield => defaultIntegerType(ctx),
-        .enum_ => defaultIntegerType(ctx),
+        .bitfield => reprIntegerType(ctx),
+        .enum_ => reprIntegerType(ctx),
         .named => |named| lowerPathType(ctx, named.name),
         .error_union => |error_union| blk: {
             const error_types = try allocator.alloc(mlir.MlirType, error_union.error_types.len);
@@ -134,21 +143,21 @@ pub fn lowerTypeDescriptor(ctx: mlir.MlirContext, descriptor: sema.Type, allocat
                 if (error_union.error_types.len == 0) null else error_types.ptr,
             );
         },
-        else => defaultIntegerType(ctx),
+        else => error.UnsupportedTypeDescriptor,
     };
 }
 
-pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: sema.RefinementType, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
+pub fn lowerRefinementType(ctx: mlir.MlirContext, refinement: RefinementType, allocator: std.mem.Allocator) anyerror!mlir.MlirType {
     const base_type = try lowerTypeDescriptor(ctx, refinement.base_type.*, allocator);
     return buildRefinementType(ctx, refinement.name, base_type, refinement.args) orelse base_type;
 }
 
 pub fn isRefinementTypeName(name: []const u8) bool {
-    return sema.refinements.hasNativeMlirTypeName(name);
+    return refinements.hasNativeMlirTypeName(name);
 }
 
-pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const ast.TypeArg) ?mlir.MlirType {
-    const entry = sema.refinements.entryForName(name) orelse return null;
+pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: mlir.MlirType, args: []const RefinementArg) ?mlir.MlirType {
+    const entry = refinements.entryForName(name) orelse return null;
     if (!entry.has_native_mlir_type) return null;
 
     return switch (entry.kind) {
@@ -175,11 +184,11 @@ pub fn buildRefinementType(ctx: mlir.MlirContext, name: []const u8, base_type: m
         },
         .exact => mlir.oraExactTypeGet(ctx, base_type),
         .non_zero_address => mlir.oraNonZeroAddressTypeGet(ctx),
-        .non_zero, .basis_points => unreachable,
+        .non_zero, .basis_points => null,
     };
 }
 
-fn parseRefinementIntArg(args: []const ast.TypeArg, index: usize) ?u256 {
+fn parseRefinementIntArg(args: []const RefinementArg, index: usize) ?u256 {
     if (index >= args.len) return null;
     return switch (args[index]) {
         .Integer => |literal| parseRefinementIntLiteral(literal.text),
@@ -208,9 +217,9 @@ test "HIR refinement type builder follows registry native type classification" {
     const ctx = try createContext();
     defer mlir.oraContextDestroy(ctx);
 
-    const base_type = defaultIntegerType(ctx);
-    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
-    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } };
+    const base_type = reprIntegerType(ctx);
+    const type_arg: RefinementArg = .{ .Type = {} };
+    const min_arg: RefinementArg = .{ .Integer = .{ .text = "1" } };
 
     try std.testing.expect(buildRefinementType(ctx, "NonZero", base_type, &.{type_arg}) == null);
 
@@ -218,16 +227,64 @@ test "HIR refinement type builder follows registry native type classification" {
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));
 }
 
+test "HIR type descriptor lowering separates representation integers from unresolved map fallbacks" {
+    const ctx = try createContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const fixed_bytes_type: Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
+    const fixed_bytes_repr = try lowerTypeDescriptor(ctx, fixed_bytes_type, std.testing.allocator);
+    try std.testing.expect(mlir.oraTypeIsAInteger(fixed_bytes_repr));
+
+    const u256_type: Type = .{ .integer = .{ .signed = false, .bits = 256, .spelling = "u256" } };
+    const missing_key_map: Type = .{ .map = .{ .key_type = null, .value_type = &u256_type } };
+    try std.testing.expectError(error.UnresolvedMapKeyType, lowerTypeDescriptor(ctx, missing_key_map, std.testing.allocator));
+
+    const missing_value_map: Type = .{ .map = .{ .key_type = &u256_type, .value_type = null } };
+    try std.testing.expectError(error.UnresolvedMapValueType, lowerTypeDescriptor(ctx, missing_value_map, std.testing.allocator));
+}
+
 test "HIR refinement type builder preserves negative bounds as u256 two's-complement limbs" {
     const ctx = try createContext();
     defer mlir.oraContextDestroy(ctx);
 
     const base_type = mlir.oraIntegerTypeCreate(ctx, 8);
-    const type_arg: ast.TypeArg = .{ .Type = ast.TypeExprId.fromIndex(0) };
-    const min_arg: ast.TypeArg = .{ .Integer = .{ .range = .{ .start = 0, .end = 2 }, .text = "-5" } };
+    const type_arg: RefinementArg = .{ .Type = {} };
+    const min_arg: RefinementArg = .{ .Integer = .{ .text = "-5" } };
 
     const min_type = buildRefinementType(ctx, "MinValue", base_type, &.{ type_arg, min_arg }) orelse return error.TestUnexpectedResult;
     try std.testing.expect(!mlir.oraTypeIsNull(min_type));
+}
+
+test "HIR integer type parsing uses canonical builtin widths" {
+    const u160_info = parseBuiltinIntegerType("u160") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 160), u160_info.bits);
+    try std.testing.expect(!u160_info.signed);
+
+    const i256_info = parseBuiltinIntegerType("i256") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), i256_info.bits);
+    try std.testing.expect(i256_info.signed);
+
+    try std.testing.expect(parseBuiltinIntegerType("u24") == null);
+    try std.testing.expect(parseBuiltinIntegerType("i96") == null);
+    try std.testing.expect(parseBuiltinIntegerType("u1_6") == null);
+    try std.testing.expect(parseBuiltinIntegerType("u+8") == null);
+
+    const bitfield_u1 = parseBitfieldIntegerType("u1") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), bitfield_u1.bits);
+    try std.testing.expect(!bitfield_u1.signed);
+}
+
+test "HIR integer signedness helper fails closed on unresolved integer facts" {
+    const i8_type: Type = .{ .integer = .{ .bits = 8, .signed = true, .spelling = "i8" } };
+    const signed = try resolvedIntegerSignedness(i8_type);
+    try std.testing.expectEqual(true, signed orelse return error.TestUnexpectedResult);
+
+    const refinement_type: Type = .{ .refinement = .{ .name = "SignedByte", .base_type = &i8_type } };
+    const refinement_signed = try resolvedIntegerSignedness(refinement_type);
+    try std.testing.expectEqual(true, refinement_signed orelse return error.TestUnexpectedResult);
+
+    try std.testing.expect((try resolvedIntegerSignedness(.{ .bool = {} })) == null);
+    try std.testing.expectError(error.MlirOperationCreationFailed, resolvedIntegerSignedness(.{ .comptime_integer = .{} }));
 }
 
 fn splitU256IntoU64Words(x: u256) struct {
@@ -278,30 +335,43 @@ pub fn appendScfYieldValues(ctx: mlir.MlirContext, block: mlir.MlirBlock, loc: m
 }
 
 pub fn blockEndsWithTerminator(block: mlir.MlirBlock) bool {
-    return !mlir.oraOperationIsNull(mlir.oraBlockGetTerminator(block));
+    return operationIsKnownBlockTerminator(blockLastOperation(block));
 }
 
 pub fn clearKnownTerminator(block: mlir.MlirBlock) void {
-    const term = mlir.oraBlockGetTerminator(block);
-    if (mlir.oraOperationIsNull(term)) return;
+    const term = blockLastOperation(block);
+    if (operationIsKnownBlockTerminator(term)) {
+        mlir.oraOperationErase(term);
+    }
+}
 
-    const name_ref = mlir.oraOperationGetName(term);
-    if (name_ref.data == null) return;
+fn blockLastOperation(block: mlir.MlirBlock) mlir.MlirOperation {
+    var current = mlir.oraBlockGetFirstOperation(block);
+    var last = std.mem.zeroes(mlir.MlirOperation);
+    while (!mlir.oraOperationIsNull(current)) {
+        last = current;
+        current = mlir.oraOperationGetNextInBlock(current);
+    }
+    return last;
+}
+
+fn operationIsKnownBlockTerminator(op: mlir.MlirOperation) bool {
+    if (mlir.oraOperationIsNull(op)) return false;
+
+    const name_ref = mlir.oraOperationGetName(op);
+    if (name_ref.data == null) return false;
     const op_name = name_ref.data[0..name_ref.length];
 
-    const is_terminator = std.mem.eql(u8, op_name, "ora.yield") or
+    return std.mem.eql(u8, op_name, "ora.yield") or
         std.mem.eql(u8, op_name, "scf.yield") or
         std.mem.eql(u8, op_name, "ora.return") or
         std.mem.eql(u8, op_name, "func.return") or
         std.mem.eql(u8, op_name, "cf.br") or
         std.mem.eql(u8, op_name, "cf.cond_br");
-    if (is_terminator) {
-        mlir.oraOperationErase(term);
-    }
 }
 
 pub fn createIntegerConstant(ctx: mlir.MlirContext, loc: mlir.MlirLocation, ty: mlir.MlirType, value: i64) mlir.MlirOperation {
-    const concrete_type = if (mlir.oraTypeIsAddressType(ty)) defaultIntegerType(ctx) else ty;
+    const concrete_type = if (mlir.oraTypeIsAddressType(ty)) reprIntegerType(ctx) else ty;
     const attr = mlir.oraIntegerAttrCreateI64FromType(concrete_type, value);
     return mlir.oraArithConstantOpCreate(ctx, loc, concrete_type, attr);
 }
@@ -316,8 +386,16 @@ pub fn zeroInitAttr(ty: mlir.MlirType) mlir.MlirAttribute {
     return mlir.oraNullAttrCreate();
 }
 
-pub fn defaultIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
+pub fn unknownTypeFallbackI256(ctx: mlir.MlirContext) mlir.MlirType {
+    return reprIntegerType(ctx);
+}
+
+pub fn reprIntegerType(ctx: mlir.MlirContext) mlir.MlirType {
     return mlir.oraIntegerTypeCreate(ctx, 256);
+}
+
+pub fn lowerIntegerType(ctx: mlir.MlirContext, integer: IntegerType) mlir.MlirType {
+    return mlir.oraIntegerTypeCreate(ctx, integer.bits);
 }
 
 pub fn boolType(ctx: mlir.MlirContext) mlir.MlirType {
@@ -350,7 +428,15 @@ pub fn sliceMemRefType(ctx: mlir.MlirContext, element_type: mlir.MlirType) mlir.
     return mlir.oraMemRefTypeCreate(ctx, element_type, shape.len, &shape, mlir.oraNullAttrCreate(), mlir.oraNullAttrCreate());
 }
 
-pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: bool } {
+pub fn parseBuiltinIntegerType(name: []const u8) ?struct { bits: u16, signed: bool } {
+    const spec = type_builtin.parseIntegerBuiltin(name) orelse return null;
+    return .{
+        .bits = spec.bit_width orelse return null,
+        .signed = spec.signed orelse return null,
+    };
+}
+
+pub fn parseBitfieldIntegerType(name: []const u8) ?struct { bits: u32, signed: bool } {
     if (name.len < 2) return null;
     const signed = switch (name[0]) {
         'u' => false,
@@ -361,14 +447,54 @@ pub fn parseSignedIntegerType(name: []const u8) ?struct { bits: u32, signed: boo
     return .{ .bits = bits, .signed = signed };
 }
 
+pub fn unwrapRefinementSemaType(ty: Type) Type {
+    return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
+pub fn resolvedIntegerSignedness(ty: Type) anyerror!?bool {
+    return switch (unwrapRefinementSemaType(ty)) {
+        .integer => |integer| integer.signed,
+        .comptime_integer => error.MlirOperationCreationFailed,
+        else => null,
+    };
+}
+
+pub fn mlirIntegerTypeIsSigned(ty: mlir.MlirType) bool {
+    return mlir.oraTypeIsAInteger(ty) and mlir.oraIntegerTypeIsSigned(ty);
+}
+
+pub fn mlirIntegerValueIsSigned(value: mlir.MlirValue) bool {
+    return mlirIntegerTypeIsSigned(mlir.oraValueGetType(value));
+}
+
 pub fn parseArrayLen(text: []const u8) ?u32 {
     return std.fmt.parseInt(u32, std.mem.trim(u8, text, " \t\n\r"), 10) catch null;
 }
 
-pub fn parseIntLiteral(text: []const u8) ?i64 {
+pub fn parseI64Literal(text: []const u8) ?i64 {
     const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
     const digits = if (base == 10) text else text[2..];
     return std.fmt.parseInt(i64, digits, base) catch null;
+}
+
+pub fn parseUnsignedIntegerLiteral(comptime T: type, text: []const u8) ?T {
+    const trimmed = std.mem.trim(u8, text, " \t\n\r");
+    const base: u8 = if (std.mem.startsWith(u8, trimmed, "0x")) 16 else if (std.mem.startsWith(u8, trimmed, "0b")) 2 else 10;
+    const digits = if (base == 10) trimmed else trimmed[2..];
+    var result: T = 0;
+    var digit_count: usize = 0;
+    for (digits) |c| {
+        if (c == '_') continue;
+        const digit = std.fmt.charToDigit(c, base) catch return null;
+        const shifted = @mulWithOverflow(result, @as(T, @intCast(base)));
+        if (shifted[1] != 0) return null;
+        const summed = @addWithOverflow(shifted[0], @as(T, @intCast(digit)));
+        if (summed[1] != 0) return null;
+        result = summed[0];
+        digit_count += 1;
+    }
+    if (digit_count == 0) return null;
+    return result;
 }
 
 pub fn exprRange(file: *const ast.AstFile, expr_id: ast.ExprId) source.TextRange {

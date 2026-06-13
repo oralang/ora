@@ -1,0 +1,29 @@
+struct Entry {
+    left: u256;
+    middle: u256;
+    right: u256;
+}
+
+contract SliceStructStorageSmoke {
+    storage var entries: slice[Entry];
+
+    pub fn set(values: slice[Entry]) {
+        entries = values;
+    }
+
+    pub fn set_middle(index: u256, value: u256) {
+        entries[index].middle = value;
+    }
+
+    pub fn get_left(index: u256) -> u256 {
+        return entries[index].left;
+    }
+
+    pub fn get_middle(index: u256) -> u256 {
+        return entries[index].middle;
+    }
+
+    pub fn get_right(index: u256) -> u256 {
+        return entries[index].right;
+    }
+}

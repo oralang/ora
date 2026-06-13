@@ -1,0 +1,14 @@
+// Falsification pairing (T3.4): the verifier discharges `ensures(result == a + b)`
+// under the requires envelope. This contract's conformance spec then EXECUTES it
+// on in-envelope boundary inputs and asserts the same property at runtime. If a
+// future change made the verifier unsoundly prove a false ensures (a false-UNSAT),
+// the execution check here would diverge — pairing "is-proved" with "is-true".
+contract FalsificationArith {
+    pub fn clamp_sum(a: u256, b: u256) -> u256
+        requires a <= 100
+        requires b <= 100
+        ensures result == a + b
+    {
+        return a + b;
+    }
+}

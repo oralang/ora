@@ -17,6 +17,7 @@
   "repository": {
     "comments": {
       "patterns": [
+        { "name": "comment.line.documentation.ora", "match": "///.*$" },
         { "name": "comment.line.double-slash.ora", "match": "//.*$" },
         { "name": "comment.block.ora", "begin": "/\\*", "end": "\\*/", "patterns": [{ "include": "#comments" }] }
       ]
@@ -46,7 +47,7 @@
         },
         {
           "name": "keyword.other.ora",
-          "match": "\\b(as|from|to|call|staticcall|errors|comptime)\\b"
+          "match": "\\b(as|from|to|call|staticcall|errors|comptime|and|or)\\b"
         }
       ]
     },
@@ -54,7 +55,7 @@
       "patterns": [
         {
           "name": "support.type.primitive.ora",
-          "match": "\\b(u8|u16|u32|u64|u128|u256|i8|i16|i32|i64|i128|i256|bool|address|string|void)\\b"
+          "match": "\\b(u8|u16|u32|u64|u128|u160|u256|i8|i16|i32|i64|i128|i256|bool|address|string|void)\\b"
         },
         {
           "name": "support.type.collection.ora",
@@ -66,7 +67,7 @@
       "patterns": [
         {
           "name": "keyword.other.verification.ora",
-          "match": "\\b(requires|guard|ensures|invariant|old|result|ghost|assert|assume|havoc|forall|exists|where|modifies|decreases|increases)\\b"
+          "match": "\\b(requires|guard|ensures|ensures_ok|ensures_err|invariant|old|result|ghost|assert|assume|havoc|forall|exists|where|modifies|decreases|increases)\\b"
         }
       ]
     },

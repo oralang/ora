@@ -1,0 +1,47 @@
+contract FixedBytesMappingStorageSmoke {
+    storage var b1_scores: map<bytes1, u256>;
+    storage var b4_scores: map<bytes4, u256>;
+    storage var b20_scores: map<bytes20, u256>;
+    storage var b31_scores: map<bytes31, u256>;
+    storage var b32_scores: map<bytes32, u256>;
+
+    pub fn set_b1(id: bytes1, amount: u256) {
+        b1_scores[id] = amount;
+    }
+
+    pub fn get_b1(id: bytes1) -> u256 {
+        return b1_scores[id];
+    }
+
+    pub fn set_b4(id: bytes4, amount: u256) {
+        b4_scores[id] = amount;
+    }
+
+    pub fn get_b4(id: bytes4) -> u256 {
+        return b4_scores[id];
+    }
+
+    pub fn set_b20(id: bytes20, amount: u256) {
+        b20_scores[id] = amount;
+    }
+
+    pub fn get_b20(id: bytes20) -> u256 {
+        return b20_scores[id];
+    }
+
+    pub fn set_b31(id: bytes31, amount: u256) {
+        b31_scores[id] = amount;
+    }
+
+    pub fn get_b31(id: bytes31) -> u256 {
+        return b31_scores[id];
+    }
+
+    pub fn set_b32(id: bytes32, amount: u256) {
+        b32_scores[id] = amount;
+    }
+
+    pub fn get_b32(id: bytes32) -> u256 {
+        return b32_scores[id];
+    }
+}

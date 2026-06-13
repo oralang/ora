@@ -14,4 +14,10 @@ contract AbiBuiltinCorpus {
             @abiSignature(ERC20.transfer);
         };
     }
+
+    pub fn transfer_hash() -> u256 {
+        return comptime {
+            @keccak256(@abiSignature(ERC20.transfer));
+        };
+    }
 }

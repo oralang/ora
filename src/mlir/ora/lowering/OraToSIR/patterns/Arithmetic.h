@@ -76,7 +76,7 @@ namespace mlir
         {
         public:
             ConvertLengthOp(const TypeConverter &converter, MLIRContext *ctx)
-                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 3, ctx) {}
 
             LogicalResult matchAndRewrite(
                 Operation *op,

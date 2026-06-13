@@ -2,12 +2,14 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const ConstValue = @import("ora_types").ConstValue;
 const abi_runtime_encoder = @import("../abi/runtime_encoder.zig");
 const abi_runtime_decoder = @import("../abi/runtime_decoder.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const source = @import("../source/mod.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
+const lookup_index = @import("../sema/lookup.zig");
 const hir_locals = @import("locals.zig");
 const support = @import("support.zig");
 
@@ -19,20 +21,15 @@ const boolType = support.boolType;
 const bytesType = support.bytesType;
 const cmpPredicate = support.cmpPredicate;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
 const exprRange = support.exprRange;
-const lowerTypeDescriptor = support.lowerTypeDescriptor;
 const nullStringRef = support.nullStringRef;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
-const parseIntLiteral = support.parseIntLiteral;
+const parseUnsignedIntegerLiteral = support.parseUnsignedIntegerLiteral;
+const reprIntegerType = support.reprIntegerType;
 const strRef = support.strRef;
 const stringType = support.stringType;
 const LocalEnv = hir_locals.LocalEnv;
-
-fn unwrapRefinementSemaType(ty: sema.Type) sema.Type {
-    return if (ty.refinementBaseType()) |base| base.* else ty;
-}
 
 pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
     _ = Lowerer;
@@ -40,37 +37,52 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         // Methods in this returned type are mixed into the parent lowerer. When
         // one helper calls another, use @This().helper(self): `self` is the
         // parent FunctionLowerer, not an instance of the anonymous mixin type.
-        fn isSignedIntegerExpr(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
-            const ty = unwrapRefinementSemaType(self.parent.typecheck.expr_types[expr_id.index()]);
-            return switch (ty) {
-                .integer => |integer| integer.signed orelse false,
-                else => false,
+        fn semaIntegerTypeIsSigned(self: *FunctionLowerer, ty: sema.Type) anyerror!?bool {
+            const unwrapped = support.unwrapRefinementSemaType(ty);
+            if (unwrapped == .named) {
+                if (self.parent.substitutedType(unwrapped.named.name)) |substituted| {
+                    return try @This().semaIntegerTypeIsSigned(self, substituted);
+                }
+            }
+            return support.resolvedIntegerSignedness(ty) catch |err| switch (err) {
+                error.MlirOperationCreationFailed => null,
+                else => return err,
             };
         }
 
-        fn signednessForBinaryIntegerOp(self: *FunctionLowerer, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) bool {
-            const lhs_node = self.parent.file.expression(lhs_expr).*;
-            const rhs_node = self.parent.file.expression(rhs_expr).*;
-            if (lhs_node == .IntegerLiteral and rhs_node != .IntegerLiteral) {
-                return @This().isSignedIntegerExpr(self, rhs_expr);
-            }
-            if (rhs_node == .IntegerLiteral and lhs_node != .IntegerLiteral) {
-                return @This().isSignedIntegerExpr(self, lhs_expr);
-            }
-            return @This().isSignedIntegerExpr(self, lhs_expr);
+        fn exprIntegerSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?bool {
+            return try @This().semaIntegerTypeIsSigned(self, self.parent.typecheck.exprType(expr_id));
+        }
+
+        fn reportIndeterminateIntegerSignedness(self: *FunctionLowerer, range: source.TextRange) anyerror!bool {
+            try self.parent.emitLoweringError(
+                range,
+                "cannot determine signedness for integer expression; annotate the expression or one operand with a concrete integer type",
+                .{},
+            );
+            return false;
+        }
+
+        fn binaryIntegerExprIsSigned(self: *FunctionLowerer, expr_id: ast.ExprId, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) anyerror!bool {
+            if (try @This().exprIntegerSignedness(self, lhs_expr)) |signed| return signed;
+            if (try @This().exprIntegerSignedness(self, rhs_expr)) |signed| return signed;
+            return (try @This().exprIntegerSignedness(self, expr_id)) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
+        }
+
+        fn integerExprSignedness(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!bool {
+            return (try @This().exprIntegerSignedness(self, expr_id)) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
         }
 
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.parent.allocator,
-                .file = self.parent.file,
-                .item_index = self.parent.item_index,
-                .typecheck = self.parent.typecheck,
+                .provider = sema.abiLayoutProvider(self.parent.file, self.parent.item_index, self.parent.typecheck),
             };
         }
 
-        fn predicateForBinaryCompare(self: *FunctionLowerer, op: ast.BinaryOp, lhs_expr: ast.ExprId, rhs_expr: ast.ExprId) []const u8 {
-            const is_signed = @This().signednessForBinaryIntegerOp(self, lhs_expr, rhs_expr);
+        fn predicateForBinaryCompare(op: ast.BinaryOp, is_signed: bool) ?[]const u8 {
             return switch (op) {
                 .lt => if (is_signed) "slt" else "ult",
                 .le => if (is_signed) "sle" else "ule",
@@ -78,7 +90,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .ge => if (is_signed) "sge" else "uge",
                 .eq => "eq",
                 .ne => "ne",
-                else => unreachable,
+                else => null,
             };
         }
 
@@ -117,7 +129,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerPersistedConstValue(
             self: *FunctionLowerer,
-            value: sema.ConstValue,
+            value: ConstValue,
             sema_type: sema.Type,
             result_type: mlir.MlirType,
             loc: mlir.MlirLocation,
@@ -167,7 +179,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const attr = mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
                     const bits = appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, i160_type, attr));
                     const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, bits);
-                    if (mlir.oraOperationIsNull(addr_op)) break :blk null;
+                    if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, addr_op);
                 },
                 .string => |text| blk: {
@@ -189,11 +201,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     defer self.parent.allocator.free(values);
                     for (elements, 0..) |element, index| {
                         const element_sema_type = tuple_types[index];
-                        const element_type = try lowerTypeDescriptor(self.parent.context, element_sema_type, self.parent.allocator);
+                        const element_type = self.parent.lowerSemaType(element_sema_type, source.TextRange.empty(0));
                         values[index] = (try @This().lowerPersistedConstValue(self, element, element_sema_type, element_type, loc)) orelse break :blk null;
                     }
                     const op = mlir.oraTupleCreateOpCreate(self.parent.context, loc, values.ptr, values.len, tuple_result_type);
-                    if (mlir.oraOperationIsNull(op)) break :blk null;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
             };
@@ -315,7 +327,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .IntegerLiteral => |literal| blk: {
                     const ty = self.parent.lowerExprType(expr_id);
-                    break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), ty, parseIntLiteral(literal.text) orelse 0));
+                    if (mlir.oraTypeEqual(ty, addressType(self.parent.context))) {
+                        break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
+                    }
+                    const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                        break :blk try @This().loweringValueError(self, literal.range, ty, "invalid integer literal '{s}'", .{literal.text});
+                    break :blk try @This().createWideIntegerConstant(self, ty, parsed, false, literal.range);
                 },
                 .BoolLiteral => |literal| blk: {
                     break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, self.parent.location(literal.range), boolType(self.parent.context), if (literal.value) 1 else 0));
@@ -383,13 +400,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk appendValueOp(self.block, op);
                 },
                 .Name => |name| try self.lowerNameExpr(expr_id, name, locals),
-                .Result => self.current_return_value orelse try self.defaultValue(self.return_type orelse defaultIntegerType(self.parent.context), expr.Result.range),
+                .Result => self.current_return_value orelse
+                    try @This().loweringValueError(self, expr.Result.range, self.parent.lowerExprType(expr_id), "result is not available in this context", .{}),
                 .Group => |group| try self.lowerExpr(group.expr, locals),
                 .Old => |old| blk: {
                     const value = try self.lowerExpr(old.expr, locals);
                     const result_type = self.parent.lowerExprType(old.expr);
                     const op = mlir.oraOldOpCreate(self.parent.context, loc, value, result_type);
-                    if (mlir.oraOperationIsNull(op)) break :blk value;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .Unary => |unary| try self.lowerUnary(unary, locals),
@@ -400,11 +418,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const sema_tuple_type = self.parent.typecheck.exprType(expr_id);
                     var operands: std.ArrayList(mlir.MlirValue) = .{};
                     for (tuple.elements, 0..) |element, index| {
-                        const raw_value = try self.lowerExpr(element, locals);
                         const value = if (sema_tuple_type.kind() == .tuple and index < sema_tuple_type.tuple.len)
-                            try self.convertValueForFlow(raw_value, self.parent.lowerSemaType(sema_tuple_type.tuple[index], tuple.range), exprRange(self.parent.file, element))
+                            try @This().lowerExprForSemaFlowTarget(self, element, sema_tuple_type.tuple[index], exprRange(self.parent.file, element), locals)
                         else
-                            raw_value;
+                            try self.lowerExpr(element, locals);
                         try operands.append(self.parent.allocator, value);
                     }
                     const result_type = self.parent.lowerSemaType(sema_tuple_type, tuple.range);
@@ -459,9 +476,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 .Index => |index| blk: {
                     const base = try self.lowerExpr(index.base, locals);
-                    const key = try self.lowerExpr(index.index, locals);
                     const base_type = self.parent.typecheck.exprType(index.base);
-                    if (mlir.oraTypeIsAMemRef(mlir.oraValueGetType(base))) {
+                    const base_mlir_type = mlir.oraValueGetType(base);
+                    if (mlir.oraTypeIsAMemRef(base_mlir_type)) {
+                        const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
                         const index_value = try @This().convertIndexToIndexType(self, key, index.range);
                         const result_type = self.parent.lowerExprType(expr_id);
                         const op = mlir.oraMemrefLoadOpCreate(
@@ -476,7 +494,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     switch (base_type.kind()) {
                         .bytes, .string => {
-                            const raw_byte_type = defaultIntegerType(self.parent.context);
+                            const key = try self.lowerExprForFlowTarget(index.index, reprIntegerType(self.parent.context), locals);
+                            const raw_byte_type = reprIntegerType(self.parent.context);
                             const op = mlir.oraByteAtOpCreate(
                                 self.parent.context,
                                 self.parent.location(index.range),
@@ -493,6 +512,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (base_type == .tuple) {
                         const tuple_index = @This().constTupleIndex(self, index.index) orelse {
+                            const key = try self.lowerExpr(index.index, locals);
                             const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{ base, key }, self.parent.lowerExprType(expr_id));
                             break :blk appendValueOp(self.block, op);
                         };
@@ -508,7 +528,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     if (base_type == .map) {
                         const result_type = self.parent.lowerExprType(expr_id);
-                        const map_key_type = mlir.oraMapTypeGetKeyType(mlir.oraValueGetType(base));
+                        const map_key_type = mlir.oraMapTypeGetKeyType(base_mlir_type);
+                        const key = if (!mlir.oraTypeIsNull(map_key_type))
+                            try self.lowerExprForFlowTarget(index.index, map_key_type, locals)
+                        else
+                            try self.lowerExpr(index.index, locals);
                         const converted_key = if (!mlir.oraTypeIsNull(map_key_type))
                             try self.convertValueForFlow(key, map_key_type, index.range)
                         else
@@ -519,13 +543,136 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const op = try self.createAggregatePlaceholder("ora.index_access", index.range, &.{}, self.parent.lowerExprType(expr_id));
                     break :blk appendValueOp(self.block, op);
                 },
-                .Quantified => |quantified| blk: {
-                    if (quantified.condition) |condition| _ = try self.lowerExpr(condition, locals);
-                    _ = try self.lowerExpr(quantified.body, locals);
-                    break :blk appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
-                },
-                .Error => try self.defaultValue(defaultIntegerType(self.parent.context), expr.Error.range),
+                .Quantified => |quantified| try @This().lowerQuantifiedExpr(self, quantified, loc, locals),
+                .Error => try @This().loweringValueError(self, expr.Error.range, self.parent.lowerExprType(expr_id), "cannot lower syntax error expression", .{}),
             };
+        }
+
+        pub fn lowerExprForFlowTarget(self: *FunctionLowerer, expr_id: ast.ExprId, target_type: mlir.MlirType, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| try @This().lowerExprForFlowTarget(self, group.expr, target_type, locals),
+                .IntegerLiteral => |literal| blk: {
+                    if (mlir.oraTypeEqual(target_type, addressType(self.parent.context))) {
+                        break :blk try @This().lowerContextualAddressIntegerLiteral(self, literal);
+                    }
+                    if (mlir.oraTypeIsAInteger(target_type)) {
+                        const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                            break :blk try @This().loweringValueError(self, literal.range, target_type, "invalid integer literal '{s}'", .{literal.text});
+                        break :blk try @This().createWideIntegerConstant(self, target_type, parsed, false, literal.range);
+                    }
+                    break :blk try self.lowerExpr(expr_id, locals);
+                },
+                else => try self.lowerExpr(expr_id, locals),
+            };
+        }
+
+        fn lowerExprForSemaFlowTarget(
+            self: *FunctionLowerer,
+            expr_id: ast.ExprId,
+            target_sema_type: sema.Type,
+            range: source.TextRange,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const target_type = self.parent.lowerSemaType(target_sema_type, range);
+            const target_ref_base = mlir.oraRefinementTypeGetBaseType(target_type);
+            const flow_target = if (!mlir.oraTypeIsNull(target_ref_base)) target_ref_base else target_type;
+            const raw_value = try @This().lowerExprForFlowTarget(self, expr_id, flow_target, locals);
+            return try self.convertValueForSemaFlow(raw_value, target_sema_type, range);
+        }
+
+        fn lowerContextualAddressIntegerLiteral(self: *FunctionLowerer, literal: ast.IntegerLiteralExpr) !mlir.MlirValue {
+            const loc = self.parent.location(literal.range);
+            const parsed = parseUnsignedIntegerLiteral(u160, literal.text) orelse {
+                return try @This().loweringValueError(self, literal.range, addressType(self.parent.context), "address literal value is out of range", .{});
+            };
+            const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+            const attr = if (parsed <= std.math.maxInt(i64))
+                mlir.oraIntegerAttrCreateI64FromType(i160_type, @intCast(parsed))
+            else blk: {
+                var decimal_buf: [80]u8 = undefined;
+                const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+                    return try @This().loweringValueError(self, literal.range, addressType(self.parent.context), "address literal value is out of range", .{});
+                };
+                break :blk mlir.oraIntegerAttrGetFromString(i160_type, strRef(decimal_text));
+            };
+            const bits = appendValueOp(self.block, mlir.oraArithConstantOpCreate(self.parent.context, loc, i160_type, attr));
+            const addr_op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, bits);
+            if (mlir.oraOperationIsNull(addr_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, addr_op);
+        }
+
+        fn lowerQuantifiedExpr(
+            self: *FunctionLowerer,
+            quantified: ast.QuantifiedExpr,
+            loc: mlir.MlirLocation,
+            locals: *LocalEnv,
+        ) anyerror!mlir.MlirValue {
+            const pattern = self.parent.file.pattern(quantified.pattern).*;
+            const variable_name = switch (pattern) {
+                .Name => |name| name.name,
+                else => return try @This().loweringValueError(
+                    self,
+                    quantified.range,
+                    boolType(self.parent.context),
+                    "quantified expression requires a named bound variable",
+                    .{},
+                ),
+            };
+
+            const variable_sema_type = self.parent.typecheck.pattern_types[quantified.pattern.index()].type;
+            const variable_type = self.parent.lowerSemaType(variable_sema_type, quantified.range);
+            if (mlir.oraTypeIsNull(variable_type)) {
+                return try @This().loweringValueError(
+                    self,
+                    quantified.range,
+                    boolType(self.parent.context),
+                    "cannot lower quantified variable type",
+                    .{},
+                );
+            }
+
+            const placeholder_op = createIntegerConstant(self.parent.context, loc, variable_type, 0);
+            _ = try @This().expectOperation(self, placeholder_op, quantified.range, "arith.constant");
+            mlir.oraOperationSetAttributeByName(
+                placeholder_op,
+                strRef("ora.bound_variable"),
+                mlir.oraStringAttrCreate(self.parent.context, strRef(variable_name)),
+            );
+            const placeholder = appendValueOp(self.block, placeholder_op);
+
+            var quantified_locals = try locals.clone();
+            try self.bindPatternValue(quantified.pattern, placeholder, &quantified_locals);
+
+            const condition_value = if (quantified.condition) |condition|
+                try self.lowerExpr(condition, &quantified_locals)
+            else
+                null;
+            const body_value = try self.lowerExpr(quantified.body, &quantified_locals);
+
+            const variable_type_text = try @This().quantifiedVariableTypeText(self, variable_sema_type);
+            const condition_operand = if (condition_value) |value| value else std.mem.zeroes(mlir.MlirValue);
+            const op = mlir.oraQuantifiedOpCreate(
+                self.parent.context,
+                loc,
+                strRef(switch (quantified.quantifier) {
+                    .forall => "forall",
+                    .exists => "exists",
+                }),
+                strRef(variable_name),
+                strRef(variable_type_text),
+                condition_operand,
+                condition_value != null,
+                body_value,
+                boolType(self.parent.context),
+            );
+            return try @This().expectValueOp(self, op, quantified.range, "ora.quantified");
+        }
+
+        fn quantifiedVariableTypeText(self: *FunctionLowerer, ty: sema.Type) ![]const u8 {
+            if (ty.name()) |name| return name;
+            var buffer: std.ArrayList(u8) = .{};
+            try sema.appendTypeMangleName(self.parent.allocator, &buffer, ty);
+            return try buffer.toOwnedSlice(self.parent.allocator);
         }
 
         pub fn lowerNameExpr(self: *FunctionLowerer, expr_id: ast.ExprId, name: ast.NameExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -573,7 +720,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
 
-            return self.defaultValue(self.parent.lowerExprType(expr_id), name.range);
+            return try @This().loweringValueError(self, name.range, self.parent.lowerExprType(expr_id), "unresolved name '{s}' during HIR lowering", .{name.name});
         }
 
         fn lowerBoundItemExpr(
@@ -647,29 +794,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!?mlir.MlirValue {
             const function = self.function orelse return null;
             const contract_id = function.parent_contract orelse return null;
-            const contract = switch (self.parent.file.item(contract_id).*) {
-                .Contract => |contract| contract,
-                else => return null,
-            };
-
-            for (contract.members) |member_id| {
-                switch (self.parent.file.item(member_id).*) {
-                    .Field => |field| {
-                        if (!std.mem.eql(u8, field.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    .Constant => |constant| {
-                        if (!std.mem.eql(u8, constant.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    .Function => |function_item| {
-                        if (!std.mem.eql(u8, function_item.name, name.name)) continue;
-                        return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
-                    },
-                    else => {},
-                }
-            }
-            return null;
+            const member_id = self.parent.item_index.lookupContractMemberWithRoles(self.parent.file, contract_id, name.name, .{
+                .field = true,
+                .constant = true,
+                .function = true,
+            }) orelse return null;
+            return try @This().lowerBoundItemExpr(self, expr_id, name, member_id, locals);
         }
 
         pub fn lowerUnary(self: *FunctionLowerer, unary: ast.UnaryExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -677,15 +807,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const loc = self.parent.location(unary.range);
             return switch (unary.op) {
                 .neg => blk: {
-                    const zero = try self.defaultValue(mlir.oraValueGetType(operand), unary.range);
+                    const zero = appendValueOp(
+                        self.block,
+                        createIntegerConstant(self.parent.context, loc, mlir.oraValueGetType(operand), 0),
+                    );
                     const op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, operand);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .not_ => blk: {
                     const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                     const op = mlir.oraArithXorIOpCreate(self.parent.context, loc, operand, one);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .bit_not => blk: {
@@ -697,7 +830,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const all_ones: i64 = if (bit_width >= 64) -1 else (@as(i64, 1) << @intCast(bit_width)) - 1;
                     const mask = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, operand_ty, all_ones));
                     const op = mlir.oraArithXorIOpCreate(self.parent.context, loc, operand, mask);
-                    if (mlir.oraOperationIsNull(op)) break :blk operand;
+                    if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
                 .try_ => try @This().lowerTryUnary(self, operand, unary.range),
@@ -712,7 +845,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (self.in_try_block) {
                 const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
-                if (mlir.oraOperationIsNull(unwrap)) return operand;
+                if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, unwrap);
             }
 
@@ -720,11 +853,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.return_type) |return_type| {
                     if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(return_type))) {
                         const is_error = mlir.oraErrorIsErrorOpCreate(self.parent.context, loc, operand);
-                        if (mlir.oraOperationIsNull(is_error)) return operand;
+                        if (mlir.oraOperationIsNull(is_error)) return error.MlirOperationCreationFailed;
                         const is_error_value = appendValueOp(self.block, is_error);
 
                         const branch = mlir.oraConditionalReturnOpCreate(self.parent.context, loc, is_error_value);
-                        if (mlir.oraOperationIsNull(branch)) return operand;
+                        if (mlir.oraOperationIsNull(branch)) return error.MlirOperationCreationFailed;
                         appendOp(self.block, branch);
 
                         const then_block = mlir.oraConditionalReturnOpGetThenBlock(branch);
@@ -733,14 +866,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             return error.MlirOperationCreationFailed;
                         }
 
-                        const error_type = defaultIntegerType(self.parent.context);
+                        const error_type = reprIntegerType(self.parent.context);
                         const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
-                        if (mlir.oraOperationIsNull(get_error)) return operand;
+                        if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
                         appendOp(then_block, get_error);
                         const error_value = mlir.oraOperationGetResult(get_error, 0);
 
                         const error_union = mlir.oraErrorErrOpCreate(self.parent.context, loc, error_value, return_type);
-                        if (mlir.oraOperationIsNull(error_union)) return operand;
+                        if (mlir.oraOperationIsNull(error_union)) return error.MlirOperationCreationFailed;
                         if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
                             mlir.oraOperationSetAttributeByName(error_union, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
                         }
@@ -754,7 +887,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         try support.appendEmptyYield(self.parent.context, else_block, loc);
 
                         const unwrap = mlir.oraErrorUnwrapOpCreate(self.parent.context, loc, operand, result_type);
-                        if (mlir.oraOperationIsNull(unwrap)) return operand;
+                        if (mlir.oraOperationIsNull(unwrap)) return error.MlirOperationCreationFailed;
                         return appendValueOp(self.block, unwrap);
                     }
                 }
@@ -770,10 +903,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             var lhs = try self.lowerExpr(binary.lhs, locals);
-            var rhs = try self.lowerExpr(binary.rhs, locals);
+            var rhs = switch (binary.op) {
+                .shl, .shr, .wrapping_shl, .wrapping_shr => blk: {
+                    const lhs_type = mlir.oraValueGetType(lhs);
+                    if (mlir.oraTypeIsAInteger(lhs_type)) {
+                        break :blk try self.lowerExprForFlowTarget(binary.rhs, lhs_type, locals);
+                    }
+                    break :blk try self.lowerExpr(binary.rhs, locals);
+                },
+                else => try self.lowerExpr(binary.rhs, locals),
+            };
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
-            const is_signed_int_op = @This().signednessForBinaryIntegerOp(self, binary.lhs, binary.rhs);
 
             lhs = try @This().unwrapRefinementForCast(self, lhs, binary.range);
             rhs = try @This().unwrapRefinementForCast(self, rhs, binary.range);
@@ -820,7 +961,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             if (binary.op == .pow) {
-                return self.lowerCheckedPower(lhs, rhs, result_type, binary.range);
+                return self.lowerCheckedPower(lhs, rhs, result_type, try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range);
             }
 
             if (binary.op == .add) {
@@ -828,8 +969,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (result_kind == .string or result_kind == .bytes) {
                     try @This().emitConcatBoundsAssert(self, lhs, rhs, binary.range);
                     const op = mlir.oraConcatOpCreate(self.parent.context, loc, lhs, rhs, result_type);
-                    if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, binary.range);
-                    return appendValueOp(self.block, op);
+                    return try @This().expectValueOp(self, op, binary.range, "ora.concat");
                 }
             }
 
@@ -867,6 +1007,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => {},
             }
 
+            const is_signed_int_op = switch (binary.op) {
+                .add, .sub, .mul, .div, .mod, .shr => try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs),
+                .lt, .le, .gt, .ge => if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(lhs)) and mlir.oraTypeIsAInteger(mlir.oraValueGetType(rhs)))
+                    try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs)
+                else
+                    false,
+                else => false,
+            };
+
             const op = switch (binary.op) {
                 .add => mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs),
                 .wrapping_add => mlir.oraAddWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
@@ -886,13 +1035,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .wrapping_shr => mlir.oraShrWrappingOpCreate(self.parent.context, loc, lhs, rhs, result_type),
                 .eq => self.createCompareOp(loc, "eq", lhs, rhs),
                 .ne => self.createCompareOp(loc, "ne", lhs, rhs),
-                .lt, .le, .gt, .ge => self.createCompareOp(loc, @This().predicateForBinaryCompare(self, binary.op, binary.lhs, binary.rhs), lhs, rhs),
-                .pow => unreachable,
+                .lt, .le, .gt, .ge => blk: {
+                    const predicate = @This().predicateForBinaryCompare(binary.op, is_signed_int_op) orelse
+                        return try @This().loweringValueError(
+                            self,
+                            binary.range,
+                            result_type,
+                            "failed to lower comparison operator '{s}'",
+                            .{@tagName(binary.op)},
+                        );
+                    break :blk self.createCompareOp(loc, predicate, lhs, rhs);
+                },
+                .pow => return self.lowerCheckedPower(lhs, rhs, result_type, try @This().binaryIntegerExprIsSigned(self, expr_id, binary.lhs, binary.rhs), binary.range),
             };
 
-            if (mlir.oraOperationIsNull(op)) {
-                return self.defaultValue(result_type, binary.range);
-            }
+            if (mlir.oraOperationIsNull(op)) return try @This().loweringValueError(
+                self,
+                binary.range,
+                result_type,
+                "failed to lower binary operator '{s}'",
+                .{@tagName(binary.op)},
+            );
             const value = appendValueOp(self.block, op);
             try @This().maybeEmitCheckedBinaryOverflowAssert(self, binary.op, lhs, rhs, value, is_signed_int_op, binary.range);
             return value;
@@ -931,7 +1094,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .add => "checked addition overflow",
                 .sub => "checked subtraction overflow",
                 .mul => "checked multiplication overflow",
-                else => unreachable,
+                else => return,
             };
             try FunctionLowerer.emitOverflowAssert(self, overflow_flag, message, range);
         }
@@ -1008,7 +1171,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .IntegerLiteral => |literal| if (std.mem.eql(u8, std.mem.trim(u8, literal.text, " \t\n\r"), "0"))
                     appendValueOp(
                         self.block,
-                        createIntegerConstant(self.parent.context, self.parent.location(literal.range), defaultIntegerType(self.parent.context), 0),
+                        createIntegerConstant(self.parent.context, self.parent.location(literal.range), reprIntegerType(self.parent.context), 0),
                     )
                 else
                     value,
@@ -1043,7 +1206,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (callee_expr == .Field) {
                     const path = try @This().fieldExprPath(self, call.callee);
                     defer self.parent.allocator.free(path);
-                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, self.parent.lowerExprType(expr_id), path)) |value| {
+                    if (try @This().lowerBuiltinFieldCall(self, callee_expr.Field, path)) |value| {
                         return value;
                     }
                 }
@@ -1101,6 +1264,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try args.append(self.parent.allocator, arg_value);
             }
 
+            const result_type = self.parent.lowerExprType(expr_id);
             const callee_name = if (imported_target != null and callee_function != null)
                 (try self.parent.ensureImportedFunctionSymbol(
                     imported_target.?.module_id,
@@ -1109,7 +1273,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     call,
                     imported_resolution,
                     @This().currentContractParentBlock(self) orelse self.parent.module_body,
-                )) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+                )) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve imported call target", .{})
             else if (callee_function != null and callee_item_id != null)
                 (try self.parent.ensureMonomorphizedFunction(
                     callee_item_id.?,
@@ -1117,11 +1281,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     call,
                     runtime_parameters,
                     @This().currentContractItemId(self),
-                )) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range)
+                )) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve function call target", .{})
             else
-                (@This().calleeName(self, call.callee) orelse return self.defaultValue(self.parent.lowerExprType(expr_id), call.range));
+                (@This().calleeName(self, call.callee) orelse return try @This().loweringValueError(self, call.range, result_type, "failed to resolve function call target", .{}));
 
-            const result_type = self.parent.lowerExprType(expr_id);
             var result_types: [1]mlir.MlirType = .{result_type};
             const op = mlir.oraFuncCallOpCreate(
                 self.parent.context,
@@ -1132,13 +1295,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (imported_target != null) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.imported_call"), mlir.oraBoolAttrCreate(self.parent.context, true));
             }
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -1342,22 +1505,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (adt_sema_type.kind() != .enum_) return null;
             const enum_name = adt_sema_type.enum_.name;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, variant_name)) return variant.payload_type;
-                }
-                return null;
+                const variant = instantiated.variantByName(variant_name) orelse return null;
+                return variant.payload_type;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
             const enum_item = switch (self.parent.file.item(item_id).*) {
                 .Enum => |enum_item| enum_item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, variant_name)) {
-                    return try @This().enumVariantPayloadSemaType(self, variant.payload);
-                }
-            }
-            return null;
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, variant_name) orelse return null;
+            return try @This().enumVariantPayloadSemaType(self, enum_item.variants[variant_index].payload);
         }
 
         fn enumVariantPayloadSemaType(
@@ -1493,64 +1650,65 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             field: ast.FieldExpr,
             trait_name: []const u8,
             method: sema.TraitMethodSignature,
-            ast_method: ?ast.nodes.TraitMethod = null,
+            trait_method_owner: ?sema.VerificationTraitMethodOwner = null,
         };
 
-        fn externTraitMethodAst(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?ast.nodes.TraitMethod {
+        fn externTraitMethodOwner(self: *FunctionLowerer, trait_name: []const u8, method_name: []const u8) ?sema.VerificationTraitMethodOwner {
             const trait_item_id = self.parent.item_index.lookup(trait_name) orelse return null;
-            const trait_item = switch (self.parent.file.item(trait_item_id).*) {
-                .Trait => |trait_item| trait_item,
-                else => return null,
+            const method_index = self.parent.item_index.lookupTraitMethodIndex(trait_item_id, method_name) orelse return null;
+            return .{
+                .trait_item = trait_item_id,
+                .method_index = method_index,
             };
-            for (trait_item.methods) |method| {
-                if (std.mem.eql(u8, method.name, method_name)) return method;
-            }
-            return null;
         }
 
         fn externSummaryLocals(
             self: *FunctionLowerer,
             base_locals: *const LocalEnv,
-            ast_method: ast.nodes.TraitMethod,
+            trait_method: ast.nodes.TraitMethod,
             args: []const mlir.MlirValue,
         ) anyerror!LocalEnv {
             var clause_locals = try self.cloneLocals(base_locals);
-            const bind_count = @min(ast_method.parameters.len, args.len);
+            const bind_count = @min(trait_method.parameters.len, args.len);
             for (0..bind_count) |index| {
-                try self.bindPatternValue(ast_method.parameters[index].pattern, args[index], &clause_locals);
+                try self.bindPatternValue(trait_method.parameters[index].pattern, args[index], &clause_locals);
             }
             return clause_locals;
         }
 
         fn emitExternSummaryRequires(
             self: *FunctionLowerer,
-            ast_method: ?ast.nodes.TraitMethod,
+            owner: ?sema.VerificationTraitMethodOwner,
             base_locals: *const LocalEnv,
             args: []const mlir.MlirValue,
         ) anyerror!void {
-            const method = ast_method orelse return;
-            for (method.clauses) |clause| {
-                if (clause.kind != .requires) continue;
+            const fact_owner = owner orelse return;
+            const method = self.parent.traitMethodForVerificationOwner(fact_owner) orelse return error.InvalidVerificationFact;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const fact = self.parent.traitMethodVerificationFact(entry);
+                if (fact.kind != .requires) continue;
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
                 var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
-                const condition = try self.lowerExpr(clause.expr, &clause_locals);
-                const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(clause.range), condition, strRef("extern trait summary requires"));
+                const condition = try self.lowerExpr(expr, &clause_locals);
+                const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(fact.range), condition, strRef("extern trait summary requires"));
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", "extern_trait_summary").attribute);
                 appendOp(self.block, op);
             }
         }
 
-        fn externSummaryHasEnsures(ast_method: ?ast.nodes.TraitMethod) bool {
-            const method = ast_method orelse return false;
-            for (method.clauses) |clause| {
-                if (clause.kind == .ensures or clause.kind == .ensures_ok) return true;
+        fn externSummaryHasEnsures(self: *FunctionLowerer, owner: ?sema.VerificationTraitMethodOwner) bool {
+            const fact_owner = owner orelse return false;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const kind = self.parent.traitMethodVerificationFact(entry).kind;
+                if (kind == .ensures or kind == .ensures_ok) return true;
             }
             return false;
         }
 
-        fn externSummaryHasClauses(ast_method: ?ast.nodes.TraitMethod) bool {
-            const method = ast_method orelse return false;
-            return method.clauses.len > 0;
+        fn externSummaryHasClauses(self: *FunctionLowerer, owner: ?sema.VerificationTraitMethodOwner) bool {
+            const fact_owner = owner orelse return false;
+            return self.parent.traitMethodVerificationFactEntries(fact_owner).len > 0;
         }
 
         fn externReturndataStrictSupports(ty: sema.Type) bool {
@@ -1597,7 +1755,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn externReturndataStrictSupportsSliceElement(ty: sema.Type) bool {
             return switch (ty) {
                 .bool, .address, .fixed_bytes => true,
-                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .integer => |integer| integer.isUnsignedBits(256),
                 .refinement => |refinement| externReturndataStrictSupportsSliceElement(refinement.base_type.*),
                 else => false,
             };
@@ -1605,7 +1763,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn externReturndataStrictSupportsU256(ty: sema.Type) bool {
             return switch (ty) {
-                .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+                .integer => |integer| integer.isUnsignedBits(256),
                 .refinement => |refinement| externReturndataStrictSupportsU256(refinement.base_type.*),
                 else => false,
             };
@@ -1613,13 +1771,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn lowerExternSummaryEnsuresCondition(
             self: *FunctionLowerer,
-            ast_method: ?ast.nodes.TraitMethod,
+            owner: ?sema.VerificationTraitMethodOwner,
             base_locals: *const LocalEnv,
             args: []const mlir.MlirValue,
             result: mlir.MlirValue,
             block: mlir.MlirBlock,
         ) anyerror!?mlir.MlirValue {
-            const method = ast_method orelse return null;
+            const fact_owner = owner orelse return null;
+            const method = self.parent.traitMethodForVerificationOwner(fact_owner) orelse return error.InvalidVerificationFact;
             const previous_block = self.block;
             const previous_result = self.current_return_value;
             self.block = block;
@@ -1630,12 +1789,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             var combined: ?mlir.MlirValue = null;
-            for (method.clauses) |clause| {
-                if (clause.kind != .ensures and clause.kind != .ensures_ok) continue;
+            for (self.parent.traitMethodVerificationFactEntries(fact_owner)) |entry| {
+                const fact = self.parent.traitMethodVerificationFact(entry);
+                if (fact.kind != .ensures and fact.kind != .ensures_ok) continue;
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
                 var clause_locals = try @This().externSummaryLocals(self, base_locals, method, args);
-                const condition = try self.lowerExpr(clause.expr, &clause_locals);
+                const condition = try self.lowerExpr(expr, &clause_locals);
                 combined = if (combined) |acc| blk: {
-                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(clause.range), acc, condition);
+                    const and_op = mlir.oraArithAndIOpCreate(self.parent.context, self.parent.location(fact.range), acc, condition);
                     if (mlir.oraOperationIsNull(and_op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(block, and_op);
                 } else condition;
@@ -1666,7 +1827,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (call.args) |arg| {
                 try encode_args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
             }
-            try @This().emitExternSummaryRequires(self, resolved.ast_method, locals, encode_args.items);
+            try @This().emitExternSummaryRequires(self, resolved.trait_method_owner, locals, encode_args.items);
 
             const layout_context = @This().layoutContext(self);
             const encode_op = try abi_runtime_encoder.createAbiEncodeWithSelectorOp(
@@ -1677,13 +1838,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.method.name,
                 resolved.method.param_types,
                 encode_args.items,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
             const calldata = appendValueOp(self.block, encode_op);
 
             const target = try self.lowerExpr(proxy.address_expr, locals);
-            const gas = try self.lowerExpr(proxy.gas_expr, locals);
+            const gas = try self.lowerExprForFlowTarget(proxy.gas_expr, reprIntegerType(self.parent.context), locals);
 
             const external_call_op = mlir.oraExternalCallOpCreate(
                 self.parent.context,
@@ -1695,17 +1856,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 gas,
                 calldata,
                 boolType(self.parent.context),
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(external_call_op)) return error.MlirOperationCreationFailed;
-            if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(resolved.ast_method)) {
+            if (resolved.method.extern_call_kind == .call and @This().externSummaryHasClauses(self, resolved.trait_method_owner)) {
                 mlir.oraOperationSetAttributeByName(external_call_op, strRef("ora.trusted_extern_frame"), namedStringAttr(self.parent.context, "ora.trusted_extern_frame", "caller_storage").attribute);
             }
             appendOp(self.block, external_call_op);
             const success = mlir.oraOperationGetResult(external_call_op, 0);
             const returndata = mlir.oraOperationGetResult(external_call_op, 1);
 
-            const has_extern_summary_ensures = @This().externSummaryHasEnsures(resolved.ast_method);
+            const has_extern_summary_ensures = @This().externSummaryHasEnsures(self, resolved.trait_method_owner);
             const if_result_types = if (has_extern_summary_ensures)
                 [_]mlir.MlirType{ result_type, boolType(self.parent.context) }
             else
@@ -1741,7 +1902,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
                 appendOp(then_block, decode_op);
                 const decoded = mlir.oraOperationGetResult(decode_op, 0);
-                const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded, then_block);
+                const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.trait_method_owner, locals, encode_args.items, decoded, then_block);
                 const ok_op = mlir.oraErrorOkOpCreate(self.parent.context, loc, decoded, result_type);
                 if (mlir.oraOperationIsNull(ok_op)) return error.MlirOperationCreationFailed;
                 if (external_result_requires_wide) {
@@ -1796,7 +1957,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(unwrap_op)) return error.MlirOperationCreationFailed;
                     appendOp(summary_ok_block, unwrap_op);
                     const decoded_payload = mlir.oraOperationGetResult(unwrap_op, 0);
-                    const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.ast_method, locals, encode_args.items, decoded_payload, summary_ok_block);
+                    const summary_condition = try @This().lowerExternSummaryEnsuresCondition(self, resolved.trait_method_owner, locals, encode_args.items, decoded_payload, summary_ok_block);
                     const condition = summary_condition orelse appendValueOp(summary_ok_block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                     try support.appendScfYieldValues(self.parent.context, summary_ok_block, loc, &[_]mlir.MlirValue{ decoded_result, condition });
 
@@ -1863,7 +2024,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 layout_context,
                 .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
                 returndata,
-                defaultIntegerType(self.parent.context),
+                reprIntegerType(self.parent.context),
             );
             if (mlir.oraOperationIsNull(decode_op)) return error.MlirOperationCreationFailed;
             appendOp(block, decode_op);
@@ -1963,7 +2124,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             returndata: mlir.MlirValue,
         ) anyerror!mlir.MlirValue {
             const lowered_error_type = self.parent.lowerSemaType(error_type, exprRange(self.parent.file, expr_id));
-            const payload_offset = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 4));
+            const payload_offset = appendValueOp(block, createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 4));
             const payload_ptr_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, returndata, payload_offset);
             if (mlir.oraOperationIsNull(payload_ptr_op)) return error.MlirOperationCreationFailed;
             appendOp(block, payload_ptr_op);
@@ -2014,10 +2175,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const selector_value = try std.fmt.parseUnsigned(u32, selector_text[2..], 16);
             const selector_u32_type = mlir.oraIntegerTypeCreate(self.parent.context, 32);
             const selector_const = appendValueOp(block, createIntegerConstant(self.parent.context, loc, selector_u32_type, selector_value));
-            const selector_u256_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, selector_const, defaultIntegerType(self.parent.context));
+            const selector_u256_op = mlir.oraArithExtUIOpCreate(self.parent.context, loc, selector_const, reprIntegerType(self.parent.context));
             if (mlir.oraOperationIsNull(selector_u256_op)) return error.MlirOperationCreationFailed;
             const selector_u256 = appendValueOp(block, selector_u256_op);
-            const shift = appendValueOp(block, createIntegerConstant(self.parent.context, loc, defaultIntegerType(self.parent.context), 224));
+            const shift = appendValueOp(block, createIntegerConstant(self.parent.context, loc, reprIntegerType(self.parent.context), 224));
             const shifted = mlir.oraArithShlIOpCreate(self.parent.context, loc, selector_u256, shift);
             if (mlir.oraOperationIsNull(shifted)) return error.MlirOperationCreationFailed;
             return appendValueOp(block, shifted);
@@ -2047,15 +2208,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(field.base);
             if (base_type.kind() != .external_proxy) return null;
             const trait_interface = self.parent.typecheck.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
-            for (trait_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name)) return .{
-                    .field = field,
-                    .trait_name = base_type.external_proxy.trait_name,
-                    .method = method,
-                    .ast_method = @This().externTraitMethodAst(self, base_type.external_proxy.trait_name, method.name),
-                };
-            }
-            return null;
+            const method = trait_interface.methodByName(field.name) orelse return null;
+            return .{
+                .field = field,
+                .trait_name = base_type.external_proxy.trait_name,
+                .method = method,
+                .trait_method_owner = @This().externTraitMethodOwner(self, base_type.external_proxy.trait_name, method.name),
+            };
         }
 
         fn lowerCurrentMethodSelfCallResult(self: *FunctionLowerer, call: ast.CallExpr) anyerror!?mlir.MlirValue {
@@ -2163,6 +2322,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
+                @This().currentContractItemId(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -2176,10 +2336,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -2211,30 +2371,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.trait_bounds) |bound| {
                 if (!std.mem.eql(u8, bound.parameter_name, receiver_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
-                for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .value_self) continue;
-                    if (matched_trait != null) return null;
-                    matched_trait = bound.trait_name;
-                }
+                if (trait_interface.methodByNameAndReceiver(field.name, .value_self) == null) continue;
+                if (matched_trait != null) return null;
+                matched_trait = bound.trait_name;
             }
             const trait_name = matched_trait orelse return null;
             const impl_item_id = self.parent.item_index.lookupImpl(trait_name, target_name) orelse return null;
-            const impl_item = self.parent.file.item(impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.parent.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                const has_self = @This().functionHasRuntimeSelf(self, item.Function);
-                if (!std.mem.eql(u8, item.Function.name, field.name) or !has_self) continue;
-                return .{
-                    .impl_item_id = impl_item_id,
-                    .method_item_id = method_item_id,
-                    .function = item.Function,
-                    .trait_name = trait_name,
-                    .target_name = target_name,
-                    .receiver_expr = field.base,
-                };
-            }
-            return null;
+            const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, field.name, .value_self) orelse return null;
+            const method_function = self.parent.file.item(method_item_id).Function;
+            return .{
+                .impl_item_id = impl_item_id,
+                .method_item_id = method_item_id,
+                .function = method_function,
+                .trait_name = trait_name,
+                .target_name = target_name,
+                .receiver_expr = field.base,
+            };
         }
 
         fn resolveConcreteValueMethodCall(
@@ -2251,17 +2403,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (item != .Impl) continue;
                 const impl_item = item.Impl;
                 if (!std.mem.eql(u8, impl_item.target_name, target_name)) continue;
-                for (impl_item.methods) |method_item_id| {
-                    const method_item = self.parent.file.item(method_item_id).*;
-                    if (method_item != .Function) continue;
-                    if (!std.mem.eql(u8, method_item.Function.name, field.name) or
-                        !@This().functionHasRuntimeSelf(self, method_item.Function)) continue;
-                    if (matched_impl_item_id != null) return null;
-                    matched_impl_item_id = ast.ItemId.fromIndex(item_index);
-                    matched_method_item_id = method_item_id;
-                    matched_function = method_item.Function;
-                    matched_trait_name = impl_item.trait_name;
-                }
+                const impl_item_id = ast.ItemId.fromIndex(item_index);
+                const method_count = self.parent.item_index.countImplMethodsByReceiver(self.parent.file, impl_item_id, field.name, .value_self);
+                if (method_count == 0) continue;
+                if (matched_impl_item_id != null or method_count > 1) return null;
+                const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, field.name, .value_self) orelse continue;
+                const method_item = self.parent.file.item(method_item_id).*;
+                if (method_item != .Function) continue;
+                matched_impl_item_id = impl_item_id;
+                matched_method_item_id = method_item_id;
+                matched_function = method_item.Function;
+                matched_trait_name = impl_item.trait_name;
             }
 
             return .{
@@ -2306,6 +2458,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 resolved.target_name,
                 call,
                 @This().currentContractParentBlock(self),
+                @This().currentContractItemId(self),
             );
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -2319,10 +2472,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (self.typeIsVoid(result_type)) null else &result_types,
                 if (self.typeIsVoid(result_type)) 0 else 1,
             );
-            if (mlir.oraOperationIsNull(op)) return try self.defaultValue(result_type, call.range);
+            _ = try @This().expectOperation(self, op, call.range, "ora.call");
             if (self.typeIsVoid(result_type)) {
                 appendOp(self.block, op);
-                return try self.defaultValue(defaultIntegerType(self.parent.context), call.range);
+                return try @This().voidValue(self, call.range);
             }
             return appendValueOp(self.block, op);
         }
@@ -2347,15 +2500,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             for (self.parent.typecheck.impl_interfaces) |impl_interface| {
                 if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
+                const method_count = impl_interface.methodCountByNameAndReceiver(field.name, .none);
+                if (method_count == 0) continue;
+                if (matched_impl_item_id != null or method_count > 1) return null;
                 const impl_item = self.parent.file.item(impl_interface.impl_item_id).Impl;
-                for (impl_interface.methods, 0..) |method, index| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
-                    if (matched_impl_item_id != null) return null;
-                    matched_impl_item_id = impl_interface.impl_item_id;
-                    matched_method_item_id = impl_item.methods[index];
-                    matched_function = self.parent.file.item(impl_item.methods[index]).Function;
-                    matched_trait_name = impl_interface.trait_name;
-                }
+                const method_index = impl_interface.methodIndexByNameAndReceiver(field.name, .none) orelse continue;
+                matched_impl_item_id = impl_interface.impl_item_id;
+                matched_method_item_id = impl_item.methods[method_index];
+                matched_function = self.parent.file.item(impl_item.methods[method_index]).Function;
+                matched_trait_name = impl_interface.trait_name;
             }
 
             return .{
@@ -2374,11 +2527,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.trait_bounds) |bound| {
                 if (!std.mem.eql(u8, bound.parameter_name, type_param_name)) continue;
                 const trait_interface = self.parent.typecheck.traitInterfaceByName(bound.trait_name) orelse continue;
-                for (trait_interface.methods) |method| {
-                    if (!std.mem.eql(u8, method.name, field.name) or method.receiver_kind != .none) continue;
-                    if (matched_trait != null) return null;
-                    matched_trait = bound.trait_name;
-                }
+                if (trait_interface.methodByNameAndReceiver(field.name, .none) == null) continue;
+                if (matched_trait != null) return null;
+                matched_trait = bound.trait_name;
             }
             const trait_name = matched_trait orelse return null;
             const concrete_type = self.parent.substitutedType(type_param_name) orelse return null;
@@ -2388,21 +2539,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn resolveAssociatedMethodFromLookup(self: *FunctionLowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) ?ResolvedAssociatedImplMethodCall {
             const impl_item_id = self.parent.item_index.lookupImpl(trait_name, target_name) orelse return null;
-            const impl_item = self.parent.file.item(impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.parent.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                const has_self = @This().functionHasRuntimeSelf(self, item.Function);
-                if (!std.mem.eql(u8, item.Function.name, method_name) or has_self) continue;
-                return .{
-                    .impl_item_id = impl_item_id,
-                    .method_item_id = method_item_id,
-                    .function = item.Function,
-                    .trait_name = trait_name,
-                    .target_name = target_name,
-                };
-            }
-            return null;
+            const method_item_id = self.parent.item_index.lookupImplMethodByReceiver(self.parent.file, impl_item_id, method_name, .none) orelse return null;
+            const function = self.parent.file.item(method_item_id).Function;
+            return .{
+                .impl_item_id = impl_item_id,
+                .method_item_id = method_item_id,
+                .function = function,
+                .trait_name = trait_name,
+                .target_name = target_name,
+            };
         }
 
         fn genericTypeParameterNameForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
@@ -2445,11 +2590,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn functionHasRuntimeSelf(self: *FunctionLowerer, function: ast.FunctionItem) bool {
-            for (function.parameters) |parameter| {
-                if (parameter.is_comptime) continue;
-                return std.mem.eql(u8, self.parent.patternName(parameter.pattern) orelse "", "self");
-            }
-            return false;
+            return sema.functionHasRuntimeSelf(self.parent.file, function);
         }
 
         fn calleeName(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
@@ -2471,7 +2612,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             resolved: sema.ResolvedCall,
         ) anyerror!?ImportedFunctionTarget {
             const query = self.parent.module_query orelse return null;
-            const target_file = try query.ast_file(query.context, resolved.module_id);
+            const target_file = try query.astFile(resolved.module_id);
             return switch (target_file.item(resolved.item_id).*) {
                 .Function => |function| .{
                     .module_id = resolved.module_id,
@@ -2484,7 +2625,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn currentContractParentBlock(self: *FunctionLowerer) ?mlir.MlirBlock {
             const function = self.function orelse return null;
-            const contract_id = function.parent_contract orelse return null;
+            const contract_id = function.parent_contract orelse self.parent.active_impl_contract_scope orelse return null;
             const block = self.parent.contract_body_blocks[contract_id.index()];
             if (mlir.oraBlockIsNull(block)) return null;
             return block;
@@ -2492,7 +2633,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn currentContractItemId(self: *FunctionLowerer) ?ast.ItemId {
             const function = self.function orelse return null;
-            return function.parent_contract;
+            return function.parent_contract orelse self.parent.active_impl_contract_scope;
         }
 
         fn calleeFunctionItem(self: *FunctionLowerer, expr_id: ast.ExprId) ?ast.FunctionItem {
@@ -2524,9 +2665,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return switch (self.parent.file.expression(expr_id).*) {
                 .Group => |group| try @This().calleeImportedFunctionTarget(self, group.expr),
                 .Field => |field| blk: {
-                    const target_module_id = @This().importedModuleForExpr(self, field.base) orelse break :blk null;
-                    const target_item_id = (query.lookup_item(query.context, target_module_id, field.name) catch null) orelse break :blk null;
-                    const target_file = try query.ast_file(query.context, target_module_id);
+                    const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
+                    const target_item_id = (try query.lookupItem(target_module_id, field.name)) orelse break :blk null;
+                    const target_file = try query.astFile(target_module_id);
                     break :blk switch (target_file.item(target_item_id).*) {
                         .Function => |function| .{
                             .module_id = target_module_id,
@@ -2582,8 +2723,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     operands.len,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.keccak256");
+            }
+            if (std.mem.eql(u8, builtin.name, "abiEncode")) {
+                return try @This().lowerAbiEncodeBuiltin(self, expr_id, builtin, locals);
             }
             if ((std.mem.eql(u8, builtin.name, "abiDecode") or std.mem.eql(u8, builtin.name, "abiDecodePermissive")) and builtin.args.len > 0) {
                 return try @This().lowerAbiDecodeBuiltin(self, expr_id, builtin, locals);
@@ -2600,8 +2743,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     rhs,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.concat");
             }
             if (builtin.args.len == 3 and std.mem.eql(u8, builtin.name, "slice")) {
                 const value = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
@@ -2621,10 +2763,34 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     length,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, op);
+                return try @This().expectValueOp(self, op, builtin.range, "ora.slice");
             }
-            return self.defaultValue(self.parent.lowerExprType(expr_id), builtin.range);
+            try self.parent.emitLoweringError(
+                builtin.range,
+                "builtin '@{s}' reached HIR lowering without a runtime implementation or const-eval result",
+                .{builtin.name},
+            );
+            return error.MlirOperationCreationFailed;
+        }
+
+        fn lowerAbiEncodeBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (builtin.args.len != 1) return error.MlirOperationCreationFailed;
+            const arg_id = builtin.args[0];
+            const arg_value = try self.lowerExpr(arg_id, locals);
+            const arg_type = self.parent.typecheck.exprType(arg_id);
+            var param_types = [_]sema.Type{arg_type};
+            var operands = [_]mlir.MlirValue{arg_value};
+            const encode_op = try abi_runtime_encoder.createAbiEncodeOp(
+                self.parent.allocator,
+                self.parent.context,
+                self.parent.location(builtin.range),
+                @This().layoutContext(self),
+                &param_types,
+                &operands,
+                self.parent.lowerExprType(expr_id),
+            );
+            if (mlir.oraOperationIsNull(encode_op)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, encode_op);
         }
 
         fn lowerAbiDecodeBuiltin(self: *FunctionLowerer, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
@@ -2723,7 +2889,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const loc = self.parent.location(builtin.range);
             const result_type = self.parent.lowerExprType(expr_id);
-            if (builtin.args.len < 2) return self.defaultValue(result_type, builtin.range);
+            if (builtin.args.len < 2) return error.MlirOperationCreationFailed;
 
             var lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             var rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
@@ -2740,21 +2906,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             const value_ty = mlir.oraValueGetType(lhs);
-            const is_signed = @This().isSignedIntegerExpr(self, builtin.args[0]) or
-                (self.parent.file.expression(builtin.args[0]).* == .IntegerLiteral and @This().isSignedIntegerExpr(self, builtin.args[1]));
+            const is_signed = blk: {
+                if (try @This().exprIntegerSignedness(self, builtin.args[0])) |signed| break :blk signed;
+                if (try @This().exprIntegerSignedness(self, builtin.args[1])) |signed| break :blk signed;
+                break :blk try @This().reportIndeterminateIntegerSignedness(self, builtin.range);
+            };
             const div_op = if (is_signed)
                 mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
                 mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs);
-            if (mlir.oraOperationIsNull(div_op)) return self.defaultValue(result_type, builtin.range);
-            const quotient = appendValueOp(self.block, div_op);
+            const quotient = try @This().expectValueOp(self, div_op, builtin.range, "arith.div");
 
             const rem_op = if (is_signed)
                 mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs)
             else
                 mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs);
-            if (mlir.oraOperationIsNull(rem_op)) return self.defaultValue(result_type, builtin.range);
-            const remainder = appendValueOp(self.block, rem_op);
+            const remainder = try @This().expectValueOp(self, rem_op, builtin.range, "arith.rem");
 
             if (std.mem.eql(u8, builtin.name, "divmod")) {
                 const tuple_op = mlir.oraTupleCreateOpCreate(
@@ -2764,8 +2931,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     2,
                     result_type,
                 );
-                if (mlir.oraOperationIsNull(tuple_op)) return self.defaultValue(result_type, builtin.range);
-                return appendValueOp(self.block, tuple_op);
+                return try @This().expectValueOp(self, tuple_op, builtin.range, "ora.tuple.create");
             }
 
             if (std.mem.eql(u8, builtin.name, "divTrunc")) return quotient;
@@ -2775,7 +2941,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             if (std.mem.eql(u8, builtin.name, "divExact")) {
                 const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, appendValueOp(self.block, self.createCompareOp(loc, "eq", remainder, zero)), strRef("exact division requires zero remainder"));
-                if (mlir.oraOperationIsNull(assert_op)) return self.defaultValue(result_type, builtin.range);
+                _ = try @This().expectOperation(self, assert_op, builtin.range, "ora.assert");
                 appendOp(self.block, assert_op);
                 return quotient;
             }
@@ -2839,7 +3005,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerStaticArrayToSliceCast(self, value, concrete_target, builtin.range)) |slice_value| {
                 value = slice_value;
             } else {
-                value = try @This().convertBuiltinCastValue(self, value, concrete_target, builtin.range, checked);
+                value = try @This().convertBuiltinCastValue(
+                    self,
+                    value,
+                    concrete_target,
+                    if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(value))) try @This().integerExprSignedness(self, builtin.args[0]) else false,
+                    if (mlir.oraTypeIsAInteger(concrete_target)) try @This().integerExprSignedness(self, expr_id) else false,
+                    builtin.range,
+                    checked,
+                );
             }
 
             if (!mlir.oraTypeIsNull(target_ref_base) and !mlir.oraTypeEqual(mlir.oraValueGetType(value), target_type)) {
@@ -2850,7 +3024,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     target_type,
                     self.block,
                 );
-                if (mlir.oraOperationIsNull(wrap_op)) return value;
+                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
                 return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return value;
@@ -2954,7 +3128,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         target_type,
                         self.block,
                     );
-                    if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+                    if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
+                    return mlir.oraOperationGetResult(wrap_op, 0);
                 }
                 return value;
             }
@@ -2965,7 +3140,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value,
                 concrete_target,
             );
-            if (mlir.oraOperationIsNull(bitcast)) return value;
+            if (mlir.oraOperationIsNull(bitcast)) return error.MlirOperationCreationFailed;
             const casted = appendValueOp(self.block, bitcast);
 
             if (!mlir.oraTypeIsNull(target_ref_base)) {
@@ -2976,7 +3151,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     target_type,
                     self.block,
                 );
-                if (!mlir.oraOperationIsNull(wrap_op)) return mlir.oraOperationGetResult(wrap_op, 0);
+                if (mlir.oraOperationIsNull(wrap_op)) return error.MlirOperationCreationFailed;
+                return mlir.oraOperationGetResult(wrap_op, 0);
             }
             return casted;
         }
@@ -2998,6 +3174,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
+            source_is_signed: bool,
+            target_is_signed: bool,
             range: source.TextRange,
             checked: bool,
         ) anyerror!mlir.MlirValue {
@@ -3008,15 +3186,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const value_is_int = mlir.oraTypeIsAInteger(value_type);
             const target_is_int = mlir.oraTypeIsAInteger(target_type);
 
-            if (mlir.oraTypeIsAddressType(value_type) and target_is_int and mlir.oraIntegerTypeGetWidth(target_type) == 160) {
+            if (mlir.oraTypeIsAddressType(value_type) and target_is_int) {
                 const op = mlir.oraAddrToI160OpCreate(self.parent.context, loc, value);
-                if (mlir.oraOperationIsNull(op)) return value;
-                return appendValueOp(self.block, op);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                const i160_value = appendValueOp(self.block, op);
+                if (mlir.oraIntegerTypeGetWidth(target_type) == 160) return i160_value;
+                return try @This().convertBuiltinCastValue(self, i160_value, target_type, false, target_is_signed, range, checked);
             }
 
-            if (value_is_int and mlir.oraTypeIsAddressType(target_type) and mlir.oraIntegerTypeGetWidth(value_type) == 160) {
-                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, value);
-                if (mlir.oraOperationIsNull(op)) return value;
+            if (value_is_int and mlir.oraTypeIsAddressType(target_type)) {
+                const i160_type = mlir.oraIntegerTypeCreate(self.parent.context, 160);
+                if (mlir.oraTypeIsNull(i160_type)) return error.MlirOperationCreationFailed;
+                const i160_value = if (mlir.oraIntegerTypeGetWidth(value_type) == 160)
+                    value
+                else
+                    try @This().convertBuiltinCastValue(self, value, i160_type, source_is_signed, false, range, checked);
+                const op = mlir.oraI160ToAddrOpCreate(self.parent.context, loc, i160_value);
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
@@ -3026,25 +3212,25 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const target_width = mlir.oraIntegerTypeGetWidth(target_type);
             if (value_width == target_width) {
                 const op = mlir.oraArithBitcastOpCreate(self.parent.context, loc, value, target_type);
-                if (mlir.oraOperationIsNull(op)) return value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
             if (value_width < target_width) {
-                const op = if (mlir.oraIntegerTypeIsSigned(value_type))
+                const op = if (source_is_signed)
                     mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
                 else
                     mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);
-                if (mlir.oraOperationIsNull(op)) return value;
+                if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 return appendValueOp(self.block, op);
             }
 
             if (checked) {
-                try @This().emitCastOverflowCheck(self, value, target_type, range);
+                try @This().emitCastOverflowCheck(self, value, target_type, target_is_signed, range);
             }
 
             const trunc = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
-            if (mlir.oraOperationIsNull(trunc)) return value;
+            if (mlir.oraOperationIsNull(trunc)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, trunc);
         }
 
@@ -3052,6 +3238,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
+            target_is_signed: bool,
             range: source.TextRange,
         ) anyerror!void {
             const value_type = mlir.oraValueGetType(value);
@@ -3060,7 +3247,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (target_width >= value_width) return;
 
             const loc = self.parent.location(range);
-            if (!mlir.oraIntegerTypeIsSigned(target_type)) {
+            if (!target_is_signed) {
                 const trunc_op = mlir.oraArithTruncIOpCreate(self.parent.context, loc, value, target_type);
                 if (mlir.oraOperationIsNull(trunc_op)) return error.MlirOperationCreationFailed;
                 const truncated = appendValueOp(self.block, trunc_op);
@@ -3132,11 +3319,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const result_type = self.parent.lowerExprType(expr_id);
             const is_unary = std.mem.eql(u8, builtin.name, "negWithOverflow");
             const expected_args: usize = if (is_unary) 1 else 2;
-            if (builtin.args.len < expected_args) return self.defaultValue(result_type, builtin.range);
+            if (builtin.args.len < expected_args) return error.MlirOperationCreationFailed;
 
             const lhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[0], locals), exprRange(self.parent.file, builtin.args[0]));
             const lhs_type = mlir.oraValueGetType(lhs);
-            const is_signed = mlir.oraTypeIsAInteger(lhs_type) and mlir.oraIntegerTypeIsSigned(lhs_type);
+            const is_signed = try @This().integerExprSignedness(self, builtin.args[0]);
 
             var value: mlir.MlirValue = lhs;
             var overflow_flag: mlir.MlirValue = undefined;
@@ -3144,8 +3331,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "negWithOverflow")) {
                 const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 0));
                 const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, lhs);
-                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, sub_op);
+                value = try @This().expectValueOp(self, sub_op, builtin.range, "arith.sub");
                 if (is_signed) {
                     const bit_width: i64 = @intCast(mlir.oraIntegerTypeGetWidth(lhs_type) - 1);
                     const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, lhs_type, 1));
@@ -3164,36 +3350,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const rhs = try @This().unwrapRefinementForCast(self, try self.lowerExpr(builtin.args[1], locals), exprRange(self.parent.file, builtin.args[1]));
             if (std.mem.eql(u8, builtin.name, "addWithOverflow")) {
                 const add_op = mlir.oraArithAddIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(add_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, add_op);
+                value = try @This().expectValueOp(self, add_op, builtin.range, "arith.add");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedAddOverflow(self, value, lhs, rhs, loc)
                 else
                     appendValueOp(self.block, self.createCompareOp(loc, "ult", value, lhs));
             } else if (std.mem.eql(u8, builtin.name, "subWithOverflow")) {
                 const sub_op = mlir.oraArithSubIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(sub_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, sub_op);
+                value = try @This().expectValueOp(self, sub_op, builtin.range, "arith.sub");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedSubOverflow(self, value, lhs, rhs, loc)
                 else
                     appendValueOp(self.block, self.createCompareOp(loc, "ult", lhs, rhs));
             } else if (std.mem.eql(u8, builtin.name, "mulWithOverflow")) {
                 const mul_op = mlir.oraArithMulIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(mul_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, mul_op);
+                value = try @This().expectValueOp(self, mul_op, builtin.range, "arith.mul");
                 overflow_flag = if (is_signed)
                     try @This().computeSignedMulOverflow(self, value, lhs, rhs, lhs_type, loc)
                 else
                     try @This().computeUnsignedMulOverflow(self, value, lhs, rhs, lhs_type, loc);
             } else if (std.mem.eql(u8, builtin.name, "powerWithOverflow")) {
-                const power = try self.lowerPowerWithOverflow(lhs, rhs, lhs_type, builtin.range);
+                const power = try self.lowerPowerWithOverflow(lhs, rhs, lhs_type, is_signed, builtin.range);
                 value = power.value;
                 overflow_flag = power.overflow;
             } else if (std.mem.eql(u8, builtin.name, "shlWithOverflow")) {
                 const shl_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(shl_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, shl_op);
+                value = try @This().expectValueOp(self, shl_op, builtin.range, "arith.shl");
                 const shr_op = if (is_signed)
                     mlir.oraArithShrSIOpCreate(self.parent.context, loc, value, rhs)
                 else
@@ -3206,19 +3388,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     mlir.oraArithShrSIOpCreate(self.parent.context, loc, lhs, rhs)
                 else
                     mlir.oraArithShrUIOpCreate(self.parent.context, loc, lhs, rhs);
-                if (mlir.oraOperationIsNull(shr_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, shr_op);
+                value = try @This().expectValueOp(self, shr_op, builtin.range, "arith.shr");
                 overflow_flag = try @This().makeFalse(self, loc);
             } else if (std.mem.eql(u8, builtin.name, "divWithOverflow") or std.mem.eql(u8, builtin.name, "modWithOverflow")) {
                 const arith_op = if (std.mem.eql(u8, builtin.name, "divWithOverflow"))
                     (if (is_signed) mlir.oraArithDivSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithDivUIOpCreate(self.parent.context, loc, lhs, rhs))
                 else
                     (if (is_signed) mlir.oraArithRemSIOpCreate(self.parent.context, loc, lhs, rhs) else mlir.oraArithRemUIOpCreate(self.parent.context, loc, lhs, rhs));
-                if (mlir.oraOperationIsNull(arith_op)) return self.defaultValue(result_type, builtin.range);
-                value = appendValueOp(self.block, arith_op);
+                value = try @This().expectValueOp(self, arith_op, builtin.range, "arith.divrem");
                 overflow_flag = try @This().makeFalse(self, loc);
             } else {
-                return self.defaultValue(result_type, builtin.range);
+                return error.MlirOperationCreationFailed;
             }
 
             return @This().packOverflowResult(self, value, overflow_flag, result_type, builtin.range);
@@ -3238,7 +3418,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 2,
                 result_type,
             );
-            if (mlir.oraOperationIsNull(op)) return self.defaultValue(result_type, range);
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
         }
 
@@ -3378,7 +3558,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
                 );
                 for (struct_literal.fields) |init| {
-                    const field_value = try self.lowerExpr(init.value, locals);
+                    const field_value = try @This().lowerExprForFlowTarget(self, init.value, word_type, locals);
                     packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
                 }
                 return packed_word;
@@ -3402,13 +3582,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (struct_item.fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
                 const field_sema_type = try type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, decl_field.type_expr);
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, field_sema_type, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, field_sema_type, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
 
@@ -3454,15 +3635,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), variant_name);
             var fields: std.ArrayList(mlir.MlirValue) = .{};
             defer fields.deinit(self.parent.allocator);
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (0..field_count) |index| {
                 const field_name_ref = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
                 const field_name = field_name_ref.data[0..field_name_ref.length];
-                const init = findStructFieldInit(struct_literal.fields, field_name) orelse return error.MlirOperationCreationFailed;
-                const raw = try self.lowerExpr(init.value, locals);
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field_name) orelse return error.MlirOperationCreationFailed;
                 const value = if (payload_sema_type != null and payload_sema_type.?.kind() == .anonymous_struct and index < payload_sema_type.?.anonymous_struct.fields.len)
-                    try self.convertValueForSemaFlow(raw, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range)
-                else
-                    try self.convertValueForFlow(raw, mlir.oraAnonymousStructTypeGetFieldType(payload_type, index), init.range);
+                    try @This().lowerExprForSemaFlowTarget(self, init.value, payload_sema_type.?.anonymous_struct.fields[index].ty, init.range, locals)
+                else blk: {
+                    const field_type = mlir.oraAnonymousStructTypeGetFieldType(payload_type, index);
+                    break :blk try @This().lowerExprForFlowTarget(self, init.value, field_type, locals);
+                };
                 try fields.append(self.parent.allocator, value);
             }
 
@@ -3505,12 +3689,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, decl_field.ty, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInstantiateOpCreate(
@@ -3534,12 +3719,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
             var operands: std.ArrayList(mlir.MlirValue) = .{};
+            const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.parent.allocator, struct_literal.fields, "name");
+            defer self.parent.allocator.free(init_lookup);
             for (fields) |decl_field| {
-                const init = findStructFieldInit(struct_literal.fields, decl_field.name) orelse {
+                const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
                 };
-                const raw_value = try self.lowerExpr(init.value, locals);
-                const value = try self.convertValueForSemaFlow(raw_value, decl_field.ty, init.range);
+                const value = try @This().lowerExprForSemaFlowTarget(self, init.value, decl_field.ty, init.range, locals);
                 try operands.append(self.parent.allocator, value);
             }
             const op = mlir.oraStructInitOpCreate(
@@ -3554,10 +3740,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn lowerFieldExpr(self: *FunctionLowerer, expr_id: ast.ExprId, field: ast.FieldExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
-            const result_type = self.parent.lowerExprType(expr_id);
-            if (try @This().lowerBuiltinFieldExpr(self, expr_id, field, result_type)) |value| {
+            if (try @This().lowerBuiltinFieldExpr(self, expr_id, field)) |value| {
                 return value;
             }
+            const result_type = self.parent.lowerExprType(expr_id);
             if (try @This().lowerImportedFieldExpr(self, field, result_type)) |value| {
                 return value;
             }
@@ -3750,20 +3936,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return false;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) return true;
-                }
-                return false;
+                return instantiated.variantIndex(field_name) != null;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return false;
-            const enum_item = switch (self.parent.file.item(item_id).*) {
-                .Enum => |item| item,
+            switch (self.parent.file.item(item_id).*) {
+                .Enum => {},
                 else => return false,
-            };
-            for (enum_item.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, field_name)) return true;
             }
-            return false;
+            return self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) != null;
         }
 
         fn attachEnumConstantValueAttrs(
@@ -3787,7 +3967,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 mlir.oraOperationSetAttributeByName(
                     op,
                     strRef("ora.enum_ordinal"),
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.parent.context), ordinal),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.parent.context), ordinal),
                 );
             }
         }
@@ -3796,13 +3976,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
+                const variant_index = instantiated.variantIndex(field_name) orelse return null;
                 var next_value: i64 = 0;
-                for (instantiated.variants) |variant| {
+                for (instantiated.variants[0 .. variant_index + 1], 0..) |variant, index| {
                     const resolved_value = if (variant.explicit_value) |explicit| switch (explicit) {
-                        .integer => |literal| literal,
+                        .integer => |integer| integer.toInt(i64) catch return null,
                         else => next_value,
                     } else next_value;
-                    if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+                    if (index == variant_index) return resolved_value;
                     next_value = resolved_value + 1;
                 }
                 return null;
@@ -3812,10 +3993,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Enum => |item| item,
                 else => return null,
             };
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
             var next_value: i64 = 0;
-            for (enum_item.variants) |variant| {
-                const resolved_value = if (variant.value) |expr_id| @This().enumIntegerValue(self, expr_id) orelse next_value else next_value;
-                if (std.mem.eql(u8, variant.name, field_name)) return resolved_value;
+            for (enum_item.variants[0 .. variant_index + 1], 0..) |variant, index| {
+                const resolved_value = if (variant.value) |expr_id|
+                    @This().enumIntegerValue(self, expr_id) orelse return null
+                else
+                    next_value;
+                if (index == variant_index) return resolved_value;
                 next_value = resolved_value + 1;
             }
             return null;
@@ -3825,41 +4010,33 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                    if (variant.explicit_value) |explicit| switch (explicit) {
-                        .string => |literal| return literal,
-                        else => return null,
-                    };
-                    return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
-                }
-                return null;
+                const variant = instantiated.variantByName(field_name) orelse return null;
+                if (variant.explicit_value) |explicit| switch (explicit) {
+                    .string => |literal| return literal,
+                    else => return null,
+                };
+                return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
             const enum_item = switch (self.parent.file.item(item_id).*) {
                 .Enum => |item| item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |expr_id| return @This().enumStringValue(self, expr_id);
-                return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
-            }
-            return null;
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
+            const variant = enum_item.variants[variant_index];
+            if (variant.value) |expr_id| return @This().enumStringValue(self, expr_id);
+            return try std.fmt.allocPrint(self.parent.allocator, "{s}.{s}", .{ enum_name, field_name });
         }
 
         fn enumFieldBytesValue(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) anyerror!?[]const u8 {
             const base_type = self.parent.typecheck.exprType(base_expr);
             const enum_name = base_type.name() orelse return null;
             if (self.parent.typecheck.instantiatedEnumByName(enum_name)) |instantiated| {
-                for (instantiated.variants) |variant| {
-                    if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                    if (variant.explicit_value) |explicit| switch (explicit) {
-                        .bytes => |literal| return literal,
-                        else => return null,
-                    };
-                    return null;
-                }
+                const variant = instantiated.variantByName(field_name) orelse return null;
+                if (variant.explicit_value) |explicit| switch (explicit) {
+                    .bytes => |literal| return literal,
+                    else => return null,
+                };
                 return null;
             }
             const item_id = self.parent.item_index.lookup(enum_name) orelse return null;
@@ -3867,11 +4044,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Enum => |item| item,
                 else => return null,
             };
-            for (enum_item.variants) |variant| {
-                if (!std.mem.eql(u8, variant.name, field_name)) continue;
-                if (variant.value) |expr_id| return @This().enumBytesValue(self, expr_id);
-                return null;
-            }
+            const variant_index = self.parent.item_index.lookupEnumVariantIndex(item_id, field_name) orelse return null;
+            if (enum_item.variants[variant_index].value) |expr_id| return @This().enumBytesValue(self, expr_id);
             return null;
         }
 
@@ -3904,10 +4078,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             self: *FunctionLowerer,
             expr_id: ast.ExprId,
             field: ast.FieldExpr,
-            result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             const path = try @This().fieldExprPath(self, expr_id);
-            if (try @This().lowerBuiltinFieldCall(self, field, result_type, path)) |value| {
+            defer self.parent.allocator.free(path);
+            if (try @This().lowerBuiltinFieldCall(self, field, path)) |value| {
                 return value;
             }
             return null;
@@ -3916,7 +4090,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         fn lowerBuiltinFieldCall(
             self: *FunctionLowerer,
             field: ast.FieldExpr,
-            result_type: mlir.MlirType,
             path: []const u8,
         ) anyerror!?mlir.MlirValue {
             const opcode_name = if (std.mem.eql(u8, path, "std.msg.sender") or
@@ -3943,7 +4116,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 std.mem.eql(u8, opcode_name, "ora.evm.coinbase"))
                     addressType(self.parent.context)
                 else
-                    result_type;
+                    reprIntegerType(self.parent.context);
 
             const op = mlir.oraEvmOpCreate(
                 self.parent.context,
@@ -3970,15 +4143,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        fn importedModuleForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) ?source.ModuleId {
+        fn importedModuleForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) !?source.ModuleId {
             const query = self.parent.module_query orelse return null;
             return switch (self.parent.file.expression(expr_id).*) {
-                .Name => |name| query.resolve_import_alias(query.context, self.parent.module_id, name.name) catch null,
+                .Name => |name| try query.resolveImportAlias(self.parent.module_id, name.name),
                 .Field => |field| blk: {
-                    const base_module_id = @This().importedModuleForExpr(self, field.base) orelse break :blk null;
-                    break :blk query.resolve_import_alias(query.context, base_module_id, field.name) catch null;
+                    const base_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse break :blk null;
+                    break :blk try query.resolveImportAlias(base_module_id, field.name);
                 },
-                .Group => |group| @This().importedModuleForExpr(self, group.expr),
+                .Group => |group| try @This().importedModuleForExpr(self, group.expr),
                 else => null,
             };
         }
@@ -3989,11 +4162,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             const query = self.parent.module_query orelse return null;
-            const target_module_id = @This().importedModuleForExpr(self, field.base) orelse return null;
-            const target_item_id = (query.lookup_item(query.context, target_module_id, field.name) catch null) orelse return null;
-            const target_file = try query.ast_file(query.context, target_module_id);
-            const target_typecheck = try query.module_typecheck(query.context, target_module_id);
-            const target_const_eval = try query.const_eval(query.context, target_module_id);
+            const target_module_id = (try @This().importedModuleForExpr(self, field.base)) orelse return null;
+            const target_item_id = (try query.lookupItem(target_module_id, field.name)) orelse return null;
+            const target_file = try query.astFile(target_module_id);
+            const target_typecheck = try query.moduleTypeCheck(target_module_id);
+            const target_const_eval = try query.constEval(target_module_id);
 
             const value_expr = switch (target_file.item(target_item_id).*) {
                 .Constant => |constant| constant.value,
@@ -4028,67 +4201,57 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             result_type: mlir.MlirType,
         ) anyerror!?mlir.MlirValue {
             switch (self.parent.file.item(item_id).*) {
-                .Contract => |contract| {
-                    for (contract.members) |member_id| {
-                        const member = self.parent.file.item(member_id).*;
-                        switch (member) {
-                            .Field => |contract_field| {
-                                if (!std.mem.eql(u8, contract_field.name, field.name)) continue;
-                                if (contract_field.binding_kind == .immutable) {
-                                    if (contract_field.value) |value| {
-                                        return try self.lowerExpr(value, locals);
-                                    }
+                .Contract => {
+                    const member_id = self.parent.item_index.lookupContractMemberWithRoles(self.parent.file, item_id, field.name, .{
+                        .field = true,
+                        .constant = true,
+                        .function = true,
+                        .struct_ = true,
+                        .enum_ = true,
+                        .bitfield = true,
+                    }) orelse return null;
+                    switch (self.parent.file.item(member_id).*) {
+                        .Field => |contract_field| {
+                            if (contract_field.binding_kind == .immutable) {
+                                if (contract_field.value) |value| {
+                                    return try self.lowerExpr(value, locals);
                                 }
-                                const op = switch (contract_field.storage_class) {
-                                    .storage => mlir.oraSLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .memory => mlir.oraMLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .tstore => mlir.oraTLoadOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(contract_field.range),
-                                        strRef(contract_field.name),
-                                        result_type,
-                                    ),
-                                    .none => std.mem.zeroes(mlir.MlirOperation),
-                                };
-                                if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                            },
-                            .Constant => |constant| {
-                                if (std.mem.eql(u8, constant.name, field.name)) {
-                                    return try self.lowerExpr(constant.value, locals);
-                                }
-                            },
-                            .Function => |function| {
-                                if (std.mem.eql(u8, function.name, field.name)) {
-                                    const op = mlir.oraFunctionRefOpCreate(
-                                        self.parent.context,
-                                        self.parent.location(field.range),
-                                        strRef(function.name),
-                                        result_type,
-                                    );
-                                    if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
-                                }
-                            },
-                            .Struct => |struct_item| {
-                                if (std.mem.eql(u8, struct_item.name, field.name)) return null;
-                            },
-                            .Enum => |enum_item| {
-                                if (std.mem.eql(u8, enum_item.name, field.name)) return null;
-                            },
-                            .Bitfield => |bitfield_item| {
-                                if (std.mem.eql(u8, bitfield_item.name, field.name)) return null;
-                            },
-                            else => {},
-                        }
+                            }
+                            const op = switch (contract_field.storage_class) {
+                                .storage => mlir.oraSLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .memory => mlir.oraMLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .tstore => mlir.oraTLoadOpCreate(
+                                    self.parent.context,
+                                    self.parent.location(contract_field.range),
+                                    strRef(contract_field.name),
+                                    result_type,
+                                ),
+                                .none => std.mem.zeroes(mlir.MlirOperation),
+                            };
+                            if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        },
+                        .Constant => |constant| return try self.lowerExpr(constant.value, locals),
+                        .Function => |function| {
+                            const op = mlir.oraFunctionRefOpCreate(
+                                self.parent.context,
+                                self.parent.location(field.range),
+                                strRef(function.name),
+                                result_type,
+                            );
+                            if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
+                        },
+                        .Struct, .Enum, .Bitfield => return null,
+                        else => {},
                     }
                 },
                 else => {},
@@ -4120,7 +4283,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(
                         self.parent.context,
                         self.parent.location(array.range),
-                        defaultIntegerType(self.parent.context),
+                        reprIntegerType(self.parent.context),
                         @intCast(index),
                     ),
                 );
@@ -4142,13 +4305,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 appendOp(self.block, store);
             }
             return memref;
-        }
-
-        fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-            for (fields) |field| {
-                if (std.mem.eql(u8, field.name, name)) return field;
-            }
-            return null;
         }
 
         fn constTupleIndex(self: *FunctionLowerer, expr_id: ast.ExprId) ?usize {
@@ -4177,7 +4333,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn createValuePlaceholder(self: *FunctionLowerer, op_name: []const u8, text: []const u8, range: source.TextRange, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
-            var attrs: [1]mlir.MlirNamedAttribute = .{namedStringAttr(self.parent.context, "value", text)};
+            self.parent.recordPlaceholder();
+            var attrs: [2]mlir.MlirNamedAttribute = .{
+                namedStringAttr(self.parent.context, "value", text),
+                namedStringAttr(self.parent.context, "ora.executable_fallback", op_name),
+            };
             return mlir.oraOperationCreate(
                 self.parent.context,
                 self.parent.location(range),
@@ -4194,7 +4354,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         pub fn createAggregatePlaceholder(self: *FunctionLowerer, op_name: []const u8, range: source.TextRange, operands: []const mlir.MlirValue, result_type: mlir.MlirType) anyerror!mlir.MlirOperation {
-            var attrs: [1]mlir.MlirNamedAttribute = .{namedTypeAttr(self.parent.context, "ora.type", result_type)};
+            self.parent.recordPlaceholder();
+            var attrs: [2]mlir.MlirNamedAttribute = .{
+                namedTypeAttr(self.parent.context, "ora.type", result_type),
+                namedStringAttr(self.parent.context, "ora.executable_fallback", op_name),
+            };
             return mlir.oraOperationCreate(
                 self.parent.context,
                 self.parent.location(range),
@@ -4210,71 +4374,40 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             );
         }
 
-        pub fn defaultValue(self: *FunctionLowerer, ty: mlir.MlirType, range: source.TextRange) anyerror!mlir.MlirValue {
-            if (mlir.oraTypeIsNull(ty)) return error.MlirOperationCreationFailed;
-            if (self.typeIsVoid(ty)) {
-                const seed = appendValueOp(
-                    self.block,
-                    createIntegerConstant(self.parent.context, self.parent.location(range), boolType(self.parent.context), 0),
-                );
-                const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
-                    self.parent.context,
-                    self.parent.location(range),
-                    seed,
-                    ty,
-                );
-                if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
-                return appendValueOp(self.block, none_cast);
-            }
+        fn expectOperation(self: *FunctionLowerer, op: mlir.MlirOperation, range: source.TextRange, op_name: []const u8) anyerror!mlir.MlirOperation {
+            if (!mlir.oraOperationIsNull(op)) return op;
+            try self.parent.emitLoweringError(
+                range,
+                "failed to create MLIR operation '{s}'",
+                .{op_name},
+            );
+            return error.MlirOperationCreationFailed;
+        }
 
-            if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ty))) {
-                const payload_type = mlir.oraErrorUnionTypeGetSuccessType(ty);
-                const payload = try self.defaultValue(payload_type, range);
-                const op = mlir.oraErrorOkOpCreate(self.parent.context, self.parent.location(range), payload, ty);
-                if (!mlir.oraOperationIsNull(op)) {
-                    if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
-                        mlir.oraOperationSetAttributeByName(op, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
-                    }
-                    return appendValueOp(self.block, op);
-                }
-                return payload;
-            }
+        fn expectValueOp(self: *FunctionLowerer, op: mlir.MlirOperation, range: source.TextRange, op_name: []const u8) anyerror!mlir.MlirValue {
+            return appendValueOp(self.block, try @This().expectOperation(self, op, range, op_name));
+        }
 
-            const refinement_base = mlir.oraRefinementTypeGetBaseType(ty);
-            if (!mlir.oraTypeIsNull(refinement_base)) {
-                const op = try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
-                return appendValueOp(self.block, op);
-            }
-
-            if (mlir.oraTypeIsAddressType(ty)) {
-                return try @This().createZeroAddressValue(self, range);
-            }
-
-            if (mlir.oraTypeEqual(ty, stringType(self.parent.context))) {
-                const op = mlir.oraStringConstantOpCreate(self.parent.context, self.parent.location(range), strRef(""), ty);
-                mlir.oraOperationSetAttributeByName(
-                    op,
-                    strRef("length"),
-                    mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), 0),
-                );
-                return appendValueOp(self.block, op);
-            }
-
-            if (mlir.oraTypeEqual(ty, bytesType(self.parent.context))) {
-                const op = mlir.oraBytesConstantOpCreate(self.parent.context, self.parent.location(range), strRef("0x"), ty);
-                mlir.oraOperationSetAttributeByName(
-                    op,
-                    strRef("length"),
-                    mlir.oraIntegerAttrCreateI64FromType(mlir.oraIntegerTypeCreate(self.parent.context, 32), 0),
-                );
-                return appendValueOp(self.block, op);
-            }
-
-            const op = if (mlir.oraTypeIsAInteger(ty) or mlir.oraTypeIsIntegerType(ty))
-                createIntegerConstant(self.parent.context, self.parent.location(range), ty, 0)
-            else
-                try self.createAggregatePlaceholder("ora.default_value", range, &.{}, ty);
+        fn loweringValueError(self: *FunctionLowerer, range: source.TextRange, result_type: mlir.MlirType, comptime fmt: []const u8, args: anytype) anyerror!mlir.MlirValue {
+            try self.parent.emitLoweringError(range, fmt, args);
+            const op = try self.createAggregatePlaceholder("ora.lowering_error", range, &.{}, result_type);
             return appendValueOp(self.block, op);
+        }
+
+        fn voidValue(self: *FunctionLowerer, range: source.TextRange) anyerror!mlir.MlirValue {
+            const loc = self.parent.location(range);
+            const seed = appendValueOp(
+                self.block,
+                createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 0),
+            );
+            const none_cast = mlir.oraUnrealizedConversionCastOpCreate(
+                self.parent.context,
+                loc,
+                seed,
+                mlir.oraNoneTypeCreate(self.parent.context),
+            );
+            if (mlir.oraOperationIsNull(none_cast)) return error.MlirOperationCreationFailed;
+            return appendValueOp(self.block, none_cast);
         }
 
         pub fn typeIsVoid(self: *const FunctionLowerer, ty: mlir.MlirType) bool {

@@ -1,7 +1,7 @@
 const std = @import("std");
 const abi_layout = @import("layout.zig");
 const comptime_mod = @import("../comptime/mod.zig");
-const sema_model = @import("../sema/model.zig");
+const ConstValue = @import("ora_types").ConstValue;
 
 const CtAggregate = comptime_mod.CtAggregate;
 const CtHeap = comptime_mod.CtHeap;
@@ -14,7 +14,7 @@ const EncodeError = error{
 
 pub const ComptimeAbiValue = union(enum) {
     ct: CtValue,
-    constant: sema_model.ConstValue,
+    constant: ConstValue,
 };
 
 pub fn encodeStaticComptimeValue(

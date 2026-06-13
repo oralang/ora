@@ -53,6 +53,7 @@ REAL_CONTRACT_PASS_CASES=(
 )
 
 FAIL_CASES=(
+  "ora-example/smt/modifies/fail_imported_summary_discriminator.ora|failed to prove contract invariant"
   "ora-example/smt/modifies/fail_internal_map_key_alias.ora|failed to prove ensures"
   "ora-example/smt/modifies/fail_modifies_empty_unresolved_call.ora|SMT encoding degraded"
   "ora-example/smt/modifies/fail_locked_call_unlocked_root.ora|failed to prove ensures"

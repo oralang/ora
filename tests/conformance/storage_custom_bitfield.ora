@@ -1,0 +1,51 @@
+bitfield CustomFlags : u256 {
+    enabled: bool @bits(0..1);
+    code: u8 @bits(1..6);
+    delta: i16 @bits(6..22);
+    amount: u32 @bits(22..54);
+}
+
+contract CustomBitfieldStorageSmoke {
+    storage var flags: CustomFlags;
+
+    pub fn configure(code: u8, delta: i16, amount: u32) {
+        let f: CustomFlags = flags;
+        f.enabled = true;
+        f.code = code;
+        f.delta = delta;
+        f.amount = amount;
+        flags = f;
+    }
+
+    pub fn set_delta(value: i16) {
+        let f: CustomFlags = flags;
+        f.delta = value;
+        flags = f;
+    }
+
+    pub fn set_code(value: u8) {
+        let f: CustomFlags = flags;
+        f.code = value;
+        flags = f;
+    }
+
+    pub fn is_enabled() -> bool {
+        let f: CustomFlags = flags;
+        return f.enabled;
+    }
+
+    pub fn get_code() -> u8 {
+        let f: CustomFlags = flags;
+        return f.code;
+    }
+
+    pub fn get_delta() -> i16 {
+        let f: CustomFlags = flags;
+        return f.delta;
+    }
+
+    pub fn get_amount() -> u32 {
+        let f: CustomFlags = flags;
+        return f.amount;
+    }
+}

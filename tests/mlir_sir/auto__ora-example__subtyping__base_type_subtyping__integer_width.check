@@ -1,1 +1,72 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/subtyping/base_type_subtyping/integer_width.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/subtyping/base_type_subtyping/integer_width.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @testU8ToU16(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":15:20)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":15:20)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":15:20)
+// CHECK-NEXT:     %2 = sir.const 65535 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:     %3 = sir.and %1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:     %4 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:     %5 = sir.malloc %4 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":16:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":15:5)
+// CHECK-NEXT:   func.func @testU16ToU32(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":20:21)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 65535 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":20:21)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":20:21)
+// CHECK-NEXT:     %2 = sir.const 4294967295 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:     %3 = sir.and %1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:     %4 = sir.const 32 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:     %5 = sir.malloc %4 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":21:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":20:5)
+// CHECK-NEXT:   func.func @testU32ToU64(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":25:21)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 4294967295 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":25:21)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":25:21)
+// CHECK-NEXT:     %2 = sir.const 18446744073709551615 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:     %3 = sir.and %1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:     %4 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:     %5 = sir.malloc %4 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":26:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":25:5)
+// CHECK-NEXT:   func.func @testU64ToU128(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":30:22)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 18446744073709551615 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":30:22)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":30:22)
+// CHECK-NEXT:     %2 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:     %3 = sir.and %1 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:     %4 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:     %5 = sir.malloc %4 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:     sir.return %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":31:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":30:5)
+// CHECK-NEXT:   func.func @testU128ToU256(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":35:23)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 340282366920938463463374607431768211455 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":35:23)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":35:23)
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":36:9)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":36:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":36:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":36:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":35:5)
+// CHECK-NEXT:   func.func @testU8ToU256(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":40:21)) -> !sir.u256 attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 255 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":40:21)
+// CHECK-NEXT:     %1 = sir.and %arg0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":40:21)
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":41:9)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":41:9)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":41:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":41:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":40:5)
+// CHECK-NEXT:   func.func @acceptU256(%arg0: !sir.u256 loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":49:19)) attributes {ora.param_names = ["value"], ora.visibility = "private"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":49:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":49:5)
+// CHECK-NEXT:   func.func @testSubtypingIn() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     %c42 = sir.const 42 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":55:20)))
+// CHECK-NEXT:     sir.icall @acceptU256(%c42) :  loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":55:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":53:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":53:5)
+// CHECK-NEXT:   func.func @testVariableAssignment() attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":62:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":62:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/subtyping/base_type_subtyping/integer_width.ora":9:1)

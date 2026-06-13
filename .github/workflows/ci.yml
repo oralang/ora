@@ -299,6 +299,16 @@ jobs:
           }
           echo "✅ Unit tests completed"
 
+      - name: Run LSP JSON-RPC gates
+        shell: bash
+        run: |
+          echo "🧪 Running LSP JSON-RPC smoke and benchmark gates..."
+          zig build lsp-smoke lsp-bench -Dskip-mlir=true || {
+            echo "❌ LSP JSON-RPC gates failed"
+            exit 1
+          }
+          echo "✅ LSP JSON-RPC gates completed"
+
 
   comprehensive-tests:
     name: Comprehensive Feature Tests
@@ -376,6 +386,13 @@ jobs:
           echo "🔨 Building Ora compiler..."
           zig build -Dskip-mlir=true
           echo "✅ Build successful"
+
+      - name: Run OraToSIR de-bloat gate
+        shell: bash
+        run: |
+          echo "🧪 Running OraToSIR de-bloat gate..."
+          zig build gate-oratosir-debloat --summary all
+          echo "✅ OraToSIR de-bloat gate completed"
 
       - name: Run SMT modifies corpus
         shell: bash

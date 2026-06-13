@@ -1,1 +1,12 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/errors/try_catch.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/errors/try_catch.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @test_try_catch() attributes {ora.selector = "0x22354daa", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.br ^bb1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/errors/try_catch.ora":9:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb2 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/errors/try_catch.ora":9:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb1
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/errors/try_catch.ora":7:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/try_catch.ora":7:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/errors/try_catch.ora":6:1)

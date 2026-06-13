@@ -1,0 +1,7 @@
+contract DispatcherErrorUnionRevert {
+    error Failure;
+
+    pub fn fail() -> !u256 | Failure {
+        return Failure;
+    }
+}

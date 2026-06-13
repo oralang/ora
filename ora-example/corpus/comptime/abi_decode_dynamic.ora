@@ -8,7 +8,7 @@ contract AbiDecodeDynamicCorpus {
         return comptime {
             let decoded = @abiDecode(string, @abiEncode("hello"));
             let out = match (decoded) {
-                Ok(value) => @abiEncode(value)[64],
+                Ok(value) => @cast(u256, @abiEncode(value)[64]),
                 Err(_) => 0,
             };
             out;
@@ -20,7 +20,7 @@ contract AbiDecodeDynamicCorpus {
             const payload: bytes = hex"deadbeef";
             let decoded = @abiDecode(bytes, @abiEncode(payload));
             let out = match (decoded) {
-                Ok(value) => @abiEncode(value)[64] + @abiEncode(value)[67],
+                Ok(value) => @cast(u256, @abiEncode(value)[64]) + @cast(u256, @abiEncode(value)[67]),
                 Err(_) => 0,
             };
             out;
@@ -32,7 +32,7 @@ contract AbiDecodeDynamicCorpus {
             const value: (u256, string) = (7, "hello");
             let decoded = @abiDecode((u256, string), @abiEncode(value));
             let out = match (decoded) {
-                Ok(roundtrip) => roundtrip.0 + @abiEncode(roundtrip.1)[64],
+                Ok(roundtrip) => roundtrip.0 + @cast(u256, @abiEncode(roundtrip.1)[64]),
                 Err(_) => 0,
             };
             out;
@@ -56,7 +56,7 @@ contract AbiDecodeDynamicCorpus {
             const values = @cast(slice[string], ["a", "bb"]);
             let decoded = @abiDecode(slice[string], @abiEncode(values));
             let out = match (decoded) {
-                Ok(roundtrip) => @abiEncode(roundtrip[0])[64] + @abiEncode(roundtrip[1])[64],
+                Ok(roundtrip) => @cast(u256, @abiEncode(roundtrip[0])[64]) + @cast(u256, @abiEncode(roundtrip[1])[64]),
                 Err(_) => 0,
             };
             out;
@@ -82,7 +82,7 @@ contract AbiDecodeDynamicCorpus {
             const value: AbiDecodeProfile = AbiDecodeProfile { id: 1, name: "hello" };
             let decoded = @abiDecode(AbiDecodeProfile, @abiEncode(value));
             let out = match (decoded) {
-                Ok(roundtrip) => roundtrip.id + @abiEncode(roundtrip.name)[64],
+                Ok(roundtrip) => roundtrip.id + @cast(u256, @abiEncode(roundtrip.name)[64]),
                 Err(_) => 0,
             };
             out;

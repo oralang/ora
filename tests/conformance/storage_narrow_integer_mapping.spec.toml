@@ -1,0 +1,174 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_u8(uint8,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 11]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint8,1,0)"
+value = 11
+
+[[call.storage]]
+slot = "map(uint8,255,0)"
+value = 0
+
+[[call]]
+fn = "set_u8(uint8,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [255, 12]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint8,1,0)"
+value = 11
+
+[[call.storage]]
+slot = "map(uint8,255,0)"
+value = 12
+
+[[call]]
+fn = "get_u8(uint8)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [255]
+returns = { u256 = 12 }
+
+[[call]]
+fn = "set_u16(uint16,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [258, 21]
+returns = {}
+
+[[call]]
+fn = "set_u16(uint16,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [65535, 22]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint16,258,1)"
+value = 21
+
+[[call.storage]]
+slot = "map(uint16,65535,1)"
+value = 22
+
+[[call]]
+fn = "set_u32(uint32,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [16909060, 31]
+returns = {}
+
+[[call]]
+fn = "set_u32(uint32,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [4294967295, 32]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint32,16909060,2)"
+value = 31
+
+[[call.storage]]
+slot = "map(uint32,4294967295,2)"
+value = 32
+
+[[call]]
+fn = "set_u128(uint128,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x0102030405060708090a0b0c0d0e0f10", 41]
+returns = {}
+
+[[call]]
+fn = "set_u128(uint128,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xffffffffffffffffffffffffffffffff", 42]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint128,0x0102030405060708090a0b0c0d0e0f10,3)"
+value = 41
+
+[[call.storage]]
+slot = "map(uint128,0xffffffffffffffffffffffffffffffff,3)"
+value = 42
+
+[[call]]
+fn = "set_i8(int8,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-1, 51]
+returns = {}
+
+[[call]]
+fn = "set_i8(int8,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [127, 52]
+returns = {}
+
+[[call.storage]]
+slot = "map(int8,127,4)"
+value = 52
+
+[[call]]
+fn = "set_i16(int16,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-12345, 61]
+returns = {}
+
+[[call]]
+fn = "set_i16(int16,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [12345, 62]
+returns = {}
+
+[[call.storage]]
+slot = "map(int16,12345,5)"
+value = 62
+
+[[call]]
+fn = "get_i16(int16)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [-12345]
+returns = { u256 = 61 }
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call.storage]]
+slot = 1
+value = 0
+
+[[call.storage]]
+slot = 2
+value = 0
+
+[[call.storage]]
+slot = 3
+value = 0
+
+[[call.storage]]
+slot = 4
+value = 0
+
+[[call.storage]]
+slot = 5
+value = 0

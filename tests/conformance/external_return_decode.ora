@@ -1,0 +1,32 @@
+extern trait SelfView {
+    staticcall fn answer(self) -> u256;
+    staticcall fn name(self) -> string;
+}
+
+error ExternalCallFailed;
+
+contract ExternalReturnDecode {
+    pub fn answer() -> u256 {
+        return 42;
+    }
+
+    pub fn name() -> string {
+        return "ora";
+    }
+
+    pub fn read_answer(target: address) -> u256 {
+        let decoded = external<SelfView>(target, gas: 50000).answer();
+        return match (decoded) {
+            Ok(value) => value,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn read_name_len(target: address) -> u256 {
+        let decoded = external<SelfView>(target, gas: 50000).name();
+        return match (decoded) {
+            Ok(value) => value.len,
+            Err(_) => 0,
+        };
+    }
+}

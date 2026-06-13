@@ -33,8 +33,7 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        /// ora.mload → sir.load (via malloc + store variable-name hash, then load).
-        /// For named memory slots, we treat the variable name as a memory pointer.
+        /// ora.mload → sir.load from the deterministic named memory slot.
         class ConvertMLoadOp : public OpConversionPattern<ora::MLoadOp>
         {
         public:
@@ -46,7 +45,7 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        /// ora.mstore → sir.store.
+        /// ora.mstore → sir.store to the deterministic named memory slot.
         class ConvertMStoreOp : public OpConversionPattern<ora::MStoreOp>
         {
         public:

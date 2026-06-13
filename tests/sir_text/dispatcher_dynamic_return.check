@@ -1,0 +1,37 @@
+// INPUT: tests/conformance/external_return_decode.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn name:
+// CHECK: v0 = const 0x3
+// CHECK: v1 = const 0x20
+// CHECK: v3 = malloc
+// CHECK: mstore256 v3 v0
+// CHECK: large_const 0x6F72610000000000000000000000000000000000000000000000000000000000
+// CHECK: mstore256 v5 v4
+// CHECK: iret
+
+// CHECK-LABEL: fn main:
+// CHECK: load_selector {
+// CHECK: selector_word = calldataload zero_0
+// CHECK: selector = shr selector_shift_0 selector_word
+// CHECK: switch selector {
+// CHECK: 0x06FDDE03 => @name_
+
+// CHECK-LABEL:     name_ {
+// CHECK: v[[NAME_PTR:[0-9]+]] v[[NAME_RET_LEN:[0-9]+]] = icall @name
+// CHECK: v[[HEAD_OFFSET:[0-9]+]] = const 0x20
+// CHECK: v[[TAIL_OFFSET:[0-9]+]] = const 0x40
+// CHECK: v[[NAME_LEN:[0-9]+]] = mload256 v[[NAME_PTR]]
+// CHECK: v[[PAD_MASK:[0-9]+]] = const 0x1F
+// CHECK: v[[LEN_PLUS_PAD:[0-9]+]] = add v[[NAME_LEN]] v[[PAD_MASK]]
+// CHECK: v[[WORD_COUNT:[0-9]+]] = div v[[LEN_PLUS_PAD]] v[[HEAD_OFFSET]]
+// CHECK: v[[PADDED_LEN:[0-9]+]] = mul v[[WORD_COUNT]] v[[HEAD_OFFSET]]
+// CHECK: v[[TOTAL_LEN:[0-9]+]] = add v[[TAIL_OFFSET]] v[[PADDED_LEN]]
+// CHECK: v[[RET_BUF:[0-9]+]] = mallocany v[[TOTAL_LEN]]
+// CHECK: mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]
+// CHECK: v[[LEN_SLOT:[0-9]+]] = add v[[RET_BUF]] v[[HEAD_OFFSET]]
+// CHECK: mstore256 v[[LEN_SLOT]] v[[NAME_LEN]]
+// CHECK: v[[SRC:[0-9]+]] = add v[[NAME_PTR]] v[[HEAD_OFFSET]]
+// CHECK: v[[DST:[0-9]+]] = add v[[RET_BUF]] v[[TAIL_OFFSET]]
+// CHECK: mcopy v[[DST]] v[[SRC]] v[[NAME_LEN]]
+// CHECK: return v[[RET_BUF]] v[[TOTAL_LEN]]

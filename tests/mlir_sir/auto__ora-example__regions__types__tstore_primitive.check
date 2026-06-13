@@ -1,1 +1,59 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/types/tstore_primitive.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/types/tstore_primitive.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {reentrancy_guard = 3 : ui64, temp_balance = 1 : ui64, temp_counter = 0 : ui64, temp_flag = 2 : ui64, temp_owner = 4 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT:   func.func @testTStorePrimitives() attributes {ora.effect = "writes", ora.selector = "0x35e29ca6", ora.visibility = "pub", ora.write_slots = ["transient:temp_counter", "transient:temp_balance", "transient:temp_flag", "transient:reentrancy_guard", "transient:temp_owner"]} {
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":21:24)))
+// CHECK-NEXT:     %c1000 = sir.const 1000 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":22:24)))
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:21)))
+// CHECK-NEXT:     %0 = sir.and %c1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:21)))
+// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:21)))
+// CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:28)))
+// CHECK-NEXT:     %2 = sir.and %c0 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:28)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:28)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:9)))
+// CHECK-NEXT:     %5 = sir.bitcast %1 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:9)))
+// CHECK-NEXT:     sir.tstore %c0 : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":21:9)))
+// CHECK-NEXT:     sir.tstore %c1 : !sir.u256, %c1000 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":22:9)))
+// CHECK-NEXT:     %6 = sir.const 2 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:9)))
+// CHECK-NEXT:     sir.tstore %6 : !sir.u256, %5 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":23:9)))
+// CHECK-NEXT:     %7 = sir.const 3 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:9)))
+// CHECK-NEXT:     sir.tstore %7 : !sir.u256, %4 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":24:9)))
+// CHECK-NEXT:     %8 = sir.caller : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":25:22)))
+// CHECK-NEXT:     %9 = sir.const 4 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":25:9)))
+// CHECK-NEXT:     sir.tstore %9 : !sir.u256, %8 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":25:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":20:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":20:5)
+// CHECK-NEXT:   func.func @testTStoreRead() attributes {ora.effect = "reads", ora.read_slots = ["transient:temp_counter", "transient:temp_flag"], ora.selector = "0x32bfcb93", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":28:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":28:5)
+// CHECK-NEXT:   func.func @testReentrancyPattern() attributes {ora.effect = "readwrites", ora.read_slots = ["transient:reentrancy_guard"], ora.selector = "0x5f9d70dd", ora.visibility = "pub", ora.write_slots = ["transient:reentrancy_guard"]} {
+// CHECK-NEXT:     %c0 = sir.const 0 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %1 = sir.and %c0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %2 = sir.bitcast %1 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %3 = sir.and %0 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc(unknown)
+// CHECK-NEXT:     %4 = sir.bitcast %3 : !sir.u256 : i1 loc(unknown)
+// CHECK-NEXT:     %5 = sir.bitcast %4 : i1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":35:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %2 : i1 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":37:13)))
+// CHECK-NEXT:     %7 = sir.const 3 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":15:5)))
+// CHECK-NEXT:     %8 = sir.tload %7 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":15:5)))
+// CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":15:5)))
+// CHECK-NEXT:     %10 = sir.eq %9 : !sir.u256, %c0 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:13)))
+// CHECK-NEXT:     %11 = sir.and %10 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:13)))
+// CHECK-NEXT:     %12 = sir.bitcast %11 : !sir.u256 : i1 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:13)))
+// CHECK-NEXT:     %13 = sir.bitcast %12 : i1 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:     %14 = sir.iszero %13 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:     %15 = sir.iszero %14 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:     sir.cond_br %15 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     %16 = sir.const 3 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":35:13)))
+// CHECK-NEXT:     sir.tstore %16 : !sir.u256, %5 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":35:13)))
+// CHECK-NEXT:     sir.tstore %16 : !sir.u256, %6 : !sir.u256 loc("ora.stmt.8"("ora.origin_stmt.8"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":37:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/types/tstore_primitive.ora":34:9)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":33:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":33:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/regions/types/tstore_primitive.ora":8:1)

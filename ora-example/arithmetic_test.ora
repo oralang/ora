@@ -19,8 +19,8 @@ contract ArithmeticTest {
     }
 
     pub fn multiply(a: u256, b: u256) -> u256
-        requires(a <= std.constants.U128_MAX)
-        requires(b <= std.constants.U128_MAX)
+        requires(a <= @cast(u256, std.constants.U128_MAX))
+        requires(b <= @cast(u256, std.constants.U128_MAX))
     {
         return a *% b;
     }

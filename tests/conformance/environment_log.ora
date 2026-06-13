@@ -1,0 +1,13 @@
+comptime const std = @import("std");
+
+contract EnvironmentLog {
+    log Ping();
+
+    pub fn caller() -> address {
+        return std.msg.sender();
+    }
+
+    pub fn ping() {
+        log Ping();
+    }
+}

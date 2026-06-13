@@ -1,0 +1,5 @@
+contract DispatcherStringArg {
+    pub fn length(s: string) -> u256 {
+        return s.len;
+    }
+}

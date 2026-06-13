@@ -1,0 +1,30 @@
+error Failure;
+
+contract StorageResultScalar {
+    storage var saved: Result<u256, Failure>;
+    storage var marker: u256;
+
+    pub fn init() {
+        saved = Ok(7);
+        marker = 99;
+    }
+
+    pub fn set_ok(value: u256) {
+        saved = Ok(value);
+    }
+
+    pub fn set_err() {
+        saved = Err(Failure());
+    }
+
+    pub fn get() -> u256 {
+        return match (saved) {
+            Ok(value) => value,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn marker_value() -> u256 {
+        return marker;
+    }
+}

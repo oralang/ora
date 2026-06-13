@@ -1,0 +1,37 @@
+error Failure;
+
+contract StorageResultDynamicSlice {
+    storage var saved: Result<slice[u256], Failure>;
+    storage var marker: u256;
+
+    pub fn init() {
+        marker = 99;
+    }
+
+    pub fn set_ok(values: slice[u256]) {
+        saved = Ok(values);
+    }
+
+    pub fn set_err() {
+        saved = Err(Failure());
+    }
+
+    pub fn sum_or(fallback: u256) -> u256 {
+        let total: u256 = 0;
+        match (saved) {
+            Ok(values) => {
+                for (values) |item| {
+                    total = total + item;
+                }
+            },
+            Err(_) => {
+                total = fallback;
+            },
+        }
+        return total;
+    }
+
+    pub fn marker_value() -> u256 {
+        return marker;
+    }
+}

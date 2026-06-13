@@ -44,6 +44,26 @@ test "numbers: hex literals" {
     }
 }
 
+test "numbers: rejects literals above u256 max" {
+    const allocator = testing.allocator;
+    const too_large = [_][]const u8{
+        "0x10000000000000000000000000000000000000000000000000000000000000000",
+        "115792089237316195423570985008687907853269984665640564039457584007913129639936",
+    };
+
+    for (too_large) |source| {
+        var lex = lexer.Lexer.init(allocator, source);
+        defer lex.deinit();
+
+        const tokens = lex.scanTokens() catch |err| {
+            try testing.expectEqual(lexer.LexerError.NumberTooLarge, err);
+            continue;
+        };
+        defer allocator.free(tokens);
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "numbers: binary literals" {
     const allocator = testing.allocator;
     const test_cases = [_][]const u8{ "0b0", "0b1010", "0b11111111" };

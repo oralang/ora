@@ -13,10 +13,11 @@
 
 const std = @import("std");
 const lib = @import("ora_lib");
+const ora_types = @import("ora_types");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const compiler = lib.compiler;
-const refinements = compiler.sema.refinements;
+const refinements = ora_types.refinement_semantics;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
@@ -32,6 +33,7 @@ const MlirOptions = struct {
     emit_cfg_mode: ?[]const u8 = null,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
+    output_file: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
@@ -122,7 +124,6 @@ const DebugCliOptions = struct {
     signature: ?[]const u8 = null,
     arg_values: std.ArrayList([]const u8),
     calldata_hex: ?[]const u8 = null,
-    verify_requested: bool = false,
     /// Headless mode: emit debug artifacts but skip launching the TUI.
     /// Used by debug-artifact regression tests and for offline artifact
     /// generation that ships traces to another engineer.
@@ -132,9 +133,8 @@ const DebugCliOptions = struct {
     /// stdio; suitable for piping to a DAP-aware editor (VS Code
     /// launch.json, etc.). Mutually exclusive with --no-tui.
     dap: bool = false,
-    /// Limit overrides forwarded verbatim to ora-evm-debug-tui. Stored as
-    /// the raw text so we can re-emit them onto the spawned argv without
-    /// any (re)formatting drift.
+    /// Limit overrides forwarded to ora-evm-debug-tui after parse-time
+    /// validation. Stored as raw text only to preserve CLI spelling.
     gas_limit: ?[]const u8 = null,
     max_steps: ?[]const u8 = null,
     deploy_step_cap: ?[]const u8 = null,
@@ -213,14 +213,73 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_abi_extras;
 }
 
+fn hasFmtFlags(parsed: cli_args.CliOptions) bool {
+    return parsed.fmt_check or parsed.fmt_diff or parsed.fmt_stdout or parsed.fmt_width != null;
+}
+
+fn bytecodeFileExtension(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".hex") or
+        std.mem.endsWith(u8, path, ".bytecode") or
+        std.mem.endsWith(u8, path, ".bin");
+}
+
+fn emitOutputCount(parsed: cli_args.CliOptions) usize {
+    var count: usize = 0;
+    if (parsed.emit_tokens) count += 1;
+    if (parsed.emit_ast) count += 1;
+    if (parsed.emit_typed_ast) count += 1;
+    if (parsed.emit_mlir) count += 1;
+    if (parsed.emit_mlir_sir) count += 1;
+    if (parsed.emit_sir_text) count += 1;
+    if (parsed.emit_bytecode) count += 1;
+    if (parsed.emit_cfg) count += 1;
+    if (parsed.emit_smt_report) count += 1;
+    if (parsed.emit_abi) count += 1;
+    if (parsed.emit_abi_solidity) count += 1;
+    if (parsed.emit_abi_extras) count += 1;
+    return count;
+}
+
+fn claimDebugOption(seen: *bool) !void {
+    if (seen.*) return error.DuplicateArgument;
+    seen.* = true;
+}
+
+fn validatePositiveI64(text: []const u8) !void {
+    const value = std.fmt.parseInt(i64, text, 10) catch return error.InvalidDebugOptions;
+    if (value <= 0) return error.InvalidDebugOptions;
+}
+
+fn validatePositiveU64(text: []const u8) !void {
+    const value = std.fmt.parseInt(u64, text, 10) catch return error.InvalidDebugOptions;
+    if (value == 0) return error.InvalidDebugOptions;
+}
+
+fn validatePositiveUsize(text: []const u8) !void {
+    const value = std.fmt.parseInt(usize, text, 10) catch return error.InvalidDebugOptions;
+    if (value == 0) return error.InvalidDebugOptions;
+}
+
 fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) !DebugCliOptions {
     var opts = DebugCliOptions.init();
     errdefer opts.deinit(allocator);
+
+    var seen_init_signature = false;
+    var seen_init_calldata_hex = false;
+    var seen_signature = false;
+    var seen_calldata_hex = false;
+    var seen_no_tui = false;
+    var seen_dap = false;
+    var seen_gas_limit = false;
+    var seen_max_steps = false;
+    var seen_deploy_step_cap = false;
+    var seen_artifact_max_bytes = false;
 
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--init-signature")) {
+            try claimDebugOption(&seen_init_signature);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.init_signature = args[i + 1];
             i += 2;
@@ -233,12 +292,14 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
             continue;
         }
         if (std.mem.eql(u8, arg, "--init-calldata-hex")) {
+            try claimDebugOption(&seen_init_calldata_hex);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.init_calldata_hex = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--signature")) {
+            try claimDebugOption(&seen_signature);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.signature = args[i + 1];
             i += 2;
@@ -251,46 +312,53 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
             continue;
         }
         if (std.mem.eql(u8, arg, "--calldata-hex")) {
+            try claimDebugOption(&seen_calldata_hex);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.calldata_hex = args[i + 1];
             i += 2;
             continue;
         }
 
-        if (std.mem.eql(u8, arg, "--verify") or std.mem.startsWith(u8, arg, "--verify=")) {
-            opts.verify_requested = true;
-        }
-
         if (std.mem.eql(u8, arg, "--no-tui")) {
+            try claimDebugOption(&seen_no_tui);
             opts.no_tui = true;
             i += 1;
             continue;
         }
         if (std.mem.eql(u8, arg, "--dap")) {
+            try claimDebugOption(&seen_dap);
             opts.dap = true;
             i += 1;
             continue;
         }
         if (std.mem.eql(u8, arg, "--gas-limit")) {
+            try claimDebugOption(&seen_gas_limit);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveI64(args[i + 1]);
             opts.gas_limit = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--max-steps")) {
+            try claimDebugOption(&seen_max_steps);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveU64(args[i + 1]);
             opts.max_steps = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            try claimDebugOption(&seen_deploy_step_cap);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveUsize(args[i + 1]);
             opts.deploy_step_cap = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            try claimDebugOption(&seen_artifact_max_bytes);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveUsize(args[i + 1]);
             opts.artifact_max_bytes = args[i + 1];
             i += 2;
             continue;
@@ -372,7 +440,16 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
+        try printUsage();
+        return;
+    }
+
     if (args.len >= 2 and std.mem.eql(u8, args[1], "init")) {
+        if (args.len == 3 and (std.mem.eql(u8, args[2], "-h") or std.mem.eql(u8, args[2], "--help"))) {
+            try printUsage();
+            return;
+        }
         if (args.len > 3) {
             std.debug.print("error: init accepts at most one optional <path>\n", .{});
             try printUsage();
@@ -415,22 +492,28 @@ pub fn main() !void {
     var parse_args: std.ArrayList([]const u8) = .{};
     defer parse_args.deinit(allocator);
     if (subcommand == .Debug) {
-        debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch {
+        debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch |err| {
+            std.debug.print("error: invalid debug arguments: {s}\n", .{@errorName(err)});
             try printUsage();
-            return;
+            std.process.exit(2);
         };
         try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
     } else {
         for (args_to_parse) |arg| try parse_args.append(allocator, arg);
     }
 
-    var parsed = cli_args.parseArgs(parse_args.items) catch {
+    var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
+        std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
         try printUsage();
-        return;
+        std.process.exit(2);
     };
 
     if (subcommand == .Fmt) {
         parsed.fmt = true;
+    }
+    if (parsed.show_help) {
+        try printUsage();
+        return;
     }
     if (parsed.show_version) {
         try printVersion();
@@ -438,6 +521,7 @@ pub fn main() !void {
     }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
+    const output_file: ?[]const u8 = parsed.output_file;
     const input_file: ?[]const u8 = parsed.input_file;
     const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
@@ -496,6 +580,10 @@ pub fn main() !void {
 
     // handle fmt command
     if (fmt) {
+        if (output_dir != null or output_file != null or hasEmitFlags(parsed)) {
+            std.debug.print("error: fmt mode accepts only fmt options and an input path.\n", .{});
+            std.process.exit(2);
+        }
         if (input_file == null) {
             std.debug.print("error: fmt requires an input file or directory\n", .{});
             try printUsage();
@@ -515,6 +603,28 @@ pub fn main() !void {
     };
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept emit selectors. Use 'ora emit --emit=<list> ...' for debug outputs.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (command_kind != .Fmt and hasFmtFlags(parsed)) {
+        std.debug.print("error: formatter options require 'ora fmt'.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (output_dir) |dir| {
+        if (bytecodeFileExtension(dir)) {
+            std.debug.print("error: '-o/--out-dir' expects a directory; use '--out-file' for '{s}'.\n", .{dir});
+            std.process.exit(2);
+        }
+    }
+
+    if (output_file != null and command_kind != .Emit) {
+        std.debug.print("error: --out-file is only valid with 'ora emit --emit=bytecode'.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (output_file != null and (!parsed.emit_bytecode or emitOutputCount(parsed) != 1)) {
+        std.debug.print("error: --out-file requires exactly '--emit=bytecode'.\n", .{});
         std.process.exit(2);
     }
 
@@ -557,6 +667,7 @@ pub fn main() !void {
         .emit_cfg_mode = emit_cfg_mode,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
+        .output_file = output_file,
         .debug_enabled = debug_enabled,
         .debug_info = debug_info,
         .canonicalize = canonicalize_mlir,
@@ -598,7 +709,7 @@ pub fn main() !void {
         debug_mlir_options.emit_sir_text = true;
         debug_mlir_options.emit_bytecode = true;
         debug_mlir_options.debug_info = true;
-        if (!debug_options.verify_requested) {
+        if (!parsed.verify_requested) {
             debug_mlir_options.verify_z3 = false;
             debug_mlir_options.emit_smt_report = false;
         }
@@ -907,18 +1018,10 @@ fn runBuildArtifacts(
         std.process.exit(2);
     }
 
-    // reset output tree so each build produces a coherent artifact bundle
-    var artifact_root_exists = true;
-    std.fs.cwd().access(artifact_root, .{}) catch |err| switch (err) {
-        error.FileNotFound => artifact_root_exists = false,
-        else => return err,
-    };
-    if (artifact_root_exists) {
-        try std.fs.cwd().deleteTree(artifact_root);
-    }
+    // Never delete a user-supplied output root. Build writes its known artifact
+    // files under stable subdirectories and may overwrite files it owns, but it
+    // must not recursively remove unrelated user data.
     try std.fs.cwd().makePath(artifact_root);
-    var build_succeeded = false;
-    errdefer if (!build_succeeded) std.fs.cwd().deleteTree(artifact_root) catch {};
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
@@ -998,7 +1101,6 @@ fn runBuildArtifacts(
 
     try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
     try stdout.flush();
-    build_succeeded = true;
 }
 
 fn printBuildArtifactSummary(
@@ -1060,14 +1162,8 @@ fn runDebugArtifacts(
     defer allocator.free(default_root);
     const artifact_root = output_dir orelse default_root;
 
-    var artifact_root_exists = true;
-    std.fs.cwd().access(artifact_root, .{}) catch |err| switch (err) {
-        error.FileNotFound => artifact_root_exists = false,
-        else => return err,
-    };
-    if (artifact_root_exists) {
-        try std.fs.cwd().deleteTree(artifact_root);
-    }
+    // Debug artifact output follows the same safety rule as build output:
+    // create directories and overwrite compiler-owned files, never wipe roots.
     try std.fs.cwd().makePath(artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
@@ -1791,10 +1887,11 @@ fn printUsage() !void {
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
     try stdout.print("  --emit=<list>          - Comma list: tokens, ast[:json|tree], typed-ast[:json|tree], mlir[:ora|sir|both], sir-text, bytecode, cfg[:ora|sir], abi[:solidity|extras], smt-report\n", .{});
     try stdout.print("  --chain-id <id>        - Chain id exposed to @chainId() (default: 31337; overrides ora.toml)\n", .{});
+    try stdout.print("  -h, --help             - Show this help text\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
-    try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
-    try stdout.print("  -o <file|dir>          - Emit mode: output file/dir\n", .{});
+    try stdout.print("  -o, --out-dir <dir>    - Artifact/output directory (default: artifacts/<name> for build)\n", .{});
+    try stdout.print("  --out-file <file>      - Exact output file for 'ora emit --emit=bytecode'\n", .{});
     try stdout.print("\nOptimization Options:\n", .{});
     try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
@@ -2007,7 +2104,9 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
         if (parsed) |g| {
             if (refinements.hasGuardViolationExplanation(g.refinement_kind)) {
                 try stdout.print("     -> ", .{});
-                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) unreachable;
+                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) {
+                    try stdout.print("{s} guard failed for {s}", .{ g.refinement_kind, g.variable_name });
+                }
                 try stdout.print("\n", .{});
             }
         }
@@ -2215,26 +2314,105 @@ fn exitOnCompilerErrors(
     std.process.exit(1);
 }
 
+fn rejectIfNotEmittable(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
+    try writeDetectOnlyTypeFallbacks(writer, sources, lowering, debug_enabled);
+    if (lowering.isEmittable()) return;
+
+    try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
+    if (lowering.type_fallback_count != 0) {
+        try writer.print("  type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    }
+    if (lowering.placeholder_count != 0) {
+        try writer.print("  placeholders: {d}\n", .{lowering.placeholder_count});
+    }
+    if (lowering.default_value_count != 0) {
+        try writer.print("  default values: {d}\n", .{lowering.default_value_count});
+    }
+    try writer.flush();
+    std.process.exit(1);
+}
+
+fn rejectIfExecutableFallbacksSurvive(
+    writer: anytype,
+    lowering: *const compiler.hir.LoweringResult,
+) !void {
+    if (compiler.hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+        try writer.print(
+            "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
+            .{ violation.op_name, violation.reason },
+        );
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+fn writeDetectOnlyTypeFallbacks(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    const report_enabled = debug_enabled or blk: {
+        if (std.posix.getenv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
+            break :blk env_value[0] != 0 and env_value[0] != '0';
+        }
+        break :blk false;
+    };
+    if (!report_enabled or lowering.type_fallback_count == 0) return;
+
+    try writer.print("debug: HIR type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    for (lowering.type_fallbacks) |fallback| {
+        if (sources) |source_store| {
+            const file = source_store.file(fallback.location.file_id);
+            const line_column = source_store.lineColumn(fallback.location);
+            try writer.print(
+                "debug: HIR type fallback: {s} at {s}:{d}:{d}\n",
+                .{ @tagName(fallback.reason), file.path, line_column.line, line_column.column },
+            );
+        } else {
+            try writer.print("debug: HIR type fallback: {s}\n", .{@tagName(fallback.reason)});
+        }
+    }
+    try writer.flush();
+}
+
 fn exitOnCompilationErrors(
     writer: anytype,
     db: *compiler.db.CompilerDb,
     module_id: compiler.source.ModuleId,
     debug_enabled: bool,
 ) !*const compiler.sema.TypeCheckResult {
-    const module = db.sources.module(module_id);
+    const root_module = db.sources.module(module_id);
+    const package = db.sources.package(root_module.package_id);
+    var root_typecheck: ?*const compiler.sema.TypeCheckResult = null;
 
-    const syntax_diags = try db.syntaxDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, syntax_diags, debug_enabled);
+    for (package.modules.items) |current_module_id| {
+        const module = db.sources.module(current_module_id);
 
-    const ast_diags = try db.astDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, ast_diags, debug_enabled);
+        const syntax_diags = try db.syntaxDiagnostics(module.file_id);
+        try exitOnCompilerErrors(writer, &db.sources, syntax_diags, debug_enabled);
 
-    const resolution_diags = try db.resolutionDiagnostics(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, resolution_diags, debug_enabled);
+        const ast_diags = try db.astDiagnostics(module.file_id);
+        try exitOnCompilerErrors(writer, &db.sources, ast_diags, debug_enabled);
 
-    const module_typecheck = try db.moduleTypeCheck(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
-    return module_typecheck;
+        const resolution_diags = try db.resolutionDiagnostics(current_module_id);
+        try exitOnCompilerErrors(writer, &db.sources, resolution_diags, debug_enabled);
+
+        const module_typecheck = try db.moduleTypeCheck(current_module_id);
+        try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
+
+        if (current_module_id == module_id) {
+            root_typecheck = module_typecheck;
+        }
+    }
+
+    return root_typecheck orelse error.ModuleNotFound;
 }
 
 fn writeJsonString(writer: anytype, text: []const u8) !void {
@@ -2336,7 +2514,7 @@ const ExtraScopeBinding = struct {
     is_folded: bool = false,
 };
 
-fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
+fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstValue) ![]const u8 {
     return switch (value) {
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
@@ -3469,7 +3647,11 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .bytes => try writer.writeAll("bytes"),
         .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
-        .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
+        .integer => |integer| if (integer.spelling) |spelling|
+            try writer.writeAll(spelling)
+        else
+            try writer.print("{c}{d}", .{ if (integer.signed) @as(u8, 'i') else @as(u8, 'u'), integer.bits }),
+        .comptime_integer => try writer.writeAll("integer"),
         .named => |named| try writer.writeAll(named.name),
         .contract => |named| try writer.writeAll(named.name),
         .struct_ => |named| try writer.writeAll(named.name),
@@ -3744,6 +3926,8 @@ fn runCompilerMlirEmit(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -3828,6 +4012,8 @@ fn runMlirEmitAdvanced(
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
 
@@ -3934,13 +4120,13 @@ fn runMlirEmitAdvanced(
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraMlirCanonicalizationFailed;
         }
         m.end();
     }
 
     if (mlir_options.emit_mlir_sir) {
-        const refinement_guards = @import("mlir/refinement_guards.zig");
+        const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
             refinement_guards.cleanupRefinementGuards(ctx, final_module, &vr.proven_guard_ids);
         } else {
@@ -3990,7 +4176,7 @@ fn runMlirEmitAdvanced(
         if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraToSirConversionFailed;
         }
     }
 
@@ -4077,12 +4263,12 @@ fn runMlirEmitAdvanced(
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirDispatcherBuildFailed;
         }
         if (!c.oraLegalizeSIRText(ctx, final_module)) {
             try stdout.print("Error: SIR text legalizer failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirTextLegalizerFailed;
         }
 
         m.begin("sir text emission");
@@ -4094,7 +4280,7 @@ fn runMlirEmitAdvanced(
         if (sir_text_ref.data == null or sir_text_ref.length == 0) {
             m.end();
             try stdout.print("Failed to emit SIR text\n", .{});
-            return;
+            return error.SirTextEmissionFailed;
         }
         m.end();
 
@@ -4179,7 +4365,7 @@ fn runMlirEmitAdvanced(
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
             m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
             m.end();
         }
     }
@@ -4613,6 +4799,7 @@ fn emitBytecodeFromSirText(
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
+    output_file: ?[]const u8,
     sir_locations_json: ?[]const u8,
     sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
@@ -4729,38 +4916,35 @@ fn emitBytecodeFromSirText(
     var bytecode_output_path: ?[]const u8 = null;
     defer if (bytecode_output_path) |p| allocator.free(p);
 
-    if (output_dir) |out_dir| {
-        const out_is_file = std.mem.endsWith(u8, out_dir, ".hex") or
-            std.mem.endsWith(u8, out_dir, ".bytecode") or
-            std.mem.endsWith(u8, out_dir, ".bin");
+    if (output_file) |out_path| {
+        var out_file = if (std.fs.path.isAbsolute(out_path))
+            try std.fs.createFileAbsolute(out_path, .{})
+        else
+            try std.fs.cwd().createFile(out_path, .{});
+        defer out_file.close();
+        try out_file.writeAll(bytecode);
+        bytecode_output_path = try allocator.dupe(u8, out_path);
+        if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_path});
+    } else if (output_dir) |out_dir| {
+        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
-        if (out_is_file) {
-            var out_file = if (std.fs.path.isAbsolute(out_dir))
-                try std.fs.createFileAbsolute(out_dir, .{})
-            else
-                try std.fs.cwd().createFile(out_dir, .{});
-            defer out_file.close();
-            try out_file.writeAll(bytecode);
-            bytecode_output_path = try allocator.dupe(u8, out_dir);
-            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_dir});
-        } else {
-            std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+        const extension = ".hex";
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+        defer allocator.free(filename);
+        const output_path = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
+        defer allocator.free(output_path);
 
-            const extension = ".hex";
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
-            defer allocator.free(filename);
-            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
-            defer allocator.free(output_file);
-
-            var out_file = try std.fs.cwd().createFile(output_file, .{});
-            defer out_file.close();
-            try out_file.writeAll(bytecode);
-            bytecode_output_path = try allocator.dupe(u8, output_file);
-            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_file});
-        }
+        var out_file = if (std.fs.path.isAbsolute(output_path))
+            try std.fs.createFileAbsolute(output_path, .{})
+        else
+            try std.fs.cwd().createFile(output_path, .{});
+        defer out_file.close();
+        try out_file.writeAll(bytecode);
+        bytecode_output_path = try allocator.dupe(u8, output_path);
+        if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
         try stdout.print("{s}\n", .{bytecode});
     }

@@ -1,12 +1,18 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const abi_type_names = @import("../abi/type_names.zig");
 const bridge = @import("compiler_const_bridge.zig");
 const comptime_mod = @import("mod.zig");
+const ora_types = @import("ora_types");
+const compiler_query = @import("../compiler_query.zig");
+const type_builtin = ora_types.builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
+const lookup_index = @import("../sema/lookup.zig");
+const abi_layout_provider = @import("../sema/abi_layout_provider.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
-const refinements = @import("../sema/refinements.zig");
+const refinements = @import("ora_types").refinement_semantics;
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 const hir_abi = @import("../hir/abi.zig");
@@ -14,16 +20,19 @@ const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_comptime_encoder = @import("../abi/comptime_encoder.zig");
 const abi_comptime_decoder = @import("../abi/comptime_decoder.zig");
 const compile_options = @import("../compile_options.zig");
+const module_graph = @import("../sema/module_graph.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
-const ConstValue = model.ConstValue;
-const TypeKind = model.TypeKind;
+const ConstValue = ora_types.ConstValue;
+const Type = ora_types.SemanticType;
+const TypeKind = ora_types.TypeKind;
+const IntegerType = ora_types.IntegerType;
+const AnonymousStructField = ora_types.AnonymousStructField;
 const CtAggregate = comptime_mod.CtAggregate;
 const CtEnum = comptime_mod.CtEnum;
 const CtErrorUnion = comptime_mod.CtErrorUnion;
 const CtEnv = bridge.CtEnv;
 const CtValue = bridge.CtValue;
-const type_ids = comptime_mod.type_ids;
 const SourceSpan = error_mod.SourceSpan;
 const Stage = stage_mod.Stage;
 const LimitCheck = comptime_mod.LimitCheck;
@@ -35,9 +44,6 @@ const evalUnary = bridge.evalUnary;
 const EvalConfig = comptime_mod.EvalConfig;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
 const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
-const fixed_bytes_type_id_base: u32 = 500_000;
-const abi_decode_error_type_id: u32 = 900_000;
-const named_type_id_base: u32 = 1_000_000;
 const named_type_id_module_stride: u32 = 100_000;
 
 fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]const u8 {
@@ -47,80 +53,13 @@ fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]const u8 {
 }
 
 fn keccakFixedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
-    const hash = try allocator.alloc(u8, 32);
-    std.crypto.hash.sha3.Keccak256.hash(bytes, hash[0..32], .{});
-    return hash;
+    const hash = hir_abi.keccak256(bytes);
+    return allocator.dupe(u8, hash[0..]);
 }
-
-fn fixedBytesTypeId(len: u8) ?u32 {
-    if (len == 0 or len > 32) return null;
-    return fixed_bytes_type_id_base + len;
-}
-
-fn fixedBytesLenForTypeId(type_id: u32) ?u8 {
-    if (type_id <= fixed_bytes_type_id_base or type_id > fixed_bytes_type_id_base + 32) return null;
-    return @intCast(type_id - fixed_bytes_type_id_base);
-}
-
-fn fixedBytesLenFromName(name: []const u8) ?u8 {
-    if (!std.mem.startsWith(u8, name, "bytes")) return null;
-    if (name.len == "bytes".len) return null;
-    const len = std.fmt.parseInt(u8, name["bytes".len..], 10) catch return null;
-    return if (fixedBytesTypeId(len) != null) len else null;
-}
-
-fn fixedBytesTypeName(len: u8) ?[]const u8 {
-    return switch (len) {
-        1 => "bytes1",
-        2 => "bytes2",
-        3 => "bytes3",
-        4 => "bytes4",
-        5 => "bytes5",
-        6 => "bytes6",
-        7 => "bytes7",
-        8 => "bytes8",
-        9 => "bytes9",
-        10 => "bytes10",
-        11 => "bytes11",
-        12 => "bytes12",
-        13 => "bytes13",
-        14 => "bytes14",
-        15 => "bytes15",
-        16 => "bytes16",
-        17 => "bytes17",
-        18 => "bytes18",
-        19 => "bytes19",
-        20 => "bytes20",
-        21 => "bytes21",
-        22 => "bytes22",
-        23 => "bytes23",
-        24 => "bytes24",
-        25 => "bytes25",
-        26 => "bytes26",
-        27 => "bytes27",
-        28 => "bytes28",
-        29 => "bytes29",
-        30 => "bytes30",
-        31 => "bytes31",
-        32 => "bytes32",
-        else => null,
-    };
-}
-
-pub const TypeQuery = struct {
-    context: *anyopaque,
-    ensure_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId, key: model.TypeCheckKey) anyerror!*const model.TypeCheckResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.TypeCheckResult,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ItemIndexResult,
-    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const model.ConstEvalResult,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
-};
 
 pub const ConstEvalOptions = struct {
     module_id: ?source.ModuleId = null,
-    type_query: ?TypeQuery = null,
+    type_query: ?compiler_query.ComptimeView = null,
     config: EvalConfig = .default,
     chain_id: u64 = compile_options.default_chain_id,
 };
@@ -148,6 +87,13 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
     const values = try arena.alloc(?ConstValue, file.expressions.len);
     @memset(values, null);
 
+    var fallback_item_index: ?model.ItemIndexResult = null;
+    defer if (fallback_item_index) |*item_index| item_index.deinit();
+    if (options.type_query == null) {
+        fallback_item_index = try module_graph.buildItemIndex(arena, file);
+    }
+    const fallback_item_index_ptr: ?*const model.ItemIndexResult = if (fallback_item_index) |*item_index| item_index else null;
+
     var evaluator = ConstEvaluator{
         .allocator = arena,
         .file = file,
@@ -155,6 +101,7 @@ pub fn constEval(allocator: std.mem.Allocator, file: *const ast.AstFile, options
         .env = CtEnv.init(arena, options.config),
         .module_id = options.module_id,
         .type_query = options.type_query,
+        .fallback_item_index = fallback_item_index_ptr,
         .chain_id = options.chain_id,
     };
     defer evaluator.env.deinit();
@@ -197,7 +144,8 @@ const ConstEvaluator = struct {
     values: []?ConstValue,
     env: CtEnv,
     module_id: ?source.ModuleId = null,
-    type_query: ?TypeQuery = null,
+    type_query: ?compiler_query.ComptimeView = null,
+    fallback_item_index: ?*const model.ItemIndexResult = null,
     chain_id: u64,
     current_typecheck_key: ?model.TypeCheckKey = null,
     current_contract: ?ast.ItemId = null,
@@ -648,7 +596,7 @@ const ConstEvaluator = struct {
                 const fields = try self.allocator.alloc(CtAggregate.StructField, struct_literal.fields.len);
                 for (struct_literal.fields, 0..) |field, idx| {
                     _ = try self.evalExprImpl(field.value, use_cache);
-                    const field_index = self.structFieldIndex(type_id, field.name) orelse break :blk null;
+                    const field_index = (try self.structFieldIndex(type_id, field.name)) orelse break :blk null;
                     const value = (try self.evalExprCtValueImpl(field.value, use_cache, true)) orelse break :blk null;
                     if (try self.structLiteralFieldType(expr_id, field.name)) |field_type| {
                         if (!try self.validateCtValueForType(value, field_type, field.range)) break :blk null;
@@ -744,12 +692,12 @@ const ConstEvaluator = struct {
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
+                        const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse break :blk_field null;
                         break :blk_field self.structFieldValue(struct_data, field_index);
                     },
                     .tuple_ref => |heap_id| blk_field: {
                         const elems = self.env.heap.getTuple(heap_id).elems;
-                        const field_index = self.anonymousStructFieldIndexForExpr(field.base, field.name) orelse break :blk_field null;
+                        const field_index = (try self.anonymousStructFieldIndexForExpr(field.base, field.name)) orelse break :blk_field null;
                         if (field_index >= elems.len) break :blk_field null;
                         break :blk_field elems[field_index];
                     },
@@ -917,16 +865,12 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, idx| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return CtValue{ .adt_val = CtEnum{
-                    .type_id = self.namedTypeId(item_id),
-                    .variant_id = @intCast(idx),
-                    .payload = null,
-                } };
-            }
-        }
-        return null;
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, variant_name) orelse return null;
+        return CtValue{ .adt_val = CtEnum{
+            .type_id = self.namedTypeId(item_id),
+            .variant_id = @intCast(variant_index),
+            .payload = null,
+        } };
     }
 
     const EnumVariantRef = struct {
@@ -951,12 +895,8 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, field.name)) {
-                return .{ .item_id = item_id, .variant_id = @intCast(index) };
-            }
-        }
-        return null;
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, field.name) orelse return null;
+        return .{ .item_id = item_id, .variant_id = @intCast(variant_index) };
     }
 
     fn enumVariantRefFromStructLiteral(self: *ConstEvaluator, struct_literal: ast.StructLiteralExpr) ?EnumVariantRef {
@@ -967,10 +907,16 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(enum_name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Enum) return null;
-        for (item.Enum.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return .{ .item_id = item_id, .variant_id = @intCast(index) };
-            }
+        const variant_index = self.enumVariantIndex(item_id, item.Enum.variants, variant_name) orelse return null;
+        return .{ .item_id = item_id, .variant_id = @intCast(variant_index) };
+    }
+
+    fn enumVariantIndex(self: *ConstEvaluator, item_id: ast.ItemId, variants: []const ast.EnumVariant, name: []const u8) ?usize {
+        if (self.currentItemIndex() catch null) |item_index| {
+            return item_index.lookupEnumVariantIndex(item_id, name);
+        }
+        for (variants, 0..) |variant, index| {
+            if (std.mem.eql(u8, variant.name, name)) return index;
         }
         return null;
     }
@@ -1087,9 +1033,11 @@ const ConstEvaluator = struct {
         }
 
         const fields = payload_fields.?;
+        const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.allocator, struct_literal.fields, "name");
+        defer self.allocator.free(init_lookup);
         const elems = try self.allocator.alloc(CtValue, fields.len);
         for (fields, 0..) |payload_field, index| {
-            const init = findStructFieldInit(struct_literal.fields, payload_field.name) orelse return null;
+            const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, payload_field.name) orelse return null;
             _ = try self.evalExprImpl(init.value, use_cache);
             const value = (try self.evalExprCtValueImpl(init.value, use_cache, true)) orelse return null;
             if (!try self.validateCtValueForType(value, payload_field.ty, init.range)) return null;
@@ -1215,38 +1163,29 @@ const ConstEvaluator = struct {
         return out;
     }
 
-    fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) ?usize {
+    fn structFieldIndex(self: *ConstEvaluator, type_id: u32, field_name: []const u8) !?usize {
         const item_id = self.itemIdForNamedTypeId(type_id) orelse return null;
-        const item = self.file.item(item_id).*;
-        if (item != .Struct) return null;
-        for (item.Struct.fields, 0..) |field, idx| {
-            if (std.mem.eql(u8, field.name, field_name)) return idx;
-        }
-        return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
+        return item_index.lookupStructFieldIndex(item_id, field_name);
     }
 
-    fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?model.Type {
+    fn structLiteralFieldType(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const typecheck = (try self.currentTypeCheckResult()) orelse return null;
         const expr_type = typecheck.exprType(expr_id);
         if (expr_type != .struct_) return null;
 
         if (typecheck.instantiatedStructByName(expr_type.struct_.name)) |instantiated| {
-            for (instantiated.fields) |field| {
-                if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-            }
+            if (instantiated.fieldByName(field_name)) |field| return field.ty;
             return null;
         }
 
         const item_id = self.lookupNamedItem(expr_type.struct_.name) orelse return null;
-        const item = self.file.item(item_id).*;
-        if (item != .Struct) return null;
-        for (item.Struct.fields) |field| {
-            if (std.mem.eql(u8, field.name, field_name)) return try self.modelTypeFromTypeExpr(field.type_expr);
-        }
-        return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
+        const field = item_index.lookupStructField(self.file, item_id, field_name) orelse return null;
+        return try self.modelTypeFromTypeExpr(field.type_expr);
     }
 
-    fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const model.AnonymousStructField {
+    fn enumVariantNamedPayloadFields(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef) !?[]const AnonymousStructField {
         if (try self.currentTypeCheckResult()) |typecheck| {
             const expr_type = typecheck.exprType(expr_id);
             if (expr_type == .enum_) {
@@ -1266,10 +1205,10 @@ const ConstEvaluator = struct {
         return try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(variant_ref.variant_id)].payload);
     }
 
-    fn enumNamedPayloadFieldsFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload) !?[]const model.AnonymousStructField {
+    fn enumNamedPayloadFieldsFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload) !?[]const AnonymousStructField {
         return switch (payload) {
             .named => |fields| blk: {
-                const result = try self.allocator.alloc(model.AnonymousStructField, fields.len);
+                const result = try self.allocator.alloc(AnonymousStructField, fields.len);
                 for (fields, 0..) |field, index| {
                     result[index] = .{
                         .name = field.name,
@@ -1282,7 +1221,7 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?model.Type {
+    fn enumVariantPayloadArgType(self: *ConstEvaluator, expr_id: ast.ExprId, variant_ref: EnumVariantRef, arg_index: usize) !?Type {
         const typecheck = (try self.currentTypeCheckResult()) orelse return null;
         const expr_type = typecheck.exprType(expr_id);
         if (expr_type == .enum_) {
@@ -1297,7 +1236,7 @@ const ConstEvaluator = struct {
         return try self.enumPayloadArgTypeFromAst(item.Enum.variants[variant_ref.variant_id].payload, arg_index);
     }
 
-    fn enumPayloadArgTypeFromModel(payload_type: ?model.Type, arg_index: usize) ?model.Type {
+    fn enumPayloadArgTypeFromModel(payload_type: ?Type, arg_index: usize) ?Type {
         const payload = payload_type orelse return null;
         return switch (payload) {
             .tuple => |elements| if (arg_index < elements.len) elements[arg_index] else null,
@@ -1306,7 +1245,7 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn enumPayloadArgTypeFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload, arg_index: usize) !?model.Type {
+    fn enumPayloadArgTypeFromAst(self: *ConstEvaluator, payload: ast.EnumVariantPayload, arg_index: usize) !?Type {
         return switch (payload) {
             .none => null,
             .positional => |types| if (arg_index < types.len) try self.modelTypeFromTypeExpr(types[arg_index]) else null,
@@ -1314,24 +1253,25 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn modelTypeFromTypeExpr(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !?model.Type {
+    fn modelTypeFromTypeExpr(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) !?Type {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
-                if (integerTypeFromName(path.name)) |integer| break :blk model.Type{ .integer = integer };
-                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "address")) break :blk model.Type{ .address = {} };
-                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "bool")) break :blk model.Type{ .bool = {} };
+                if (integerTypeFromName(path.name)) |integer| break :blk Type{ .integer = integer };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "address")) break :blk Type{ .address = {} };
+                if (std.mem.eql(u8, std.mem.trim(u8, path.name, " \t\n\r"), "bool")) break :blk Type{ .bool = {} };
                 break :blk null;
             },
             .Generic => |generic| blk: {
                 if (!refinements.isKnownName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
                 const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
-                break :blk try refinements.refinementType(self.allocator, generic.name, base_type, generic.args);
+                const args = try type_descriptors.refinementArgsFromAst(self.allocator, generic.args);
+                break :blk try refinements.refinementType(self.allocator, generic.name, base_type, args);
             },
             else => null,
         };
     }
 
-    fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: model.Type, range: source.TextRange) !bool {
+    fn validateCtValueForType(self: *ConstEvaluator, value: CtValue, ty: Type, range: source.TextRange) !bool {
         return switch (ty) {
             .refinement => |refinement| try self.validateCtValueForRefinement(value, refinement, range),
             else => true,
@@ -1383,20 +1323,6 @@ const ConstEvaluator = struct {
         return null;
     }
 
-    fn findStructFieldInit(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
-        }
-        return null;
-    }
-
-    fn findAnonymousStructFieldIndex(fields: []const model.AnonymousStructField, name: []const u8) ?usize {
-        for (fields, 0..) |field, index| {
-            if (std.mem.eql(u8, field.name, name)) return index;
-        }
-        return null;
-    }
-
     fn readPatternCtValue(self: *ConstEvaluator, pattern_id: ast.PatternId) anyerror!?CtValue {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.env.lookupValue(name.name),
@@ -1405,7 +1331,7 @@ const ConstEvaluator = struct {
                 break :blk switch (base) {
                     .struct_ref => |heap_id| blk_field: {
                         const struct_data = self.env.heap.getStruct(heap_id);
-                        const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse break :blk_field null;
+                        const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse break :blk_field null;
                         break :blk_field self.structFieldValue(struct_data, field_index);
                     },
                     else => null,
@@ -1434,7 +1360,7 @@ const ConstEvaluator = struct {
         return switch (base) {
             .struct_ref => |heap_id| blk: {
                 const struct_data = self.env.heap.getStruct(heap_id);
-                const field_index = self.structFieldIndex(struct_data.type_id, field_name) orelse break :blk null;
+                const field_index = (try self.structFieldIndex(struct_data.type_id, field_name)) orelse break :blk null;
                 break :blk CtValue{ .struct_ref = try self.env.heap.setStructField(heap_id, @intCast(field_index), value) };
             },
             else => null,
@@ -1443,13 +1369,12 @@ const ConstEvaluator = struct {
 
     fn lookupNamedItem(self: *ConstEvaluator, name: []const u8) ?ast.ItemId {
         if (self.current_contract) |contract_id| {
-            const contract_item = self.file.item(contract_id).*;
-            if (contract_item == .Contract) {
-                for (contract_item.Contract.members) |member_id| {
-                    if (self.itemName(member_id)) |item_name| {
-                        if (std.mem.eql(u8, item_name, name)) return member_id;
-                    }
-                }
+            switch (self.file.item(contract_id).*) {
+                .Contract => |contract| for (contract.members) |member_id| {
+                    const member_name = self.itemName(member_id) orelse continue;
+                    if (std.mem.eql(u8, member_name, name)) return member_id;
+                },
+                else => {},
             }
         }
         for (self.file.root_items) |item_id| {
@@ -1478,7 +1403,7 @@ const ConstEvaluator = struct {
 
     const AbiFunctionReference = struct {
         name: []const u8,
-        param_types: []const model.Type,
+        param_types: []const Type,
         has_self: bool = false,
         signature: ?[]const u8 = null,
     };
@@ -1527,55 +1452,29 @@ const ConstEvaluator = struct {
         return try hir_abi.signatureForAbiTypes(self.allocator, event_name, abi_types.items);
     }
 
-    fn signatureForEip712Struct(self: *ConstEvaluator, builtin_range: source.TextRange, struct_item: ast.StructItem) !?[]const u8 {
-        const type_name = hir_abi.eip712WireNameFromStructItem(self.file, struct_item) orelse return null;
-
-        var fields: std.ArrayList(hir_abi.Eip712Field) = .{};
-        defer fields.deinit(self.allocator);
-
-        for (struct_item.fields) |field| {
-            if (self.typeExprIsStructReference(field.type_expr)) {
-                self.recordCtError(error_mod.CtError.init(
-                    .compile_error,
-                    self.sourceSpan(builtin_range),
-                    "@eip712TypeHash does not yet support nested struct fields",
-                ));
-                return null;
-            }
-
-            const abi_type = (try self.typeExprAbiName(field.type_expr)) orelse return null;
-            try fields.append(self.allocator, .{
-                .name = field.name,
-                .abi_type = abi_type,
-            });
-        }
-
-        return try hir_abi.signatureForEip712Type(self.allocator, type_name, fields.items);
-    }
-
     fn ensureTypeChecked(self: *ConstEvaluator, key: model.TypeCheckKey) !void {
         const module_id = self.module_id orelse return;
         const type_query = self.type_query orelse return;
-        _ = try type_query.ensure_typecheck(type_query.context, module_id, key);
+        _ = try type_query.ensureTypeCheck(module_id, key);
     }
 
     fn currentTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
         const key = self.current_typecheck_key orelse return null;
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.ensure_typecheck(type_query.context, module_id, key);
+        return try type_query.ensureTypeCheck(module_id, key);
     }
 
     fn currentModuleTypeCheckResult(self: *ConstEvaluator) !?*const model.TypeCheckResult {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.module_typecheck(type_query.context, module_id);
+        return try type_query.moduleTypeCheck(module_id);
     }
 
     fn currentItemIndex(self: *ConstEvaluator) !?*const model.ItemIndexResult {
-        const module_id = self.module_id orelse return null;
-        const type_query = self.type_query orelse return null;
-        return try type_query.item_index(type_query.context, module_id);
+        const type_query = self.type_query orelse return self.fallback_item_index;
+        const module_id = self.module_id orelse return self.fallback_item_index;
+        return try type_query.itemIndex(module_id);
     }
 
     fn currentLayoutContext(self: *ConstEvaluator) !?abi_layout_context.LayoutContext {
@@ -1583,15 +1482,13 @@ const ConstEvaluator = struct {
         const item_index = (try self.currentItemIndex()) orelse return null;
         return .{
             .allocator = self.allocator,
-            .file = self.file,
-            .item_index = item_index,
-            .typecheck = typecheck,
+            .provider = abi_layout_provider.abiLayoutProvider(self.file, item_index, typecheck),
         };
     }
 
-    fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const model.ConstEvalResult {
+    fn constEvalForModule(self: *ConstEvaluator, module_id: source.ModuleId) !?*const ConstEvalResult {
         const type_query = self.type_query orelse return null;
-        return try type_query.const_eval(type_query.context, module_id);
+        return try type_query.constEval(module_id);
     }
 
     fn callableFunctionIsPure(self: *ConstEvaluator, item_id: ast.ItemId) !bool {
@@ -1606,18 +1503,18 @@ const ConstEvaluator = struct {
 
     fn astFileForModule(self: *ConstEvaluator, module_id: source.ModuleId) !*const ast.AstFile {
         const type_query = self.type_query orelse return error.MissingTypeQuery;
-        return try type_query.ast_file(type_query.context, module_id);
+        return try type_query.astFile(module_id);
     }
 
     fn lookupNamedItemInModule(self: *ConstEvaluator, module_id: source.ModuleId, name: []const u8) !?ast.ItemId {
         const type_query = self.type_query orelse return null;
-        return try type_query.lookup_item(type_query.context, module_id, name);
+        return try type_query.lookupItem(module_id, name);
     }
 
     fn resolveImportAlias(self: *ConstEvaluator, alias: []const u8) !?source.ModuleId {
         const module_id = self.module_id orelse return null;
         const type_query = self.type_query orelse return null;
-        return try type_query.resolve_import_alias(type_query.context, module_id, alias);
+        return try type_query.resolveImportAlias(module_id, alias);
     }
 
     fn importedModuleForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?source.ModuleId {
@@ -1626,96 +1523,43 @@ const ConstEvaluator = struct {
             .Field => |field| blk: {
                 const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
                 const type_query = self.type_query orelse break :blk null;
-                break :blk try type_query.resolve_import_alias(type_query.context, base_module_id, field.name);
+                break :blk try type_query.resolveImportAlias(base_module_id, field.name);
             },
-            .Group => |group| self.importedModuleForExpr(group.expr),
+            .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
         };
     }
 
     fn functionRuntimeSelfParameterIndex(self: *ConstEvaluator, function: ast.FunctionItem) ?usize {
-        return self.functionRuntimeSelfParameterIndexInFile(self.file, function);
+        return model.functionRuntimeSelfParameterIndex(self.file, function);
     }
 
     fn functionRuntimeSelfParameterIndexInFile(self: *ConstEvaluator, file: *const ast.AstFile, function: ast.FunctionItem) ?usize {
         _ = self;
-        for (function.parameters, 0..) |parameter, index| {
-            if (parameter.is_comptime) continue;
-            const name = switch (file.pattern(parameter.pattern).*) {
-                .Name => |pattern| pattern.name,
-                else => null,
-            };
-            return if (std.mem.eql(u8, name orelse "", "self")) index else null;
-        }
-        return null;
+        return model.functionRuntimeSelfParameterIndex(file, function);
     }
 
     fn typeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return fixedBytesTypeName(len);
-        return switch (type_id) {
-            type_ids.u8_id => "u8",
-            type_ids.u16_id => "u16",
-            type_ids.u32_id => "u32",
-            type_ids.u64_id => "u64",
-            type_ids.u128_id => "u128",
-            type_ids.u256_id => "u256",
-            type_ids.i8_id => "i8",
-            type_ids.i16_id => "i16",
-            type_ids.i32_id => "i32",
-            type_ids.i64_id => "i64",
-            type_ids.i128_id => "i128",
-            type_ids.i256_id => "i256",
-            type_ids.bool_id => "bool",
-            type_ids.address_id => "address",
-            type_ids.string_id => "string",
-            type_ids.bytes_id => "bytes",
-            type_ids.void_id => "void",
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return type_builtin.fixedBytesName(len);
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| return spec.source_name;
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null;
     }
 
     fn abiTypeNameForTypeId(self: *ConstEvaluator, type_id: u32) ?[]const u8 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return fixedBytesTypeName(len);
-        return switch (type_id) {
-            type_ids.u8_id => "uint8",
-            type_ids.u16_id => "uint16",
-            type_ids.u32_id => "uint32",
-            type_ids.u64_id => "uint64",
-            type_ids.u128_id => "uint128",
-            type_ids.u256_id => "uint256",
-            type_ids.i8_id => "int8",
-            type_ids.i16_id => "int16",
-            type_ids.i32_id => "int32",
-            type_ids.i64_id => "int64",
-            type_ids.i128_id => "int128",
-            type_ids.i256_id => "int256",
-            type_ids.bool_id => "bool",
-            type_ids.address_id => "address",
-            type_ids.string_id => "string",
-            type_ids.bytes_id => "bytes",
-            type_ids.void_id => "void",
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return abi_type_names.fixedBytesAbiName(len);
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| return abi_type_names.builtinSpecAbiName(spec);
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id| self.itemName(item_id) else null;
     }
 
     fn typeByteSizeForTypeId(self: *ConstEvaluator, type_id: u32) ?u256 {
-        if (fixedBytesLenForTypeId(type_id)) |len| return len;
-        return switch (type_id) {
-            type_ids.u8_id, type_ids.i8_id => 1,
-            type_ids.u16_id, type_ids.i16_id => 2,
-            type_ids.u32_id, type_ids.i32_id => 4,
-            type_ids.u64_id, type_ids.i64_id => 8,
-            type_ids.u128_id, type_ids.i128_id => 16,
-            type_ids.u256_id, type_ids.i256_id => 32,
-            type_ids.bool_id => 1,
-            type_ids.address_id => 20,
-            type_ids.bytes_id, type_ids.string_id => null,
-            type_ids.void_id => 0,
-            else => if (self.itemIdForNamedTypeId(type_id)) |item_id|
-                self.itemByteSize(item_id)
-            else
-                null,
-        };
+        if (type_builtin.fixedBytesLenForTypeId(type_id)) |len| return len;
+        if (type_builtin.lookupBuiltinByComptimeTypeId(type_id)) |spec| {
+            return if (spec.byte_width) |width| @as(u256, width) else null;
+        }
+        return if (self.itemIdForNamedTypeId(type_id)) |item_id|
+            self.itemByteSize(item_id)
+        else
+            null;
     }
 
     fn itemByteSize(self: *ConstEvaluator, item_id: ast.ItemId) ?u256 {
@@ -1789,7 +1633,7 @@ const ConstEvaluator = struct {
     fn typeExprAbiName(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) anyerror!?[]const u8 {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
-                if (hir_abi.parseFixedBytesSpelling(path.name)) |_| break :blk try self.allocator.dupe(u8, path.name);
+                if (type_builtin.parseFixedBytesName(path.name)) |_| break :blk try self.allocator.dupe(u8, path.name);
                 if (self.pathTypeId(path.name)) |type_id| break :blk self.abiTypeNameForTypeId(type_id);
                 break :blk null;
             },
@@ -1845,25 +1689,6 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn typeExprIsStructReference(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) bool {
-        return switch (self.file.typeExpr(type_expr_id).*) {
-            .Path => |path| blk: {
-                const item_id = self.lookupNamedItem(path.name) orelse break :blk false;
-                break :blk self.file.item(item_id).* == .Struct;
-            },
-            .Generic => |generic| blk: {
-                if (refinements.isKnownName(generic.name)) {
-                    if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprIsStructReference(generic.args[0].Type);
-                }
-                const item_id = self.lookupNamedItem(generic.name) orelse break :blk false;
-                break :blk self.file.item(item_id).* == .Struct;
-            },
-            .Array => |array| self.typeExprIsStructReference(array.element),
-            .Slice => |slice| self.typeExprIsStructReference(slice.element),
-            .Tuple, .AnonymousStruct, .ErrorUnion, .Error => false,
-        };
-    }
-
     fn concreteTypeNameForCtValue(self: *ConstEvaluator, value: CtValue) ?[]const u8 {
         return switch (value) {
             .type_val => |type_id| self.typeNameForTypeId(type_id),
@@ -1872,8 +1697,8 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) ?CallableFunction {
-        const typecheck = (self.currentModuleTypeCheckResult() catch return null) orelse return null;
+    fn resolveConcreteTraitMethodCall(self: *ConstEvaluator, field: ast.FieldExpr) !?CallableFunction {
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         const base_value = (self.evalExprCtValue(field.base) catch null) orelse self.typeExprCtValue(field.base);
         const target_name = if (base_value) |value|
             self.concreteTypeNameForCtValue(value)
@@ -1887,24 +1712,19 @@ const ConstEvaluator = struct {
         for (typecheck.impl_interfaces) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, concrete_name)) continue;
             const trait_interface = typecheck.traitInterfaceByName(impl_interface.trait_name) orelse continue;
-            var trait_is_comptime = false;
-            for (trait_interface.methods) |trait_method| {
-                if (!std.mem.eql(u8, trait_method.name, field.name)) continue;
-                trait_is_comptime = trait_method.is_comptime;
-                break;
-            }
-            if (!trait_is_comptime) continue;
+            const trait_method = trait_interface.methodByName(field.name) orelse continue;
+            if (!trait_method.is_comptime) continue;
 
-            const impl_item = self.file.item(impl_interface.impl_item_id).Impl;
-            for (impl_item.methods) |method_item_id| {
-                const item = self.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                if (!std.mem.eql(u8, item.Function.name, field.name)) continue;
-                if (matched_impl_item_id != null) return null;
-                matched_impl_item_id = impl_interface.impl_item_id;
-                matched_method_item_id = method_item_id;
-                matched_function = item.Function;
-            }
+            const item_index = (try self.currentItemIndex()) orelse return null;
+            const method_count = item_index.countImplMethods(self.file, impl_interface.impl_item_id, field.name);
+            if (method_count == 0) continue;
+            if (matched_impl_item_id != null or method_count > 1) return null;
+            const method_item_id = item_index.lookupImplMethod(self.file, impl_interface.impl_item_id, field.name) orelse continue;
+            const item = self.file.item(method_item_id).*;
+            if (item != .Function) continue;
+            matched_impl_item_id = impl_interface.impl_item_id;
+            matched_method_item_id = method_item_id;
+            matched_function = item.Function;
         }
 
         _ = matched_impl_item_id orelse return null;
@@ -1941,7 +1761,7 @@ const ConstEvaluator = struct {
         }
     }
 
-    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) ?CallableFunction {
+    fn lookupCallableFunction(self: *ConstEvaluator, callee: ast.ExprId) !?CallableFunction {
         switch (self.file.expression(callee).*) {
             .Name => |name| {
                 const function_item_id = self.lookupNamedItem(name.name) orelse return null;
@@ -1956,9 +1776,9 @@ const ConstEvaluator = struct {
                 };
             },
             .Field => |field| {
-                if ((self.importedModuleForExpr(field.base) catch null)) |target_module_id| {
-                    const target_file = self.astFileForModule(target_module_id) catch return null;
-                    const function_item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch return null) orelse return null;
+                if (try self.importedModuleForExpr(field.base)) |target_module_id| {
+                    const target_file = try self.astFileForModule(target_module_id);
+                    const function_item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse return null;
                     const item = target_file.item(function_item_id).*;
                     if (item == .Function) {
                         return .{
@@ -1970,9 +1790,9 @@ const ConstEvaluator = struct {
                         };
                     }
                 }
-                return self.resolveConcreteTraitMethodCall(field);
+                return try self.resolveConcreteTraitMethodCall(field);
             },
-            .Group => |group| return self.lookupCallableFunction(group.expr),
+            .Group => |group| return try self.lookupCallableFunction(group.expr),
             else => return null,
         }
     }
@@ -1980,14 +1800,14 @@ const ConstEvaluator = struct {
     fn functionReferenceFromItemType(
         self: *ConstEvaluator,
         name: []const u8,
-        ty: model.Type,
+        ty: Type,
         self_param_index: ?usize,
     ) !?AbiFunctionReference {
         if (ty.kind() != .function) return null;
         const params = ty.function.param_types;
         const filtered = if (self_param_index) |skip_index| blk: {
             if (skip_index >= params.len) break :blk params;
-            var out = try self.allocator.alloc(model.Type, params.len - 1);
+            var out = try self.allocator.alloc(Type, params.len - 1);
             var out_index: usize = 0;
             for (params, 0..) |param, index| {
                 if (index == skip_index) continue;
@@ -2023,13 +1843,13 @@ const ConstEvaluator = struct {
                     .Name => |name| name.name,
                     else => null,
                 }) |base_name| {
-                    if ((self.resolveImportAlias(base_name) catch null)) |target_module_id| {
-                        const target_file = self.astFileForModule(target_module_id) catch break :blk null;
+                    if (try self.resolveImportAlias(base_name)) |target_module_id| {
+                        const target_file = try self.astFileForModule(target_module_id);
                         const target_typecheck = if (self.type_query) |query|
-                            (query.module_typecheck(query.context, target_module_id) catch break :blk null)
+                            try query.moduleTypeCheck(target_module_id)
                         else
                             break :blk null;
-                        const item_id = (self.lookupNamedItemInModule(target_module_id, field.name) catch break :blk null) orelse break :blk null;
+                        const item_id = (try self.lookupNamedItemInModule(target_module_id, field.name)) orelse break :blk null;
                         const item = target_file.item(item_id).*;
                         if (item != .Function) break :blk null;
                         break :blk try self.functionReferenceFromItemType(
@@ -2042,8 +1862,8 @@ const ConstEvaluator = struct {
                     if (self.lookupNamedItem(base_name)) |base_item_id| {
                         switch (self.file.item(base_item_id).*) {
                             .Trait => |trait_item| {
-                                for (trait_item.methods) |method| {
-                                    if (std.mem.eql(u8, method.name, field.name)) {
+                                if (try self.currentItemIndex()) |item_index| {
+                                    if (item_index.lookupTraitMethod(self.file, base_item_id, field.name)) |method| {
                                         const signature = (try self.signatureForTraitMethod(method)) orelse break :blk null;
                                         break :blk AbiFunctionReference{
                                             .name = method.name,
@@ -2056,14 +1876,7 @@ const ConstEvaluator = struct {
 
                                 const module_typecheck = typecheck orelse break :blk null;
                                 if (module_typecheck.traitInterfaceByName(trait_item.name)) |trait_interface| {
-                                    var found_method: ?model.TraitMethodSignature = null;
-                                    for (trait_interface.methods) |method| {
-                                        if (std.mem.eql(u8, method.name, field.name)) {
-                                            found_method = method;
-                                            break;
-                                        }
-                                    }
-                                    const method = found_method orelse break :blk null;
+                                    const method = trait_interface.methodByName(field.name) orelse break :blk null;
                                     break :blk AbiFunctionReference{
                                         .name = method.name,
                                         .param_types = method.param_types,
@@ -2073,17 +1886,16 @@ const ConstEvaluator = struct {
                                     break :blk null;
                                 }
                             },
-                            .Contract => |contract| {
+                            .Contract => {
                                 const module_typecheck = typecheck orelse break :blk null;
-                                for (contract.members) |member_id| {
-                                    const member = self.file.item(member_id).*;
-                                    if (member != .Function or !std.mem.eql(u8, member.Function.name, field.name)) continue;
-                                    break :blk try self.functionReferenceFromItemType(
-                                        field.name,
-                                        module_typecheck.itemLocatedType(member_id).type,
-                                        self.functionRuntimeSelfParameterIndex(member.Function),
-                                    );
-                                }
+                                const item_index = (try self.currentItemIndex()) orelse break :blk null;
+                                const member_id = item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{ .function = true }) orelse break :blk null;
+                                const member = self.file.item(member_id).*;
+                                break :blk try self.functionReferenceFromItemType(
+                                    field.name,
+                                    module_typecheck.itemLocatedType(member_id).type,
+                                    self.functionRuntimeSelfParameterIndex(member.Function),
+                                );
                             },
                             else => {},
                         }
@@ -2098,31 +1910,43 @@ const ConstEvaluator = struct {
         };
     }
 
+    fn signatureForAbiFunctionReference(self: *ConstEvaluator, function_ref: AbiFunctionReference) !?[]const u8 {
+        const layout_ctx = (try self.currentLayoutContext()) orelse return null;
+        return try layout_ctx.signatureForMethod(
+            function_ref.name,
+            function_ref.has_self,
+            function_ref.param_types,
+        );
+    }
+
     /// Resolves `Name` or `Contract.Member` paths to an item id, recursing
     /// through `.Group` wrappers. Returns null for anything else (imports,
     /// traits, expressions). Used by the event/struct ABI reference resolvers.
-    fn resolveContractMemberPath(self: *ConstEvaluator, expr_id: ast.ExprId) ?ast.ItemId {
+    fn resolveContractMemberPath(self: *ConstEvaluator, expr_id: ast.ExprId) !?ast.ItemId {
         return switch (self.file.expression(expr_id).*) {
-            .Group => |group| self.resolveContractMemberPath(group.expr),
+            .Group => |group| try self.resolveContractMemberPath(group.expr),
             .Name => |name| self.lookupNamedItem(name.name),
             .Field => |field| blk: {
-                const base_item_id = self.resolveContractMemberPath(field.base) orelse break :blk null;
-                const contract = switch (self.file.item(base_item_id).*) {
-                    .Contract => |contract| contract,
-                    else => break :blk null,
-                };
-                for (contract.members) |member_id| {
-                    const member_name = self.itemName(member_id) orelse continue;
-                    if (std.mem.eql(u8, member_name, field.name)) break :blk member_id;
-                }
-                break :blk null;
+                const base_item_id = (try self.resolveContractMemberPath(field.base)) orelse break :blk null;
+                const item_index = (try self.currentItemIndex()) orelse break :blk null;
+                break :blk item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{
+                    .function = true,
+                    .struct_ = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                    .trait_ = true,
+                    .field = true,
+                    .constant = true,
+                    .log_decl = true,
+                    .error_decl = true,
+                });
             },
             else => null,
         };
     }
 
     fn resolveAbiEventReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?AbiEventReference {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .LogDecl) return null;
         const signature = (try self.signatureForLogDecl(item.LogDecl)) orelse return null;
@@ -2130,20 +1954,20 @@ const ConstEvaluator = struct {
     }
 
     fn resolveAbiStructReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?AbiStructReference {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .Struct) return null;
         return .{ .item = item.Struct };
     }
 
     fn resolveReflectionStructReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?ast.StructItem {
-        const item_id = self.resolveContractMemberPath(expr_id) orelse return null;
+        const item_id = (try self.resolveContractMemberPath(expr_id)) orelse return null;
         const item = self.file.item(item_id).*;
         return if (item == .Struct) item.Struct else null;
     }
 
     fn resolveReflectionTraitReference(self: *ConstEvaluator, expr_id: ast.ExprId) !?ReflectionTraitReference {
-        if (self.resolveContractMemberPath(expr_id)) |item_id| {
+        if (try self.resolveContractMemberPath(expr_id)) |item_id| {
             const item = self.file.item(item_id).*;
             return if (item == .Trait) .{
                 .module_id = self.module_id orelse return null,
@@ -2182,7 +2006,12 @@ const ConstEvaluator = struct {
 
     fn buildTraitMethodsCtValue(self: *ConstEvaluator, trait_ref: ReflectionTraitReference) !CtValue {
         const type_query = self.type_query orelse return error.NotComptime;
-        const typecheck = try type_query.module_typecheck(type_query.context, trait_ref.module_id);
+        const typecheck = try type_query.moduleTypeCheck(trait_ref.module_id);
+        const item_index = try type_query.itemIndex(trait_ref.module_id);
+        const layout_ctx = abi_layout_context.LayoutContext{
+            .allocator = self.allocator,
+            .provider = abi_layout_provider.abiLayoutProvider(trait_ref.file, item_index, typecheck),
+        };
         const trait_interface = typecheck.traitInterfaceByName(trait_ref.item.name) orelse return error.NotComptime;
         const elems = try self.allocator.alloc(CtValue, trait_interface.methods.len);
         for (trait_interface.methods, 0..) |method, index| {
@@ -2196,8 +2025,7 @@ const ConstEvaluator = struct {
                 declared_errors[err_index] = .{ .string_ref = try self.env.heap.allocString(err_name) };
             }
 
-            const signature = try hir_abi.signatureForMethod(
-                self.allocator,
+            const signature = try layout_ctx.signatureForMethod(
                 method.name,
                 method.receiver_kind != .none,
                 method.param_types,
@@ -2224,57 +2052,35 @@ const ConstEvaluator = struct {
         return .{ .tuple_ref = try self.env.heap.allocTuple(copied) };
     }
 
-    fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) ?usize {
-        const fields = self.anonymousStructFieldsForExpr(expr_id) orelse return null;
-        for (fields, 0..) |field, index| {
-            if (std.mem.eql(u8, field.name, field_name)) return index;
+    fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?usize {
+        const fields = (try self.anonymousStructFieldsForExpr(expr_id)) orelse return null;
+        return model.anonymousStructFieldIndex(fields, field_name);
+    }
+
+    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) !?[]const AnonymousStructField {
+        if (try self.currentTypeCheckResult()) |typecheck| {
+            const ty = typecheck.exprType(expr_id);
+            if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
+        }
+        if (try self.currentModuleTypeCheckResult()) |typecheck| {
+            const ty = typecheck.exprType(expr_id);
+            if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
         }
         return null;
     }
 
-    fn anonymousStructFieldsForExpr(self: *ConstEvaluator, expr_id: ast.ExprId) ?[]const model.AnonymousStructField {
-        if (self.currentTypeCheckResult() catch null) |typecheck| {
-            const ty = typecheck.exprType(expr_id);
-            if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
-        }
-        if (self.currentModuleTypeCheckResult() catch null) |typecheck| {
-            const ty = typecheck.exprType(expr_id);
-            if (ty.kind() == .anonymous_struct) return ty.anonymous_struct.fields;
-        }
-        return null;
-    }
-
-    fn typeIdForModelType(self: *ConstEvaluator, ty: model.Type) ?u32 {
+    fn typeIdForModelType(self: *ConstEvaluator, ty: Type) ?u32 {
         return switch (ty) {
             .integer => |integer| blk: {
-                const bits = integer.bits orelse 256;
-                if (integer.signed orelse false) {
-                    break :blk switch (bits) {
-                        8 => type_ids.i8_id,
-                        16 => type_ids.i16_id,
-                        32 => type_ids.i32_id,
-                        64 => type_ids.i64_id,
-                        128 => type_ids.i128_id,
-                        256 => type_ids.i256_id,
-                        else => null,
-                    };
-                }
-                break :blk switch (bits) {
-                    8 => type_ids.u8_id,
-                    16 => type_ids.u16_id,
-                    32 => type_ids.u32_id,
-                    64 => type_ids.u64_id,
-                    128 => type_ids.u128_id,
-                    256 => type_ids.u256_id,
-                    else => null,
-                };
+                const spec = integer.builtinSpec() orelse break :blk null;
+                break :blk spec.comptime_type_id;
             },
-            .bool => type_ids.bool_id,
-            .address => type_ids.address_id,
-            .fixed_bytes => |fixed_bytes| fixedBytesTypeId(fixed_bytes.len),
-            .string => type_ids.string_id,
-            .bytes => type_ids.bytes_id,
-            .void => type_ids.void_id,
+            .bool => type_builtin.lookupBuiltinById(.bool).comptime_type_id,
+            .address => type_builtin.lookupBuiltinById(.address).comptime_type_id,
+            .fixed_bytes => |fixed_bytes| type_builtin.fixedBytesTypeId(fixed_bytes.len),
+            .string => type_builtin.lookupBuiltinById(.string).comptime_type_id,
+            .bytes => type_builtin.lookupBuiltinById(.bytes).comptime_type_id,
+            .void => type_builtin.lookupBuiltinById(.void).comptime_type_id,
             .struct_ => |named| self.pathTypeId(named.name),
             .contract => |named| self.pathTypeId(named.name),
             .bitfield => |named| self.pathTypeId(named.name),
@@ -2500,7 +2306,7 @@ const ConstEvaluator = struct {
         const fields = (try self.enumNamedPayloadFieldsFromAst(item.Enum.variants[@intCast(enum_value.variant_id)].payload)) orelse return false;
 
         for (destructure.fields) |field| {
-            const index = findAnonymousStructFieldIndex(fields, field.name) orelse return false;
+            const index = model.anonymousStructFieldIndex(fields, field.name) orelse return false;
             if (index >= payload.elems.len) return false;
             try self.bindPatternCtValue(field.binding, payload.elems[index]);
         }
@@ -2580,13 +2386,13 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn abiDecodeTypeFromTypeArg(self: *ConstEvaluator, type_arg: ast.TypeExprId) !model.Type {
+    fn abiDecodeTypeFromTypeArg(self: *ConstEvaluator, type_arg: ast.TypeExprId) !Type {
         const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
         const raw = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, type_arg);
         return try self.resolveAbiDecodeTypeAliases(raw);
     }
 
-    fn resolveAbiDecodeTypeAliases(self: *ConstEvaluator, ty: model.Type) !model.Type {
+    fn resolveAbiDecodeTypeAliases(self: *ConstEvaluator, ty: Type) !Type {
         return switch (ty) {
             .named => |named| blk: {
                 const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
@@ -2599,7 +2405,7 @@ const ConstEvaluator = struct {
             .refinement => |refinement| blk: {
                 var copy = refinement;
                 copy.base_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(refinement.base_type.*));
-                break :blk model.Type{ .refinement = copy };
+                break :blk Type{ .refinement = copy };
             },
             .array => |array| .{ .array = .{
                 .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(array.element_type.*)),
@@ -2609,28 +2415,28 @@ const ConstEvaluator = struct {
                 .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(slice.element_type.*)),
             } },
             .tuple => |elements| blk: {
-                const resolved = try self.allocator.alloc(model.Type, elements.len);
+                const resolved = try self.allocator.alloc(Type, elements.len);
                 for (elements, 0..) |element, index| {
                     resolved[index] = try self.resolveAbiDecodeTypeAliases(element);
                 }
-                break :blk model.Type{ .tuple = resolved };
+                break :blk Type{ .tuple = resolved };
             },
             .anonymous_struct => |struct_type| blk: {
-                const fields = try self.allocator.alloc(model.AnonymousStructField, struct_type.fields.len);
+                const fields = try self.allocator.alloc(AnonymousStructField, struct_type.fields.len);
                 for (struct_type.fields, 0..) |field, index| {
                     fields[index] = .{
                         .name = field.name,
                         .ty = try self.resolveAbiDecodeTypeAliases(field.ty),
                     };
                 }
-                break :blk model.Type{ .anonymous_struct = .{ .fields = fields } };
+                break :blk Type{ .anonymous_struct = .{ .fields = fields } };
             },
             .error_union => |error_union| blk: {
-                const errors = try self.allocator.alloc(model.Type, error_union.error_types.len);
+                const errors = try self.allocator.alloc(Type, error_union.error_types.len);
                 for (error_union.error_types, 0..) |err, index| {
                     errors[index] = try self.resolveAbiDecodeTypeAliases(err);
                 }
-                break :blk model.Type{ .error_union = .{
+                break :blk Type{ .error_union = .{
                     .payload_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(error_union.payload_type.*)),
                     .error_types = errors,
                 } };
@@ -2639,8 +2445,8 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn storeAbiDecodeType(self: *ConstEvaluator, ty: model.Type) !*model.Type {
-        const ptr = try self.allocator.create(model.Type);
+    fn storeAbiDecodeType(self: *ConstEvaluator, ty: Type) !*Type {
+        const ptr = try self.allocator.create(Type);
         ptr.* = ty;
         return ptr;
     }
@@ -2655,7 +2461,7 @@ const ConstEvaluator = struct {
 
     fn abiDecodeErr(self: *ConstEvaluator, err: abi_comptime_decoder.DecodeError) !CtValue {
         const err_value = CtValue{ .adt_val = .{
-            .type_id = abi_decode_error_type_id,
+            .type_id = type_builtin.abi_decode_error_type_id,
             .variant_id = @intFromEnum(err),
             .payload = null,
         } };
@@ -2675,16 +2481,16 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn abiDecodeTypeIdForType(context: *anyopaque, ty: model.Type) ?u32 {
+    fn abiDecodeTypeIdForType(context: *anyopaque, ty: Type) anyerror!?u32 {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
         return self.typeIdForModelType(ty);
     }
 
-    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) ?[]const model.AnonymousStructField {
+    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) anyerror!?[]const AnonymousStructField {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
-        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         if (typecheck.instantiatedStructByName(name)) |instantiated| {
-            const fields = self.allocator.alloc(model.AnonymousStructField, instantiated.fields.len) catch return null;
+            const fields = try self.allocator.alloc(AnonymousStructField, instantiated.fields.len);
             for (instantiated.fields, 0..) |field, index| {
                 fields[index] = .{ .name = field.name, .ty = field.ty };
             }
@@ -2695,20 +2501,20 @@ const ConstEvaluator = struct {
             .Struct => |struct_item| struct_item,
             else => return null,
         };
-        const item_index = (self.currentItemIndex() catch null) orelse return null;
-        const fields = self.allocator.alloc(model.AnonymousStructField, struct_item.fields.len) catch return null;
+        const item_index = (try self.currentItemIndex()) orelse return null;
+        const fields = try self.allocator.alloc(AnonymousStructField, struct_item.fields.len);
         for (struct_item.fields, 0..) |field, index| {
             fields[index] = .{
                 .name = field.name,
-                .ty = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, field.type_expr) catch return null,
+                .ty = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, field.type_expr),
             };
         }
         return fields;
     }
 
-    fn abiDecodeEnumVariantCount(context: *anyopaque, name: []const u8) ?usize {
+    fn abiDecodeEnumVariantCount(context: *anyopaque, name: []const u8) anyerror!?usize {
         const self: *ConstEvaluator = @ptrCast(@alignCast(context));
-        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        const typecheck = (try self.currentModuleTypeCheckResult()) orelse return null;
         if (typecheck.instantiatedEnumByName(name)) |instantiated| return instantiated.variants.len;
         const item_id = self.lookupNamedItem(name) orelse return null;
         return switch (self.file.item(item_id).*) {
@@ -2721,7 +2527,7 @@ const ConstEvaluator = struct {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.evalAbiEncodeVoidCallArgument(group.expr),
             .Call => |call| blk: {
-                const callable = self.lookupCallableFunction(call.callee) orelse break :blk false;
+                const callable = (try self.lookupCallableFunction(call.callee)) orelse break :blk false;
                 const function = callable.function;
                 if (function.return_type != null) break :blk false;
 
@@ -2831,12 +2637,7 @@ const ConstEvaluator = struct {
         if (std.mem.eql(u8, builtin.name, "selector") or std.mem.eql(u8, builtin.name, "abiSignature")) {
             if (builtin.args.len != 1) return null;
             const function_ref = (try self.resolveAbiFunctionReference(builtin.args[0])) orelse return null;
-            const signature = function_ref.signature orelse try hir_abi.signatureForMethod(
-                self.allocator,
-                function_ref.name,
-                function_ref.has_self,
-                function_ref.param_types,
-            );
+            const signature = function_ref.signature orelse (try self.signatureForAbiFunctionReference(function_ref)) orelse return null;
             if (std.mem.eql(u8, builtin.name, "abiSignature")) return .{ .string = signature };
 
             const selector = hir_abi.keccakSelectorValue(signature);
@@ -2851,13 +2652,6 @@ const ConstEvaluator = struct {
 
         if (std.mem.eql(u8, builtin.name, "abiEncode")) {
             return try self.evalAbiEncodeBuiltin(builtin);
-        }
-
-        if (std.mem.eql(u8, builtin.name, "eip712TypeHash")) {
-            if (builtin.args.len != 1) return null;
-            const struct_ref = (try self.resolveAbiStructReference(builtin.args[0])) orelse return null;
-            const signature = (try self.signatureForEip712Struct(builtin.range, struct_ref.item)) orelse return null;
-            return .{ .fixed_bytes = try keccakFixedBytes(self.allocator, signature) };
         }
 
         if (std.mem.eql(u8, builtin.name, "cast")) {
@@ -2900,16 +2694,9 @@ const ConstEvaluator = struct {
                 }
             else
                 return null;
-            var hash: [32]u8 = undefined;
-            std.crypto.hash.sha3.Keccak256.hash(bytes, &hash, .{});
-            var text: [64]u8 = undefined;
-            for (hash, 0..) |byte, index| {
-                text[index * 2] = std.fmt.hex_charset[byte >> 4];
-                text[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-            }
-            var integer = try std.math.big.int.Managed.init(self.allocator);
-            try integer.setString(16, text[0..]);
-            return .{ .integer = integer };
+            const hash = hir_abi.keccak256(bytes);
+            const value = std.mem.readInt(u256, &hash, .big);
+            return .{ .integer = try std.math.big.int.Managed.initSet(self.allocator, value) };
         }
 
         if (builtin.args.len >= 2 and (std.mem.eql(u8, builtin.name, "divTrunc") or
@@ -2955,6 +2742,7 @@ const ConstEvaluator = struct {
         }
 
         if (std.mem.eql(u8, builtin.name, "truncate")) {
+            if (builtin.args.len == 0) return null;
             return try self.evalExpr(builtin.args[0]);
         }
 
@@ -2995,7 +2783,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalCall(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?ConstValue {
-        const callable = self.lookupCallableFunction(call.callee) orelse {
+        const callable = (try self.lookupCallableFunction(call.callee)) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
             return null;
@@ -3064,7 +2852,7 @@ const ConstEvaluator = struct {
     }
 
     fn evalCallCtValue(self: *ConstEvaluator, call: ast.CallExpr, comptime use_cache: bool) anyerror!?CtValue {
-        const callable = self.lookupCallableFunction(call.callee) orelse {
+        const callable = (try self.lookupCallableFunction(call.callee)) orelse {
             _ = try self.evalExprImpl(call.callee, use_cache);
             for (call.args) |arg| _ = try self.evalExprImpl(arg, use_cache);
             return null;
@@ -3215,39 +3003,23 @@ const ConstEvaluator = struct {
                 else => null,
             };
         }
-        if (std.mem.eql(u8, trimmed, "u8")) return type_ids.u8_id;
-        if (std.mem.eql(u8, trimmed, "u16")) return type_ids.u16_id;
-        if (std.mem.eql(u8, trimmed, "u32")) return type_ids.u32_id;
-        if (std.mem.eql(u8, trimmed, "u64")) return type_ids.u64_id;
-        if (std.mem.eql(u8, trimmed, "u128")) return type_ids.u128_id;
-        if (std.mem.eql(u8, trimmed, "u256")) return type_ids.u256_id;
-        if (std.mem.eql(u8, trimmed, "i8")) return type_ids.i8_id;
-        if (std.mem.eql(u8, trimmed, "i16")) return type_ids.i16_id;
-        if (std.mem.eql(u8, trimmed, "i32")) return type_ids.i32_id;
-        if (std.mem.eql(u8, trimmed, "i64")) return type_ids.i64_id;
-        if (std.mem.eql(u8, trimmed, "i128")) return type_ids.i128_id;
-        if (std.mem.eql(u8, trimmed, "i256")) return type_ids.i256_id;
-        if (std.mem.eql(u8, trimmed, "bool")) return type_ids.bool_id;
-        if (std.mem.eql(u8, trimmed, "address")) return type_ids.address_id;
-        if (std.mem.eql(u8, trimmed, "string")) return type_ids.string_id;
-        if (std.mem.eql(u8, trimmed, "bytes")) return type_ids.bytes_id;
-        if (fixedBytesLenFromName(trimmed)) |len| return fixedBytesTypeId(len);
-        if (std.mem.eql(u8, trimmed, "void")) return type_ids.void_id;
+        if (type_builtin.lookupBuiltinByName(trimmed)) |spec| return spec.comptime_type_id;
+        if (type_builtin.parseFixedBytesName(trimmed)) |len| return type_builtin.fixedBytesTypeId(len);
         if (self.lookupNamedItem(trimmed)) |item_id| return self.namedTypeId(item_id);
         return null;
     }
 
     fn namedTypeId(self: *ConstEvaluator, item_id: ast.ItemId) u32 {
         const module_component: u32 = if (self.module_id) |module_id| @intCast(module_id.index() + 1) else 0;
-        return named_type_id_base +
+        return type_builtin.named_type_id_base +
             module_component * named_type_id_module_stride +
             @as(u32, @intCast(item_id.index()));
     }
 
     fn namedTypeRefForTypeId(self: *ConstEvaluator, type_id: u32) ?NamedTypeRef {
         _ = self;
-        if (type_id < named_type_id_base) return null;
-        const offset = type_id - named_type_id_base;
+        if (type_id < type_builtin.named_type_id_base) return null;
+        const offset = type_id - type_builtin.named_type_id_base;
         const module_component = offset / named_type_id_module_stride;
         const item_component = offset % named_type_id_module_stride;
         return .{
@@ -4221,6 +3993,26 @@ const ConstEvaluator = struct {
         };
     }
 
+    fn compoundAssignBinaryOp(op: ast.AssignmentOp) ?ast.BinaryOp {
+        return switch (op) {
+            .add_assign => .add,
+            .sub_assign => .sub,
+            .mul_assign => .mul,
+            .div_assign => .div,
+            .mod_assign => .mod,
+            .bit_and_assign => .bit_and,
+            .bit_or_assign => .bit_or,
+            .bit_xor_assign => .bit_xor,
+            .shl_assign => .shl,
+            .shr_assign => .shr,
+            .pow_assign => .pow,
+            .wrapping_add_assign => .wrapping_add,
+            .wrapping_sub_assign => .wrapping_sub,
+            .wrapping_mul_assign => .wrapping_mul,
+            .assign => null,
+        };
+    }
+
     fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
         const rhs_const = try self.evalExprUncached(assign.value);
         const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse blk: {
@@ -4234,23 +4026,8 @@ const ConstEvaluator = struct {
                     return rhs_const;
                 }
                 const rhs = rhs_const orelse (try ctValueToConstValue(self.allocator, &self.env.heap, rhs_ct)) orelse return null;
-                const value = switch (assign.op) {
-                    .add_assign => (try evalBinary(self.allocator, .add, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .sub_assign => (try evalBinary(self.allocator, .sub, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .mul_assign => (try evalBinary(self.allocator, .mul, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .div_assign => (try evalBinary(self.allocator, .div, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .mod_assign => (try evalBinary(self.allocator, .mod, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_and_assign => (try evalBinary(self.allocator, .bit_and, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_or_assign => (try evalBinary(self.allocator, .bit_or, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .bit_xor_assign => (try evalBinary(self.allocator, .bit_xor, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .shl_assign => (try evalBinary(self.allocator, .shl, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .shr_assign => (try evalBinary(self.allocator, .shr, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .pow_assign => (try evalBinary(self.allocator, .pow, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_add_assign => (try evalBinary(self.allocator, .wrapping_add, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_sub_assign => (try evalBinary(self.allocator, .wrapping_sub, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .wrapping_mul_assign => (try evalBinary(self.allocator, .wrapping_mul, try self.readBoundName(name.name), rhs)) orelse return null,
-                    .assign => unreachable,
-                };
+                const op = compoundAssignBinaryOp(assign.op) orelse return null;
+                const value = (try evalBinary(self.allocator, op, try self.readBoundName(name.name), rhs)) orelse return null;
                 const ct_value = (try self.constValueToCtValue(value)) orelse return null;
                 try self.env.set(name.name, ct_value);
                 return value;
@@ -4263,7 +4040,7 @@ const ConstEvaluator = struct {
                 };
                 const struct_data = self.env.heap.getStruct(heap_id);
                 for (destructure.fields) |field| {
-                    const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                    const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse return null;
                     const field_value = self.structFieldValue(struct_data, field_index) orelse return null;
                     try self.bindPatternCtValue(field.binding, field_value);
                 }
@@ -4288,23 +4065,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4318,23 +4080,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4353,23 +4100,8 @@ const ConstEvaluator = struct {
                             .assign => rhs_ct,
                             else => blk_op: {
                                 const current_value = current orelse break :blk_op null;
-                                const computed = switch (assign.op) {
-                                    .add_assign => try evalBinary(self.allocator, .add, current_value, rhs),
-                                    .sub_assign => try evalBinary(self.allocator, .sub, current_value, rhs),
-                                    .mul_assign => try evalBinary(self.allocator, .mul, current_value, rhs),
-                                    .div_assign => try evalBinary(self.allocator, .div, current_value, rhs),
-                                    .mod_assign => try evalBinary(self.allocator, .mod, current_value, rhs),
-                                    .bit_and_assign => try evalBinary(self.allocator, .bit_and, current_value, rhs),
-                                    .bit_or_assign => try evalBinary(self.allocator, .bit_or, current_value, rhs),
-                                    .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current_value, rhs),
-                                    .shl_assign => try evalBinary(self.allocator, .shl, current_value, rhs),
-                                    .shr_assign => try evalBinary(self.allocator, .shr, current_value, rhs),
-                                    .pow_assign => try evalBinary(self.allocator, .pow, current_value, rhs),
-                                    .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current_value, rhs),
-                                    .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current_value, rhs),
-                                    .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current_value, rhs),
-                                    .assign => unreachable,
-                                } orelse break :blk_op null;
+                                const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                                const computed = (try evalBinary(self.allocator, op, current_value, rhs)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4387,7 +4119,7 @@ const ConstEvaluator = struct {
                         }
                         return null;
                     },
-                    else => unreachable,
+                    else => return null,
                 });
             },
             .Field => |field| {
@@ -4397,30 +4129,15 @@ const ConstEvaluator = struct {
                     .struct_ref => |heap_id| self.env.heap.getStruct(heap_id),
                     else => return null,
                 };
-                const field_index = self.structFieldIndex(struct_data.type_id, field.name) orelse return null;
+                const field_index = (try self.structFieldIndex(struct_data.type_id, field.name)) orelse return null;
                 const current_field = self.structFieldValue(struct_data, field_index) orelse return null;
                 const next_value = switch (assign.op) {
                     .assign => rhs_ct,
                     else => blk_op: {
                         const rhs = rhs_const orelse break :blk_op null;
                         const current = (try ctValueToConstValue(self.allocator, &self.env.heap, current_field)) orelse break :blk_op null;
-                        const computed = switch (assign.op) {
-                            .add_assign => try evalBinary(self.allocator, .add, current, rhs),
-                            .sub_assign => try evalBinary(self.allocator, .sub, current, rhs),
-                            .mul_assign => try evalBinary(self.allocator, .mul, current, rhs),
-                            .div_assign => try evalBinary(self.allocator, .div, current, rhs),
-                            .mod_assign => try evalBinary(self.allocator, .mod, current, rhs),
-                            .bit_and_assign => try evalBinary(self.allocator, .bit_and, current, rhs),
-                            .bit_or_assign => try evalBinary(self.allocator, .bit_or, current, rhs),
-                            .bit_xor_assign => try evalBinary(self.allocator, .bit_xor, current, rhs),
-                            .shl_assign => try evalBinary(self.allocator, .shl, current, rhs),
-                            .shr_assign => try evalBinary(self.allocator, .shr, current, rhs),
-                            .pow_assign => try evalBinary(self.allocator, .pow, current, rhs),
-                            .wrapping_add_assign => try evalBinary(self.allocator, .wrapping_add, current, rhs),
-                            .wrapping_sub_assign => try evalBinary(self.allocator, .wrapping_sub, current, rhs),
-                            .wrapping_mul_assign => try evalBinary(self.allocator, .wrapping_mul, current, rhs),
-                            .assign => unreachable,
-                        } orelse break :blk_op null;
+                        const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
+                        const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
                         break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                     },
                 } orelse return null;
@@ -4460,23 +4177,16 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn typeExprIntegerType(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?model.IntegerType {
+    fn typeExprIntegerType(self: *ConstEvaluator, type_expr_id: ast.TypeExprId) ?IntegerType {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| integerTypeFromName(path.name),
             else => null,
         };
     }
 
-    fn integerTypeFromName(name: []const u8) ?model.IntegerType {
+    fn integerTypeFromName(name: []const u8) ?IntegerType {
         const trimmed = std.mem.trim(u8, name, " \t\n\r");
-        if (trimmed.len < 2) return null;
-        const signed = switch (trimmed[0]) {
-            'u' => false,
-            'i' => true,
-            else => return null,
-        };
-        const bits = std.fmt.parseInt(u16, trimmed[1..], 10) catch return null;
-        return .{ .bits = bits, .signed = signed, .spelling = trimmed };
+        return type_descriptors.integerTypeFromName(trimmed);
     }
 
     fn constConditionTruthy(self: *ConstEvaluator, value: ConstValue) ?bool {
@@ -4521,13 +4231,21 @@ const ConstEvaluator = struct {
                 if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
             },
             .Assign => |assign| _ = self.evalExpr(assign.value) catch null,
+            .VariableDecl => |decl| {
+                if (decl.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+            },
+            .Return => |ret| {
+                if (ret.value) |expr_id| _ = self.evalExpr(expr_id) catch null;
+            },
+            .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
+            .Block => |block_stmt| self.visitBody(block_stmt.body),
+            .LabeledBlock => |labeled| self.visitBody(labeled.body),
             .Log => |log_stmt| {
                 for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
             },
             .Assert => |assert_stmt| _ = self.evalExpr(assert_stmt.condition) catch null,
             .Assume => |assume_stmt| _ = self.evalExpr(assume_stmt.condition) catch null,
             .Lock, .Unlock, .Break, .Continue, .Havoc, .Error => {},
-            .VariableDecl, .Return, .Expr, .Block, .LabeledBlock => unreachable,
         }
     }
 };

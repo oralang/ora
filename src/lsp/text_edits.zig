@@ -42,6 +42,9 @@ pub fn applyChangesAllocWithEncoding(
     changes: []const Change,
     encoding: PositionEncoding,
 ) ApplyError![]u8 {
+    if (changes.len == 0) return allocator.dupe(u8, initial_text);
+    if (changes.len == 1) return applySingleChangeAlloc(allocator, initial_text, changes[0], encoding);
+
     var current = try allocator.dupe(u8, initial_text);
     errdefer allocator.free(current);
 

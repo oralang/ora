@@ -61,7 +61,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
         \\        else => {
         \\            return value;
         \\        }
-        \\    }
+        \\    };
         \\}
     ;
 
@@ -71,6 +71,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const tree = try compilation.db.syntaxTree(module.file_id);
     const root = compiler.syntax.rootNode(tree);
+
     const function = firstChildNodeOfKind(root, .FunctionItem);
     try testing.expect(function != null);
 
@@ -81,6 +82,36 @@ test "compiler syntax parses match statements as match syntax nodes" {
     try testing.expect(nthChildNodeOfKind(body.?, .SwitchStmt, 0) == null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 0) != null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 1) != null);
+}
+
+test "compiler syntax accepts trailing semicolon after match statements" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    var out: u256 = 0;
+        \\    match (value) {
+        \\        Ok(inner) => {
+        \\            out = inner;
+        \\        }
+        \\        Err(_) => {
+        \\            out = 1;
+        \\        }
+        \\    };
+        \\    return out;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diagnostics = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnostics.isEmpty());
+
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    try testing.expect(!containsNodeOfKind(root, .Error));
+    try testing.expect(nthDescendantNodeOfKind(root, .MatchStmt, 0) != null);
 }
 
 test "compiler lowers match expressions through existing switch expression path" {
@@ -190,6 +221,50 @@ test "compiler lowers error-union match statements with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch") == null);
 }
 
+test "compiler corpus accepts exhaustive Result match statement returns" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/result_bytes_flow.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects Result match statement fallthrough" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/fail_result_match_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler corpus accepts labeled switch with return-or-continue arms" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/switch_labeled.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects labeled switch fallthrough in non-void function" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/fail_switch_labeled_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
 test "compiler lowers error-union match expressions with ok and err bindings" {
     const source_text =
         \\error Failure(code: u256);
@@ -208,6 +283,25 @@ test "compiler lowers error-union match expressions with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch_expr") == null);
+}
+
+test "compiler lowers exhaustive Result match expressions without placeholder fallback" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.placeholder_count);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
 test "compiler rejects non-exhaustive error-union match expressions without else" {
@@ -691,6 +785,56 @@ test "compiler lowers Result constructors in match expression arms" {
     try testing.expect(std.mem.indexOf(u8, rendered, "func.call @Err") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.ok") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.return") != null);
+}
+
+test "compiler rejects mixed payload and Result constructor match arms" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => value,
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const message = "match expression arms have incompatible types 'u256' and '!u256 | Overflow'; wrap success values with Ok(...) or use try";
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match expression arms have incompatible types 'u256' and '!u256 | Overflow'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, message));
+}
+
+test "compiler allows explicit Result constructors in every match arm" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => Ok(value),
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
 test "compiler emits error-union ABI attrs for public Result returns" {
@@ -1273,7 +1417,7 @@ test "compiler marks payload-bearing narrow error unions for wide lowering in HI
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
 
-test "compiler infers operator result types from operand compatibility" {
+test "compiler infers operator result types from strict operand compatibility" {
     const source_text =
         \\error Failure(code: u256);
         \\
@@ -1307,14 +1451,17 @@ test "compiler infers operator result types from operand compatibility" {
     const unwrapped_stmt = ast_file.statement(body.statements[6]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[7]).Return;
 
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[logic_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[negated_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[failed_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[unwrapped_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '&' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u256' and 'u8'"));
 }
 
 test "compiler emits user diagnostics for generic arity mismatches" {
@@ -1416,16 +1563,18 @@ test "compiler reports sema diagnostics for declaration assignment and return mi
     try testing.expectEqualStrings("field 'total' expects type 'u256', found 'bool'", type_diags.items.items[0].message);
     try testing.expectEqualStrings("constant 'LIMIT' expects type 'u256', found 'bool'", type_diags.items.items[1].message);
     try testing.expectEqualStrings("declaration expects type 'u256', found 'bool'", type_diags.items.items[2].message);
-    try testing.expectEqualStrings("assignment expects type 'integer', found 'bool'", type_diags.items.items[3].message);
+    try testing.expectEqualStrings("ambiguous integer type; annotate or suffix the integer literal", type_diags.items.items[3].message);
     try testing.expectEqualStrings("return expects type 'u256', found 'bool'", type_diags.items.items[4].message);
 
     const function = ast_file.item(ast_file.root_items[2]).Function;
     const full_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
     const body = ast_file.body(function.body);
     const a_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+    const b_stmt = ast_file.statement(body.statements[1]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[3]).Return;
 
     try testing.expectEqual(compiler.sema.TypeKind.integer, full_typecheck.pattern_types[a_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, full_typecheck.pattern_types[b_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, full_typecheck.exprType(ret_stmt.value.?).kind());
 }
 
@@ -1433,7 +1582,7 @@ test "compiler reports sema diagnostics for control flow conditions and switch b
     const source_text =
         \\pub fn broken(flag: u256) -> u256 {
         \\    if (1) {
-        \\        let a = 1;
+        \\        let a: u256 = 1;
         \\    }
         \\    while (2) {
         \\        break;

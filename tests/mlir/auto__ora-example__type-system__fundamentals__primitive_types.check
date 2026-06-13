@@ -5,5 +5,5 @@
 // CHECK-LABEL: func.func @testBool
 // CHECK-LABEL: func.func @testAddress
 // CHECK-LABEL: func.func @testString
-// CHECK-LABEL: func.func @testBytes
+// CHECK-LABEL: func.func @testHexValues
 // CHECK-LABEL: func.func @testTypeAnnotations

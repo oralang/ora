@@ -2,6 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
+const abi_layout_context = ora_root.abi_layout_context;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
 
@@ -463,6 +464,28 @@ test "compiler lowers extern trait calls to abi and external call ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"balanceOf\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "returndata_failure_error = \"ExternalCallFailed\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return \"ExternalCallFailed\""));
+}
+
+test "compiler lowers extern trait gas literals without type fallback" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Caller {
+        \\    pub fn pull(target: address) -> !u256 | ExternalCallFailed {
+        \\        return external<Oracle>(target, gas: 50000).quote();
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
 test "compiler converts trusted extern trait summaries through SIR" {
@@ -1694,10 +1717,16 @@ test "compiler computes extern trait ABI signatures" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const layout_ctx = abi_layout_context.LayoutContext{
+        .allocator = testing.allocator,
+        .provider = compiler.sema.abiLayoutProvider(ast_file, item_index, typecheck),
+    };
     const trait_interface = typecheck.traitInterfaceByName("ERC20").?;
 
-    const transfer_signature = try compiler.hir.abi.signatureForMethod(
-        testing.allocator,
+    const transfer_signature = try layout_ctx.signatureForMethod(
         trait_interface.methods[0].name,
         trait_interface.methods[0].receiver_kind != .none,
         trait_interface.methods[0].param_types,
@@ -1705,8 +1734,7 @@ test "compiler computes extern trait ABI signatures" {
     defer testing.allocator.free(transfer_signature);
     try testing.expectEqualStrings("transfer(address,uint256)", transfer_signature);
 
-    const balance_signature = try compiler.hir.abi.signatureForMethod(
-        testing.allocator,
+    const balance_signature = try layout_ctx.signatureForMethod(
         trait_interface.methods[1].name,
         trait_interface.methods[1].receiver_kind != .none,
         trait_interface.methods[1].param_types,
@@ -1766,10 +1794,54 @@ test "compiler collects verification facts from trait ghost blocks" {
     const trait_id = ast_file.root_items[0];
 
     const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = trait_id });
-    try testing.expectEqual(@as(usize, 3), facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, facts.facts[1].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.invariant, facts.facts[2].kind);
+    try testing.expectEqual(@as(usize, 4), facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_block, facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.assume, facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.assert, facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_axiom, facts.facts[3].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_ghost_block, facts.facts[0].context);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_ghost_block, facts.facts[1].context);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_ghost_block, facts.facts[2].context);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_ghost_block, facts.facts[3].context);
+}
+
+test "compiler collects verification facts from trait method clauses" {
+    const source_text =
+        \\trait Echo {
+        \\    fn echo(self, amount: u256) -> u256
+        \\        requires(amount > 0)
+        \\        ensures(result == amount);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const trait_id = ast_file.root_items[0];
+    const owner: compiler.sema.VerificationTraitMethodOwner = .{
+        .trait_item = trait_id,
+        .method_index = 0,
+    };
+
+    const method_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .trait_method = owner });
+    try testing.expectEqual(@as(usize, 2), method_facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, method_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, method_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_method_contract, method_facts.facts[0].context);
+    try testing.expectEqual(compiler.sema.VerificationContext.trait_method_contract, method_facts.facts[1].context);
+
+    const fact_owner = method_facts.facts[0].owner.traitMethod() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(trait_id, fact_owner.trait_item);
+    try testing.expectEqual(@as(usize, 0), fact_owner.method_index);
+
+    const module_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
+    var trait_method_fact_count: usize = 0;
+    for (module_facts.facts) |fact| {
+        if (fact.owner.traitMethod() != null) trait_method_fact_count += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), trait_method_fact_count);
 }
 
 test "compiler type-checks trait ghost blocks during impl checking" {
@@ -2603,9 +2675,10 @@ test "compiler lowers trait-bound generic method calls to concrete impl symbols"
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @run"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Test.Marker.Box.marked"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @choose__Box"));
 }
 
@@ -2639,8 +2712,9 @@ test "compiler lowers generic impl methods for trait-bound calls" {
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Marker.Box.marked__"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Marker.Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked__"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Marker.Box.marked__7(%arg0: !ora.struct<\"Box\">"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @Test.Marker.Box.marked__"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
 }
 
@@ -2825,7 +2899,8 @@ test "compiler lowers associated trait impl calls to concrete symbols" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Factory.Box.make"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @choose__Box"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Factory.Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @Test.Factory.Box.make"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "call @Test.Factory.Box.make"));
 }
 
 test "compiler const eval executes comptime associated trait methods" {

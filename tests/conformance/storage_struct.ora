@@ -1,0 +1,29 @@
+struct Triple {
+    left: u256;
+    middle: u256;
+    right: u256;
+}
+
+contract StructStorageSmoke {
+    storage var values: Triple;
+
+    pub fn set(left: u256, middle: u256, right: u256) {
+        values = Triple { left: left, middle: middle, right: right };
+    }
+
+    pub fn set_middle(value: u256) {
+        values.middle = value;
+    }
+
+    pub fn get_left() -> u256 {
+        return values.left;
+    }
+
+    pub fn get_middle() -> u256 {
+        return values.middle;
+    }
+
+    pub fn get_right() -> u256 {
+        return values.right;
+    }
+}

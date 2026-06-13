@@ -8,9 +8,11 @@ const ora_root = @import("ora_root");
 const abi = ora_root.abi;
 const abi_layout = ora_root.abi_layout;
 const abi_layout_context = ora_root.abi_layout_context;
+const abi_policy = ora_root.abi_policy;
 const abi_comptime_decoder = ora_root.abi_comptime_decoder;
 const abi_comptime_encoder = ora_root.abi_comptime_encoder;
 const compiler = ora_root.compiler;
+const ora_types = @import("ora_types");
 const hir_module_lowering = compiler.hir.abi_layout_test_support;
 const mlir = @import("mlir_c_api").c;
 
@@ -64,6 +66,115 @@ fn serializeAbiLayoutForType(ty: compiler.sema.Type) ![]const u8 {
     return abi_layout.serializeForMlirAttr(testing.allocator, layout);
 }
 
+const PublicPolicyTestProvider = struct {
+    pub fn enumHasPayload(_: @This(), _: []const u8) bool {
+        return false;
+    }
+
+    pub fn errorTypeHasPayload(_: @This(), _: compiler.sema.Type) bool {
+        return false;
+    }
+};
+
+const PublicPolicyTest = abi_policy.Policy(PublicPolicyTestProvider);
+
+const PublicPolicyTestContext = struct {
+    fn init() PublicPolicyTestContext {
+        return .{};
+    }
+
+    fn deinit(_: *PublicPolicyTestContext) void {}
+
+    fn policy(self: *PublicPolicyTestContext) PublicPolicyTest {
+        _ = self;
+        return .{
+            .provider = .{},
+        };
+    }
+};
+
+test "public ABI policy static word count fails closed for non-builtin integers" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } }));
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .comptime_integer = .{ .spelling = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .comptime_integer = .{} }));
+
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u8" } }));
+    try testing.expectEqual(@as(?usize, 1), policy.staticWordCount(.{ .named = .{ .name = "u256" } }));
+    try testing.expectEqual(@as(?usize, null), policy.staticWordCount(.{ .named = .{ .name = "u500" } }));
+}
+
+test "public ABI policy Result dynamic arrays accept only canonical u256 integer elements" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    const error_types = [_]compiler.sema.Type{.{ .named = .{ .name = "Failure" } }};
+    const u256_element: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u500_element: compiler.sema.Type = .{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } };
+    const u256_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u256_element } };
+    const u500_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u500_element } };
+
+    try testing.expect(policy.planResultCarrier(.{ .error_union = .{ .payload_type = &u256_slice, .error_types = &error_types } }) != null);
+    try testing.expect(policy.planResultCarrier(.{ .error_union = .{ .payload_type = &u500_slice, .error_types = &error_types } }) == null);
+}
+
+test "public ABI policy encode and decode fail closed for non-builtin integers" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    const u8_type: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const u256_type: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u500_type: compiler.sema.Type = .{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } };
+    const unresolved_integer: compiler.sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
+
+    try testing.expect(policy.supportsAbiEncode(u8_type));
+    try testing.expect(policy.supportsAbiDecode(u256_type));
+    try testing.expect(!policy.supportsAbiEncode(u500_type));
+    try testing.expect(!policy.supportsAbiDecode(u500_type));
+    try testing.expect(!policy.supportsAbiEncode(unresolved_integer));
+    try testing.expect(!policy.supportsAbiDecode(unresolved_integer));
+
+    try testing.expect(policy.supportsAbiEncode(.{ .named = .{ .name = "u8" } }));
+    try testing.expect(policy.supportsAbiDecode(.{ .named = .{ .name = "u256" } }));
+    try testing.expect(!policy.supportsAbiEncode(.{ .named = .{ .name = "u500" } }));
+    try testing.expect(!policy.supportsAbiDecode(.{ .named = .{ .name = "u500" } }));
+}
+
+test "public ABI policy runtime decode fails closed for non-builtin integers" {
+    var context = PublicPolicyTestContext.init();
+    defer context.deinit();
+
+    var policy = context.policy();
+
+    const u8_type: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
+    const u256_type: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const u500_type: compiler.sema.Type = .{ .integer = .{ .bits = 500, .signed = false, .spelling = "u500" } };
+    const u256_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u256_type } };
+    const u500_slice: compiler.sema.Type = .{ .slice = .{ .element_type = &u500_type } };
+
+    try testing.expect(policy.supportsRuntimeAbiDecode(u8_type, .strict));
+    try testing.expect(policy.supportsRuntimeAbiDecode(u256_type, .strict));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(u500_type, .strict));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(.{ .comptime_integer = .{} }, .strict));
+    try testing.expect(policy.supportsRuntimeAbiDecode(.{ .named = .{ .name = "u256" } }, .strict));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(.{ .named = .{ .name = "u500" } }, .strict));
+
+    try testing.expect(policy.supportsRuntimeAbiDecode(u256_slice, .strict));
+    try testing.expect(policy.supportsRuntimeAbiDecode(u256_slice, .permissive));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(u500_slice, .strict));
+    try testing.expect(!policy.supportsRuntimeAbiDecode(u500_slice, .permissive));
+}
+
 const ExpectedSirNeedleCount = struct {
     needle: []const u8,
     count: usize,
@@ -71,15 +182,15 @@ const ExpectedSirNeedleCount = struct {
 
 var noop_resolver_context: u8 = 0;
 
-fn noopTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
+fn noopTypeIdForType(_: *anyopaque, _: compiler.sema.Type) anyerror!?u32 {
     return null;
 }
 
-fn noopStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+fn noopStructFields(_: *anyopaque, _: []const u8) anyerror!?[]const compiler.sema.AnonymousStructField {
     return null;
 }
 
-fn noopEnumVariantCount(_: *anyopaque, _: []const u8) ?usize {
+fn noopEnumVariantCount(_: *anyopaque, _: []const u8) anyerror!?usize {
     return null;
 }
 
@@ -94,18 +205,18 @@ fn noopAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
 
 var n4a_resolver_context: u8 = 0;
 
-fn n4aTypeIdForType(_: *anyopaque, ty: compiler.sema.Type) ?u32 {
+fn n4aTypeIdForType(_: *anyopaque, ty: compiler.sema.Type) anyerror!?u32 {
     return switch (ty) {
         .enum_ => |named| if (std.mem.eql(u8, named.name, "Status")) 1 else null,
         else => null,
     };
 }
 
-fn n4aStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+fn n4aStructFields(_: *anyopaque, _: []const u8) anyerror!?[]const compiler.sema.AnonymousStructField {
     return null;
 }
 
-fn n4aEnumVariantCount(_: *anyopaque, name: []const u8) ?usize {
+fn n4aEnumVariantCount(_: *anyopaque, name: []const u8) anyerror!?usize {
     return if (std.mem.eql(u8, name, "Status")) 2 else null;
 }
 
@@ -115,6 +226,29 @@ fn n4aAbiDecodeResolver() abi_comptime_decoder.TypeResolver {
         .typeIdForType = n4aTypeIdForType,
         .structFields = n4aStructFields,
         .enumVariantCount = n4aEnumVariantCount,
+    };
+}
+
+var failing_struct_fields_context: u8 = 0;
+
+fn failingStructFieldsTypeIdForType(_: *anyopaque, _: compiler.sema.Type) anyerror!?u32 {
+    return 1;
+}
+
+fn failingStructFields(_: *anyopaque, _: []const u8) anyerror!?[]const compiler.sema.AnonymousStructField {
+    return error.TestResolverFailure;
+}
+
+fn failingStructFieldsEnumVariantCount(_: *anyopaque, _: []const u8) anyerror!?usize {
+    return null;
+}
+
+fn failingStructFieldsResolver() abi_comptime_decoder.TypeResolver {
+    return .{
+        .context = &failing_struct_fields_context,
+        .typeIdForType = failingStructFieldsTypeIdForType,
+        .structFields = failingStructFields,
+        .enumVariantCount = failingStructFieldsEnumVariantCount,
     };
 }
 
@@ -237,6 +371,31 @@ test "abi decode error ordinals are stable for runtime C++ mapping" {
     try testing.expectEqual(@as(u32, 14), @intFromEnum(DecodeError.string_length_exceeded));
 }
 
+test "abi comptime decoder propagates struct resolver failures" {
+    const layout_elements = [_]abi_layout.LayoutNode{
+        .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 256 } } },
+    };
+    const layout: abi_layout.LayoutNode = .{ .tuple = .{ .path = .{}, .elements = &layout_elements } };
+    const target_type: compiler.sema.Type = .{ .struct_ = .{ .name = "Point" } };
+    const bytes = [_]u8{0} ** 32;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    try testing.expectError(error.TestResolverFailure, abi_comptime_decoder.decodeComptimeValue(
+        allocator,
+        &heap,
+        failingStructFieldsResolver(),
+        layout,
+        target_type,
+        &bytes,
+    ));
+}
+
 test "abi comptime decoder has malformed corpus fixture for every DecodeError variant" {
     const sema = compiler.sema;
     const resolver = n4aAbiDecodeResolver();
@@ -247,9 +406,9 @@ test "abi comptime decoder has malformed corpus fixture for every DecodeError va
     const u256_slice_ty: sema.Type = .{ .slice = .{ .element_type = &u256_ty } };
     const bytes4_ty: sema.Type = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } };
     const status_ty: sema.Type = .{ .enum_ = .{ .name = "Status" } };
-    const refinement_args = [_]compiler.ast.TypeArg{
-        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
-        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    const refinement_args = [_]ora_types.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
     };
     const non_zero_ty: sema.Type = .{ .refinement = .{
         .name = "MinValue",
@@ -320,6 +479,40 @@ test "abi comptime decoder has malformed corpus fixture for every DecodeError va
     try expectComptimeDecodeErrorHex(string_layout, string_ty, word_32 ++ word_1048577, resolver, .string_length_exceeded);
 }
 
+test "abi comptime decoder fails closed for refinement base with unresolved comptime integer" {
+    const sema = compiler.sema;
+    const resolver = noopAbiDecodeResolver();
+
+    const unresolved_u256: sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
+    const refinement_args = [_]ora_types.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
+    };
+    const refined_ty: sema.Type = .{ .refinement = .{
+        .name = "MinValue",
+        .base_type = &unresolved_u256,
+        .args = &refinement_args,
+    } };
+    const u256_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 256 } } };
+    const bytes = try decodeHexBytes(testing.allocator, "0000000000000000000000000000000000000000000000000000000000000001");
+    defer testing.allocator.free(bytes);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var heap = ora_root.comptime_eval.CtHeap.init(allocator);
+    defer heap.deinit();
+
+    try testing.expectError(error.AbiDecoderInternalShapeMismatch, abi_comptime_decoder.decodeComptimeValue(
+        allocator,
+        &heap,
+        resolver,
+        u256_layout,
+        refined_ty,
+        bytes,
+    ));
+}
+
 test "abi N5 permissive comptime decoder masks canonicality but preserves hard errors" {
     const sema = compiler.sema;
     const resolver = n4aAbiDecodeResolver();
@@ -367,9 +560,9 @@ test "abi N5 permissive comptime decoder masks canonicality but preserves hard e
     const word_64 = "0000000000000000000000000000000000000000000000000000000000000040";
     const word_one = "0000000000000000000000000000000000000000000000000000000000000001";
     const word_2_64 = "0000000000000000000000000000000000000000000000010000000000000000";
-    const refinement_args = [_]compiler.ast.TypeArg{
-        .{ .Type = compiler.ast.TypeExprId.fromIndex(0) },
-        .{ .Integer = .{ .range = .{ .start = 0, .end = 1 }, .text = "1" } },
+    const refinement_args = [_]ora_types.RefinementArg{
+        .Type,
+        .{ .Integer = .{ .text = "1" } },
     };
     const positive_u8_ty: sema.Type = .{ .refinement = .{
         .name = "MinValue",
@@ -811,6 +1004,63 @@ fn findCallable(contract_abi: *const abi.ContractAbi, kind: abi.CallableKind, na
     return null;
 }
 
+fn findTypeByWire(contract_abi: *const abi.ContractAbi, wire_type: []const u8) ?*const abi.AbiTypeNode {
+    for (contract_abi.types) |*typ| {
+        if (typ.wire_type) |wire| {
+            if (std.mem.eql(u8, wire, wire_type)) return typ;
+        }
+    }
+    return null;
+}
+
+fn countTypesByWire(contract_abi: *const abi.ContractAbi, wire_type: []const u8) usize {
+    var count: usize = 0;
+    for (contract_abi.types) |typ| {
+        if (typ.wire_type) |wire| {
+            if (std.mem.eql(u8, wire, wire_type)) count += 1;
+        }
+    }
+    return count;
+}
+
+fn expectSequentialTypeIds(contract_abi: *const abi.ContractAbi) !void {
+    for (contract_abi.types, 0..) |typ, index| {
+        const type_id = typ.type_id orelse return error.TestUnexpectedResult;
+        try testing.expect(std.mem.startsWith(u8, type_id, "t:"));
+        const parsed = try std.fmt.parseInt(usize, type_id["t:".len..], 10);
+        try testing.expectEqual(index, parsed);
+        const found = contract_abi.findType(type_id) orelse return error.TestUnexpectedResult;
+        try testing.expectEqualStrings(type_id, found.type_id.?);
+    }
+}
+
+const ConstantHashPayloadContext = struct {
+    pub fn hash(_: @This(), _: []const u8) u64 {
+        return 0;
+    }
+
+    pub fn eql(_: @This(), lhs: []const u8, rhs: []const u8) bool {
+        return abi.AbiTypePayloadContext.eql(.{}, lhs, rhs);
+    }
+};
+
+test "abi payload lookup equality distinguishes forced hash collisions" {
+    var lookup = std.HashMap(
+        []const u8,
+        usize,
+        ConstantHashPayloadContext,
+        std.hash_map.default_max_load_percentage,
+    ).init(testing.allocator);
+    defer lookup.deinit();
+
+    try lookup.put("primitive:u256", 0);
+    try lookup.put("primitive:address", 1);
+
+    try testing.expectEqual(@as(usize, 0), lookup.get("primitive:u256") orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(usize, 1), lookup.get("primitive:address") orelse return error.TestUnexpectedResult);
+    try testing.expect(lookup.get("primitive:bool") == null);
+}
+
 test "abi layout serializer is consumed by OraToSIR parser with matching static decisions" {
     const u256_ty: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
     const u8_ty: compiler.sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
@@ -1044,9 +1294,7 @@ fn testLayoutContext(
 ) abi_layout_context.LayoutContext {
     return .{
         .allocator = allocator,
-        .file = ast_file,
-        .item_index = item_index,
-        .typecheck = typecheck,
+        .provider = compiler.sema.abiLayoutProvider(ast_file, item_index, typecheck),
     };
 }
 
@@ -1115,7 +1363,7 @@ fn hasEffectKind(callable: *const abi.AbiCallable, kind: abi.AbiEffectKind) bool
     return false;
 }
 
-test "abi layout canonical strings match existing ABI helper for static types" {
+test "abi layout canonical strings match expected static type spellings" {
     const allocator = testing.allocator;
     const sema = compiler.sema;
 
@@ -1125,18 +1373,65 @@ test "abi layout canonical strings match existing ABI helper for static types" {
     const tuple_elems = [_]sema.Type{ u256_ty, .address, .bool, bytes4_ty };
     const tuple_ty: sema.Type = .{ .tuple = &tuple_elems };
 
-    const cases = [_]sema.Type{ u256_ty, i128_ty, .bool, .address, bytes4_ty };
-    for (cases) |ty| {
-        const layout_text = try abi_layout.canonicalAbiTypeFromType(allocator, ty);
+    const cases = [_]struct {
+        ty: sema.Type,
+        wire: []const u8,
+    }{
+        .{ .ty = u256_ty, .wire = "uint256" },
+        .{ .ty = i128_ty, .wire = "int128" },
+        .{ .ty = .bool, .wire = "bool" },
+        .{ .ty = .address, .wire = "address" },
+        .{ .ty = bytes4_ty, .wire = "bytes4" },
+    };
+    for (cases) |case| {
+        const layout_text = try abi_layout.canonicalAbiTypeFromType(allocator, case.ty);
         defer allocator.free(layout_text);
-        const legacy_text = try compiler.hir.abi.canonicalAbiType(allocator, ty);
-        defer allocator.free(legacy_text);
-        try testing.expectEqualStrings(legacy_text, layout_text);
+        try testing.expectEqualStrings(case.wire, layout_text);
     }
 
     const tuple_text = try abi_layout.canonicalAbiTypeFromType(allocator, tuple_ty);
     defer allocator.free(tuple_text);
     try testing.expectEqualStrings("(uint256,address,bool,bytes4)", tuple_text);
+}
+
+test "abi layout derives primitive family checks from builtin types" {
+    const allocator = testing.allocator;
+    const sema = compiler.sema;
+
+    const u160_ty: sema.Type = .{ .integer = .{ .bits = 160, .signed = false, .spelling = "u160" } };
+    const u160_text = try abi_layout.canonicalAbiTypeFromType(allocator, u160_ty);
+    defer allocator.free(u160_text);
+    try testing.expectEqualStrings("uint160", u160_text);
+    try testing.expectEqual(@as(?usize, 1), abi_layout.staticWordCountForType(u160_ty));
+
+    const u24_ty: sema.Type = .{ .integer = .{ .bits = 24, .signed = false, .spelling = "u24" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, u24_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(u24_ty));
+
+    const i96_ty: sema.Type = .{ .integer = .{ .bits = 96, .signed = true, .spelling = "i96" } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiTypeFromType(allocator, i96_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(i96_ty));
+
+    const unresolved_integer_ty: sema.Type = .{ .comptime_integer = .{ .spelling = "u256" } };
+    try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, unresolved_integer_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(unresolved_integer_ty));
+
+    const bytes33_ty: sema.Type = .{ .fixed_bytes = .{ .len = 33, .spelling = "bytes33" } };
+    try testing.expectError(error.InvalidFixedBytesWidth, abi_layout.canonicalAbiTypeFromType(allocator, bytes33_ty));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(bytes33_ty));
+
+    const invalid_integer_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .uint = 24 } } };
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.canonicalAbiType(allocator, invalid_integer_layout));
+    try testing.expectError(error.InvalidIntegerWidth, abi_layout.serializeForMlirAttr(allocator, invalid_integer_layout));
+
+    const invalid_fixed_bytes_layout: abi_layout.LayoutNode = .{ .static_word = .{ .path = .{}, .encoding = .{ .fixed_bytes = 33 } } };
+    try testing.expectError(error.InvalidFixedBytesWidth, abi_layout.canonicalAbiType(allocator, invalid_fixed_bytes_layout));
+    try testing.expectError(error.InvalidFixedBytesWidth, abi_layout.serializeForMlirAttr(allocator, invalid_fixed_bytes_layout));
+
+    try testing.expectEqual(@as(?u8, 20), abi_layout.parseFixedBytesSpelling("bytes20"));
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes01") == null);
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes+5") == null);
+    try testing.expect(abi_layout.parseFixedBytesSpelling("bytes1_6") == null);
 }
 
 test "abi layout classifies static and dynamic aggregate shapes" {
@@ -1232,13 +1527,13 @@ test "abi layout rejects Result carrier shapes without item-index context" {
     const no_payload_errors = [_]sema.Type{no_payload_error_ty};
     const no_payload_result: sema.Type = .{ .error_union = .{ .payload_type = &u256_ty, .error_types = &no_payload_errors } };
     try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, no_payload_result));
-    try testing.expectEqual(@as(?usize, null), compiler.hir.abi.staticAbiWordCount(no_payload_result));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(no_payload_result));
 
     const payload_error_ty: sema.Type = .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } };
     const payload_errors = [_]sema.Type{payload_error_ty};
     const payload_result: sema.Type = .{ .error_union = .{ .payload_type = &u256_ty, .error_types = &payload_errors } };
     try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, payload_result));
-    try testing.expectEqual(@as(?usize, null), compiler.hir.abi.staticAbiWordCount(payload_result));
+    try testing.expectEqual(@as(?usize, null), abi_layout.staticWordCountForType(payload_result));
 }
 
 test "abi layout matches generated ABI wire types for context-free public function boundary" {
@@ -1695,7 +1990,7 @@ test "abi layout rejects non-wire Ora types" {
     try testing.expectError(error.UnsupportedAbiType, abi_layout.canonicalAbiTypeFromType(allocator, .{ .external_proxy = .{ .trait_name = "ERC20" } }));
 }
 
-test "abi manifest includes functions errors events effects and hashed type ids" {
+test "abi manifest includes functions errors events effects and sequential type ids" {
     const allocator = testing.allocator;
     const source =
         \\contract Test {
@@ -1740,10 +2035,7 @@ test "abi manifest includes functions errors events effects and hashed type ids"
     try testing.expect(transfer.inputs[0].indexed orelse false);
     try testing.expect(!(transfer.inputs[1].indexed orelse false));
 
-    for (contract_abi.types) |typ| {
-        const type_id = typ.type_id orelse return error.TestUnexpectedResult;
-        try testing.expect(std.mem.startsWith(u8, type_id, "t:"));
-    }
+    try expectSequentialTypeIds(contract_abi);
 
     var u256_count: usize = 0;
     for (contract_abi.types) |typ| {
@@ -1787,6 +2079,70 @@ test "abi manifest includes functions errors events effects and hashed type ids"
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"stateMutability\":\"nonpayable\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"error\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"event\"") != null);
+}
+
+test "abi sequential type ids dedup equal payloads and keep distinct payloads" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract TypeIds {
+        \\    pub fn useTypes(
+        \\        a: u256,
+        \\        b: u256,
+        \\        owner: address,
+        \\        values: [u256; 2],
+        \\        pair: (u256, address)
+        \\    ) {}
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    try expectSequentialTypeIds(contract_abi);
+    try testing.expectEqual(@as(usize, 1), countTypesByWire(contract_abi, "uint256"));
+
+    const u256_type = findTypeByWire(contract_abi, "uint256") orelse return error.TestUnexpectedResult;
+    const address_type = findTypeByWire(contract_abi, "address") orelse return error.TestUnexpectedResult;
+    const array_type = findTypeByWire(contract_abi, "uint256[2]") orelse return error.TestUnexpectedResult;
+    const tuple_type = findTypeByWire(contract_abi, "(uint256,address)") orelse return error.TestUnexpectedResult;
+
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, address_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, array_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, u256_type.type_id.?, tuple_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, address_type.type_id.?, array_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, address_type.type_id.?, tuple_type.type_id.?));
+    try testing.expect(!std.mem.eql(u8, array_type.type_id.?, tuple_type.type_id.?));
+}
+
+test "abi sequential type id json is byte stable across generation" {
+    const allocator = testing.allocator;
+    const source =
+        \\contract TypeIds {
+        \\    pub fn useTypes(
+        \\        a: u256,
+        \\        b: u256,
+        \\        owner: address,
+        \\        values: [u256; 2],
+        \\        pair: (u256, address)
+        \\    ) {}
+        \\}
+    ;
+
+    var first = try generateAbiForSource(allocator, source);
+    defer first.deinit();
+    var second = try generateAbiForSource(allocator, source);
+    defer second.deinit();
+
+    try expectSequentialTypeIds(&first.contract_abi);
+    try expectSequentialTypeIds(&second.contract_abi);
+
+    const first_json = try first.contract_abi.toJson(allocator);
+    defer allocator.free(first_json);
+    const second_json = try second.contract_abi.toJson(allocator);
+    defer allocator.free(second_json);
+
+    try testing.expectEqualStrings(first_json, second_json);
 }
 
 test "abi manifest uses pinned event_name metadata for event wire identity" {

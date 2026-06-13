@@ -23,6 +23,7 @@
 // ============================================================================
 
 const std = @import("std");
+const builtin_types = @import("ora_types").builtin;
 const Allocator = std.mem.Allocator;
 
 // Import error recovery system
@@ -56,7 +57,6 @@ pub const LexerError = error{
     NumberTooLarge,
     InvalidAddressFormat,
     TooManyErrors,
-    InvalidBuiltinFunction,
     InvalidRangePattern,
     InvalidSwitchSyntax,
 };
@@ -221,6 +221,7 @@ pub const TokenType = enum {
     U32,
     U64,
     U128,
+    U160,
     U256,
     I8,
     I16,
@@ -496,6 +497,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "u32", .U32 },
     .{ "u64", .U64 },
     .{ "u128", .U128 },
+    .{ "u160", .U160 },
     .{ "u256", .U256 },
     .{ "i8", .I8 },
     .{ "i16", .I16 },
@@ -510,6 +512,46 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "slice", .Slice },
     .{ "bytes", .Bytes },
 });
+
+pub const builtin_type_keyword_tokens = blk: {
+    var tokens: [builtin_types.builtin_types.len]TokenType = undefined;
+    for (builtin_types.builtin_types, 0..) |spec, index| {
+        tokens[index] = keywords.get(spec.source_name) orelse
+            @compileError("missing lexer keyword for builtin type '" ++ spec.source_name ++ "'");
+    }
+    break :blk tokens;
+};
+
+pub fn isBuiltinTypeKeyword(token_type: TokenType) bool {
+    inline for (builtin_type_keyword_tokens) |keyword_token| {
+        if (token_type == keyword_token) return true;
+    }
+    return false;
+}
+
+pub fn isCollectionTypeKeyword(token_type: TokenType) bool {
+    return switch (token_type) {
+        .Map, .Slice => true,
+        else => false,
+    };
+}
+
+pub fn isTypeKeyword(token_type: TokenType) bool {
+    return isBuiltinTypeKeyword(token_type) or isCollectionTypeKeyword(token_type);
+}
+
+test "builtin type keywords stay synchronized with builtin table" {
+    inline for (builtin_types.builtin_types) |spec| {
+        const token_type = keywords.get(spec.source_name) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(isBuiltinTypeKeyword(token_type));
+        try std.testing.expect(isTypeKeyword(token_type));
+    }
+
+    try std.testing.expect(isTypeKeyword(.Map));
+    try std.testing.expect(isTypeKeyword(.Slice));
+    try std.testing.expect(!isBuiltinTypeKeyword(.Map));
+    try std.testing.expect(!isBuiltinTypeKeyword(.Slice));
+}
 
 // ============================================================================
 // SECTION 5: Core Lexer Logic & State Machine
@@ -1391,8 +1433,9 @@ pub inline fn isWhitespace(c: u8) bool {
 
 // Token utility functions for parser use
 pub fn isKeyword(token_type: TokenType) bool {
+    if (isBuiltinTypeKeyword(token_type)) return true;
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Ghost, .Assert, .Void, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Match, .Ghost, .Assert, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .Map, .Slice => true,
         else => false,
     };
 }

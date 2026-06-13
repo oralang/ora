@@ -75,7 +75,7 @@ pub fn Evm(comptime config: EvmConfig) type {
         // Stack of balance snapshots for nested calls (for SELFDESTRUCT revert handling)
         // Each call pushes a snapshot, and on revert we restore from that snapshot
         balance_snapshot_stack: std.ArrayList(*std.AutoHashMap(primitives.Address, u256)),
-        hardfork: Hardfork = Hardfork.DEFAULT,
+        hardfork: Hardfork = .OSAKA,
         fork_transition: ?primitives.ForkTransition = null,
         origin: primitives.Address,
         gas_price: u256,
@@ -118,7 +118,7 @@ pub fn Evm(comptime config: EvmConfig) type {
                 .access_list_manager = undefined,
                 .gas_refund = 0,
                 .balance_snapshot_stack = undefined,
-                .hardfork = hardfork orelse Hardfork.DEFAULT,
+                .hardfork = hardfork orelse .OSAKA,
                 .fork_transition = null,
                 .block_context = block_context orelse .{
                     .chain_id = 1,

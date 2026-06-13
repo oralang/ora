@@ -244,11 +244,6 @@ pub fn getErrorTemplate(error_type: LexerError) ErrorMessageTemplate {
             .description = "Multi-line comment is missing closing */",
             .help = "Add */ to close the comment",
         },
-        LexerError.InvalidBuiltinFunction => ErrorMessageTemplate{
-            .title = "invalid built-in function",
-            .description = "This is not a valid built-in function name",
-            .help = "Use a valid built-in function like @divTrunc, @divFloor, @divCeil, @divExact, or @divmod",
-        },
         LexerError.InvalidRangePattern => ErrorMessageTemplate{
             .title = "invalid range pattern",
             .description = "Range patterns must have valid syntax with proper bounds",
@@ -441,7 +436,6 @@ pub const ErrorRecovery = struct {
             LexerError.EmptyCharacterLiteral => "Add a character between the single quotes",
             LexerError.InvalidCharacterLiteral => "Character literals must contain exactly one character",
             LexerError.InvalidEscapeSequence => "Use a valid escape sequence like \\n, \\t, \\r, \\\\, or \\\"",
-            LexerError.InvalidBuiltinFunction => "Use a valid built-in function like @divTrunc, @divFloor, @divCeil, @divExact, or @divmod",
             else => null,
         };
     }

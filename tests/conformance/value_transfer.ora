@@ -1,0 +1,10 @@
+// Dispatcher is non-payable by default: nonzero call value reverts before
+// selector dispatch (revert(0,0)). No payable surface exists yet; this spec
+// pins both the rejection and that std.msg.value() reads 0 on the zero path.
+comptime const std = @import("std");
+
+contract ValueTransfer {
+    pub fn echo_value() -> u256 {
+        return std.msg.value();
+    }
+}

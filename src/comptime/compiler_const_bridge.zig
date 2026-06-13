@@ -1,11 +1,11 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const comptime_eval = @import("mod.zig");
-const model = @import("../sema/model.zig");
+const ora_types = @import("ora_types");
 const units = @import("../units.zig");
 
 const BigInt = std.math.big.int.Managed;
-pub const ConstValue = model.ConstValue;
+const ConstValue = ora_types.ConstValue;
 pub const CtEnv = comptime_eval.CtEnv;
 pub const CtHeap = comptime_eval.CtHeap;
 pub const CtValue = comptime_eval.CtValue;
@@ -153,16 +153,16 @@ fn evalFixedBytesFixedBytes(
     return .{ .fixed_bytes = out };
 }
 
-pub fn wrapIntegerConstToType(allocator: std.mem.Allocator, value: ConstValue, integer: model.IntegerType) !?ConstValue {
+pub fn wrapIntegerConstToType(allocator: std.mem.Allocator, value: ConstValue, integer: ora_types.IntegerType) !?ConstValue {
     return switch (value) {
         .integer => |integer_value| .{ .integer = try wrapIntegerToType(allocator, integer_value, integer) },
         else => null,
     };
 }
 
-pub fn wrapIntegerToType(allocator: std.mem.Allocator, value: BigInt, integer: model.IntegerType) !BigInt {
-    const bits = integer.bits orelse return cloneInteger(allocator, value);
-    const signed = integer.signed orelse return cloneInteger(allocator, value);
+pub fn wrapIntegerToType(allocator: std.mem.Allocator, value: BigInt, integer: ora_types.IntegerType) !BigInt {
+    const bits = integer.bits;
+    const signed = integer.signed;
     if (bits == 0) return BigInt.initSet(allocator, 0);
 
     var modulus = try BigInt.initSet(allocator, 1);

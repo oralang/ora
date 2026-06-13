@@ -22,7 +22,6 @@ const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
 const findVariablePatternByName = h.findVariablePatternByName;
-const diagnosticMessagesContain = h.diagnosticMessagesContain;
 const countDiagnosticMessages = h.countDiagnosticMessages;
 const DiagnosticProbePhase = h.DiagnosticProbePhase;
 const expectDiagnosticProbeContains = h.expectDiagnosticProbeContains;
@@ -68,6 +67,120 @@ test "compiler lowers impl self methods and calls end to end" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.get"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @CounterLike.Counter.bump"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @CounterLike.Counter.bump"));
+}
+
+test "compiler lowers wide HIR integer literals without defaulting" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\    return value;
+        \\}
+        \\
+        \\pub fn direct() -> u256 {
+        \\    return 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(usize, 0), hir_result.placeholder_count);
+    try testing.expect(hir_result.isEmittable());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    // Text alone cannot distinguish u256.max from i256(-1), but it still
+    // proves the literal did not collapse to the old zero/i64 fallback.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "-1 : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 0 : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
+test "compiler preserves full-width u256 and i256 semantics for literal and parameter comparisons" {
+    const source_text =
+        \\contract WideIntegerLiteralBoundaries {
+        \\    pub fn unsigned_param_gt_zero(value: u256) -> bool {
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_param_gt_zero(value: i256) -> bool {
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn unsigned_max_literal_gt_zero() -> bool {
+        \\        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_max_literal_gt_zero() -> bool {
+        \\        let value: i256 = 0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        \\        return value > 0;
+        \\    }
+        \\
+        \\    pub fn signed_min_literal_lt_zero() -> bool {
+        \\        let value: i256 = -57896044618658097711785492504343953926634992332820282019728792003956564819968;
+        \\        return value < 0;
+        \\    }
+        \\}
+    ;
+
+    const ora_text = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(ora_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "ora.abi_params = [\"uint256\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "ora.abi_params = [\"int256\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 2, "arith.cmpi ugt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 2, "arith.cmpi sgt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "arith.cmpi slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "-1 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "57896044618658097711785492504343953926634992332820282019728792003956564819967 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, ora_text, 1, "-57896044618658097711785492504343953926634992332820282019728792003956564819968 : i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, ora_text, 1, "ora.lowering_error"));
+}
+
+test "compiler rejects oversized HIR array lengths instead of defaulting to zero" {
+    const source_text =
+        \\pub fn read(values: [u256; 4294967296]) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(h.diagnosticMessagesContain(&hir_result.diagnostics, "array length must be resolved before HIR lowering"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler lowers wide explicit enum values without defaulting" {
+    const source_text =
+        \\enum Big : u256 {
+        \\    A = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\pub fn current() -> Big {
+        \\    return Big.A;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+    // Text alone cannot distinguish u256.max from i256(-1), but it still
+    // proves the explicit enum value did not collapse to zero.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
 }
 
 test "compiler lowers syntax into immutable AST items" {
@@ -540,6 +653,27 @@ test "compiler lowers string, bytes, and address literals through real ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.address_const"));
 }
 
+test "compiler lowers contextual short hex address initializer through address conversion" {
+    const source_text =
+        \\pub fn owner() -> address {
+        \\    let who: address = 0x0;
+        \\    return who;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.i160.to.addr"));
+}
+
 test "compiler lowers top-level const items through ora.const" {
     const source_text =
         \\const LIMIT: u256 = 2;
@@ -691,27 +825,6 @@ test "compiler lowers bitfield types as wire integers with metadata attrs" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "i256"));
 }
 
-test "compiler lowers pinned eip712_name metadata on struct declarations" {
-    const source_text =
-        \\struct PermitV2 {
-        \\    pub const eip712_name = "Permit";
-        \\    owner: address,
-        \\    spender: address,
-        \\    value: u256,
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    const hir_text = try hir_result.renderText(testing.allocator);
-    defer testing.allocator.free(hir_text);
-
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.eip712_name"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Permit\""));
-}
-
 test "compiler lowers bitfield field reads and writes through bit ops" {
     const source_text =
         \\contract Bits {
@@ -775,10 +888,27 @@ test "compiler lowers bitfield construction through packed bit ops" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.struct.create\""));
 }
 
+test "compiler rejects bitfield fields without inferrable integer width" {
+    const source_text =
+        \\contract Bits {
+        \\    bitfield Flags: u256 {
+        \\        label: string,
+        \\    }
+        \\
+        \\    storage packed: Flags;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    try testing.expectError(error.InvalidBitfieldFieldType, compilation.db.lowerToHir(compilation.root_module_id));
+}
+
 test "compiler lowers tuple locals without tuple fallback" {
     const source_text =
         \\pub fn probe() -> u256 {
-        \\    let coords = (1, 2);
+        \\    let coords: (u256, u256) = (1, 2);
         \\    return 1;
         \\}
     ;
@@ -796,7 +926,7 @@ test "compiler lowers tuple locals without tuple fallback" {
 test "compiler lowers tuple HIR types without tuple fallback" {
     const source_text =
         \\pub fn pair() -> (u256, bool) {
-        \\    let coords = (1, true);
+        \\    let coords: (u256, bool) = (1, true);
         \\    return coords;
         \\}
     ;
@@ -819,7 +949,7 @@ test "compiler lowers tuple HIR types without tuple fallback" {
 test "compiler lowers tuple expressions through real tuple ops" {
     const source_text =
         \\pub fn pair() -> u256 {
-        \\    let coords = (1, true);
+        \\    let coords: (u256, bool) = (1, true);
         \\    return coords[0];
         \\}
     ;
@@ -835,6 +965,33 @@ test "compiler lowers tuple expressions through real tuple ops" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tuple_extract"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.tuple.create\""));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.index_access\""));
+}
+
+test "compiler lowers contextual aggregate integer literals without type fallback" {
+    const source_text =
+        \\struct Point {
+        \\    x: u256,
+        \\    y: u16,
+        \\}
+        \\
+        \\bitfield Flags: u256 {
+        \\    enabled: u1,
+        \\    decimals: u8,
+        \\}
+        \\
+        \\pub fn probe() -> u256 {
+        \\    let point: Point = Point { x: 10, y: 20 };
+        \\    let pair: (u256, u8) = (1, 2);
+        \\    let flags = Flags { enabled: 1, decimals: 18 };
+        \\    return point.x + pair[0];
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
 test "compiler lowers function-valued bindings without function fallback" {
@@ -889,7 +1046,7 @@ test "compiler lowers builtin, quantified, and verification expressions" {
         \\{
         \\    assert(forall i: u256 where i < 4 => values[i] >= 0);
         \\    let casted = @cast(address, next);
-        \\    let quotient = @divTrunc(10, 3);
+        \\    let quotient = @divTrunc(@cast(u256, 10), @cast(u256, 3));
         \\    let snapshot = old(quotient);
         \\    let addr = 0x1234567890abcdef1234567890abcdef12345678;
         \\    let data = hex"deadbeef";
@@ -969,17 +1126,30 @@ test "compiler lowers builtin, quantified, and verification expressions" {
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[quotient_stmt.value.?.index()] != null);
     try testing.expectEqual(@as(i128, 3), try consteval.values[quotient_stmt.value.?.index()].?.integer.toInt(i128));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.bound_variable = \"i\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.quantified \"forall\", \"i\", \"u256\""));
 }
 
 test "compiler lowers divExact and divmod through Ora and SIR" {
     const source_text =
         \\pub fn compute(a: i256, b: i256, x: u256, y: u256) -> i256 {
-        \\    let exact = @divExact(12, 4);
+        \\    let exact = @divExact(@cast(i256, 12), @cast(i256, 4));
         \\    let rounded = @divFloor(a, b);
         \\    let pair = @divmod(x, y);
         \\    return rounded + exact + @cast(i256, pair.0) + @cast(i256, pair.1);
         \\}
     ;
+
+    var checked = try compileText(source_text);
+    defer checked.deinit();
+    const typecheck = try checked.db.moduleTypeCheck(checked.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 
     const rendered = try renderOraMlirForSource(source_text);
     defer testing.allocator.free(rendered);
@@ -993,6 +1163,56 @@ test "compiler lowers divExact and divmod through Ora and SIR" {
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
+test "compiler resolves all-literal divExact and divmod builtins in u256 flow" {
+    const source_text =
+        \\pub fn compute() -> u256 {
+        \\    let exact = @divExact(12, 4);
+        \\    let pair = @divmod(17, 5);
+        \\    return exact + pair.0 * 5 + pair.1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler lowers declarations after early return guards in branch suffixes" {
+    const source_text =
+        \\contract Sample {
+        \\    fn burn(amount: u256, rate: u256) -> u256 {
+        \\        if (rate > 0) {
+        \\            const scaled_amount: u256 = amount / 10000;
+        \\            if (scaled_amount > 10) {
+        \\                return amount;
+        \\            }
+        \\            const burn_fee: u256 = scaled_amount * rate;
+        \\            if (burn_fee >= amount) {
+        \\                return 1;
+        \\            }
+        \\            const actual_burn_raw: u256 = amount - burn_fee;
+        \\            if (actual_burn_raw < 1) {
+        \\                return 1;
+        \\            }
+        \\            return actual_burn_raw;
+        \\        }
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+}
+
 test "compiler lowers tuple, array, struct, switch, and error return expressions" {
     const source_text =
         \\struct Pair {
@@ -1003,10 +1223,10 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let coords = (items[0], items[1]);
         \\    let pair = Pair { first: items[0], second: items[1] };
-        \\    let value = switch (true) {
+        \\    let value: u256 = switch (true) {
         \\        true => 1,
         \\        false => 2,
         \\        else => 3,
@@ -1077,6 +1297,32 @@ test "compiler lowers tuple, array, struct, switch, and error return expressions
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error.return\""));
+}
+
+test "compiler lowers space-form error return constructors" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn run() -> !u256 | Failure {
+        \\    return error Failure(7);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(ast_diags.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.return"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 
 test "compiler lowers grouped struct literal bases" {
@@ -1299,6 +1545,42 @@ test "compiler lowers integer range for loops with break and continue" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "scf.for"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.if"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+}
+
+test "compiler preserves signed integer range loop item type" {
+    const source_text =
+        \\pub fn sum_signed_range(a: i256, b: i256) -> i256 {
+        \\    var total: i256 = 0;
+        \\    for (a..b) |value, _| {
+        \\        total = total + value;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function = ast_file.item(ast_file.root_items[0]).Function;
+    const body = ast_file.body(function.body);
+    const for_stmt = ast_file.statement(body.statements[1]).For;
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const item_type = typecheck.pattern_types[for_stmt.item_pattern.index()].type;
+    try testing.expectEqual(compiler.sema.TypeKind.integer, item_type.kind());
+    try testing.expectEqual(@as(u16, 256), item_type.integer.bits);
+    try testing.expectEqual(true, item_type.integer.signed);
+    try testing.expectEqualStrings("i256", item_type.integer.spelling.?);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.for"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
 }
 
@@ -1620,7 +1902,7 @@ test "compiler lowers checked arithmetic compound assignment" {
 test "compiler lowers array literals through memref allocation and stores" {
     const source_text =
         \\pub fn read_first() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    return items[0];
         \\}
     ;
@@ -1672,8 +1954,8 @@ test "compiler lowers destructuring assignment through struct field extracts" {
         \\}
         \\
         \\pub fn sum() -> u256 {
-        \\    let left = 0;
-        \\    let right = 0;
+        \\    let left: u256 = 0;
+        \\    let right: u256 = 0;
         \\    .{ left, right } = Pair { left: 4, right: 5 };
         \\    return left + right;
         \\}
@@ -1715,7 +1997,7 @@ test "compiler lowers fallback break and continue through real ops" {
 test "compiler types and lowers all-constant switch expressions without else" {
     const source_text =
         \\pub fn choose(tag: u256) -> u256 {
-        \\    let value = switch (tag) {
+        \\    let value: u256 = switch (tag) {
         \\        0 => 1,
         \\        1 => 2,
         \\    };

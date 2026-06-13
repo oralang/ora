@@ -1,0 +1,11 @@
+contract MappingStorageSmoke {
+    storage var balances: map<address, u256>;
+
+    pub fn set_balance(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        return balances[account];
+    }
+}

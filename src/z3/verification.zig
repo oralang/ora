@@ -20,7 +20,7 @@ const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
-const refinements = @import("ora_lib").compiler.sema.refinements;
+const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
 
 pub const AnnotationKind = enum {

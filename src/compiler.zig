@@ -4,6 +4,7 @@ pub const syntax = @import("syntax/mod.zig");
 pub const ast = @import("ast/mod.zig");
 pub const sema = @import("sema/mod.zig");
 pub const hir = @import("hir/mod.zig");
+pub const refinement_guards = @import("mlir/refinement_guards.zig");
 pub const db = @import("db/mod.zig");
 pub const driver = @import("driver/mod.zig");
 pub const compile_options = @import("compile_options.zig");

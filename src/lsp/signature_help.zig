@@ -22,13 +22,26 @@ pub const SignatureInfo = struct {
     }
 };
 
-/// Given source and a cursor position (typically after `(` or `,`), find the
-/// function being called and return its signature with the active parameter.
-pub fn signatureAt(
+pub const SignatureView = struct {
+    symbol: *const semantic_index.Symbol,
+    active_parameter: u32,
+};
+
+pub fn signatureAtIndex(
     allocator: Allocator,
     source: []const u8,
     position: frontend.Position,
+    index: *const semantic_index.SemanticIndex,
 ) !?SignatureInfo {
+    const view = signatureViewAtIndex(source, position, index) orelse return null;
+    return try buildSignatureInfo(allocator, view.symbol, view.active_parameter);
+}
+
+pub fn signatureViewAtIndex(
+    source: []const u8,
+    position: frontend.Position,
+    index: *const semantic_index.SemanticIndex,
+) ?SignatureView {
     const byte_offset = positionToByteOffset(source, position);
     if (byte_offset == 0) return null;
 
@@ -38,14 +51,13 @@ pub fn signatureAt(
     // Extract the function name before the `(`.
     const callee_name = extractCalleeName(source, call_ctx.paren_offset) orelse return null;
 
-    // Look up the function in the semantic index.
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
     const symbol = findFunctionSymbol(index.symbols, callee_name) orelse return null;
 
-    // Build signature from symbol detail.
-    return try buildSignatureInfo(allocator, symbol, call_ctx.active_parameter);
+    if (symbol.detail == null) return null;
+    return .{
+        .symbol = symbol,
+        .active_parameter = call_ctx.active_parameter,
+    };
 }
 
 const CallContext = struct {

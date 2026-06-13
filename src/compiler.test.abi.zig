@@ -71,15 +71,15 @@ const ExpectedU256Return = struct {
 
 var noop_decode_resolver_context: u8 = 0;
 
-fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) ?u32 {
+fn noopDecodeTypeIdForType(_: *anyopaque, _: compiler.sema.Type) anyerror!?u32 {
     return null;
 }
 
-fn noopDecodeStructFields(_: *anyopaque, _: []const u8) ?[]const compiler.sema.AnonymousStructField {
+fn noopDecodeStructFields(_: *anyopaque, _: []const u8) anyerror!?[]const compiler.sema.AnonymousStructField {
     return null;
 }
 
-fn noopDecodeEnumVariantCount(_: *anyopaque, _: []const u8) ?usize {
+fn noopDecodeEnumVariantCount(_: *anyopaque, _: []const u8) anyerror!?usize {
     return null;
 }
 
@@ -207,6 +207,16 @@ fn signedLessThanU256(lhs: u256, rhs: u256) bool {
     const rhs_negative = (rhs & sign_bit) != 0;
     if (lhs_negative != rhs_negative) return lhs_negative;
     return lhs < rhs;
+}
+
+fn arithmeticShiftRightU256(shift: u256, value: u256) u256 {
+    const sign_bit: u256 = @as(u256, 1) << 255;
+    const negative = (value & sign_bit) != 0;
+    if (shift >= 256) return if (negative) ~@as(u256, 0) else 0;
+    const shifted = value >> @intCast(shift);
+    if (!negative or shift == 0) return shifted;
+    const fill = ~@as(u256, 0) << @intCast(256 - shift);
+    return shifted | fill;
 }
 
 fn writeU256WordClipped(buffer: []u8, offset: usize, value: u256) void {
@@ -351,6 +361,15 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
 
             if (std.mem.eql(u8, op, "const") or std.mem.eql(u8, op, "large_const")) {
                 if (parseSirIntLiteral(tokens[3])) |value| try self.values.put(name, value);
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "bitcast") and tokens.len >= 4) {
+                if (valueForToken(self.values, tokens[3])) |value| {
+                    try self.values.put(name, value);
+                } else if (self.pointers.get(tokens[3])) |ptr| {
+                    try self.pointers.put(name, ptr);
+                }
                 return;
             }
 
@@ -558,6 +577,13 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
                 } else {
                     try self.values.put(name, value >> @intCast(shift));
                 }
+                return;
+            }
+
+            if (std.mem.eql(u8, op, "sar") and tokens.len >= 5) {
+                const shift = valueForToken(self.values, tokens[3]) orelse return;
+                const value = valueForToken(self.values, tokens[4]) orelse return;
+                try self.values.put(name, arithmeticShiftRightU256(shift, value));
                 return;
             }
 
@@ -1748,6 +1774,14 @@ test "compiler const eval supports typeName and string concat for ABI signatures
     try testing.expect(std.mem.eql(u8, "transfer(address,uint256)", consteval.values[ret_stmt.value.?.index()].?.string));
 }
 
+test "compiler ABI keccak selector known answer stays byte-identical" {
+    try testing.expectEqual(@as(u32, 0xa9059cbb), compiler.hir.abi.keccakSelectorValue("transfer(address,uint256)"));
+
+    const selector = try compiler.hir.abi.keccakSelectorHex(testing.allocator, "transfer(address,uint256)");
+    defer testing.allocator.free(selector);
+    try testing.expectEqualStrings("0xa9059cbb", selector);
+}
+
 test "compiler const eval supports keccak256 for ABI selector hashes" {
     const source_text =
         \\pub fn run() -> u256 {
@@ -1766,16 +1800,10 @@ test "compiler const eval supports keccak256 for ABI selector hashes" {
     const body = ast_file.body(function.body);
     const ret_stmt = ast_file.statement(body.statements[0]).Return;
 
-    var hash: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("transfer(address,uint256)", &hash, .{});
-    var hex: [64]u8 = undefined;
-    for (hash, 0..) |byte, index| {
-        hex[index * 2] = std.fmt.hex_charset[byte >> 4];
-        hex[index * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-    }
-    var expected = try std.math.big.int.Managed.init(testing.allocator);
+    const expected_value: u256 = 0xa9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b;
+    try testing.expectEqual(@as(u32, 0xa9059cbb), @as(u32, @intCast(expected_value >> 224)));
+    var expected = try std.math.big.int.Managed.initSet(testing.allocator, expected_value);
     defer expected.deinit();
-    try expected.setString(16, hex[0..]);
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.values[ret_stmt.value.?.index()].?.integer.eql(expected));
@@ -1998,7 +2026,7 @@ test "compiler abiDecode decodes strict static values at comptime" {
         \\    return comptime {
         \\        let decoded = @abiDecode(u256, hex"0000000000000000000000000000000000000000000000000000000000000005");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value,
+        \\            Ok(value) => @cast(u256, value),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2077,7 +2105,7 @@ test "compiler abiDecode covers static primitive enum bitfield and refinement ca
         \\    return comptime {
         \\        let decoded = @abiDecode(address, hex"0000000000000000000000001234567890abcdef1234567890abcdef12345678");
         \\        let out = match (decoded) {
-        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[31]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2091,7 +2119,7 @@ test "compiler abiDecode covers static primitive enum bitfield and refinement ca
         \\    return comptime {
         \\        let decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000000");
         \\        let out = match (decoded) {
-        \\            Ok(value) => @abiEncode(value)[0] + @abiEncode(value)[3],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[0]) + @cast(u256, @abiEncode(value)[3]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2127,7 +2155,7 @@ test "compiler abiDecode covers static primitive enum bitfield and refinement ca
         \\    return comptime {
         \\        let decoded = @abiDecode(Flags, hex"0000000000000000000000000000000000000000000000000000000000000003");
         \\        let out = match (decoded) {
-        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[31]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2142,7 +2170,7 @@ test "compiler abiDecode covers static primitive enum bitfield and refinement ca
         \\    return comptime {
         \\        let decoded = @abiDecode(NonZeroU256, hex"0000000000000000000000000000000000000000000000000000000000000005");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value,
+        \\            Ok(value) => @cast(u256, value),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2264,22 +2292,22 @@ test "compiler abiDecodePermissive accepts documented non-canonical comptime inp
         \\    return comptime {
         \\        let decoded_u8 = @abiDecodePermissive(u8, hex"0000000000000000000000000000000000000000000000000000000000000100");
         \\        let u8_score = match (decoded_u8) {
-        \\            Ok(value) => value,
+        \\            Ok(value) => @cast(u256, value),
         \\            Err(_) => 900,
         \\        };
         \\        let decoded_bool = @abiDecodePermissive(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
         \\        let bool_score = match (decoded_bool) {
-        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[31]),
         \\            Err(_) => 900,
         \\        };
         \\        let decoded_address = @abiDecodePermissive(address, hex"0100000000000000000000001234567890abcdef1234567890abcdef12345678");
         \\        let address_score = match (decoded_address) {
-        \\            Ok(value) => @abiEncode(value)[31],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[31]),
         \\            Err(_) => 900,
         \\        };
         \\        let decoded_bytes = @abiDecodePermissive(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000001");
         \\        let bytes_score = match (decoded_bytes) {
-        \\            Ok(value) => @abiEncode(value)[0] + @abiEncode(value)[3],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[0]) + @cast(u256, @abiEncode(value)[3]),
         \\            Err(_) => 900,
         \\        };
         \\        u8_score + bool_score + address_score + bytes_score;
@@ -2294,19 +2322,19 @@ test "compiler abiDecodePermissive accepts documented non-canonical comptime inp
         \\        // Non-canonical top-level offset leaves a 32-byte gap before the string tail.
         \\        let shifted = @abiDecodePermissive(string, hex"00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        let shifted_score = match (shifted) {
-        \\            Ok(value) => value[0],
+        \\            Ok(value) => @cast(u256, value[0]),
         \\            Err(_) => 900,
         \\        };
         \\        // Canonical offset and length, but non-zero dynamic padding.
         \\        let padded = @abiDecodePermissive(bytes, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001aaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        let padded_score = match (padded) {
-        \\            Ok(value) => value[0],
+        \\            Ok(value) => @cast(u256, value[0]),
         \\            Err(_) => 900,
         \\        };
         \\        // Trailing bytes are accepted by the permissive surface and discarded on re-encode.
         \\        let trailing = @abiDecodePermissive(string, hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000016100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
         \\        let trailing_score = match (trailing) {
-        \\            Ok(value) => @abiEncode(value)[64],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[64]),
         \\            Err(_) => 900,
         \\        };
         \\        shifted_score + padded_score + trailing_score;
@@ -2365,11 +2393,11 @@ test "compiler abiDecodePermissive agrees with strict on canonical bytes at comp
         \\        let strict = @abiDecode(Payload, payload);
         \\        let permissive = @abiDecodePermissive(Payload, payload);
         \\        let strict_score = match (strict) {
-        \\            Ok(decoded) => decoded.0 + @abiEncode(decoded.1)[64],
+        \\            Ok(decoded) => decoded.0 + @cast(u256, @abiEncode(decoded.1)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        let permissive_score = match (permissive) {
-        \\            Ok(decoded) => decoded.0 + @abiEncode(decoded.1)[64],
+        \\            Ok(decoded) => decoded.0 + @cast(u256, @abiEncode(decoded.1)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        strict_score + permissive_score;
@@ -2479,12 +2507,12 @@ test "compiler abiDecodePermissive runtime decodes documented non-canonical valu
         \\    pub fn dynamic_values() -> u256 {
         \\        let shifted = @abiDecodePermissive(string, hex"00000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        let shifted_score = match (shifted) {
-        \\            Ok(value) => value[0],
+        \\            Ok(value) => @cast(u256, value[0]),
         \\            Err(_) => 900,
         \\        };
         \\        let padded = @abiDecodePermissive(bytes, hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000001aaffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        let padded_score = match (padded) {
-        \\            Ok(value) => value[0],
+        \\            Ok(value) => @cast(u256, value[0]),
         \\            Err(_) => 900,
         \\        };
         \\        return shifted_score + padded_score;
@@ -2501,7 +2529,7 @@ test "compiler abiDecodePermissive runtime decodes documented non-canonical valu
         \\    pub fn mixed_tuple() -> u256 {
         \\        let decoded = @abiDecodePermissive((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 900,
         \\        };
         \\    }
@@ -2745,7 +2773,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode(slice[bool], hex"00000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001");
         \\        let out = match (decoded) {
-        \\            Ok(values) => @abiEncode(values)[95] + @abiEncode(values)[159],
+        \\            Ok(values) => @cast(u256, @abiEncode(values)[95]) + @cast(u256, @abiEncode(values)[159]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2816,7 +2844,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2826,7 +2854,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, bytes), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2836,7 +2864,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, slice[u256]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0] + value.1[1] + value.1[2],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]) + value.1[1] + value.1[2],
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2846,7 +2874,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, slice[address]), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000200000000000000000000000000000000000000000000000000000000000000010000000000000000000000001234567890abcdef1234567890abcdef12345678");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + @abiEncode(value.1)[95],
+        \\            Ok(value) => value.0 + @cast(u256, @abiEncode(value.1)[95]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -2856,7 +2884,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, slice[bool]), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + @abiEncode(value.1)[95] + @abiEncode(value.1)[159],
+        \\            Ok(value) => value.0 + @cast(u256, @abiEncode(value.1)[95]) + @cast(u256, @abiEncode(value.1)[159]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -3992,7 +4020,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        let payload = hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000";
         \\        let decoded = @abiDecode((u256, string), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -4000,7 +4028,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003aabbcc0000000000000000000000000000000000000000000000000000000000";
         \\        let decoded = @abiDecode((u256, bytes), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -4008,7 +4036,7 @@ test "compiler abiDecode runtime memory result matches comptime oracle" {
         \\        let payload = hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000400000000000000000000000000000000000000000000000000000000000000003000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003";
         \\        let decoded = @abiDecode((u256, slice[u256]), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0] + value.1[1] + value.1[2],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]) + value.1[1] + value.1[2],
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -4986,7 +5014,7 @@ test "compiler abiDecode round-trips encoder M2 static corpus" {
         \\        const value: Scalars = (1, true);
         \\        let decoded = @abiDecode(Scalars, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip.0 + @abiEncode(roundtrip.1)[31],
+        \\            Ok(roundtrip) => roundtrip.0 + @cast(u256, @abiEncode(roundtrip.1)[31]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5035,7 +5063,7 @@ test "compiler abiDecode round-trips encoder M2 static corpus" {
         \\        const value: Pair = Pair { amount: 7, ok: true };
         \\        let decoded = @abiDecode(Pair, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(pair) => pair.amount + @abiEncode(pair.ok)[31],
+        \\            Ok(pair) => pair.amount + @cast(u256, @abiEncode(pair.ok)[31]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5129,7 +5157,7 @@ test "compiler abiDecode round-trips encoder dynamic corpus" {
         \\        const value = "hello";
         \\        let decoded = @abiDecode(string, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip[0] + roundtrip.len,
+        \\            Ok(roundtrip) => @cast(u256, roundtrip[0]) + roundtrip.len,
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5141,7 +5169,7 @@ test "compiler abiDecode round-trips encoder dynamic corpus" {
         \\        const value: bytes = hex"deadbeef";
         \\        let decoded = @abiDecode(bytes, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip[0] + roundtrip[3],
+        \\            Ok(roundtrip) => @cast(u256, roundtrip[0]) + @cast(u256, roundtrip[3]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5165,7 +5193,7 @@ test "compiler abiDecode round-trips encoder dynamic corpus" {
         \\        const value: (u256, string) = (7, "hello");
         \\        let decoded = @abiDecode((u256, string), @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip.0 + roundtrip.1[0] + roundtrip.1.len,
+        \\            Ok(roundtrip) => roundtrip.0 + @cast(u256, roundtrip.1[0]) + roundtrip.1.len,
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5199,7 +5227,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const payload: bytes = hex"deadbeef";
         \\        let decoded = @abiDecode(bytes, @abiEncode(payload));
         \\        let out = match (decoded) {
-        \\            Ok(value) => @abiEncode(value)[64] + @abiEncode(value)[67],
+        \\            Ok(value) => @cast(u256, @abiEncode(value)[64]) + @cast(u256, @abiEncode(value)[67]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5215,7 +5243,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const value: Payload = (7, "hello");
         \\        let decoded = @abiDecode(Payload, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip.0 + @abiEncode(roundtrip.1)[64],
+        \\            Ok(roundtrip) => roundtrip.0 + @cast(u256, @abiEncode(roundtrip.1)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5245,7 +5273,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const values = @cast(slice[string], ["a", "bb"]);
         \\        let decoded = @abiDecode(slice[string], @abiEncode(values));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => @abiEncode(roundtrip[0])[64] + @abiEncode(roundtrip[1])[64],
+        \\            Ok(roundtrip) => @cast(u256, @abiEncode(roundtrip[0])[64]) + @cast(u256, @abiEncode(roundtrip[1])[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5281,7 +5309,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const value: Profile = Profile { id: 1, name: "hello" };
         \\        let decoded = @abiDecode(Profile, @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip.id + @abiEncode(roundtrip.name)[64],
+        \\            Ok(roundtrip) => roundtrip.id + @cast(u256, @abiEncode(roundtrip.name)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5296,7 +5324,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const value: [string; 3] = ["a", "bb", "ccc"];
         \\        let decoded = @abiDecode([string; 3], @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => @abiEncode(roundtrip[0])[64] + @abiEncode(roundtrip[1])[64] + @abiEncode(roundtrip[2])[64],
+        \\            Ok(roundtrip) => @cast(u256, @abiEncode(roundtrip[0])[64]) + @cast(u256, @abiEncode(roundtrip[1])[64]) + @cast(u256, @abiEncode(roundtrip[2])[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5317,7 +5345,7 @@ test "compiler abiDecode decodes dynamic ABI values at comptime" {
         \\        const value = @cast(slice[Profile], [first, second]);
         \\        let decoded = @abiDecode(slice[Profile], @abiEncode(value));
         \\        let out = match (decoded) {
-        \\            Ok(roundtrip) => roundtrip[0].id + roundtrip[1].id + @abiEncode(roundtrip[0].name)[64] + @abiEncode(roundtrip[1].name)[64],
+        \\            Ok(roundtrip) => roundtrip[0].id + roundtrip[1].id + @cast(u256, @abiEncode(roundtrip[0].name)[64]) + @cast(u256, @abiEncode(roundtrip[1].name)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5381,7 +5409,7 @@ test "compiler abiDecode decodes cast-anchored dynamic ABI bytes at comptime" {
         \\    return comptime {
         \\        let decoded = @abiDecode((u256, string), hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.0 + @abiEncode(value.1)[64],
+        \\            Ok(value) => value.0 + @cast(u256, @abiEncode(value.1)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -5400,7 +5428,7 @@ test "compiler abiDecode decodes cast-anchored dynamic ABI bytes at comptime" {
         \\    return comptime {
         \\        let decoded = @abiDecode(Profile, hex"000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000000568656c6c6f000000000000000000000000000000000000000000000000000000");
         \\        let out = match (decoded) {
-        \\            Ok(value) => value.id + @abiEncode(value.name)[64],
+        \\            Ok(value) => value.id + @cast(u256, @abiEncode(value.name)[64]),
         \\            Err(_) => 0,
         \\        };
         \\        out;
@@ -6286,6 +6314,42 @@ test "compiler runtime static ABI materializer matches comptime abiEncode and ca
     try expectRuntimeAbiPayloadMatchesComptimeAndCast(refinement_comptime_source, refinement_runtime_source, "probe", "expected", "0000000000000000000000000000000000000000000000000000000000000005");
 }
 
+test "compiler lowers source runtime abiEncode builtin instead of empty bytes default" {
+    const param_source =
+        \\pub fn encode(value: u256) -> bytes {
+        \\    return @abiEncode(value);
+        \\}
+    ;
+    const param_hir = try renderOraMlirForSource(param_source);
+    defer testing.allocator.free(param_hir);
+    try testing.expect(std.mem.containsAtLeast(u8, param_hir, 1, "ora.abi_encode"));
+    try testing.expect(!std.mem.containsAtLeast(u8, param_hir, 1, "ora.bytes.constant \"0x\""));
+
+    const const_source =
+        \\pub fn encode() -> bytes {
+        \\    let value: u256 = 5;
+        \\    return @abiEncode(value);
+        \\}
+    ;
+    var compilation = try compileText(const_source);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const expected = "0000000000000000000000000000000000000000000000000000000000000020" ++
+        "0000000000000000000000000000000000000000000000000000000000000005";
+    const payload = try extractRuntimeReturnBytesFromSir(rendered, "encode", try expectedHexByteLen(expected));
+    defer testing.allocator.free(payload);
+    try expectHexBytes(expected, payload);
+}
+
 test "compiler plain runtime static ABI encode op matches cast" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);
@@ -7118,6 +7182,24 @@ test "compiler abiEncode emits exact diagnostics for unsupported cases" {
         },
         .{
             .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(bytes01, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "undefined type 'bytes01'",
+        },
+        .{
+            .source =
+            \\pub fn run(payload: bytes) -> u256 {
+            \\    let decoded = @abiDecode(bytes1_6, payload);
+            \\    return 0;
+            \\}
+            ,
+            .needle = "undefined type 'bytes1_6'",
+        },
+        .{
+            .source =
             \\struct Pair { left: u256, right: u256 }
             \\pub fn run(payload: bytes) -> u256 {
             \\    let decoded = @abiDecode(Pair, payload);
@@ -7778,168 +7860,11 @@ test "compiler eventTopic builtin rejects non-string event_name metadata" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "string literal"));
 }
 
-test "compiler preserves pinned eip712_name metadata on structs" {
-    const source_text =
-        \\struct PermitV2 {
-        \\    pub const eip712_name = "Permit";
-        \\    owner: address,
-        \\    spender: address,
-        \\    value: u256,
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
-
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(typecheck.diagnostics.isEmpty());
-    try testing.expectEqual(@as(usize, 1), struct_item.metadata.len);
-    try testing.expectEqualStrings("Permit", compiler.hir.abi.eip712WireNameFromStructItem(ast_file, struct_item).?);
-}
-
-test "compiler eip712_name metadata falls back to struct identifier" {
-    const source_text =
-        \\struct Permit {
-        \\    owner: address,
-        \\    spender: address,
-        \\    value: u256,
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const struct_item = ast_file.item(ast_file.root_items[0]).Struct;
-
-    try testing.expectEqualStrings("Permit", compiler.hir.abi.eip712WireNameFromStructItem(ast_file, struct_item).?);
-}
-
-test "compiler rejects non-string eip712_name metadata" {
-    const source_text =
-        \\struct Permit {
-        \\    pub const eip712_name = 42;
-        \\    owner: address,
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "eip712_name"));
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "string literal"));
-}
-
-test "compiler const eval supports eip712TypeHash builtin for ERC-2612 Permit" {
+test "compiler rejects struct metadata while EIP-712 support is disabled" {
     const source_text =
         \\struct Permit {
         \\    pub const eip712_name = "Permit";
         \\    owner: address,
-        \\    spender: address,
-        \\    value: u256,
-        \\    nonce: u256,
-        \\    deadline: u256,
-        \\}
-        \\
-        \\pub fn run() -> bytes32 {
-        \\    return comptime {
-        \\        @eip712TypeHash(Permit);
-        \\    };
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const function = ast_file.item(ast_file.root_items[1]).Function;
-    const body = ast_file.body(function.body);
-    const ret_stmt = ast_file.statement(body.statements[0]).Return;
-
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(typecheck.diagnostics.isEmpty());
-    try testing.expectEqual(compiler.sema.TypeKind.fixed_bytes, typecheck.exprType(ret_stmt.value.?).kind());
-    try testing.expectEqual(@as(u8, 32), typecheck.exprType(ret_stmt.value.?).fixed_bytes.len);
-
-    var expected: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)", &expected, .{});
-
-    const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
-}
-
-test "compiler eip712TypeHash builtin falls back to struct identifier" {
-    const source_text =
-        \\struct Permit {
-        \\    owner: address,
-        \\}
-        \\
-        \\pub fn run() -> bytes32 {
-        \\    return comptime {
-        \\        @eip712TypeHash(Permit);
-        \\    };
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const function = ast_file.item(ast_file.root_items[1]).Function;
-    const body = ast_file.body(function.body);
-    const ret_stmt = ast_file.statement(body.statements[0]).Return;
-
-    var expected: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner)", &expected, .{});
-
-    const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
-}
-
-test "compiler eip712TypeHash builtin uses pinned eip712_name metadata" {
-    const source_text =
-        \\struct PermitV2 {
-        \\    pub const eip712_name = "Permit";
-        \\    owner: address,
-        \\}
-        \\
-        \\pub fn run() -> bytes32 {
-        \\    return comptime {
-        \\        @eip712TypeHash(PermitV2);
-        \\    };
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const module = compilation.db.sources.module(compilation.root_module_id);
-    const ast_file = try compilation.db.astFile(module.file_id);
-    const function = ast_file.item(ast_file.root_items[1]).Function;
-    const body = ast_file.body(function.body);
-    const ret_stmt = ast_file.statement(body.statements[0]).Return;
-
-    var expected: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash("Permit(address owner)", &expected, .{});
-
-    const consteval = try compilation.db.constEval(compilation.root_module_id);
-    try testing.expectEqualSlices(u8, expected[0..], consteval.values[ret_stmt.value.?.index()].?.fixed_bytes);
-}
-
-test "compiler eip712TypeHash builtin rejects non-struct arguments" {
-    const source_text =
-        \\pub fn run() -> bytes32 {
-        \\    return comptime {
-        \\        @eip712TypeHash(42);
-        \\    };
         \\}
     ;
 
@@ -7947,32 +7872,7 @@ test "compiler eip712TypeHash builtin rejects non-struct arguments" {
     defer compilation.deinit();
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "struct type"));
-}
-
-test "compiler eip712TypeHash builtin rejects nested struct fields" {
-    const source_text =
-        \\struct Permit {
-        \\    owner: address,
-        \\}
-        \\
-        \\struct Order {
-        \\    permit: Permit,
-        \\    deadline: u256,
-        \\}
-        \\
-        \\pub fn run() -> bytes32 {
-        \\    return comptime {
-        \\        @eip712TypeHash(Order);
-        \\    };
-        \\}
-    ;
-
-    var compilation = try compileText(source_text);
-    defer compilation.deinit();
-
-    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "nested struct fields"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "struct metadata constant 'eip712_name' is not supported"));
 }
 
 test "compiler corpus covers ABI selector and signature builtins" {
@@ -7990,6 +7890,7 @@ test "compiler corpus covers ABI selector and signature builtins" {
 
     var selector_index: ?usize = null;
     var signature_index: ?usize = null;
+    var hash_index: ?usize = null;
     for (contract.members) |member_id| {
         const item = ast_file.item(member_id).*;
         if (item != .Function) continue;
@@ -8001,15 +7902,23 @@ test "compiler corpus covers ABI selector and signature builtins" {
             selector_index = ret_stmt.value.?.index();
         } else if (std.mem.eql(u8, function.name, "transfer_signature")) {
             signature_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, function.name, "transfer_hash")) {
+            hash_index = ret_stmt.value.?.index();
         }
     }
 
     try testing.expect(selector_index != null);
     try testing.expect(signature_index != null);
+    try testing.expect(hash_index != null);
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expectEqualSlices(u8, &.{ 0xa9, 0x05, 0x9c, 0xbb }, consteval.values[selector_index.?].?.fixed_bytes);
     try testing.expectEqualStrings("transfer(address,uint256)", consteval.values[signature_index.?].?.string);
+
+    const transfer_hash_value: u256 = 0xa9059cbb2ab09eb219583f4a59a5d0623ade346d962bcd4e46b11da047c9049b;
+    var expected_hash = try std.math.big.int.Managed.initSet(testing.allocator, transfer_hash_value);
+    defer expected_hash.deinit();
+    try testing.expect(consteval.values[hash_index.?].?.integer.eql(expected_hash));
 }
 
 test "compiler corpus covers ABI eventTopic builtin" {

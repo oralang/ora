@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import re
 import subprocess
 from pathlib import Path
@@ -23,6 +24,15 @@ def should_skip(path: Path) -> bool:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--only",
+        action="append",
+        help="repo-relative .ora path; regenerate just these checks (overwrites existing)",
+    )
+    args = parser.parse_args()
+    only = set(args.only) if args.only else None
+
     if not ORA_BIN.exists():
         print(f"error: ora binary not found at {ORA_BIN}. Run 'zig build' first.")
         return 1
@@ -47,9 +57,11 @@ def main() -> int:
 
     for path in ora_files:
         rel = path.relative_to(REPO).as_posix()
+        if only is not None and rel not in only:
+            continue
         if should_skip(path):
             continue
-        if rel in covered:
+        if only is None and rel in covered:
             continue
 
         try:
@@ -69,12 +81,16 @@ def main() -> int:
             continue
 
         out = proc.stdout
+        # Older CLI versions printed a banner before the IR; current versions
+        # emit the module directly. Accept both (same fallback as run-mlir-checks.sh).
         marker = "Ora MLIR (before conversion)"
-        if marker not in out:
-            failed.append((rel, "missing Ora MLIR marker"))
+        if marker in out:
+            ora = out.split(marker, 1)[1]
+        elif out.lstrip().startswith("module"):
+            ora = out
+        else:
+            failed.append((rel, "missing Ora MLIR output"))
             continue
-
-        ora = out.split(marker, 1)[1]
         func_names = re.findall(r"func\.func\s+@([A-Za-z0-9_]+)", ora)
 
         check_name = "auto__" + rel.replace("/", "__").replace(".ora", ".check")
@@ -98,6 +114,7 @@ def main() -> int:
         print("failed:")
         for rel, reason in failed:
             print(f"  {rel}: {reason}")
+        return 1
     return 0
 
 

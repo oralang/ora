@@ -1,5 +1,7 @@
 #pragma once
 
+#include "patterns/AdtCarrierLayout.h"
+
 #include "OraDialect.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Value.h"
@@ -8,7 +10,6 @@
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
 
-#include <cstdint>
 #include <utility>
 
 namespace mlir
@@ -18,26 +19,59 @@ namespace mlir
         namespace adt_helpers
         {
 
-            // The wide ADT carrier is two back-to-back u256 words in memory:
-            // tag at offset 0, payload at offset 32, total 64 bytes.
-            inline constexpr uint64_t kAdtCarrierSize = 64;
-            inline constexpr uint64_t kAdtPayloadOffset = 32;
+            ::mlir::Value adtCarrierSizeConst(::mlir::OpBuilder &builder,
+                                              ::mlir::Location loc);
 
-            // Allocate a 64-byte handle, store `tag` at offset 0 and `payload`
-            // at offset 32, and return the base pointer (sir.ptr<1>). Both
-            // operands are coerced to sir.u256 if needed.
+            ::mlir::Value adtPayloadOffsetConst(::mlir::OpBuilder &builder,
+                                                ::mlir::Location loc);
+
+            ::mlir::Value adtStoragePayloadSlotOffsetConst(::mlir::OpBuilder &builder,
+                                                           ::mlir::Location loc);
+
+            struct AdtHandle
+            {
+                ::mlir::Value basePtr;
+                ::mlir::Value sizeBytes;
+            };
+
+            AdtHandle materializeAdtHandleWithSize(::mlir::OpBuilder &builder,
+                                                   ::mlir::Location loc,
+                                                   ::mlir::Value tag,
+                                                   ::mlir::Value payload);
+
+            // Allocate a kAdtCarrierSize-byte handle, store `tag` at the tag
+            // word and `payload` at the payload word, and return the base
+            // pointer (sir.ptr<1>). Both operands are coerced to sir.u256 if
+            // needed.
             ::mlir::Value materializeAdtHandle(::mlir::OpBuilder &builder,
                                                ::mlir::Location loc,
                                                ::mlir::Value tag,
                                                ::mlir::Value payload);
 
-            // View `handle` as a base pointer to a 64-byte ADT carrier and load
-            // (tag, payload). Accepts `handle` as sir.ptr<1> or sir.u256
-            // (a u256 is bitcast to ptr first). Loads are typed sir.u256.
+            // View `handle` as a base pointer to an ADT carrier and load
+            // (tag, payload). Accepts `handle` as sir.ptr<1> or sir.u256 (a
+            // u256 is bitcast to ptr first). Loads are typed sir.u256.
             std::pair<::mlir::Value, ::mlir::Value>
             loadAdtPartsFromHandle(::mlir::OpBuilder &builder,
                                    ::mlir::Location loc,
                                    ::mlir::Value handle);
+
+            // Storage representation for wide ADT/error-union carriers:
+            // tag at `baseSlot`, payload at `baseSlot + kAdtStoragePayloadSlotOffset`.
+            ::mlir::Value adtStoragePayloadSlot(::mlir::OpBuilder &builder,
+                                                ::mlir::Location loc,
+                                                ::mlir::Value baseSlot);
+
+            std::pair<::mlir::Value, ::mlir::Value>
+            loadAdtPartsFromStorageRoot(::mlir::OpBuilder &builder,
+                                        ::mlir::Location loc,
+                                        ::mlir::Value baseSlot);
+
+            void storeAdtPartsToStorageRoot(::mlir::OpBuilder &builder,
+                                            ::mlir::Location loc,
+                                            ::mlir::Value baseSlot,
+                                            ::mlir::Value tag,
+                                            ::mlir::Value payload);
 
             // Aggregate ADT payloads (tuples, structs, strings, bytes, memrefs)
             // ride the wide ADT carrier as a compiler-managed handle pointer.
@@ -45,6 +79,38 @@ namespace mlir
 
             // Linear scan; the variant table is small in practice.
             ::mlir::FailureOr<unsigned> getAdtVariantIndex(::mlir::ora::AdtType type, ::mlir::StringRef variantName);
+
+            struct AdtConstructCarrierOptions
+            {
+                bool requireExistingScalarCarrier = false;
+                bool acceptExistingAggregateCarrier = false;
+                bool acceptSingleOperandCarrierCast = false;
+            };
+
+            // Build the normalized wide ADT carrier `(tag, payload)` for an
+            // `ora.adt.construct`. Aggregate payloads are represented as a
+            // compiler-managed handle in the payload word.
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            materializeAdtConstructParts(::mlir::PatternRewriter &rewriter,
+                                         ::mlir::Location loc,
+                                         ::mlir::ora::AdtType adtType,
+                                         ::mlir::StringRef variantName,
+                                         ::mlir::ValueRange payloadValues,
+                                         AdtConstructCarrierOptions options = {});
+
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            materializeAdtConstructParts(::mlir::PatternRewriter &rewriter,
+                                         ::mlir::Location loc,
+                                         ::mlir::ora::AdtConstructOp constructOp,
+                                         AdtConstructCarrierOptions options = {});
+
+            // Prefer direct construct materialization, then fall back to an
+            // existing normalized_adt materialization cast.
+            ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>
+            getAdtPartsFromConstructOrNormalized(::mlir::PatternRewriter &rewriter,
+                                                 ::mlir::Location loc,
+                                                 ::mlir::Value value,
+                                                 AdtConstructCarrierOptions options = {});
 
             // Wide ADT carrier pulled out of the (already-adapted) operand pair.
             ::mlir::FailureOr<std::pair<::mlir::Value, ::mlir::Value>>

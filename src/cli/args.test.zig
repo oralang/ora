@@ -118,3 +118,70 @@ test "chain id parses as separate value and equals form" {
     try testing.expectEqual(@as(?u64, 31337), equals.chain_id);
     try testing.expectEqualStrings("contract.ora", equals.input_file.?);
 }
+
+test "help flags parse explicitly" {
+    const short_args = [_][]const u8{"-h"};
+    const short = try cli.parseArgs(&short_args);
+    try testing.expect(short.show_help);
+
+    const long_args = [_][]const u8{"--help"};
+    const long = try cli.parseArgs(&long_args);
+    try testing.expect(long.show_help);
+}
+
+test "separator allows dash-prefixed input file" {
+    const args = [_][]const u8{ "--", "-contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expectEqualStrings("-contract.ora", parsed.input_file.?);
+}
+
+test "formatter width must be nonzero" {
+    const args = [_][]const u8{ "fmt", "--width", "0", "contract.ora" };
+    try testing.expectError(error.UnknownArgument, cli.parseArgs(&args));
+}
+
+test "bare fmt token is not positional formatter mode" {
+    const args = [_][]const u8{ "contract.ora", "fmt" };
+    try testing.expectError(error.UnknownArgument, cli.parseArgs(&args));
+}
+
+test "emit ast formats validate at parse time" {
+    const bad_ast = [_][]const u8{"--emit=ast:xml"};
+    try testing.expectError(error.UnknownArgument, cli.parseArgs(&bad_ast));
+
+    const bad_typed_ast = [_][]const u8{"--emit=typed-ast:yaml"};
+    try testing.expectError(error.UnknownArgument, cli.parseArgs(&bad_typed_ast));
+
+    const good_ast = [_][]const u8{ "--emit=ast:json", "contract.ora" };
+    const parsed = try cli.parseArgs(&good_ast);
+    try testing.expect(parsed.emit_ast);
+    try testing.expectEqualStrings("json", parsed.emit_ast_format.?);
+}
+
+test "output target flags are explicit and mutually exclusive" {
+    const out_dir_args = [_][]const u8{ "--out-dir", "artifacts", "contract.ora" };
+    const out_dir = try cli.parseArgs(&out_dir_args);
+    try testing.expectEqualStrings("artifacts", out_dir.output_dir.?);
+
+    const out_file_args = [_][]const u8{ "--out-file", "contract.hex", "contract.ora" };
+    const out_file = try cli.parseArgs(&out_file_args);
+    try testing.expectEqualStrings("contract.hex", out_file.output_file.?);
+
+    const duplicate = [_][]const u8{ "--out-dir", "artifacts", "--out-file", "contract.hex", "contract.ora" };
+    try testing.expectError(error.DuplicateArgument, cli.parseArgs(&duplicate));
+}
+
+test "duplicate single-owner flags are rejected" {
+    const width_args = [_][]const u8{ "fmt", "--width", "80", "--width", "100", "contract.ora" };
+    try testing.expectError(error.DuplicateArgument, cli.parseArgs(&width_args));
+
+    const emit_args = [_][]const u8{ "--emit=mlir", "--emit=bytecode", "contract.ora" };
+    try testing.expectError(error.DuplicateArgument, cli.parseArgs(&emit_args));
+
+    const verify_args = [_][]const u8{ "--verify", "--no-verify", "contract.ora" };
+    try testing.expectError(error.DuplicateArgument, cli.parseArgs(&verify_args));
+
+    const chain_args = [_][]const u8{ "--chain-id=1", "--chain-id=2", "contract.ora" };
+    try testing.expectError(error.DuplicateArgument, cli.parseArgs(&chain_args));
+}

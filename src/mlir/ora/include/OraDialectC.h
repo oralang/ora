@@ -61,6 +61,7 @@ extern "C"
     MLIR_CAPI_EXPORTED void oraRegisterAllDialects(MlirDialectRegistry registry);
     MLIR_CAPI_EXPORTED void oraContextAppendDialectRegistry(MlirContext ctx, MlirDialectRegistry registry);
     MLIR_CAPI_EXPORTED void oraContextLoadAllAvailableDialects(MlirContext ctx);
+    MLIR_CAPI_EXPORTED void oraContextLoadSIRDialect(MlirContext ctx);
 
     MLIR_CAPI_EXPORTED MlirModule oraModuleCreateEmpty(MlirLocation loc);
     /// Parse a textual MLIR module. Returns a null module on parse failure.

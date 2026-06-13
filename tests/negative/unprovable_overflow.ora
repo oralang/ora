@@ -1,0 +1,8 @@
+// Negative: unconstrained checked arithmetic the verifier cannot discharge is
+// rejected at compile time (FV-first). See FINDINGS / arithmetic_checked_revert
+// for the runtime-guarded counterpart that DOES compile.
+contract UnprovableOverflow {
+    pub fn f(a: u256, b: u256) -> u256 {
+        return a + b;
+    }
+}

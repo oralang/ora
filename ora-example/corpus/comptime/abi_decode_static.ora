@@ -54,7 +54,7 @@ contract AbiDecodeStaticCorpus {
         return comptime {
             const decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000000");
             const out = match (decoded) {
-                Ok(value) => @abiEncode(value)[0] + @abiEncode(value)[3],
+                Ok(value) => @cast(u256, @abiEncode(value)[0]) + @cast(u256, @abiEncode(value)[3]),
                 Err(_) => 0,
             };
             out;

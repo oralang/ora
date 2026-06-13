@@ -1,1 +1,101 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/regions/effects/function_effect_summary.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/regions/effects/function_effect_summary.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module attributes {ora.global_slots = {balances = 1 : ui64, counter = 0 : ui64, temp_flag = 2 : ui64}, ora.global_slots_built} {
+// CHECK-NEXT:   func.func @testStorageReadOnly() attributes {ora.effect = "reads", ora.read_slots = ["counter", "balances"], ora.selector = "0xb30feec5", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":14:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":14:5)
+// CHECK-NEXT:   func.func @testStorageWriteOnly(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":21:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["x"], ora.read_slots = ["balances"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x38ceebbb", ora.visibility = "pub", ora.write_slots = ["counter", "balances"]} {
+// CHECK-NEXT:     %slot_balances = sir.const 1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":22:9)))
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":22:9)))
+// CHECK-NEXT:     %0 = sir.caller : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:18)))
+// CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     %ptr = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     sir.store %ptr : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     %ptr_off = sir.addptr %ptr : !sir.ptr<1>, %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     sir.store %ptr_off : !sir.ptr<1>, %slot_balances : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     %3 = sir.keccak256 %ptr : !sir.ptr<1>, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     sir.sstore %3 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":23:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":21:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":21:5)
+// CHECK-NEXT:   func.func @testStorageReadWrite(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":28:33)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["x"], ora.read_slots = ["counter"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xd9fd6e56", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":9:5)))
+// CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":9:5)))
+// CHECK-NEXT:     %0 = sir.eq %arg0 : !sir.u256, %value : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:13)))
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:13)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:13)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:13)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %value : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":31:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":33:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":30:9)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":28:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":28:5)
+// CHECK-NEXT:   func.func @testTStoreEffects() attributes {ora.effect = "readwrites", ora.read_slots = ["transient:temp_flag"], ora.selector = "0xc418b99f", ora.visibility = "pub", ora.write_slots = ["transient:temp_flag"]} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:21)))
+// CHECK-NEXT:     %0 = sir.and %c1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:21)))
+// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:21)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : i1 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:9)))
+// CHECK-NEXT:     %3 = sir.const 2 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:9)))
+// CHECK-NEXT:     sir.tstore %3 : !sir.u256, %2 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":41:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":39:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":39:5)
+// CHECK-NEXT:   func.func @testCalldataEffects(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":46:32), %arg1: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":46:41)) attributes {ora.abi_param_enum_counts = [0 : i256, 0 : i256], ora.abi_param_refinements = ["", ""], ora.abi_params = ["uint256", "uint256"], ora.effect = "writes", ora.param_names = ["x", "y"], ora.result_input_error_ids = [0 : i256, 0 : i256], ora.result_input_modes = ["", ""], ora.selector = "0xcd05dae0", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":49:13)))
+// CHECK-NEXT:     %0 = sir.eq %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":47:26)))
+// CHECK-NEXT:     %1 = sir.const 1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":47:26)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":47:26)))
+// CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":47:26)))
+// CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":49:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg1 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":51:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":48:9)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":46:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":46:5)
+// CHECK-NEXT:   func.func @testMemoryEffects(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":57:30)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xeb4ad4b4", ora.visibility = "pub", ora.write_slots = ["counter"]} {
+// CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":60:9)))
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":60:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":57:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":57:5)
+// CHECK-NEXT:   func.func @testAllEffects(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":65:27)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "readwrites", ora.param_names = ["x"], ora.read_slots = ["counter", "transient:temp_flag"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0xc802c819", ora.visibility = "pub", ora.write_slots = ["counter", "transient:temp_flag"]} {
+// CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:21)))
+// CHECK-NEXT:     %0 = sir.and %c1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:21)))
+// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:21)))
+// CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.18"("ora.origin_stmt.18"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":9:5)))
+// CHECK-NEXT:     %2 = sir.bitcast %1 : i1 : !sir.u256 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:9)))
+// CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.18"("ora.origin_stmt.18"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":9:5)))
+// CHECK-NEXT:     %3 = sir.eq %arg0 : !sir.u256, %value : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:13)))
+// CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:13)))
+// CHECK-NEXT:     %5 = sir.bitcast %4 : !sir.u256 : i1 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:13)))
+// CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:   ^bb1:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %value : !sir.u256 loc("ora.stmt.20"("ora.origin_stmt.20"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":72:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:   ^bb2:  // pred: ^bb0
+// CHECK-NEXT:     sir.sstore %slot_counter : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.19"("ora.origin_stmt.19"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":74:13)))
+// CHECK-NEXT:     sir.br ^bb3 loc("ora.stmt.21"("ora.origin_stmt.21"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":71:9)))
+// CHECK-NEXT:   ^bb3:  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %9 = sir.const 2 : !sir.u256 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:9)))
+// CHECK-NEXT:     sir.tstore %9 : !sir.u256, %2 : !sir.u256 loc("ora.stmt.25"("ora.origin_stmt.25"("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":83:9)))
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":65:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":65:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/regions/effects/function_effect_summary.ora":8:1)

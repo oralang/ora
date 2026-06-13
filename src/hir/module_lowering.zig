@@ -2,21 +2,29 @@ const std = @import("std");
 const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
+const ora_types = @import("ora_types");
+const ConstValue = ora_types.ConstValue;
+const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
+const BigInt = std.math.big.int.Managed;
 const appendOp = support.appendOp;
 const createIntegerConstant = support.createIntegerConstant;
-const defaultIntegerType = support.defaultIntegerType;
 const identifier = support.identifier;
 const namedBoolAttr = support.namedBoolAttr;
 const namedStringAttr = support.namedStringAttr;
 const namedTypeAttr = support.namedTypeAttr;
 const strRef = support.strRef;
 const zeroInitAttr = support.zeroInitAttr;
+const reprIntegerType = support.reprIntegerType;
+const descriptorFromPathName = sema.descriptorFromPathName;
+
+const no_public_result_input_error_id: i64 = 0;
+const no_abi_param_enum_count: usize = 0;
 
 pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSymbolKind: type) type {
     return struct {
@@ -37,7 +45,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .TypeAlias => {},
                 .LogDecl => |log_decl| try self.lowerLogDecl(item_id, log_decl, parent_block),
                 .ErrorDecl => |error_decl| try self.lowerErrorDecl(item_id, error_decl, parent_block),
-                .GhostBlock => |ghost_block| try @This().lowerGhostBlock(self, ghost_block, parent_block),
+                .GhostBlock => |ghost_block| try @This().lowerGhostBlock(self, item_id, ghost_block, parent_block),
                 .Field => |field| try self.lowerField(item_id, field, parent_block),
                 .Constant => |constant| try self.lowerConstant(item_id, constant, parent_block),
                 .Error => {},
@@ -66,8 +74,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             self.guarded_storage_roots = &guarded_storage_roots;
             defer self.guarded_storage_roots = previous_guarded_roots;
 
-            for (contract.invariants) |expr_id| {
-                try contract_lowerer.lowerInvariant(expr_id);
+            for (self.itemVerificationFactEntries(item_id)) |entry| {
+                const fact = self.verificationFact(entry);
+                if (fact.kind != .contract_invariant) continue;
+                try contract_lowerer.lowerInvariant(fact.*);
             }
             for (self.typecheck.instantiated_structs) |instantiated| {
                 if (self.enclosingContractForItem(instantiated.template_item_id)) |contract_id| {
@@ -117,70 +127,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
         }
 
-        fn lowerImplGhostBlock(self: *Lowerer, impl_item: ast.ImplItem, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
-            var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
-            function_lowerer.in_ghost_context = true;
-
-            var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
-            if (@This().firstImplSelfPattern(self, impl_item)) |pattern_id| {
-                function_lowerer.trait_ghost_self_pattern = pattern_id;
-                const self_value = try @This().lowerImplGhostSelfValue(self, impl_item, ghost_block.range, &function_lowerer);
-                try locals.bindPattern(self.file, pattern_id, self_value);
-            }
-
-            _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
-        }
-
-        fn lowerImplGhostSelfValue(self: *Lowerer, impl_item: ast.ImplItem, range: source.TextRange, function_lowerer: *FunctionLowerer) anyerror!mlir.MlirValue {
-            const target_item_id = self.item_index.lookup(impl_item.target_name) orelse return error.MlirOperationCreationFailed;
-            const self_type = mlir.oraStructTypeGet(self.context, strRef(impl_item.target_name));
-
-            switch (self.file.item(target_item_id).*) {
-                .Contract => {
-                    const created = mlir.oraStructInstantiateOpCreate(self.context, self.location(range), strRef(impl_item.target_name), null, 0, self_type);
-                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
-                },
-                .Struct => |struct_item| {
-                    var operands: std.ArrayList(mlir.MlirValue) = .{};
-                    for (struct_item.fields) |field| {
-                        try operands.append(self.allocator, try function_lowerer.defaultValue(self.lowerTypeExpr(field.type_expr), field.range));
-                    }
-                    const created = mlir.oraStructInstantiateOpCreate(
-                        self.context,
-                        self.location(range),
-                        strRef(impl_item.target_name),
-                        if (operands.items.len == 0) null else operands.items.ptr,
-                        operands.items.len,
-                        self_type,
-                    );
-                    if (!mlir.oraOperationIsNull(created)) return support.appendValueOp(function_lowerer.block, created);
-                },
-                else => {},
-            }
-
-            return error.MlirOperationCreationFailed;
-        }
-
         pub fn enclosingContractForItem(self: *const Lowerer, item_id: ast.ItemId) ?ast.ItemId {
             for (self.file.items, 0..) |item, index| {
                 if (item != .Contract) continue;
                 for (item.Contract.members) |member_id| {
                     if (member_id.index() == item_id.index()) return ast.ItemId.fromIndex(index);
-                }
-            }
-            return null;
-        }
-
-        fn firstImplSelfPattern(self: *Lowerer, impl_item: ast.ImplItem) ?ast.PatternId {
-            for (impl_item.methods) |method_item_id| {
-                const item = self.file.item(method_item_id).*;
-                if (item != .Function) continue;
-                for (item.Function.parameters) |parameter| {
-                    if (parameter.is_comptime) continue;
-                    const pattern = self.file.pattern(parameter.pattern).*;
-                    if (pattern != .Name) break;
-                    if (std.mem.eql(u8, pattern.Name.name, "self")) return parameter.pattern;
-                    break;
                 }
             }
             return null;
@@ -214,7 +165,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const repr_type = if (instantiated.repr_type) |resolved|
                 self.lowerSemaType(resolved, template_item.range)
             else
-                defaultIntegerType(self.context);
+                reprIntegerType(self.context);
             const op = mlir.oraEnumDeclOpCreate(self.context, loc, strRef(instantiated.mangled_name), repr_type);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
 
@@ -222,10 +173,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, template_item.variants.len);
                 var has_explicit_values = false;
-                var next_value: i64 = 0;
+                var next_value: ?i64 = 0;
                 for (template_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
-                    const value_attr = try @This().lowerInstantiatedEnumVariantValue(self, instantiated, variant.name, instantiated.variants[index].explicit_value, repr_type, &next_value, &has_explicit_values);
+                    const value_attr = try @This().lowerInstantiatedEnumVariantValue(self, instantiated, variant, instantiated.variants[index].explicit_value, repr_type, &next_value, &has_explicit_values);
                     variant_values[index] = value_attr;
                 }
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.variant_names"), mlir.oraArrayAttrCreate(self.context, @intCast(variant_names.len), variant_names.ptr));
@@ -260,7 +211,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             caller_contract_id: ?ast.ItemId,
         ) anyerror!?[]const u8 {
             if (@This().enclosingImplForMethod(self, item_id)) |impl_item| {
-                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.trait_name, impl_item.target_name, call, null);
+                const symbol_name = try @This().ensureLoweredImplMethod(self, item_id, function, impl_item.trait_name, impl_item.target_name, call, null, null);
                 return symbol_name;
             }
             const scoped_contract_id = if (function.parent_contract == null) caller_contract_id else null;
@@ -309,11 +260,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         ) anyerror!?[]const u8 {
             if (function.parent_contract != null or function.is_comptime) return null;
 
-            const target_file = try self.module_query.?.ast_file(self.module_query.?.context, target_module_id);
-            const target_item_index = try self.module_query.?.item_index(self.module_query.?.context, target_module_id);
-            const target_resolution = try self.module_query.?.resolution(self.module_query.?.context, target_module_id);
-            const target_typecheck = try self.module_query.?.module_typecheck(self.module_query.?.context, target_module_id);
-            const target_const_eval = try self.module_query.?.const_eval(self.module_query.?.context, target_module_id);
+            const query = self.module_query.?;
+            const target_file = try query.astFile(target_module_id);
+            const target_item_index = try query.itemIndex(target_module_id);
+            const target_resolution = try query.nameResolution(target_module_id);
+            const target_typecheck = try query.moduleTypeCheck(target_module_id);
+            const target_verification_facts = try query.moduleVerificationFacts(target_module_id);
+            const target_verification_fact_lookup = try self.makeVerificationFactLookup(target_verification_facts.facts);
+            const target_verification_trait_method_fact_lookup = try self.makeVerificationTraitMethodFactLookup(target_verification_facts.facts);
+            const target_verification_statement_fact_lookup = try self.makeVerificationStatementFactLookup(target_verification_facts.facts);
+            const target_const_eval = try query.constEval(target_module_id);
 
             const module_name = try self.allocator.dupe(u8, self.sources.module(target_module_id).name);
             for (module_name) |*ch| {
@@ -334,10 +290,17 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .resolution = target_resolution,
                 .const_eval = target_const_eval,
                 .typecheck = target_typecheck,
+                .verification_facts = target_verification_facts,
+                .verification_fact_lookup = target_verification_fact_lookup,
+                .verification_trait_method_fact_lookup = target_verification_trait_method_fact_lookup,
+                .verification_statement_fact_lookup = target_verification_statement_fact_lookup,
                 .module_query = self.module_query,
                 .module_body = self.module_body,
                 .items = self.items,
                 .type_fallbacks = self.type_fallbacks,
+                .placeholder_count = self.placeholder_count,
+                .default_value_count = self.default_value_count,
+                .diagnostics = self.diagnostics,
                 .contract_body_blocks = imported_contract_body_blocks,
                 .monomorphized_function_names = std.StringHashMap(void).init(self.allocator),
             };
@@ -381,6 +344,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 }
                 self.items = imported_lowerer.items;
                 self.type_fallbacks = imported_lowerer.type_fallbacks;
+                self.placeholder_count = imported_lowerer.placeholder_count;
+                self.default_value_count = imported_lowerer.default_value_count;
                 return symbol_name;
             }
 
@@ -390,6 +355,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             self.items = imported_lowerer.items;
             self.type_fallbacks = imported_lowerer.type_fallbacks;
+            self.placeholder_count = imported_lowerer.placeholder_count;
+            self.default_value_count = imported_lowerer.default_value_count;
             return base_symbol_name;
         }
 
@@ -419,13 +386,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn enclosingImplForMethod(self: *Lowerer, method_item_id: ast.ItemId) ?ast.ImplItem {
-            for (self.file.items) |item| {
-                if (item != .Impl) continue;
-                for (item.Impl.methods) |candidate_id| {
-                    if (candidate_id.index() == method_item_id.index()) return item.Impl;
-                }
-            }
-            return null;
+            const impl_item_id = self.item_index.lookupImplContainingMethod(method_item_id) orelse return null;
+            return self.file.item(impl_item_id).Impl;
         }
 
         pub fn ensureLoweredImplMethod(
@@ -436,23 +398,40 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             target_name: []const u8,
             call: ?ast.CallExpr,
             parent_block_override: ?mlir.MlirBlock,
+            caller_contract_id: ?ast.ItemId,
         ) anyerror![]const u8 {
             const base_symbol_name = try @This().implMethodSymbolName(self, trait_name, target_name, function.name);
+            const scoped_symbol_name = if (caller_contract_id) |contract_id|
+                try @This().scopedFunctionSymbolName(self, contract_id, base_symbol_name)
+            else
+                base_symbol_name;
             const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name, self.module_body);
             if (function.is_generic) {
-                const method_call = call orelse return base_symbol_name;
-                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return base_symbol_name;
+                const method_call = call orelse return scoped_symbol_name;
+                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return scoped_symbol_name;
                 const runtime_parameters = try self.runtimeFunctionParameters(function);
-                const symbol_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+                const symbol_name = try self.mangleGenericFunctionName(scoped_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
+                    const previous_impl_contract_scope = self.active_impl_contract_scope;
+                    const previous_impl_self_type = self.active_impl_self_type;
+                    self.active_impl_contract_scope = caller_contract_id;
+                    self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
+                    defer self.active_impl_contract_scope = previous_impl_contract_scope;
+                    defer self.active_impl_self_type = previous_impl_self_type;
                     try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, null, null);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 return symbol_name;
             }
 
-            const symbol_name = base_symbol_name;
+            const symbol_name = scoped_symbol_name;
             if (!self.monomorphized_function_names.contains(symbol_name)) {
+                const previous_impl_contract_scope = self.active_impl_contract_scope;
+                const previous_impl_self_type = self.active_impl_self_type;
+                self.active_impl_contract_scope = caller_contract_id;
+                self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
+                defer self.active_impl_contract_scope = previous_impl_contract_scope;
+                defer self.active_impl_self_type = previous_impl_self_type;
                 try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
@@ -526,13 +505,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     try attrs.append(self.allocator, namedStringAttr(self.context, "ora.abi_decode_mode", "permissive"));
                 }
             }
+            if (function.visibility == .private) {
+                if (return_type) |ret_type| {
+                    if (!mlir.oraTypeIsNull(mlir.oraErrorUnionTypeGetSuccessType(ret_type))) {
+                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                    }
+                }
+            }
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
             try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 
             var param_types: std.ArrayList(mlir.MlirType) = .{};
             var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
             for (parameters, 0..) |parameter, index| {
-                const param_type = if (concrete_runtime_parameter_types) |resolved|
+                const impl_self_param_type: ?mlir.MlirType = if (self.active_impl_self_type) |self_type| blk: {
+                    if (std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) {
+                        break :blk self.lowerSemaType(self_type, parameter.range);
+                    }
+                    break :blk null;
+                } else null;
+                const param_type = impl_self_param_type orelse if (concrete_runtime_parameter_types) |resolved|
                     self.lowerSemaType(resolved[index], parameter.range)
                 else if (type_bindings.len == 0)
                     self.lowerSemaType(self.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
@@ -565,7 +557,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 param_types.items.len,
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-            if (function.is_ghost) @This().attachGhostAttrs(self, op, "ghost_function");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
             for (parameters, 0..) |parameter, index| {
                 const param_type = if (concrete_runtime_parameter_types) |resolved|
@@ -576,12 +568,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (self.errorUnionRequiresWideCarrier(param_type)) {
                     _ = mlir.oraFuncSetArgAttr(op, @intCast(index), strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.context, true));
                 }
-                if (@This().publicResultInputErrorId(self, param_type)) |error_id| {
+                if (try @This().publicResultInputErrorId(self, param_type)) |error_id| {
                     _ = mlir.oraFuncSetArgAttr(
                         op,
                         @intCast(index),
                         strRef("ora.result_input_error_id"),
-                        mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), error_id),
+                        mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), error_id),
                     );
                 }
             }
@@ -660,6 +652,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             attrs: *std.ArrayList(mlir.MlirNamedAttribute),
             item_id: ast.ItemId,
         ) anyerror!void {
+            if (!self.itemHasVerificationFact(item_id, .modifies)) return;
             if (item_id.index() >= self.typecheck.item_modifies.len) return;
             const slots = self.typecheck.item_modifies[item_id.index()] orelse return;
 
@@ -721,61 +714,92 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return true;
         }
 
+        const TraitMethodMatch = struct {
+            method: ast.nodes.TraitMethod,
+            owner: sema.VerificationTraitMethodOwner,
+        };
+
         fn traitVerificationClausesForImplMethod(self: *Lowerer, method_item_id: ast.ItemId) anyerror![]const FunctionLowerer.ExtraVerificationClause {
             const impl_item = @This().enclosingImplForMethod(self, method_item_id) orelse return &.{};
             const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return &.{};
-            const trait_item = switch (self.file.item(trait_item_id).*) {
-                .Trait => |trait_item| trait_item,
-                else => return &.{},
-            };
 
             var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
-            if (@This().matchingTraitMethodForImplMethod(self, trait_item, method_item_id)) |trait_method| {
-                const aliases = try @This().traitMethodPatternAliases(self, trait_method, self.file.item(method_item_id).Function);
-                for (trait_method.clauses) |clause| {
-                    try clauses.append(self.allocator, .{
-                        .kind = clause.kind,
-                        .expr = clause.expr,
-                        .range = clause.range,
-                        .verification_context = "trait_method_contract",
-                        .pattern_aliases = aliases,
-                    });
+            if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |matched| {
+                const aliases = try @This().traitMethodPatternAliases(self, matched.method, self.file.item(method_item_id).Function);
+                for (self.traitMethodVerificationFactEntries(matched.owner)) |entry| {
+                    const fact = self.traitMethodVerificationFact(entry);
+                    try @This().appendExtraVerificationClauseFromFact(self, &clauses, fact.*, "trait_method_contract", aliases);
                 }
             }
 
-            const ghost_id = trait_item.ghost_block orelse return clauses.toOwnedSlice(self.allocator);
-            const ghost_block = self.file.item(ghost_id).GhostBlock;
-            const body = self.file.body(ghost_block.body).*;
-            for (body.statements) |stmt_id| {
-                switch (self.file.statement(stmt_id).*) {
-                    .Assert => |assert_stmt| {
-                        try clauses.append(self.allocator, .{
-                            .kind = .ensures,
-                            .expr = assert_stmt.condition,
-                            .range = assert_stmt.range,
-                            .verification_context = "ghost_axiom",
-                        });
-                    },
-                    .Assume => |assume_stmt| {
-                        try clauses.append(self.allocator, .{
-                            .kind = .requires,
-                            .expr = assume_stmt.condition,
-                            .range = assume_stmt.range,
-                            .verification_context = "ghost_axiom",
-                        });
-                    },
-                    else => {},
-                }
-            }
+            try @This().appendTraitGhostFactClauses(self, trait_item_id, &clauses);
             return clauses.toOwnedSlice(self.allocator);
         }
 
-        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item: ast.TraitItem, method_item_id: ast.ItemId) ?ast.nodes.TraitMethod {
-            const method = self.file.item(method_item_id).Function;
-            for (trait_item.methods) |trait_method| {
-                if (std.mem.eql(u8, trait_method.name, method.name)) return trait_method;
+        fn appendExtraVerificationClauseFromFact(
+            self: *Lowerer,
+            clauses: *std.ArrayList(FunctionLowerer.ExtraVerificationClause),
+            fact: sema.VerificationFact,
+            verification_context: []const u8,
+            pattern_aliases: []const FunctionLowerer.PatternAlias,
+        ) anyerror!void {
+            const kind = fact.kind.specClauseKind() orelse return;
+            const expr = fact.expr orelse return error.InvalidVerificationFact;
+            try clauses.append(self.allocator, .{
+                .kind = kind,
+                .expr = expr,
+                .range = fact.range,
+                .verification_context = verification_context,
+                .pattern_aliases = pattern_aliases,
+            });
+        }
+
+        fn appendTraitGhostFactClauses(
+            self: *Lowerer,
+            trait_item_id: ast.ItemId,
+            clauses: *std.ArrayList(FunctionLowerer.ExtraVerificationClause),
+        ) anyerror!void {
+            for (self.itemVerificationFactEntries(trait_item_id)) |entry| {
+                const fact = self.verificationFact(entry);
+                if (fact.context != .trait_ghost_block) continue;
+                const kind: ast.SpecClauseKind = switch (fact.kind) {
+                    .assert => .ensures,
+                    .assume => .requires,
+                    .ghost_axiom => continue,
+                    else => {
+                        try self.emitLoweringError(
+                            fact.range,
+                            "unsupported trait ghost verification fact '{s}' during HIR lowering",
+                            .{@tagName(fact.kind)},
+                        );
+                        return error.InvalidVerificationFact;
+                    },
+                };
+                const expr = fact.expr orelse return error.InvalidVerificationFact;
+                try clauses.append(self.allocator, .{
+                    .kind = kind,
+                    .expr = expr,
+                    .range = fact.range,
+                    .verification_context = "ghost_axiom",
+                });
             }
-            return null;
+        }
+
+        fn matchingTraitMethodForImplMethod(self: *Lowerer, trait_item_id: ast.ItemId, method_item_id: ast.ItemId) ?TraitMethodMatch {
+            const method = self.file.item(method_item_id).Function;
+            const method_index = self.item_index.lookupTraitMethodIndex(trait_item_id, method.name) orelse return null;
+            const trait_item = switch (self.file.item(trait_item_id).*) {
+                .Trait => |trait_item| trait_item,
+                else => return null,
+            };
+            if (method_index >= trait_item.methods.len) return null;
+            return .{
+                .method = trait_item.methods[method_index],
+                .owner = .{
+                    .trait_item = trait_item_id,
+                    .method_index = method_index,
+                },
+            };
         }
 
         fn traitMethodPatternAliases(self: *Lowerer, trait_method: ast.nodes.TraitMethod, impl_method: ast.FunctionItem) anyerror![]const FunctionLowerer.PatternAlias {
@@ -833,11 +857,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 ) catch return error.OutOfMemory;
                 result_input_error_id_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().publicResultInputErrorId(self, param_type) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(try @This().publicResultInputErrorIdAttrValue(self, param_type))),
                 ) catch return error.OutOfMemory;
                 abi_param_enum_count_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(@This().enumVariantCountForType(self, param_type) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(@This().enumVariantCountAttrValue(self, param_type))),
                 ) catch return error.OutOfMemory;
                 const refinement_spec = try @This().abiParamRefinementSpec(self, param_type);
                 defer self.allocator.free(refinement_spec);
@@ -889,7 +913,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     else => body_type,
                 };
                 if (abi_return_type.kind() != .void) {
-                    const abi_return = abi_support.externReturnAbiType(self.allocator, abi_return_type) catch |err| switch (err) {
+                    const abi_return = @This().publicReturnAbiTypeForType(self, abi_return_type) catch |err| switch (err) {
                         error.UnsupportedAbiType => blk: {
                             const return_type_id = function.return_type.?;
                             const layout = @This().abiLayoutForType(self, abi_return_type) catch try @This().abiLayoutForTypeExpr(self, return_type_id);
@@ -912,7 +936,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     if (@This().staticAbiWordCountForType(self, abi_return_type)) |word_count| {
                         try attrs.append(self.allocator, .{
                             .name = identifier(self.context, "ora.abi_return_words"),
-                            .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), @intCast(word_count)),
+                            .attribute = mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(word_count)),
                         });
                     }
                 }
@@ -930,7 +954,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const ty = if (field.type_expr) |_|
                 self.lowerSemaType(self.typecheck.item_types[item_id.index()], field.range)
             else
-                defaultIntegerType(self.context);
+                reprIntegerType(self.context);
 
             if (field.binding_kind == .immutable) {
                 const op = if (field.value) |expr_id| blk: {
@@ -942,7 +966,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                     break :blk created;
                 } else try self.createNamedPlaceholderOp("ora.immutable_decl", field.name, field.range, ty);
-                if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
+                if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
                 if (field.type_expr) |_| {
                     try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
@@ -978,7 +1002,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 .none => try self.createNamedPlaceholderOp("ora.field_decl", field.name, field.range, ty),
             };
-            if (field.is_ghost) @This().attachGhostAttrs(self, op, "ghost_variable");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
 
             if (field.type_expr) |_| {
                 try self.attachBitfieldOpMetadataForType(op, self.typecheck.item_types[item_id.index()]);
@@ -1003,7 +1027,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (try @This().constValueAttr(self, value, sema_result_type, result_type)) |value_attr| {
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (!mlir.oraOperationIsNull(created)) {
-                        if (constant.is_ghost) @This().attachGhostAttrs(self, created, "ghost_constant");
+                        if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, created, context);
                         appendOp(parent_block, created);
                         try self.appendItemHandle(item_id, .constant, constant.name, constant.range, created);
                         return;
@@ -1012,8 +1036,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
             const op = switch (expr) {
                 .IntegerLiteral => |literal| blk: {
-                    const parsed = support.parseIntLiteral(literal.text) orelse 0;
-                    const value_attr = mlir.oraIntegerAttrCreateI64FromType(result_type, parsed);
+                    const parsed = support.parseUnsignedIntegerLiteral(u256, literal.text) orelse {
+                        try self.emitLoweringError(literal.range, "invalid integer literal '{s}'", .{literal.text});
+                        break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                    };
+                    const value_attr = if (parsed <= std.math.maxInt(i64))
+                        mlir.oraIntegerAttrCreateI64FromType(result_type, @intCast(parsed))
+                    else attr: {
+                        var decimal_buf: [80]u8 = undefined;
+                        const decimal_text = std.fmt.bufPrint(&decimal_buf, "{}", .{parsed}) catch {
+                            try self.emitLoweringError(literal.range, "failed to materialize integer literal '{s}'", .{literal.text});
+                            break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
+                        };
+                        break :attr mlir.oraIntegerAttrGetFromString(result_type, strRef(decimal_text));
+                    };
                     const created = mlir.oraConstOpCreate(self.context, self.location(constant.range), strRef(constant.name), value_attr, result_type);
                     if (mlir.oraOperationIsNull(created)) {
                         break :blk try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type);
@@ -1065,19 +1101,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 },
                 else => try self.createNamedPlaceholderOp("ora.constant_decl", constant.name, constant.range, result_type),
             };
-            if (constant.is_ghost) @This().attachGhostAttrs(self, op, "ghost_constant");
+            if (self.ghostDeclarationContextName(item_id)) |context| @This().attachGhostAttrs(self, op, context);
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, .constant, constant.name, constant.range, op);
         }
 
-        pub fn lowerGhostBlock(self: *Lowerer, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
+        pub fn lowerGhostBlock(self: *Lowerer, item_id: ast.ItemId, ghost_block: ast.GhostBlockItem, parent_block: mlir.MlirBlock) anyerror!void {
             var function_lowerer = FunctionLowerer.initContractContext(self, parent_block);
-            function_lowerer.in_ghost_context = true;
+            function_lowerer.item_id = item_id;
+            function_lowerer.in_ghost_context = self.itemHasVerificationFact(item_id, .ghost_block);
             var locals = try function_lowerer.cloneLocals(&function_lowerer.locals);
             _ = try function_lowerer.lowerBody(ghost_block.body, &locals);
         }
 
-        fn constValueAttr(self: *Lowerer, value: sema.ConstValue, sema_type: sema.Type, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
+        fn constValueAttr(self: *Lowerer, value: ConstValue, sema_type: sema.Type, result_type: mlir.MlirType) anyerror!?mlir.MlirAttribute {
             return switch (value) {
                 .integer => |integer| blk: {
                     if (integer.toInt(i64)) |small| {
@@ -1132,8 +1169,6 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const loc = self.location(struct_item.range);
             const op = mlir.oraStructDeclOpCreate(self.context, loc, strRef(struct_item.name));
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-            const eip712_name = abi_support.eip712WireNameFromStructItem(self.file, struct_item) orelse struct_item.name;
-            mlir.oraOperationSetAttributeByName(op, strRef("ora.eip712_name"), mlir.oraStringAttrCreate(self.context, strRef(eip712_name)));
 
             if (struct_item.fields.len > 0) {
                 const field_names = try self.allocator.alloc(mlir.MlirAttribute, struct_item.fields.len);
@@ -1142,7 +1177,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     field_names[index] = mlir.oraStringAttrCreate(self.context, strRef(field.name));
                     field_types[index] = mlir.oraTypeAttrCreateFromType(
                         self.lowerSemaType(
-                            type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr) catch .{ .unknown = {} },
+                            try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, field.type_expr),
                             field.range,
                         ),
                     );
@@ -1168,7 +1203,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 const variant_names = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
                 const variant_values = try self.allocator.alloc(mlir.MlirAttribute, enum_item.variants.len);
                 var has_explicit_values = false;
-                var next_value: i64 = 0;
+                var next_value: ?i64 = 0;
                 for (enum_item.variants, 0..) |variant, index| {
                     variant_names[index] = mlir.oraStringAttrCreate(self.context, strRef(variant.name));
                     variant_values[index] = try @This().lowerEnumVariantValue(self, enum_item, variant, repr_type, &next_value, &has_explicit_values);
@@ -1186,7 +1221,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn lowerEnumReprType(self: *Lowerer, enum_item: ast.EnumItem) anyerror!mlir.MlirType {
-            const type_expr = enum_item.base_type orelse return defaultIntegerType(self.context);
+            const type_expr = enum_item.base_type orelse return reprIntegerType(self.context);
             return self.lowerSemaType(
                 try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, type_expr),
                 enum_item.range,
@@ -1198,35 +1233,74 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             enum_item: ast.EnumItem,
             variant: ast.EnumVariant,
             repr_type: mlir.MlirType,
-            next_value: *i64,
+            next_value: *?i64,
             has_explicit_values: *bool,
         ) anyerror!mlir.MlirAttribute {
             if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
                 const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk @This().enumStringValue(self, expr_id) orelse "";
+                    break :blk @This().enumStringValue(self, expr_id) orelse {
+                        try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' must be a string literal", .{ enum_item.name, variant.name });
+                        break :blk "";
+                    };
                 } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ enum_item.name, variant.name });
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
             if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
                 const text = if (variant.value) |expr_id| blk: {
                     has_explicit_values.* = true;
-                    break :blk @This().enumBytesValue(self, expr_id) orelse "";
+                    break :blk @This().enumBytesValue(self, expr_id) orelse {
+                        try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' must be a bytes literal", .{ enum_item.name, variant.name });
+                        break :blk "";
+                    };
                 } else "";
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
 
-            const resolved_value = if (variant.value) |expr_id| blk: {
+            if (variant.value) |expr_id| {
                 has_explicit_values.* = true;
-                break :blk @This().enumIntegerValue(self, expr_id) orelse 0;
-            } else blk: {
-                break :blk next_value.*;
+                const attr = try @This().enumIntegerAttr(self, expr_id, repr_type, enum_item.name, variant.name);
+                next_value.* = if (@This().enumIntegerValueI64(self, expr_id)) |value|
+                    std.math.add(i64, value, 1) catch null
+                else
+                    null;
+                return attr;
+            }
+
+            const resolved_value = next_value.* orelse {
+                try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ enum_item.name, variant.name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
             };
-            next_value.* = resolved_value + 1;
+            next_value.* = std.math.add(i64, resolved_value, 1) catch null;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
         }
 
-        fn enumIntegerValue(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
+        fn enumIntegerAttr(self: *Lowerer, expr_id: ast.ExprId, repr_type: mlir.MlirType, enum_name: []const u8, variant_name: []const u8) anyerror!mlir.MlirAttribute {
+            const value = self.const_eval.values[expr_id.index()] orelse {
+                try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' is not a compile-time integer", .{ enum_name, variant_name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
+            };
+            return switch (value) {
+                .integer => |integer| try @This().integerAttrFromBigInt(self, integer, repr_type),
+                .boolean => |boolean| mlir.oraIntegerAttrCreateI64FromType(repr_type, if (boolean) 1 else 0),
+                else => {
+                    try self.emitLoweringError(support.exprRange(self.file, expr_id), "explicit enum value for '{s}.{s}' is not an integer", .{ enum_name, variant_name });
+                    return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
+                },
+            };
+        }
+
+        fn integerAttrFromBigInt(self: *Lowerer, integer: BigInt, repr_type: mlir.MlirType) anyerror!mlir.MlirAttribute {
+            if (integer.toInt(i64)) |small| {
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, small);
+            } else |_| {
+                const text = try integer.toString(self.allocator, 10, .lower);
+                defer self.allocator.free(text);
+                return mlir.oraIntegerAttrGetFromString(repr_type, strRef(text));
+            }
+        }
+
+        fn enumIntegerValueI64(self: *Lowerer, expr_id: ast.ExprId) ?i64 {
             const value = self.const_eval.values[expr_id.index()] orelse return null;
             return switch (value) {
                 .integer => |integer| integer.toInt(i64) catch null,
@@ -1254,10 +1328,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         fn lowerInstantiatedEnumVariantValue(
             self: *Lowerer,
             instantiated: sema.InstantiatedEnum,
-            variant_name: []const u8,
+            variant: ast.EnumVariant,
             explicit_value: ?sema.ExplicitEnumValue,
             repr_type: mlir.MlirType,
-            next_value: *i64,
+            next_value: *?i64,
             has_explicit_values: *bool,
         ) anyerror!mlir.MlirAttribute {
             if (mlir.oraTypeEqual(repr_type, support.stringType(self.context))) {
@@ -1265,9 +1339,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     has_explicit_values.* = true;
                     break :blk switch (value) {
                         .string => |literal| literal,
-                        else => "",
+                        else => {
+                            try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be a string literal", .{ instantiated.mangled_name, variant.name });
+                            break :blk "";
+                        },
                     };
-                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ instantiated.mangled_name, variant_name });
+                } else try std.fmt.allocPrint(self.allocator, "{s}.{s}", .{ instantiated.mangled_name, variant.name });
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
             if (mlir.oraTypeEqual(repr_type, support.bytesType(self.context))) {
@@ -1275,22 +1352,37 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     has_explicit_values.* = true;
                     break :blk switch (value) {
                         .bytes => |literal| literal,
-                        else => "",
+                        else => {
+                            try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be a bytes literal", .{ instantiated.mangled_name, variant.name });
+                            break :blk "";
+                        },
                     };
                 } else "";
                 return mlir.oraStringAttrCreate(self.context, strRef(text));
             }
 
-            const resolved_value = if (explicit_value) |value| blk: {
+            if (explicit_value) |value| {
                 has_explicit_values.* = true;
-                break :blk switch (value) {
-                    .integer => |literal| literal,
-                    else => 0,
+                return switch (value) {
+                    .integer => |integer| blk: {
+                        next_value.* = if (integer.toInt(i64)) |small|
+                            std.math.add(i64, small, 1) catch null
+                        else |_|
+                            null;
+                        break :blk try @This().integerAttrFromBigInt(self, integer, repr_type);
+                    },
+                    else => blk: {
+                        try self.emitLoweringError(variant.range, "explicit enum value for '{s}.{s}' must be an integer", .{ instantiated.mangled_name, variant.name });
+                        break :blk mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
+                    },
                 };
-            } else blk: {
-                break :blk next_value.*;
+            }
+
+            const resolved_value = next_value.* orelse {
+                try self.emitLoweringError(variant.range, "implicit enum value for '{s}.{s}' cannot be represented; specify an explicit value", .{ instantiated.mangled_name, variant.name });
+                return mlir.oraIntegerAttrCreateI64FromType(repr_type, 0);
             };
-            next_value.* = resolved_value + 1;
+            next_value.* = std.math.add(i64, resolved_value, 1) catch null;
             return mlir.oraIntegerAttrCreateI64FromType(repr_type, resolved_value);
         }
 
@@ -1350,7 +1442,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
             try attrs.append(self.allocator, .{
                 .name = identifier(self.context, "ora.error_id"),
-                .attribute = mlir.oraIntegerAttrCreateI64FromType(defaultIntegerType(self.context), try @This().errorDeclRuntimeId(self, error_decl)),
+                .attribute = mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), try @This().errorDeclRuntimeId(self, error_decl)),
             });
 
             const param_types = try self.allocator.alloc(sema.Type, error_decl.parameters.len);
@@ -1358,7 +1450,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             for (error_decl.parameters, 0..) |param, index| {
                 param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
             }
-            const maybe_signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+            const maybe_signature = @This().abiSignatureForMethod(self, error_decl.name, false, param_types) catch |err| switch (err) {
                 error.UnsupportedAbiType => null,
                 else => return err,
             };
@@ -1411,7 +1503,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 param_types[index] = self.typecheck.pattern_types[param.pattern.index()].type;
             }
 
-            const signature = abi_support.signatureForMethod(self.allocator, error_decl.name, false, param_types) catch |err| switch (err) {
+            const signature = @This().abiSignatureForMethod(self, error_decl.name, false, param_types) catch |err| switch (err) {
                 error.UnsupportedAbiType => try std.fmt.allocPrint(self.allocator, "{s}#ora-internal-error/{d}", .{ error_decl.name, error_decl.parameters.len }),
                 else => return err,
             };
@@ -1420,7 +1512,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn attachBitfieldParamMetadata(self: *Lowerer, func_op: mlir.MlirOperation, type_expr_id: ast.TypeExprId, index: c_uint) !void {
-            const metadata = self.bitfieldMetadataForTypeExpr(type_expr_id) orelse return;
+            const metadata = (try self.bitfieldMetadataForTypeExpr(type_expr_id)) orelse return;
             _ = mlir.oraFuncSetArgAttr(func_op, index, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
         }
 
@@ -1430,7 +1522,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn attachBitfieldOpMetadata(self: *Lowerer, op: mlir.MlirOperation, type_expr_id: ast.TypeExprId) !void {
-            const metadata = self.bitfieldMetadataForTypeExpr(type_expr_id) orelse return;
+            const metadata = (try self.bitfieldMetadataForTypeExpr(type_expr_id)) orelse return;
             mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
             if (metadata.layout.len > 0) {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield_layout"), mlir.oraStringAttrCreate(self.context, strRef(metadata.layout)));
@@ -1450,14 +1542,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             layout: []const u8,
         };
 
-        pub fn bitfieldMetadataForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) ?BitfieldMetadata {
+        pub fn bitfieldMetadataForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) !?BitfieldMetadata {
             const type_expr = self.file.typeExpr(type_expr_id).*;
             const name = switch (type_expr) {
                 .Path => |path| path.name,
                 else => return null,
             };
             const bitfield = self.bitfieldItemByName(name) orelse return null;
-            const layout = self.buildBitfieldLayout(bitfield) catch return null;
+            const layout = try self.buildBitfieldLayout(bitfield);
             return .{
                 .name = bitfield.name,
                 .layout = layout,
@@ -1485,7 +1577,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
             var buffer: std.ArrayList(u8) = .{};
             for (bitfield.fields) |field| {
-                const resolved = self.resolveBitfieldField(bitfield.name, field.name) orelse continue;
+                const resolved = (try self.resolveBitfieldField(bitfield.name, field.name)) orelse continue;
                 try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
             }
             return buffer.toOwnedSlice(self.allocator);
@@ -1495,7 +1587,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             var buffer: std.ArrayList(u8) = .{};
             var next_offset: u32 = 0;
             for (bitfield.fields) |field| {
-                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
                 const sign = self.bitfieldFieldSignFromType(field.ty);
                 try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
@@ -1507,9 +1599,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         fn abiLayoutContext(self: *Lowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.allocator,
-                .file = self.file,
-                .item_index = self.item_index,
-                .typecheck = self.typecheck,
+                .provider = sema.abiLayoutProvider(self.file, self.item_index, self.typecheck),
             };
         }
 
@@ -1523,12 +1613,22 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return ctx.canonicalAbiTypeForType(ty);
         }
 
+        fn publicReturnAbiTypeForType(self: *Lowerer, ty: sema.Type) anyerror![]const u8 {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.publicReturnAbiTypeForType(ty);
+        }
+
+        fn abiSignatureForMethod(self: *Lowerer, name: []const u8, has_self: bool, param_types: []const sema.Type) anyerror![]const u8 {
+            const ctx = @This().abiLayoutContext(self);
+            return ctx.signatureForMethod(name, has_self, param_types);
+        }
+
         fn publicResultInputMode(self: *Lowerer, ty: sema.Type) abi_layout_context.ResultInputMode {
             const ctx = @This().abiLayoutContext(self);
             return ctx.publicResultInputMode(ty);
         }
 
-        fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) ?i64 {
+        fn publicResultInputErrorId(self: *Lowerer, ty: sema.Type) anyerror!?i64 {
             if (@This().publicResultInputMode(self, ty) != .narrow_payloadless) return null;
             const error_union = switch (ty) {
                 .error_union => |error_union| error_union,
@@ -1538,12 +1638,16 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const error_name = error_union.error_types[0].name() orelse return null;
             if (self.item_index.lookup(error_name)) |item_id| {
                 if (self.file.item(item_id).* != .ErrorDecl) return null;
-                return @This().errorDeclRuntimeIdForItem(self, item_id) catch null;
+                return try @This().errorDeclRuntimeIdForItem(self, item_id);
             }
 
             var signature_buf: [256]u8 = undefined;
             const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{error_name}) catch return null;
             return @intCast(abi_support.keccakSelectorValue(signature));
+        }
+
+        fn publicResultInputErrorIdAttrValue(self: *Lowerer, ty: sema.Type) anyerror!i64 {
+            return (try @This().publicResultInputErrorId(self, ty)) orelse no_public_result_input_error_id;
         }
 
         fn enumVariantCountForType(self: *Lowerer, ty: sema.Type) ?usize {
@@ -1557,6 +1661,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 else => return null,
             };
             return enum_item.variants.len;
+        }
+
+        fn enumVariantCountAttrValue(self: *Lowerer, ty: sema.Type) usize {
+            return @This().enumVariantCountForType(self, ty) orelse no_abi_param_enum_count;
         }
 
         fn abiParamRefinementSpec(self: *Lowerer, ty: sema.Type) ![]const u8 {
@@ -1574,12 +1682,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             switch (ty) {
                 .refinement => |refinement| {
                     try @This().appendAbiParamRefinementSpec(self, parts, refinement.base_type.*);
-                    if (sema.refinements.kindForName(refinement.name) == .non_zero_address) {
+                    if (refinements.kindForName(refinement.name) == .non_zero_address) {
                         try parts.append(self.allocator, try self.allocator.dupe(u8, "nonzero_address"));
                         return;
                     }
-                    if (sema.refinements.bounds(refinement)) |bounds| {
-                        const signed = @This().refinementBaseIsSignedInteger(bounds.base_type);
+                    if (refinements.bounds(refinement)) |bounds| {
+                        const signed = try @This().refinementBaseIsSignedInteger(bounds.base_type);
                         if (bounds.min_text) |min_text| {
                             const min_value = try @This().parseAbiRefinementBound(min_text, signed);
                             try @This().appendAbiRefinementBound(self, parts, "min", signed, min_value);
@@ -1614,12 +1722,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return std.fmt.parseInt(u256, text, 10) catch error.MlirOperationCreationFailed;
         }
 
-        fn refinementBaseIsSignedInteger(ty: sema.Type) bool {
-            return switch (ty) {
-                .integer => |integer| integer.signed orelse false,
-                .refinement => |refinement| @This().refinementBaseIsSignedInteger(refinement.base_type.*),
-                else => false,
-            };
+        fn refinementBaseIsSignedInteger(ty: sema.Type) anyerror!bool {
+            return (try support.resolvedIntegerSignedness(ty)) orelse error.MlirOperationCreationFailed;
         }
 
         pub fn abiLayoutForTypeExpr(self: *Lowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
@@ -1636,7 +1740,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return switch (self.file.typeExpr(type_expr_id).*) {
                 .Path => |path| blk: {
                     const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                    if (trimmed.len > 1 and trimmed[0] == 'i' and support.parseSignedIntegerType(trimmed) != null) break :blk 's';
+                    if (support.parseBitfieldIntegerType(trimmed)) |int_info| {
+                        if (int_info.signed) break :blk 's';
+                    }
                     break :blk 'u';
                 },
                 else => 'u',
@@ -1667,6 +1773,17 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
+            const mark_executable_fallback = std.mem.endsWith(u8, op_name, "_placeholder");
+            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            defer marked_attrs.deinit(self.allocator);
+            var final_attrs = attrs;
+
+            if (mark_executable_fallback) {
+                self.recordPlaceholder();
+                try marked_attrs.appendSlice(self.allocator, attrs);
+                try marked_attrs.append(self.allocator, namedStringAttr(self.context, "ora.executable_fallback", op_name));
+                final_attrs = marked_attrs.items;
+            }
             const op = mlir.oraOperationCreate(
                 self.context,
                 loc,
@@ -1675,8 +1792,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 0,
                 null,
                 0,
-                if (attrs.len == 0) null else attrs.ptr,
-                attrs.len,
+                if (final_attrs.len == 0) null else final_attrs.ptr,
+                final_attrs.len,
                 0,
                 false,
             );

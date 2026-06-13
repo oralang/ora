@@ -1539,6 +1539,9 @@ const Parser = struct {
         } else {
             try self.reportUnterminated("unterminated switch body", children.items);
         }
+        if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
 
         return self.finishNode(node_kind, children.items);
     }
@@ -2030,17 +2033,25 @@ const Parser = struct {
     }
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        if (kind == .Error) {
+            return self.parseErrorReturnExprNode(terminators);
+        }
+        if (tokenStartsPrimaryNameExpr(kind)) {
+            if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less) {
+                return self.parseExternalProxyExprNode();
+            }
+            if (self.looksLikeGenericTypeValueExpr(terminators)) {
+                return self.parsePathOrGenericTypeNode(terminators);
+            }
+            return self.parseSingleTokenExprNode(SyntaxKind.NameExpr);
+        }
+
+        return switch (kind) {
             .Dot => if (self.peekKind(1) == .LeftBrace)
                 self.parseAnonymousStructLiteralExprNode(terminators)
             else
                 self.parseExpressionErrorNode("expected expression"),
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
-                self.parseExternalProxyExprNode()
-            else if (self.looksLikeGenericTypeValueExpr(terminators))
-                self.parsePathOrGenericTypeNode(terminators)
-            else
-                self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
             .IntegerLiteral => self.parseIntegerLiteralExprNode(),
             .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
             .LeftParen => self.parseParenLikeExprNode(),
@@ -2052,6 +2063,42 @@ const Parser = struct {
             .Switch, .Match => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
+    }
+
+    fn parseErrorReturnExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.Dot)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected error name after 'error'");
+            return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
+                if (!self.at(.Comma)) break;
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after error arguments");
+            }
+        } else {
+            try self.reportHere("expected '(' after error name");
+        }
+
+        _ = terminators;
+        return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
     }
 
     fn parseAnonymousStructLiteralExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
@@ -2182,40 +2229,41 @@ const Parser = struct {
             }
             return self.finishNode(SyntaxKind.ErrorUnionType, children.items);
         }
-        return self.parseTypePrimaryNode(stops);
+        const primary = try self.parseTypePrimaryNode(stops);
+        if (self.at(.Pipe)) {
+            return self.parseBarePipeTypeErrorNode(primary, stops);
+        }
+        return primary;
+    }
+
+    fn parseBarePipeTypeErrorNode(
+        self: *Parser,
+        primary: green.GreenNodeId,
+        stops: []const green.TokenKind,
+    ) anyerror!green.GreenNodeId {
+        try self.reportHere("error-union types must start with '!'");
+
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .node = primary });
+        while (!self.at(.Eof) and !self.atAny(stops) and !self.typeAtGreaterToken()) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+        return self.finishNode(SyntaxKind.Error, children.items);
     }
 
     fn parseTypePrimaryNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        return switch (kind) {
             .LeftParen => self.parseTupleTypeNode(),
             .LeftBracket => self.parseArrayTypeNode(),
             .Slice => self.parseSliceTypeNode(),
             .Struct => self.parseAnonymousStructTypeNode(),
-            .Map,
-            .Identifier,
-            .Error,
-            .Result,
-            .From,
-            .To,
-            .U8,
-            .U16,
-            .U32,
-            .U64,
-            .U128,
-            .U256,
-            .I8,
-            .I16,
-            .I32,
-            .I64,
-            .I128,
-            .I256,
-            .Bool,
-            .Address,
-            .String,
-            .Bytes,
-            .Void,
-            => self.parsePathOrGenericTypeNode(stops),
-            else => self.parseTypeErrorNode("expected type expression"),
+            else => if (tokenStartsTypePath(kind))
+                self.parsePathOrGenericTypeNode(stops)
+            else
+                self.parseTypeErrorNode("expected type expression"),
         };
     }
 
@@ -2934,9 +2982,24 @@ const Parser = struct {
         return units.isEtherUnit(self.source_text[token.range.start..token.range.end]);
     }
 
-    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+    fn tokenStartsPrimaryNameExpr(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .Result, .From, .To, .Error => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenStartsTypePath(kind: green.TokenKind) bool {
+        return switch (kind) {
+            .Map, .Identifier, .Error, .Result, .From, .To => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+        if (lexer.isBuiltinTypeKeyword(kind)) return true;
+        return switch (kind) {
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice => true,
             else => false,
         };
     }
@@ -3325,8 +3388,9 @@ fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
 }
 
 fn isIdentifierLike(kind: green.TokenKind) bool {
+    if (lexer.isBuiltinTypeKeyword(kind)) return true;
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice => true,
         else => false,
     };
 }

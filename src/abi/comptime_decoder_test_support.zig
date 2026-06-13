@@ -2,7 +2,7 @@ const std = @import("std");
 const abi_layout = @import("layout.zig");
 const abi_comptime_decoder = @import("comptime_decoder.zig");
 const comptime_mod = @import("../comptime/mod.zig");
-const sema = @import("../sema/mod.zig");
+const Type = @import("ora_types").SemanticType;
 
 pub fn decodeHexBytes(allocator: std.mem.Allocator, hex_with_optional_prefix: []const u8) ![]u8 {
     const hex = if (std.mem.startsWith(u8, hex_with_optional_prefix, "0x")) hex_with_optional_prefix[2..] else hex_with_optional_prefix;
@@ -19,7 +19,7 @@ pub fn decodeHexBytes(allocator: std.mem.Allocator, hex_with_optional_prefix: []
 
 pub fn expectDecodeErrorForType(
     allocator: std.mem.Allocator,
-    target_type: sema.Type,
+    target_type: Type,
     payload_hex: []const u8,
     resolver: abi_comptime_decoder.TypeResolver,
     expected: abi_comptime_decoder.DecodeError,
@@ -50,7 +50,7 @@ pub fn expectDecodeErrorForType(
 
 pub fn expectDecodeErrorBytesForType(
     allocator: std.mem.Allocator,
-    target_type: sema.Type,
+    target_type: Type,
     bytes: []const u8,
     resolver: abi_comptime_decoder.TypeResolver,
     expected: abi_comptime_decoder.DecodeError,

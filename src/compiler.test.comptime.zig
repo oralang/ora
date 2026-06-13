@@ -241,8 +241,11 @@ test "compiler supports comptime while statements" {
     const source_text =
         \\pub fn run() -> u256 {
         \\    var total: u256 = 0;
-        \\    comptime while (total < 5) {
-        \\        total = total + 1;
+        \\    comptime {
+        \\        let step = 1;
+        \\        while (total < 5) {
+        \\            total = total + step;
+        \\        }
         \\    }
         \\    return total;
         \\}
@@ -260,6 +263,25 @@ test "compiler supports comptime while statements" {
 
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.constant 5 : i256"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c5_i256 : i256"));
+}
+
+test "compiler rejects runtime values inside statement-position comptime blocks" {
+    const source_text =
+        \\pub fn run(input: u256) -> u256 {
+        \\    var total: u256 = 0;
+        \\    comptime {
+        \\        total = input;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime assignment value is not statically known during HIR lowering"));
 }
 
 test "compiler folds comptime shifts before MLIR verification" {
@@ -1363,6 +1385,25 @@ test "compiler lowers value-parameter generic enum declarations in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.enum.decl"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256__7\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @identity(%arg0: i256"));
+}
+
+test "compiler lowers wide explicit values on instantiated generic enum declarations" {
+    const source_text =
+        \\enum Choice(comptime T: type) : u256 {
+        \\    left = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\pub fn identity(value: Choice<u256>) -> Choice<u256> {
+        \\    return value;
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"Choice__u256\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [-1 : i256]"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.variant_values = [0 : i256]"));
 }
 
 test "compiler monomorphizes generic bitfield types on type use" {
@@ -4185,6 +4226,76 @@ test "compiler @chainId rejects arguments" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@chainId expects 0 arguments"));
 }
 
+test "compiler rejects unknown builtin functions during typecheck" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return @totallyBogusBuiltin(5);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown built-in function '@totallyBogusBuiltin'"));
+}
+
+test "compiler rejects eip712TypeHash while support is disabled" {
+    const source_text =
+        \\struct Permit {
+        \\    owner: address,
+        \\}
+        \\
+        \\pub fn run() -> bytes32 {
+        \\    return comptime {
+        \\        @eip712TypeHash(Permit);
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "unknown built-in function '@eip712TypeHash'"));
+}
+
+test "compiler validates cast-like and overflow builtin arguments during typecheck" {
+    const source_text =
+        \\pub fn bad_cast(value: u256) -> u256 {
+        \\    return @cast(value);
+        \\}
+        \\
+        \\pub fn bad_bitcast(value: u256) -> address {
+        \\    return @bitCast(address, value, value);
+        \\}
+        \\
+        \\pub fn bad_truncate(value: u256) -> u8 {
+        \\    return @truncate(value);
+        \\}
+        \\
+        \\pub fn bad_overflow_arity(value: u8) -> bool {
+        \\    let pair = @addWithOverflow(value);
+        \\    return pair.overflow;
+        \\}
+        \\
+        \\pub fn bad_overflow_type(value: u8) -> bool {
+        \\    let pair = @mulWithOverflow(value, true);
+        \\    return pair.overflow;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@cast expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@bitCast expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@truncate expects a type argument and 1 value argument"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@addWithOverflow expects 2 arguments"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@mulWithOverflow expects integer operands"));
+}
+
 test "compiler @structFields returns ordered fields" {
     const source_text =
         \\struct Point {
@@ -4395,6 +4506,36 @@ test "compiler corpus covers reflection builtins" {
 
     const consteval = try compilation.db.constEval(compilation.root_module_id);
     try testing.expect(consteval.diagnostics.isEmpty());
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const contract_id = item_index.lookup("ReflectionBuiltinCorpus").?;
+    const contract = ast_file.item(contract_id).Contract;
+
+    var type_name_index: ?usize = null;
+    var size_index: ?usize = null;
+    for (contract.members) |member_id| {
+        const item = ast_file.item(member_id).*;
+        if (item != .Function) continue;
+
+        const function = item.Function;
+        const body = ast_file.body(function.body);
+        const ret_stmt = ast_file.statement(body.statements[0]).Return;
+        if (std.mem.eql(u8, function.name, "address_type_name")) {
+            type_name_index = ret_stmt.value.?.index();
+        } else if (std.mem.eql(u8, function.name, "address_size")) {
+            size_index = ret_stmt.value.?.index();
+        }
+    }
+
+    try testing.expect(type_name_index != null);
+    try testing.expect(size_index != null);
+    try testing.expectEqualStrings("address", consteval.values[type_name_index.?].?.string);
+
+    var expected_size = try std.math.big.int.Managed.initSet(testing.allocator, 20);
+    defer expected_size.deinit();
+    try testing.expect(consteval.values[size_index.?].?.integer.eql(expected_size));
 }
 
 test "compiler reflection corpus lowers without ora.default_value escaping HIR" {

@@ -378,13 +378,16 @@ test "compiler evaluates division builtins with distinct semantics" {
         \\    let trunc = @divTrunc(@cast(i256, -7), @cast(i256, 3));
         \\    let floor = @divFloor(@cast(i256, -7), @cast(i256, 3));
         \\    let ceil = @divCeil(@cast(i256, -7), @cast(i256, 3));
-        \\    let exact = @divExact(12, 4);
+        \\    let exact = @divExact(@cast(i256, 12), @cast(i256, 4));
         \\    return trunc + floor + ceil + exact;
         \\}
     ;
 
     var compilation = try compileText(source_text);
     defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);

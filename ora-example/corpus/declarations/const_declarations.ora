@@ -8,7 +8,7 @@ contract ConstDeclarations {
     const MAX_SUPPLY: u256 = 1_000_000;
     const MIN_STAKE: u256 = 100;
     const DECIMALS: u8 = 18;
-    const FEE_BPS: u16 = 30;
+    const FEE_BPS: u256 = 30;
     const SCALE: u256 = 1_000_000_000_000_000_000;
 
     // Bool constants

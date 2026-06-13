@@ -179,8 +179,8 @@ test "compiler aggregates sema and verification across multiple root items" {
 
     const module_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 2), module_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, module_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, module_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, module_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, module_facts.facts[1].kind);
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     const hir_text = try hir_result.renderText(testing.allocator);
@@ -527,6 +527,53 @@ test "compiler parses log, error, and bitfield declarations" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error_decl\""));
 }
 
+test "compiler parses bitfield layout annotations without raw source substring matching" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        enabled: bool(1);
+        \\        mode: u8 @bits(1 .. 9);
+        \\        code: u16 @at(9, 16);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(ast_diags.isEmpty());
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const bitfield = ast_file.item(contract.members[0]).Bitfield;
+
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[0].width.?);
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[1].offset.?);
+    try testing.expectEqual(@as(u32, 8), bitfield.fields[1].width.?);
+    try testing.expectEqual(@as(u32, 9), bitfield.fields[2].offset.?);
+    try testing.expectEqual(@as(u32, 16), bitfield.fields[2].width.?);
+}
+
+test "compiler rejects malformed bitfield layout annotations" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        reversed: u8 @bits(5..2);
+        \\        spaced: u8 @at (2, 8);
+        \\        unknown: u8 @where(2, 8);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "@bits range end must be greater than start"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "bitfield layout annotation arguments must immediately follow the annotation name"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "unsupported bitfield layout annotation"));
+}
+
 test "compiler preserves typed local names in assignments" {
     const source_text =
         \\contract Wallet {
@@ -724,8 +771,233 @@ test "compiler tracks HIR unknown type fallbacks" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expect(hir_result.executableFallbackCount() >= hir_result.type_fallback_count);
     try testing.expectEqual(compiler.hir.TypeFallbackReason.sema_unknown, hir_result.type_fallbacks[0].reason);
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
+}
+
+test "HIR emittability arms all executable fallback counters" {
+    var hir_result: compiler.hir.LoweringResult = undefined;
+    hir_result.type_fallback_count = 0;
+    hir_result.placeholder_count = 0;
+    hir_result.default_value_count = 0;
+
+    try testing.expect(hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 0), hir_result.executableFallbackCount());
+
+    hir_result.placeholder_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+
+    hir_result.placeholder_count = 0;
+    hir_result.default_value_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+
+    hir_result.default_value_count = 0;
+    hir_result.type_fallback_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+}
+
+test "HIR executable fallback verifier enforces protocol-zero allowlist" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    const module_op = mlir.oraModuleGetOperation(hir_result.module.raw_module);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("abi_padding")),
+    );
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("debug_zero")),
+    );
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("unknown protocol-zero purpose", violation.reason);
+}
+
+test "compiler tracks HIR executable placeholders as non-emittable" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum: u256 = 0;
+        \\        for (9) |i| {
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.executable_fallback"));
+    try testing.expect(hir_result.placeholder_count > 0);
+    try testing.expect(!hir_result.isEmittable());
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("ora.for_placeholder", violation.op_name);
+}
+
+test "compiler diagnoses uninitialized locals instead of emitting HIR default values" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    let value: u256;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "local declaration requires an initializer"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler does not count unary negation zero as a HIR default value" {
+    const source_text =
+        \\pub fn negate(value: i256) -> i256 {
+        \\    return -value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
+test "compiler lowers void error-union success without HIR default values" {
+    const source_text =
+        \\error Done;
+        \\
+        \\pub fn explicit_ok() -> !void | Done {
+        \\    return;
+        \\}
+        \\
+        \\pub fn implicit_ok() -> !void | Done {
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
+test "compiler resolves assignment integer literals before HIR lowering" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u256 = 0;
+        \\
+        \\    pub fn init() {
+        \\        counter = 0;
+        \\    }
+        \\
+        \\    pub fn increment() {
+        \\        counter += 1;
+        \\    }
+        \\
+        \\    pub fn get() -> u256 {
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler rejects assignment integer literals that overflow the target type" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u8 = 0;
+        \\
+        \\    pub fn set() {
+        \\        counter = 300;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+}
+
+test "compiler resolves std environment intrinsics before HIR lowering" {
+    const source_text =
+        \\contract Env {
+        \\    storage var owner: address;
+        \\
+        \\    pub fn capture() -> u256 {
+        \\        owner = std.msg.sender();
+        \\        let sender: address = std.msg.sender;
+        \\        let origin: address = std.tx.origin();
+        \\        let coinbase: address = std.block.coinbase;
+        \\        let value: u256 = std.msg.value();
+        \\        let gas_price: u256 = std.transaction.gasprice();
+        \\        let timestamp: u256 = std.block.timestamp;
+        \\        let number: u256 = std.block.number();
+        \\        return value + gas_price + timestamp + number;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler resolves for-range integer bounds before HIR lowering" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    let total: u256 = 0;
+        \\    for (0..5) |i| {
+        \\        total += i;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
 test "compiler persists divmod as a tuple consteval value" {
@@ -803,7 +1075,7 @@ test "compiler render ladder step 3 add array literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: 1, second: 2 };
         \\    return pair.first;
         \\}
@@ -826,7 +1098,7 @@ test "compiler render ladder step 4 add array indexing into struct literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: items[0], second: items[1] };
         \\    return pair.first;
         \\}
@@ -1371,7 +1643,7 @@ test "compiler contextualizes nested array literals to their declared element ty
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
-        \\    let pair = (flag, 7);
+        \\    let pair: (bool, u256) = (flag, 7);
         \\    return pair[1 - 1];
         \\}
     ;
@@ -1616,7 +1888,7 @@ test "compiler unrolls small constant runtime for-count loops" {
     const source_text =
         \\contract Sample {
         \\    pub fn run() -> u256 {
-        \\        let sum = 0;
+        \\        let sum: u256 = 0;
         \\        for (4) |i| {
         \\            sum += i;
         \\        }
@@ -1625,8 +1897,16 @@ test "compiler unrolls small constant runtime for-count loops" {
         \\}
     ;
 
-    const rendered = try renderOraMlirForSource(source_text);
-    defer testing.allocator.free(rendered);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
     try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") == null);
     try testing.expect(std.mem.count(u8, rendered, "ora.stmt.1") >= 4);

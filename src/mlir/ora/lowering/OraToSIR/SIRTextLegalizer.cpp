@@ -20,6 +20,7 @@
 #include "llvm/Support/Casting.h"
 
 using namespace mlir;
+using mlir::ora::lowering::constU256;
 
 namespace mlir
 {
@@ -104,12 +105,11 @@ namespace mlir
             struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
             {
                 // Insert trampoline blocks for cond_br with operands. Sensei's
-                // text form carries values through block outputs; keep those on
-                // unconditional trampoline edges instead of the conditional edge.
-                // Trampolines cannot directly reference values defined in the
-                // predecessor block, so operands are spilled to deterministic
-                // scratch words before the cond_br and reloaded in the
-                // trampoline block.
+                // text form carries values through block outputs rather than
+                // edge-specific conditional branch operands. The backend stores
+                // locals in function-wide static slots, so trampoline block
+                // outputs may reference dominated values defined in predecessor
+                // blocks without executable scratch memory.
             LogicalResult normalizeBranches(ModuleOp module)
             {
                 SmallVector<sir::CondBrOp, 16> condBranchesToFix;
@@ -120,72 +120,11 @@ namespace mlir
                         condBranchesToFix.push_back(br);
                 });
 
-                struct SpillSlot
-                {
-                    uint64_t offset;
-                    Type type;
-                };
-
-                MLIRContext *ctx = module.getContext();
-                Type u256Type = sir::U256Type::get(ctx);
-                Type ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                Type intType = ::mlir::IntegerType::get(ctx, 256);
-                uint64_t nextScratchOffset = lowering::kSIRTextLegalizerScratchStartBytes;
-
-                auto constU256 = [&](OpBuilder &builder, Location loc, uint64_t value) -> Value {
-                    return builder.create<sir::ConstOp>(
-                        loc,
-                        u256Type,
-                        IntegerAttr::get(intType, APInt(256, value)));
-                };
-
-                auto scratchPtr = [&](OpBuilder &builder, Location loc, uint64_t offset) -> Value {
-                    Value off = constU256(builder, loc, offset);
-                    return builder.create<sir::BitcastOp>(loc, ptrType, off);
-                };
-
-                auto asU256 = [&](OpBuilder &builder, Location loc, Value value) -> Value {
-                    if (value.getType() == u256Type)
-                        return value;
-                    return builder.create<sir::BitcastOp>(loc, u256Type, value);
-                };
-
-                auto spillOperands = [&](OpBuilder &builder, Location loc, ValueRange operands) {
-                    SmallVector<SpillSlot, 4> slots;
-                    slots.reserve(operands.size());
-                    for (Value operand : operands)
-                    {
-                        uint64_t offset = nextScratchOffset;
-                        nextScratchOffset += 32;
-                        Value ptr = scratchPtr(builder, loc, offset);
-                        builder.create<sir::StoreOp>(loc, ptr, asU256(builder, loc, operand));
-                        slots.push_back({offset, operand.getType()});
-                    }
-                    return slots;
-                };
-
-                auto reloadOperands = [&](OpBuilder &builder, Location loc, ArrayRef<SpillSlot> slots) {
-                    SmallVector<Value, 4> values;
-                    values.reserve(slots.size());
-                    for (const SpillSlot &slot : slots)
-                    {
-                        Value ptr = scratchPtr(builder, loc, slot.offset);
-                        Value loaded = builder.create<sir::LoadOp>(loc, u256Type, ptr);
-                        if (loaded.getType() != slot.type)
-                            loaded = builder.create<sir::BitcastOp>(loc, slot.type, loaded);
-                        values.push_back(loaded);
-                    }
-                    return values;
-                };
-
                 for (auto br : condBranchesToFix)
                 {
                     OpBuilder b(br);
                     Block *parentBlock = br.getOperation()->getBlock();
                     Region *region = parentBlock->getParent();
-                    Location loc = br.getLoc();
-                    SmallVector<SpillSlot, 4> trueSlots = spillOperands(b, loc, br.getTrueOperands());
-                    SmallVector<SpillSlot, 4> falseSlots = spillOperands(b, loc, br.getFalseOperands());
 
                     // Create trampoline blocks after the parent block.
                     Block *trampTrue = new Block();
@@ -198,111 +137,22 @@ namespace mlir
                         OpBuilder tb(br.getContext());
                         tb.setInsertionPointToEnd(trampTrue);
                         Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_true");
-                        SmallVector<Value, 4> operands = reloadOperands(tb, trampLoc, trueSlots);
-                        tb.create<sir::BrOp>(trampLoc, operands, br.getTrueDest());
+                        tb.create<sir::BrOp>(trampLoc, br.getTrueOperands(), br.getTrueDest());
                     }
                     // trampoline_false: br ^false_dest(false_operands)
                     {
                         OpBuilder fb(br.getContext());
                         fb.setInsertionPointToEnd(trampFalse);
                         Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_false");
-                        SmallVector<Value, 4> operands = reloadOperands(fb, trampLoc, falseSlots);
-                        fb.create<sir::BrOp>(trampLoc, operands, br.getFalseDest());
+                        fb.create<sir::BrOp>(trampLoc, br.getFalseOperands(), br.getFalseDest());
                     }
 
                     // Replace cond_br with: cond_br %c, ^trampTrue, ^trampFalse (no operands)
-                    // build signature: (cond, trueOperands, falseOperands, trueDest, falseDest)
                     b.setInsertionPoint(br);
                     b.create<sir::CondBrOp>(br.getLoc(), br.getCond(),
                                             ValueRange{}, ValueRange{},
                                             trampTrue, trampFalse);
                     br.erase();
-                }
-
-                SmallVector<sir::BrOp, 16> branchesToFix;
-                auto isTextLocalDefinition = [](Value value, Block *block) {
-                    Operation *def = value.getDefiningOp();
-                    if (!def || def->getBlock() != block)
-                        return false;
-
-                    // The text emitter aliases bitcasts to their operands because
-                    // Sensei has no bitcast mnemonic. A branch output that is a
-                    // local bitcast of a predecessor value would still print as
-                    // the predecessor-local name, so treat that as non-local.
-                    while (auto bitcast = dyn_cast<sir::BitcastOp>(def))
-                    {
-                        Value operand = bitcast.getOperand();
-                        def = operand.getDefiningOp();
-                        if (!def || def->getBlock() != block)
-                            return false;
-                    }
-
-                    return true;
-                };
-
-                module.walk([&](sir::BrOp br) {
-                    Block *parentBlock = br.getOperation()->getBlock();
-                    for (Value operand : br.getDestOperands())
-                    {
-                        if (!isTextLocalDefinition(operand, parentBlock))
-                        {
-                            branchesToFix.push_back(br);
-                            return;
-                        }
-                    }
-                });
-
-                for (auto br : branchesToFix)
-                {
-                    Block *parentBlock = br.getOperation()->getBlock();
-                    OpBuilder b(br);
-                    SmallVector<Value, 4> operands;
-                    operands.reserve(br.getDestOperands().size());
-
-                    for (Value operand : br.getDestOperands())
-                    {
-                        if (isTextLocalDefinition(operand, parentBlock))
-                        {
-                            operands.push_back(operand);
-                            continue;
-                        }
-
-                        uint64_t offset = nextScratchOffset;
-                        nextScratchOffset += 32;
-
-                        Block *sourceBlock = operand.getParentBlock();
-                        const bool operandAvailableInBranchBlock = sourceBlock == parentBlock;
-                        OpBuilder spillBuilder(br.getContext());
-                        if (operandAvailableInBranchBlock)
-                            spillBuilder.setInsertionPoint(br);
-                        else if (Operation *def = operand.getDefiningOp())
-                            spillBuilder.setInsertionPointAfter(def);
-                        else
-                            spillBuilder.setInsertionPointToStart(sourceBlock);
-
-                        Location spillLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_operand_spill");
-                        Value spillPtr = scratchPtr(spillBuilder, spillLoc, offset);
-                        spillBuilder.create<sir::StoreOp>(spillLoc, spillPtr, asU256(spillBuilder, spillLoc, operand));
-
-                        Location reloadLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_operand_reload");
-                        Value reloadPtr = scratchPtr(b, reloadLoc, offset);
-                        Value loaded = b.create<sir::LoadOp>(reloadLoc, u256Type, reloadPtr);
-                        if (loaded.getType() != operand.getType())
-                            loaded = b.create<sir::BitcastOp>(reloadLoc, operand.getType(), loaded);
-                        operands.push_back(loaded);
-                    }
-
-                    b.create<sir::BrOp>(br.getLoc(), ValueRange(operands), br.getDest());
-                    br.erase();
-                }
-
-                if (nextScratchOffset >= lowering::kConstructorDecodeScratchFenceBytes)
-                {
-                    module.emitError()
-                        << "SIR text legalizer scratch range reaches constructor decode scratch fence: next scratch offset "
-                        << nextScratchOffset << " >= fence "
-                        << lowering::kConstructorDecodeScratchFenceBytes;
-                    return failure();
                 }
 
                 return success();
@@ -312,7 +162,6 @@ namespace mlir
                 {
                     ModuleOp module = getOperation();
 
-                    // Phase 0: normalize asymmetric cond_br operands.
                     if (failed(normalizeBranches(module)))
                     {
                         signalPassFailure();
@@ -726,9 +575,7 @@ namespace mlir
                             {
                                 OpBuilder b(op);
                                 auto u256 = sir::U256Type::get(op.getContext());
-                                auto ui256 = mlir::IntegerType::get(op.getContext(), 256, mlir::IntegerType::Unsigned);
-                                auto idConst = b.create<sir::ConstOp>(
-                                    op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
+                                Value idConst = constU256(b, op.getLoc(), static_cast<uint64_t>(it->second));
                                 for (unsigned i = 0; i < op.getNumResults(); ++i)
                                 {
                                     Value oldRes = op.getResult(i);
@@ -755,6 +602,12 @@ namespace mlir
                             report(op.getOperation(), "icall argument count does not match callee function inputs");
                         if (funcType.getNumResults() != op.getResults().size())
                         {
+                            if (op.getNumResults() > funcType.getNumResults())
+                            {
+                                report(op.getOperation(), "icall result count exceeds callee function results");
+                                continue;
+                            }
+
                             OpBuilder b(op);
                             auto u256 = sir::U256Type::get(op.getContext());
                             SmallVector<Type, 4> newResults;
@@ -773,22 +626,6 @@ namespace mlir
                                 }
                                 else
                                     oldRes.replaceAllUsesWith(newRes);
-                            }
-                            if (op.getNumResults() > newCall.getNumResults())
-                            {
-                                auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
-                                                                   IntegerAttr::get(b.getI64Type(), 0));
-                                for (unsigned i = common; i < op.getNumResults(); ++i)
-                                {
-                                    Value oldRes = op.getResult(i);
-                                    if (isa<sir::PtrType>(oldRes.getType()))
-                                    {
-                                        auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), zero);
-                                        oldRes.replaceAllUsesWith(bc.getResult());
-                                    }
-                                    else
-                                        oldRes.replaceAllUsesWith(zero);
-                                }
                             }
                             op.erase();
                         }

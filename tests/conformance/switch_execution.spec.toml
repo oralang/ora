@@ -1,0 +1,25 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+returns = { u256 = 100 }
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 200 }
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7]
+returns = { u256 = 999 }

@@ -1,0 +1,3 @@
+# Vacuous preconditions are gated: the base satisfiability obligation is UNSAT,
+# so verification fails and no bytecode is emitted.
+expect_error = "VerificationFailed"

@@ -22,7 +22,9 @@ contract RefinementContractDedupSoundCore {
         return x;
     }
 
-    fn plusOne(x: u256) -> u256 {
+    fn plusOne(x: u256) -> u256
+        requires x < std.constants.U256_MAX
+    {
         return x + 1;
     }
 

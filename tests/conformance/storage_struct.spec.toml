@@ -1,0 +1,49 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set(uint256,uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [17, 23, 31]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 17
+
+[[call.storage]]
+slot = 1
+value = 23
+
+[[call.storage]]
+slot = 2
+value = 31
+
+[[call]]
+fn = "set_middle(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [99]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 17
+
+[[call.storage]]
+slot = 1
+value = 99
+
+[[call.storage]]
+slot = 2
+value = 31
+
+[[call]]
+fn = "get_middle()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 99 }

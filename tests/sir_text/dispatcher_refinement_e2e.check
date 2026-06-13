@@ -1,0 +1,73 @@
+// INPUT: ora-example/refinements/dispatcher_refinement_e2e.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK: fn main:
+// CHECK: main_entry {
+// CHECK: cv = callvalue
+// CHECK: => cv_nonzero ? @load_selector : @revert_error
+
+// CHECK: load_selector {
+// CHECK: selector_word = calldataload zero_0
+// CHECK: selector = shr selector_shift_0 selector_word
+// CHECK: switch selector {
+// CHECK: 0xB6B55F25 => @deposit_
+// CHECK: 0x13AF4035 => @setOwner_
+// CHECK: 0x27EA6F2B => @setLimit_
+// CHECK: 0xB295A00E => @getLimit_
+// CHECK: 0x9366A8AF => @isOverLimit_
+// CHECK: default => @revert_error
+
+// CHECK: revert_error {
+// CHECK: revert zero_1 zero_1
+
+// CHECK: deposit_ {
+// CHECK: cdsize_deposit = calldatasize
+// CHECK: valid_deposit = lt min_cdsize_1arg_0 cdsize_deposit
+// CHECK: => valid_deposit ? @bb0 : @revert_error
+// CHECK: deposit_exec {
+// CHECK: icall @deposit a_deposit
+// CHECK: return
+
+// CHECK: setOwner_ {
+// CHECK: cdsize_setOwner = calldatasize
+// CHECK: valid_setOwner = lt min_cdsize_1arg_1 cdsize_setOwner
+// CHECK: => valid_setOwner ? @bb1 : @revert_error
+// CHECK: setOwner_exec {
+// CHECK: icall @setOwner
+
+// CHECK: setLimit_ {
+// CHECK: cdsize_setLimit = calldatasize
+// CHECK: valid_setLimit = lt min_cdsize_1arg_2 cdsize_setLimit
+// CHECK: => valid_setLimit ? @bb3 : @revert_error
+
+// CHECK: a_deposit = calldataload selector_offset_0
+// CHECK: => {{.*}} ? @deposit_exec : @abi_decode_revert_10
+
+// CHECK: setLimit_exec {
+// CHECK: icall @setLimit a_setLimit
+
+// CHECK: getLimit_ {
+// CHECK: icall @getLimit
+// CHECK: return
+
+// CHECK: abi_decode_revert_10 {
+// CHECK: revert
+
+// CHECK: isOverLimit_ {
+// CHECK: cdsize_isOverLimit = calldatasize
+// CHECK: valid_isOverLimit = lt min_cdsize_1arg_3 cdsize_isOverLimit
+// CHECK: => valid_isOverLimit ? @isOverLimit_exec : @revert_error
+
+// CHECK: a_setOwner = calldataload selector_offset_1
+// CHECK: large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+// CHECK: => {{.*}} ? @bb2 : @abi_decode_revert_5
+// CHECK: => {{.*}} ? @setOwner_exec : @abi_decode_revert_10
+
+// CHECK: isOverLimit_exec {
+// CHECK: icall @isOverLimit a_isOverLimit
+
+// CHECK: abi_decode_revert_5 {
+// CHECK: revert
+
+// CHECK: a_setLimit = calldataload selector_offset_2
+// CHECK: => {{.*}} ? @setLimit_exec : @abi_decode_revert_10

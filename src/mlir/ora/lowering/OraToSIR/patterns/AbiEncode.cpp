@@ -15,6 +15,7 @@
 using namespace mlir;
 using namespace ora;
 using namespace mlir::ora::abi_lowering;
+using mlir::ora::lowering::coerceToU256;
 
 namespace
 {
@@ -44,7 +45,7 @@ namespace
             return {};
         if (llvm::isa<sir::PtrType>(operand.getType()))
             return operand;
-        return rewriter.create<sir::BitcastOp>(loc, ptrType, ensureU256(rewriter, loc, operand));
+        return rewriter.create<sir::BitcastOp>(loc, ptrType, coerceToU256(rewriter, loc, operand));
     }
 
     static bool isPointerBackedAggregateNode(const AbiLayoutNode &node)
@@ -1021,10 +1022,10 @@ namespace
             return rewriter.notifyMatchFailure(op, "missing ABI layout attr");
 
         AbiLayoutNode root;
-        AbiLayoutDslParser parser(layoutAttr.getValue());
-        if (!parser.parse(root))
+        unsigned operandCount = 0;
+        if (!parseAbiLayout(layoutAttr.getValue(), root, AbiLayoutSyntax::LayoutDsl, &operandCount))
             return rewriter.notifyMatchFailure(op, "unsupported or malformed ABI layout attr");
-        if (parser.getOperandCount() != adaptor.getOperands().size())
+        if (operandCount != adaptor.getOperands().size())
             return rewriter.notifyMatchFailure(op, "ABI layout operand count does not match converted operands");
 
         const uint64_t selectorBytes = selectorAttr.has_value() ? 4 : 0;
@@ -1035,7 +1036,17 @@ namespace
         Value totalSize = selectorBytes == 0
                               ? payloadSize
                               : addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), selectorBytes), payloadSize);
-        Value basePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, totalSize);
+        const bool materializeBytesValue = llvm::isa<ora::BytesType, ora::StringType>(op.getResult().getType());
+        Value allocationSize = materializeBytesValue
+                                   ? addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), 32), totalSize)
+                                   : totalSize;
+        Value basePtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, allocationSize);
+        Value payloadPtr = basePtr;
+        if (materializeBytesValue)
+        {
+            rewriter.create<sir::StoreOp>(op.getLoc(), basePtr, totalSize);
+            payloadPtr = rewriter.create<sir::AddPtrOp>(op.getLoc(), ptrType, basePtr, constU256(rewriter, op.getLoc(), 32));
+        }
 
         if (selectorAttr)
         {
@@ -1045,13 +1056,13 @@ namespace
             // The selector occupies the high 4 bytes of this word. The first
             // argument store starts at byte 4 and intentionally overwrites the
             // zero padding from this selector word.
-            rewriter.create<sir::StoreOp>(op.getLoc(), basePtr, selectorValue);
+            rewriter.create<sir::StoreOp>(op.getLoc(), payloadPtr, selectorValue);
         }
 
-        if (failed(emitAbiEncoding(rewriter, op.getLoc(), op.getOperation(), root, adaptor.getOperands(), basePtr, constU256(rewriter, op.getLoc(), selectorBytes), sizeCache)))
+        if (failed(emitAbiEncoding(rewriter, op.getLoc(), op.getOperation(), root, adaptor.getOperands(), payloadPtr, constU256(rewriter, op.getLoc(), selectorBytes), sizeCache)))
             return rewriter.notifyMatchFailure(op, "unable to materialize ABI layout");
 
-        Value result = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, basePtr);
+        Value result = materializeBytesValue ? basePtr : rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, basePtr).getResult();
         rewriter.replaceOp(op, result);
         return success();
     }
@@ -1093,7 +1104,6 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     auto *ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     auto callKind = op->getAttrOfType<mlir::StringAttr>("call_kind");
     if (!callKind)
@@ -1110,8 +1120,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     if (!encodedLayout)
         return rewriter.notifyMatchFailure(op, "missing layout on ora.abi_encode_with_selector");
     AbiLayoutNode calldataRoot;
-    AbiLayoutDslParser calldataParser(encodedLayout.getValue());
-    if (!calldataParser.parse(calldataRoot))
+    if (!parseAbiLayout(encodedLayout.getValue(), calldataRoot, AbiLayoutSyntax::LayoutDsl))
         return rewriter.notifyMatchFailure(op, "unsupported ABI calldata layout");
 
     Value calldataPayloadLen = nullptr;
@@ -1135,14 +1144,11 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         calldataPayloadLen = constU256(rewriter, op.getLoc(), calldataRoot.headBytes());
     }
     Value calldataLen = addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), 4), calldataPayloadLen);
-    Value scratchReturnLen = rewriter.create<sir::ConstOp>(
-        op.getLoc(),
-        u256Type,
-        mlir::IntegerAttr::get(ui64Type, 32));
+    Value scratchReturnLen = constU256(rewriter, op.getLoc(), 32);
     Value scratchReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, scratchReturnLen);
     Value calldataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getCalldata());
-    Value gas = ensureU256(rewriter, op.getLoc(), adaptor.getGas());
-    Value target = ensureU256(rewriter, op.getLoc(), adaptor.getTarget());
+    Value gas = coerceToU256(rewriter, op.getLoc(), adaptor.getGas());
+    Value target = coerceToU256(rewriter, op.getLoc(), adaptor.getTarget());
 
     Operation *callOp = nullptr;
     if (callKind.getValue() == "staticcall")
@@ -1159,10 +1165,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     }
     else if (callKind.getValue() == "call")
     {
-        Value zeroValue = rewriter.create<sir::ConstOp>(
-            op.getLoc(),
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, 0));
+        Value zeroValue = constU256(rewriter, op.getLoc(), 0);
         callOp = rewriter.create<sir::CallOp>(
             op.getLoc(),
             u256Type,
@@ -1191,10 +1194,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     Value callSuccess = callOp->getResult(0);
     Value fullReturnLen = rewriter.create<sir::ReturnDataSizeOp>(op.getLoc(), u256Type);
     Value fullReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, fullReturnLen);
-    Value zeroOffset = rewriter.create<sir::ConstOp>(
-        op.getLoc(),
-        u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroOffset = constU256(rewriter, op.getLoc(), 0);
     rewriter.create<sir::ReturnDataCopyOp>(op.getLoc(), fullReturnPtr, zeroOffset, fullReturnLen);
     Value fullReturnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, fullReturnPtr);
     rewriter.replaceOp(op, ValueRange{callSuccess, fullReturnPtrU256});

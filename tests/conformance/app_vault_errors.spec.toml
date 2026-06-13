@@ -1,0 +1,72 @@
+# Full-app scenario over ora-example/vault/02_errors.ora (error-union vault).
+# Multi-caller deposit/withdraw exercising both error-union revert paths.
+# deposit/withdraw return !bool | E (NARROW). Success returns are asserted as ABI
+# bool words, and error paths must preserve the custom error selector.
+[deploy]
+source = "ora-example/vault/02_errors.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "deposit(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [5]
+returns = { bool = true }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 5 }
+
+[[call]]
+fn = "deposit(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [0]
+reverts = { selector = "0x1f2a2005" }
+
+[[call]]
+fn = "withdraw(uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = [5]
+reverts = { selector = "0xcf479181" }
+
+[[call]]
+fn = "withdraw(uint256)"
+caller = "0x1000000000000000000000000000000000000001"
+value = 0
+args = [3]
+returns = { bool = true }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "deposit(uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = [7]
+returns = { bool = true }
+
+[[call]]
+fn = "getTotalDeposits()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002"]
+returns = { u256 = 7 }

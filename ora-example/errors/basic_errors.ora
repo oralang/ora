@@ -55,7 +55,9 @@ contract ErrorHandlingTest {
         return true;
     }
     // Function that handles errors with try/catch
-    pub fn safe_transfer(to: address, amount: u256) -> bool {
+    pub fn safe_transfer(to: address, amount: u256) -> bool
+    requires(amount>0)
+    {
         try {
             // Attempt transfer
             var transfer_result: bool = try transfer(to, amount);
@@ -65,12 +67,20 @@ contract ErrorHandlingTest {
         }
     }
     // Function that propagates errors
-    pub fn proxy_transfer(to: address, amount: u256) -> !bool|InsufficientBalance|InvalidAddress {
+    pub fn proxy_transfer(to: address, amount: u256) -> !bool|InsufficientBalance|InvalidAddress
+    requires(amount>0)
+    {
         // This will propagate any errors from transfer
         return transfer(to, amount);
     }
     // Function with custom error handling logic
-    pub fn batch_transfer(recipients:[address; 5], amounts:[u256; 5]) -> u256 {
+    pub fn batch_transfer(recipients:[address; 5], amounts:[u256; 5]) -> u256
+    requires(amounts[0]>0)
+    requires(amounts[1]>0)
+    requires(amounts[2]>0)
+    requires(amounts[3]>0)
+    requires(amounts[4]>0)
+    {
         var success_count: u256 = 0;
         var failed_count: u256 = 0;
         var i: u256 = 0;

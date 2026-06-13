@@ -54,6 +54,7 @@ fn createOraMlirContext() mlir.MlirContext {
     mlir.oraContextAppendDialectRegistry(ctx, registry);
     mlir.oraDialectRegistryDestroy(registry);
     mlir.oraContextLoadAllAvailableDialects(ctx);
+    mlir.oraContextLoadSIRDialect(ctx);
     _ = mlir.oraDialectRegister(ctx);
     return ctx;
 }
@@ -137,6 +138,385 @@ test "compiler lowers runtime keccak256 through OraToSIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "keccak256"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
+}
+
+test "compiler lowers signed integer operations through signed SIR ops" {
+    const source_text =
+        \\contract SignedOps {
+        \\    pub fn signed_div(a: i256, b: i256) -> i256 {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn signed_mod(a: i256, b: i256) -> i256 {
+        \\        return a % b;
+        \\    }
+        \\
+        \\    pub fn signed_shr(a: i256, b: i8) -> i256 {
+        \\        return a >> b;
+        \\    }
+        \\
+        \\    pub fn signed_gt(a: i256, b: i256) -> bool {
+        \\        return a > b;
+        \\    }
+        \\
+        \\    pub fn signed_checked_add(a: i256, b: i256) -> i256 {
+        \\        return a + b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_div"), 1, "sdiv"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_mod"), 1, "smod"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_shr"), 1, "sar"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_gt"), 1, "sgt"));
+    try testing.expect(std.mem.containsAtLeast(u8, try functionSlice(rendered, "signed_checked_add"), 1, "slt"));
+}
+
+test "compiler lowers unsigned integer operations through unsigned SIR ops" {
+    const source_text =
+        \\contract UnsignedOps {
+        \\    pub fn unsigned_div(a: u256, b: u256) -> u256 {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn unsigned_mod(a: u256, b: u256) -> u256 {
+        \\        return a % b;
+        \\    }
+        \\
+        \\    pub fn unsigned_shr(a: u256, b: u8) -> u256 {
+        \\        return a >> b;
+        \\    }
+        \\
+        \\    pub fn unsigned_gt(a: u256, b: u256) -> bool {
+        \\        return a > b;
+        \\    }
+        \\
+        \\    pub fn unsigned_checked_add(a: u256, b: u256) -> u256 {
+        \\        return a + b;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const div_fn = try functionSlice(rendered, "unsigned_div");
+    const mod_fn = try functionSlice(rendered, "unsigned_mod");
+    const shr_fn = try functionSlice(rendered, "unsigned_shr");
+    const gt_fn = try functionSlice(rendered, "unsigned_gt");
+    const add_fn = try functionSlice(rendered, "unsigned_checked_add");
+
+    try testing.expect(std.mem.containsAtLeast(u8, div_fn, 1, " = div "));
+    try testing.expect(!std.mem.containsAtLeast(u8, div_fn, 1, " = sdiv "));
+    try testing.expect(std.mem.containsAtLeast(u8, mod_fn, 1, " = mod "));
+    try testing.expect(!std.mem.containsAtLeast(u8, mod_fn, 1, " = smod "));
+    try testing.expect(std.mem.containsAtLeast(u8, shr_fn, 1, " = shr "));
+    try testing.expect(!std.mem.containsAtLeast(u8, shr_fn, 1, " = sar "));
+    try testing.expect(std.mem.containsAtLeast(u8, gt_fn, 1, " = gt "));
+    try testing.expect(!std.mem.containsAtLeast(u8, gt_fn, 1, " = sgt "));
+    try testing.expect(std.mem.containsAtLeast(u8, add_fn, 1, " = lt "));
+    try testing.expect(!std.mem.containsAtLeast(u8, add_fn, 1, " = slt "));
+}
+
+test "compiler lowers generic requires clauses with substituted integer signedness" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract GenericRequires {
+        \\    fn add(comptime T: type, a: T, b: T) -> T
+        \\        requires a <= std.constants.U256_MAX - b
+        \\    {
+        \\        return a + b;
+        \\    }
+        \\
+        \\    fn guarded_div(comptime T: type, a: T, b: T) -> T
+        \\        requires a >= b
+        \\    {
+        \\        return a / b;
+        \\    }
+        \\
+        \\    pub fn run_unsigned(a: u256, b: u256) -> u256 {
+        \\        return add(u256, a, b);
+        \\    }
+        \\
+        \\    pub fn run_signed(a: i256, b: i256) -> i256 {
+        \\        return guarded_div(i256, a, b);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn add__u256"));
+    const signed_fn = try functionSlice(rendered, "guarded_div__i256");
+    try testing.expect(std.mem.containsAtLeast(u8, signed_fn, 1, "sdiv"));
+}
+
+test "OraToSIR folds redundant integer/u256 bitcast round trips" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u256;
+        \\
+        \\    pub fn increment() {
+        \\        counter = counter + 1;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const increment_fn = try functionSlice(rendered, "increment");
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, increment_fn, "sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, increment_fn, 1, "bitcast"));
+}
+
+test "OraToSIR keeps width-changing bitcast round trips" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @guard(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : i1
+        \\    %1 = sir.bitcast %0 : i1 : !sir.u256
+        \\    sir.iret %1
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": !sir.u256 : i1"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": i1 : !sir.u256"));
+}
+
+test "OraToSIR keeps arithmetic width-changing carrier round trips" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @add_carrier(%arg0: !sir.u256, %arg1: !sir.u256) {
+        \\    %0 = sir.add %arg0 : !sir.u256, %arg1 : !sir.u256 : !sir.u256
+        \\    %1 = sir.bitcast %0 : !sir.u256 : i128
+        \\    %2 = sir.bitcast %1 : i128 : !sir.u256
+        \\    sir.iret %2
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
+}
+
+test "OraToSIR handles residual cast worklist entries erased by an earlier cast" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @stale_residual_cast(%arg0: !sir.u256) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : !sir.u256 to i128
+        \\    %1 = builtin.unrealized_conversion_cast %0 : i128 to !sir.u256
+        \\    %2 = builtin.unrealized_conversion_cast %0 : i128 to !sir.u256
+        \\    %3 = sir.add %1 : !sir.u256, %2 : !sir.u256 : !sir.u256
+        \\    sir.iret %3
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
+}
+
+test "OraToSIR masks unsigned materialization widths above u64" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @mask_u128(%arg0: i128) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : i128 to !sir.u256
+        \\    sir.iret %0
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "builtin.unrealized_conversion_cast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "340282366920938463463374607431768211455"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.and"));
+}
+
+test "OraToSIR rejects generic aggregate to scalar cast fallback" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @bad(%arg0: !ora.string) {
+        \\    %0 = builtin.unrealized_conversion_cast %arg0 : !ora.string to !sir.u256
+        \\    sir.iret %0
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
+test "OraToSIR rejects value typed try_stmt with empty yield" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @bad() -> i256 {
+        \\    %0 = "ora.try_stmt"() ({
+        \\      ora.yield
+        \\    }, {
+        \\      ora.yield
+        \\    }) : () -> i256
+        \\    ora.return %0 : i256
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
+test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
+    const source_text =
+        \\pub fn div_i128(a: i128, b: i128) -> i128 {
+        \\    return a / b;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.sdiv"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+}
+
+test "OraToSIR preserves explicit narrow integer truncation mask" {
+    const source_text =
+        \\pub fn narrow(big: i256) -> i8 {
+        \\    return @cast(i8, big);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const narrow_fn = try functionSlice(rendered, "narrow");
+
+    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "const 0xFF"));
+    try testing.expect(std.mem.containsAtLeast(u8, narrow_fn, 1, "and"));
+    try testing.expect(!std.mem.containsAtLeast(u8, narrow_fn, 1, "bitcast"));
+}
+
+test "frontend reuses storage roots for compound map assignments" {
+    const source_text =
+        \\contract MapCounter {
+        \\    storage var balances: map<address, u256>;
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn add_balance(owner: address, amount: u256) {
+        \\        balances[owner] += amount;
+        \\    }
+        \\
+        \\    pub fn add_allowance(owner: address, spender: address, amount: u256) {
+        \\        allowances[owner][spender] += amount;
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"balances\""));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"allowances\""));
+    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, rendered, "ora.map_store"));
 }
 
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {
@@ -333,7 +713,7 @@ test "compiler converts runtime abiDecodePermissive mixed dynamic hex literal th
         \\    pub fn decode() -> u256 {
         \\        let decoded = @abiDecodePermissive((u256, string), hex"000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000000600000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000161ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -943,11 +1323,11 @@ test "compiler abiDecode N3b4 rejects unsupported nested dynamic calldata arrays
     try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
 }
 
-test "compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before legacy fallback" {
+test "compiler abiDecode N3b4 validates public calldata dynamic tuple params before call" {
     const source_text =
         \\contract Entry {
-        \\    pub fn take_pair(value: (u256, string)) -> bool {
-        \\        return true;
+        \\    pub fn value(t: (u256, string)) -> u256 {
+        \\        return t.0 + t.1.len;
         \\    }
         \\}
     ;
@@ -957,7 +1337,18 @@ test "compiler abiDecode N3b4 rejects unsupported dynamic calldata tuples before
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
-    try testing.expect(!mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "value_"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 2, "calldataload"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "abi_decode_revert_11"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "mload8"));
+    try testing.expect(std.mem.containsAtLeast(u8, main_fn, 1, "icall @value"));
 }
 
 test "compiler abiDecode N3b5 validates dynamic constructor string and bytes calldata" {
@@ -1780,7 +2171,7 @@ test "compiler converts runtime abiDecode dynamic string and bytes memory result
         \\    pub fn decode_pair_bytes(payload: bytes) -> u256 {
         \\        let decoded = @abiDecode((u256, bytes), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]),
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -1788,7 +2179,7 @@ test "compiler converts runtime abiDecode dynamic string and bytes memory result
         \\    pub fn decode_pair_values(payload: bytes) -> u256 {
         \\        let decoded = @abiDecode((u256, slice[u256]), payload);
         \\        return match (decoded) {
-        \\            Ok(value) => value.0 + value.1[0] + value.1[1],
+        \\            Ok(value) => value.0 + @cast(u256, value.1[0]) + value.1[1],
         \\            Err(_) => 0,
         \\        };
         \\    }
@@ -2183,6 +2574,68 @@ test "compiler lowers guard clauses to runtime revert through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
 }
 
+test "compiler lowers requires clauses to runtime revert and erases ensures before SIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(amount: u256) -> u256
+        \\        requires amount < 10
+        \\        ensures result == amount
+        \\    {
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    {
+        const before_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+        defer if (before_ref.data != null) mlir.oraStringRefFree(before_ref);
+        const before = before_ref.data[0..before_ref.length];
+        try testing.expect(std.mem.containsAtLeast(u8, before, 1, "ora.requires"));
+        try testing.expect(std.mem.containsAtLeast(u8, before, 1, "ora.ensures"));
+    }
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.ensures"));
+}
+
+test "compiler preserves requires source order before hazardous later clauses" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn ordered(a: u256, b: u256) -> u256
+        \\        requires b != 0
+        \\        requires a / b < 10
+        \\    {
+        \\        return a;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const rendered = after_ref.data[0..after_ref.length];
+
+    const first_branch = std.mem.indexOf(u8, rendered, "sir.cond_br") orelse return error.TestUnexpectedResult;
+    const division = std.mem.indexOf(u8, rendered, "sir.div") orelse return error.TestUnexpectedResult;
+    try testing.expect(first_branch < division);
+}
+
 test "corpus guard runtime clause lowers to SIR revert" {
     var compilation = try compilePackage("ora-example/smt/verification/guard_runtime_clause.ora");
     defer compilation.deinit();
@@ -2331,6 +2784,44 @@ test "compiler converts ADT storage load and store through carrier slots" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts scalar Result storage load and store through carrier slots" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract ResultStorage {
+        \\    storage var saved: Result<u256, Failure>;
+        \\
+        \\    pub fn set_ok(value: u256) {
+        \\        saved = Ok(value);
+        \\    }
+        \\
+        \\    pub fn set_err() {
+        \\        saved = Err(Failure());
+        \\    }
+        \\
+        \\    pub fn get() -> u256 {
+        \\        return match (saved) {
+        \\            Ok(value) => value,
+        \\            Err(_) => 0,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sload"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts nested ADT fields through compiler-managed handle storage" {
     const source_text =
         \\struct Holder {
@@ -2456,6 +2947,34 @@ test "compiler converts source scalar ADT constructors through OraToSIR" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler converts wide explicit enum constants through OraToSIR" {
+    const source_text =
+        \\enum Big : u256 {
+        \\    A = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff,
+        \\}
+        \\
+        \\fn current() -> Big {
+        \\    return Big.A;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const has_max_literal =
+        std.mem.containsAtLeast(u8, rendered, 1, "large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF") or
+        std.mem.containsAtLeast(u8, rendered, 1, "sir.const -1");
+    try testing.expect(has_max_literal);
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.const 0"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler converts source aggregate ADT constructors through OraToSIR" {
     const source_text =
         \\struct Receipt {
@@ -2549,13 +3068,25 @@ test "compiler converts native string and bytes index access through OraToSIR" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
-test "compiler resolves imported std bytes errors in type position and lowers them through OraToSIR" {
+test "compiler stores opaque Result values into local Result memrefs through OraToSIR" {
     const source_text =
-        \\comptime const std = @import("std");
+        \\error Failure;
         \\
-        \\contract Probe {
-        \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
-        \\        return std.bytes.at(data, 0);
+        \\contract ResultMemRefOpaque {
+        \\    fn choose(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, value: u256) -> u256 {
+        \\        var values: [Result<u256, Failure>; 2] = [Ok(0), Err(Failure())];
+        \\        values[0] = choose(flag, value);
+        \\        return match (values[0]) {
+        \\            Ok(inner) => inner,
+        \\            Err(_) => 99,
+        \\        };
         \\    }
         \\}
     ;
@@ -2570,7 +3101,47 @@ test "compiler resolves imported std bytes errors in type position and lowers th
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
 
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn choose:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn run:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "icall @choose"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "alloc_size = const 0x80"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256 elem4_ptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256 elem5_ptr"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "elem9 = mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "shl c1 v"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler resolves imported std bytes errors in type position and lowers them through OraToSIR" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Probe {
+        \\    pub fn first(data: bytes) -> !u8 | std.bytes.OutOfBounds {
+        \\        return std.bytes.at(data, 0);
+        \\    }
+        \\
+        \\    pub fn decodeWord(data: bytes) -> !u256 | std.bytes.InvalidLength {
+        \\        return std.bytes.decodeU256BE(data);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_bytes_at:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn std_bytes_decodeU256BE:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload8"));
 }
 
@@ -2770,6 +3341,76 @@ test "OraToSIR rejects missing strict storage slot metadata" {
     try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
 }
 
+test "OraToSIR lowers named memory slots without release malloc fallback" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {scratch = 0 : ui64}} {
+        \\  ora.contract @C {
+        \\    func.func @roundtrip(%arg0: !sir.u256) {
+        \\      ora.mstore %arg0, "scratch" : !sir.u256
+        \\      %0 = ora.mload "scratch" : !sir.u256
+        \\      sir.iret %0
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+    const rendered = try renderSirTextForModule(ctx, module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "codesize"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "malloc"));
+}
+
+test "SIR text legalizer rejects icall result underflow instead of zero filling" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() {
+        \\    sir.stop
+        \\  }
+        \\  func.func @main() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraLegalizeSIRText(ctx, module));
+}
+
+test "SIR dispatcher rejects icall result underflow instead of zero filling" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() {
+        \\    sir.stop
+        \\  }
+        \\  func.func @caller() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraBuildSIRDispatcher(ctx, module));
+}
+
 test "OraToSIR rejects malformed ABI encode and decode layout attributes" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);
@@ -2859,16 +3500,18 @@ test "compiler storage layout manifest matches SIR slot usage" {
         \\    storage var balances: map<address, u256>;
         \\    storage var allowances: map<address, map<address, u256>>;
         \\    storage var history: [u256; 4];
+        \\    storage var after_history: u256;
         \\
         \\    pub fn write(who: address, spender: address, index: u256, amount: u256) {
         \\        balance = amount;
         \\        balances[who] = amount;
         \\        allowances[who][spender] = amount;
         \\        history[index] = amount;
+        \\        after_history = amount;
         \\    }
         \\
         \\    pub fn read(who: address, index: u256) -> u256 {
-        \\        return balance + balances[who] + history[index];
+        \\        return balance + balances[who] + history[index] + after_history;
         \\    }
         \\}
     ;
@@ -2886,6 +3529,7 @@ test "compiler storage layout manifest matches SIR slot usage" {
     try expectGlobalSlot(slots_json, "balances", 2);
     try expectGlobalSlot(slots_json, "allowances", 3);
     try expectGlobalSlot(slots_json, "history", 4);
+    try expectGlobalSlot(slots_json, "after_history", 8);
 
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
@@ -3047,6 +3691,121 @@ test "OraToSIR lowers deep dynamic struct scalar update to direct field sstore" 
     try testing.expect(!std.mem.containsAtLeast(u8, update_fn, 1, "keccak256"));
 }
 
+test "OraToSIR lowers dynamic string and bytes storage map values through storage roots" {
+    const source_text =
+        \\contract DynamicMapValues {
+        \\    storage var names: map<address, string>;
+        \\    storage var blobs: map<u256, bytes>;
+        \\
+        \\    pub fn setName(account: address, name: string) {
+        \\        names[account] = name;
+        \\    }
+        \\
+        \\    pub fn getName(account: address) -> string {
+        \\        return names[account];
+        \\    }
+        \\
+        \\    pub fn copyBlob(from: u256, to: u256) {
+        \\        blobs[to] = blobs[from];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const set_name = try functionSlice(rendered, "setName");
+    try testing.expect(std.mem.count(u8, set_name, "sstore") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, set_name, 1, "mload"));
+
+    const get_name = try functionSlice(rendered, "getName");
+    try testing.expect(std.mem.count(u8, get_name, "sload") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, get_name, 1, "malloc"));
+
+    const copy_blob = try functionSlice(rendered, "copyBlob");
+    try testing.expect(std.mem.count(u8, copy_blob, "keccak256") >= 2);
+    try testing.expect(std.mem.count(u8, copy_blob, "sload") >= 2);
+    try testing.expect(std.mem.count(u8, copy_blob, "sstore") >= 2);
+}
+
+test "OraToSIR lowers dynamic string storage map keys" {
+    const source_text =
+        \\contract MapStringKey {
+        \\    storage var values: map<string, u256>;
+        \\
+        \\    pub fn set(key: string, val: u256) {
+        \\        values[key] = val;
+        \\    }
+        \\
+        \\    pub fn get(key: string) -> u256 {
+        \\        return values[key];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const set_fn = try functionSlice(rendered, "set");
+    try testing.expect(std.mem.count(u8, set_fn, "keccak256") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, set_fn, 1, "sstore"));
+
+    const get_fn = try functionSlice(rendered, "get");
+    try testing.expect(std.mem.count(u8, get_fn, "keccak256") >= 2);
+    try testing.expect(std.mem.containsAtLeast(u8, get_fn, 1, "sload"));
+}
+
+test "OraToSIR lowers fixed array storage map values" {
+    const source_text =
+        \\contract MapOfArrays {
+        \\    storage var slots: map<address, [u256; 4]>;
+        \\
+        \\    pub fn set_slot(account: address, index: u256, val: u256) {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        arr[index] = val;
+        \\        slots[account] = arr;
+        \\    }
+        \\
+        \\    pub fn get_slot(account: address, index: u256) -> u256 {
+        \\        let arr: [u256; 4] = slots[account];
+        \\        return arr[index];
+        \\    }
+        \\
+        \\    pub fn set_all(account: address, a: u256, b: u256, c: u256, d: u256) {
+        \\        let arr: [u256; 4] = [a, b, c, d];
+        \\        slots[account] = arr;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const get_slot = try functionSlice(rendered, "get_slot");
+    try testing.expect(std.mem.containsAtLeast(u8, get_slot, 1, "sload"));
+
+    const set_all = try functionSlice(rendered, "set_all");
+    try testing.expect(std.mem.count(u8, set_all, "sstore") >= 4);
+}
+
 test "compiler converts narrowed carried locals in nested scf ifs" {
     const source_text =
         \\contract Test {
@@ -3151,6 +3910,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
         "ora-example/apps/arithmetic_probe.ora",
         "ora-example/apps/erc20_verified.ora",
         "ora-example/apps/defi_lending_pool.ora",
+        "ora-example/apps/defi_lending_pool_fv.ora",
         "ora-example/apps/erc20_bitfield_comptime_generics.ora",
         "ora-example/array_operations.ora",
         "ora-example/structs/basic_structs.ora",
@@ -3179,6 +3939,7 @@ test "compiler examples leave no residual Ora runtime ops after OraToSIR" {
     };
 
     for (example_paths) |path| {
+        errdefer std.debug.print("OraToSIR residual runtime-op example failed: {s}\n", .{path});
         var compilation = try compilePackage(path);
         defer compilation.deinit();
 

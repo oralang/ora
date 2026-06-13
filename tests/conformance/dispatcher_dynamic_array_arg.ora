@@ -1,0 +1,5 @@
+contract DispatcherDynamicArrayArg {
+    pub fn sum(xs: slice[u256]) -> u256 {
+        return xs[0] + xs[1] + xs[2];
+    }
+}

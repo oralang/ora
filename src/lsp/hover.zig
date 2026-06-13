@@ -1,5 +1,7 @@
 const std = @import("std");
 const frontend = @import("frontend.zig");
+const keyword_docs = @import("keyword_docs.zig");
+const refinement_docs = @import("refinement_docs.zig");
 const semantic_index = @import("semantic_index.zig");
 
 const Allocator = std.mem.Allocator;
@@ -13,13 +15,15 @@ pub const Hover = struct {
     }
 };
 
-pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
+pub fn hoverAtIndex(
+    allocator: Allocator,
+    source: []const u8,
+    position: frontend.Position,
+    index: *const semantic_index.SemanticIndex,
+) !?Hover {
     if (!index.parse_succeeded) return null;
 
-    if (semantic_index.findSymbolAtPosition(index.symbols, position)) |symbol_index| {
+    if (semantic_index.findSymbolAtPosition(index, position)) |symbol_index| {
         const candidate = index.symbols[symbol_index];
         if (rangeContainsPosition(candidate.selection_range, position)) {
             const value = try formatHoverValueAlloc(allocator, candidate);
@@ -27,78 +31,142 @@ pub fn hoverAt(allocator: Allocator, source: []const u8, position: frontend.Posi
         }
     }
 
-    return keywordHoverAt(allocator, source, position);
+    if (try keywordHoverAt(allocator, source, position)) |hover| return hover;
+    return refinementHoverAt(allocator, source, position);
 }
 
 fn formatHoverValueAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {
-    const signature = try formatSignatureAlloc(allocator, symbol);
-    defer allocator.free(signature);
+    const value = try allocator.alloc(u8, hoverValueCapacity(symbol));
+    var cursor: usize = 0;
 
+    appendBytes(value, &cursor, "```ora\n");
+    appendSignature(value, &cursor, symbol);
+    appendBytes(value, &cursor, "\n```");
     if (symbol.doc_comment) |doc| {
-        return std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ signature, doc });
+        appendBytes(value, &cursor, "\n---\n");
+        appendBytes(value, &cursor, doc);
     }
 
-    return std.fmt.allocPrint(allocator, "```ora\n{s}\n```", .{signature});
+    std.debug.assert(cursor == value.len);
+    return value;
 }
 
-fn formatSignatureAlloc(allocator: Allocator, symbol: semantic_index.Symbol) ![]u8 {
-    return switch (symbol.kind) {
-        .contract => std.fmt.allocPrint(allocator, "contract {s}", .{symbol.name}),
+fn appendSignature(buffer: []u8, cursor: *usize, symbol: semantic_index.Symbol) void {
+    switch (symbol.kind) {
+        .contract => {
+            appendBytes(buffer, cursor, "contract ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .function, .method => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "fn {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "fn ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "fn {s}()", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "fn ", symbol.name, "", "()"),
         .variable => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "var {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "var ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "var {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "var ", symbol.name, "", ""),
         .field => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "field {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "field ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "field {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "field ", symbol.name, "", ""),
         .constant => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "const {s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "const ", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "const {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "const ", symbol.name, "", ""),
         .parameter => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "{s}: {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "", symbol.name, detail, ": ")
         else
-            std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
-        .struct_decl => std.fmt.allocPrint(allocator, "struct {s}", .{symbol.name}),
-        .bitfield_decl => std.fmt.allocPrint(allocator, "bitfield {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "", symbol.name, "", ""),
+        .struct_decl => {
+            appendBytes(buffer, cursor, "struct ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
+        .bitfield_decl => {
+            appendBytes(buffer, cursor, "bitfield ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .enum_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "enum {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "enum ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "enum {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "enum ", symbol.name, "", ""),
         .enum_member => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "enum member {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "enum member ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "enum member {s}", .{symbol.name}),
-        .trait_decl => std.fmt.allocPrint(allocator, "trait {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "enum member ", symbol.name, "", ""),
+        .trait_decl => {
+            appendBytes(buffer, cursor, "trait ");
+            appendBytes(buffer, cursor, symbol.name);
+        },
         .impl_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "{s} {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "", symbol.name, detail, " ")
         else
-            std.fmt.allocPrint(allocator, "{s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "", symbol.name, "", ""),
         .type_alias => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "type {s} = {s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "type ", symbol.name, detail, " = ")
         else
-            std.fmt.allocPrint(allocator, "type {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "type ", symbol.name, "", ""),
         .event => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "log {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "log ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "log {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "log ", symbol.name, "", ""),
         .error_decl => if (symbol.detail) |detail|
-            std.fmt.allocPrint(allocator, "error {s}{s}", .{ symbol.name, detail })
+            appendNameDetail(buffer, cursor, "error ", symbol.name, detail, "")
         else
-            std.fmt.allocPrint(allocator, "error {s}", .{symbol.name}),
+            appendNameDetail(buffer, cursor, "error ", symbol.name, "", ""),
+    }
+}
+
+fn appendNameDetail(buffer: []u8, cursor: *usize, prefix: []const u8, name: []const u8, detail: []const u8, separator: []const u8) void {
+    appendBytes(buffer, cursor, prefix);
+    appendBytes(buffer, cursor, name);
+    appendBytes(buffer, cursor, separator);
+    appendBytes(buffer, cursor, detail);
+}
+
+fn appendBytes(buffer: []u8, cursor: *usize, value: []const u8) void {
+    @memcpy(buffer[cursor.*..][0..value.len], value);
+    cursor.* += value.len;
+}
+
+fn hoverValueCapacity(symbol: semantic_index.Symbol) usize {
+    var total: usize = "```ora\n".len + "\n```".len + signatureCapacity(symbol);
+    if (symbol.doc_comment) |doc| total += "\n---\n".len + doc.len;
+    return total;
+}
+
+fn signatureCapacity(symbol: semantic_index.Symbol) usize {
+    const detail_len = if (symbol.detail) |detail| detail.len else 0;
+    return symbol.name.len + detail_len + switch (symbol.kind) {
+        .contract => "contract ".len,
+        .function, .method => "fn ".len + if (symbol.detail == null) "()".len else 0,
+        .variable => "var ".len + if (symbol.detail != null) ": ".len else 0,
+        .field => "field ".len + if (symbol.detail != null) ": ".len else 0,
+        .constant => "const ".len + if (symbol.detail != null) ": ".len else 0,
+        .parameter => if (symbol.detail != null) ": ".len else 0,
+        .struct_decl => "struct ".len,
+        .bitfield_decl => "bitfield ".len,
+        .enum_decl => "enum ".len,
+        .enum_member => "enum member ".len,
+        .trait_decl => "trait ".len,
+        .impl_decl => if (symbol.detail != null) " ".len else 0,
+        .type_alias => "type  = ".len,
+        .event => "log ".len,
+        .error_decl => "error ".len,
     };
 }
 
 fn keywordHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
     const word = wordAtPosition(source, position) orelse return null;
-    const doc = keyword_docs.get(word.text) orelse return null;
+    const doc = keyword_docs.documentation(word.text) orelse return null;
 
     const value = try std.fmt.allocPrint(allocator, "```ora\n{s}\n```\n---\n{s}", .{ word.text, doc });
+    return .{ .contents = value, .range = word.range };
+}
+
+fn refinementHoverAt(allocator: Allocator, source: []const u8, position: frontend.Position) !?Hover {
+    const word = wordAtPosition(source, position) orelse return null;
+    const entry = refinement_docs.entryForName(word.text) orelse return null;
+    const value = try refinement_docs.markdownAlloc(allocator, entry);
     return .{ .contents = value, .range = word.range };
 }
 
@@ -136,64 +204,6 @@ fn wordAtPosition(source: []const u8, position: frontend.Position) ?WordAtPositi
 fn isIdentChar(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
 }
-
-const keyword_docs = std.StaticStringMap([]const u8).initComptime(.{
-    .{ "contract", "Declares a smart contract type." },
-    .{ "struct", "Declares a named struct type." },
-    .{ "enum", "Declares an enumeration type." },
-    .{ "bitfield", "Declares a packed bitfield type for efficient storage." },
-    .{ "type", "Declares a type alias." },
-    .{ "fn", "Declares a function." },
-    .{ "pub", "Makes a declaration publicly visible." },
-    .{ "let", "Declares an immutable local binding." },
-    .{ "var", "Declares a mutable variable." },
-    .{ "const", "Declares a compile-time constant." },
-    .{ "storage", "Storage qualifier — persists on-chain between calls." },
-    .{ "tstore", "Transient storage qualifier — cleared after each transaction." },
-    .{ "memory", "Memory qualifier — temporary data within a call." },
-    .{ "import", "Imports declarations from another module." },
-    .{ "log", "Declares an event (emits an EVM log)." },
-    .{ "error", "Declares a custom error type." },
-    .{ "trait", "Declares an interface trait." },
-    .{ "impl", "Implements a trait for a type." },
-    .{ "comptime", "Evaluates an expression at compile time." },
-    .{ "if", "Conditional branch." },
-    .{ "else", "Alternative branch of an `if` or `switch`." },
-    .{ "while", "Loop that repeats while a condition holds." },
-    .{ "for", "Iterates over a range or collection." },
-    .{ "switch", "Multi-way branch on a value." },
-    .{ "match", "Pattern match over values, enums, and Result/error unions." },
-    .{ "return", "Returns a value from the current function." },
-    .{ "break", "Exits the innermost loop." },
-    .{ "continue", "Skips to the next iteration of the innermost loop." },
-    .{ "try", "Unwraps an error union, propagating the error on failure." },
-    .{ "catch", "Handles an error from an error union." },
-    .{ "requires", "Precondition — must hold when the function is called." },
-    .{ "guard", "Runtime-enforced precondition — checked at runtime and assumed after it passes." },
-    .{ "ensures", "Postcondition — guaranteed to hold when the function returns." },
-    .{ "ensures_ok", "Success postcondition — guaranteed to hold on successful error-union returns." },
-    .{ "ensures_err", "Error postcondition — guaranteed to hold on error-union returns." },
-    .{ "invariant", "Contract or loop invariant — preserved across state transitions." },
-    .{ "ghost", "Ghost declaration — exists only for verification, not compiled." },
-    .{ "assert", "Verification assertion — checked by the prover." },
-    .{ "assume", "Verification assumption — taken as given by the prover." },
-    .{ "havoc", "Assigns an arbitrary value for verification." },
-    .{ "old", "Refers to the pre-state value of an expression in postconditions." },
-    .{ "result", "Refers to the return value in postconditions." },
-    .{ "modifies", "Declares state locations a function may modify." },
-    .{ "decreases", "Declares a decreasing termination measure." },
-    .{ "increases", "Declares an increasing termination measure." },
-    .{ "forall", "Universal quantifier — for all values satisfying a predicate." },
-    .{ "exists", "Existential quantifier — there exists a value satisfying a predicate." },
-    .{ "where", "Type constraint or refinement clause." },
-    .{ "extern", "Declares an external contract interface." },
-    .{ "true", "Boolean literal `true`." },
-    .{ "false", "Boolean literal `false`." },
-    .{ "self", "Refers to the current contract instance." },
-    .{ "call", "Declares or invokes a state-changing external call." },
-    .{ "staticcall", "Declares or invokes a read-only external call." },
-    .{ "errors", "Declares the closed error set an extern trait method may return." },
-});
 
 fn rangeContainsPosition(range: frontend.Range, position: frontend.Position) bool {
     if (positionLessThan(position, range.start)) return false;

@@ -1,1 +1,31 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/strings/simple_string.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/strings/simple_string.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @stringExample() -> !sir.ptr<1> attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 29 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %2 = sir.const 61 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %4 = sir.const 38178759162904981154304547632516927327671669658753653443810156993363788693504 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %5 = sir.addptr %3 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/strings/simple_string.ora":7:31)))
+// CHECK-NEXT:     %6 = sir.load %3 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/strings/simple_string.ora":9:9)))
+// CHECK-NEXT:     %7 = sir.add %6 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/strings/simple_string.ora":9:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/strings/simple_string.ora":9:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/strings/simple_string.ora":6:5)
+// CHECK-NEXT:   func.func @stringWithTypes() -> !sir.ptr<1> attributes {ora.visibility = "private"} {
+// CHECK-NEXT:     %0 = sir.const 14 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %1 = sir.const 32 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %2 = sir.const 46 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %3 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     sir.store %3 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %4 = sir.const 31422280619888180115783229901348220631465428504951712818857188477955322413056 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %5 = sir.addptr %3 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     sir.store %5 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/strings/simple_string.ora":14:33)))
+// CHECK-NEXT:     %6 = sir.load %3 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/strings/simple_string.ora":15:9)))
+// CHECK-NEXT:     %7 = sir.add %6 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/strings/simple_string.ora":15:9)))
+// CHECK-NEXT:     sir.return %3 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/strings/simple_string.ora":15:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/strings/simple_string.ora":13:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/strings/simple_string.ora":4:1)
