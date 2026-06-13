@@ -3,6 +3,7 @@ const import_graph = @import("ora_imports");
 const ast = @import("../ast/mod.zig");
 const db = @import("../db/mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const hir = @import("../hir/mod.zig");
 const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const embedded_stdlib = import_graph.embedded_stdlib;
@@ -30,9 +31,14 @@ pub const Compilation = struct {
     db: db.CompilerDb,
     package_id: source.PackageId,
     root_module_id: source.ModuleId,
+    artifact_blocked: bool = false,
 
     pub fn deinit(self: *Compilation) void {
         self.db.deinit();
+    }
+
+    pub fn isArtifactEmittable(self: *const Compilation) bool {
+        return !self.artifact_blocked;
     }
 };
 
@@ -91,6 +97,7 @@ fn finishCompilation(compilation: *Compilation) !void {
         const typecheck = try compilation.db.moduleTypeCheck(module_id);
         compilerPhaseLog("module {s} typecheck", .{module.name});
         if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
+            compilation.artifact_blocked = true;
             return;
         }
         _ = try compilation.db.constEval(module_id);
@@ -102,6 +109,11 @@ fn finishCompilation(compilation: *Compilation) !void {
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
     compilerPhaseLog("root lower-to-hir done", .{});
     if (diagnosticsHaveErrors(&lowering.diagnostics)) {
+        compilation.artifact_blocked = true;
+        return;
+    }
+    if (!lowering.isEmittable() or hir.findExecutableFallback(lowering.module.raw_module) != null) {
+        compilation.artifact_blocked = true;
         return;
     }
 }
