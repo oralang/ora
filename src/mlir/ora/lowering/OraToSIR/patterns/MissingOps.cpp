@@ -1,6 +1,7 @@
 #include "patterns/MissingOps.h"
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "patterns/LoweringHelpers.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -20,17 +21,9 @@
 
 using namespace mlir;
 using namespace ora;
+using mlir::ora::lowering::ensureU256;
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
-
-// Helper: ensure value is u256, inserting a bitcast if needed.
-static Value ensureU256(PatternRewriter &rewriter, Location loc, Value value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    if (llvm::isa<sir::U256Type>(value.getType()))
-        return value;
-    return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-}
 
 // Helper: convert a value to a non-zero boolean in u256 (double iszero).
 static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)

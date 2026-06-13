@@ -1,0 +1,7 @@
+contract AbiDecodeConstructorStringRevert {
+    storage var touched: u256 = 0;
+
+    pub fn init(name: string) {
+        touched = 9;
+    }
+}

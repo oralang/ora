@@ -2598,7 +2598,21 @@ test "ora dialect exposes external call ops through C API" {
     mlir.oraBlockAppendOwnedOperation(body, external_call_op);
 
     const returndata = mlir.oraOperationGetResult(external_call_op, 1);
+    const decode_layout = mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("tuple(static(bool))"));
     const decode_op = mlir.oraAbiDecodeOpCreate(ctx, loc, return_types_attr, returndata, i1_ty);
+    // The C ABI constructor stays stable for existing callers; the required
+    // decode attrs are attached immediately before the op is verified/printed.
+    mlir.oraOperationSetAttributeByName(decode_op, mlir.oraStringRefCreateFromCString("layout"), decode_layout);
+    mlir.oraOperationSetAttributeByName(
+        decode_op,
+        mlir.oraStringRefCreateFromCString("source"),
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("returndata")),
+    );
+    mlir.oraOperationSetAttributeByName(
+        decode_op,
+        mlir.oraStringRefCreateFromCString("failure_mode"),
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("error_union")),
+    );
     mlir.oraBlockAppendOwnedOperation(body, decode_op);
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
@@ -2608,6 +2622,9 @@ test "ora dialect exposes external call ops through C API" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode_with_selector"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "layout = \"tuple(static(bool))\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "source = \"returndata\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "failure_mode = \"error_union\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ERC20\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"transfer\""));

@@ -161,6 +161,8 @@ add_mlir_dialect_library(MLIROraDialectC
   lowering/OraToSIR/patterns/Struct.cpp
   lowering/OraToSIR/patterns/Storage.cpp
   lowering/OraToSIR/patterns/MemRef.cpp
+  lowering/OraToSIR/patterns/AbiEncode.cpp
+  lowering/OraToSIR/patterns/AbiDecode.cpp
   lowering/OraToSIR/patterns/ControlFlow.cpp
   lowering/OraToSIR/patterns/EVM.cpp
   lowering/OraToSIR/patterns/Logs.cpp

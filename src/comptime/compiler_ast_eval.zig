@@ -5,12 +5,14 @@ const comptime_mod = @import("mod.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
 const stage_mod = @import("stage.zig");
 const model = @import("../sema/model.zig");
+const type_descriptors = @import("../sema/type_descriptors.zig");
 const refinements = @import("../sema/refinements.zig");
 const source = @import("../source/mod.zig");
 const error_mod = @import("error.zig");
 const hir_abi = @import("../hir/abi.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_comptime_encoder = @import("../abi/comptime_encoder.zig");
+const abi_comptime_decoder = @import("../abi/comptime_decoder.zig");
 const compile_options = @import("../compile_options.zig");
 
 const ConstEvalResult = model.ConstEvalResult;
@@ -34,6 +36,7 @@ const EvalConfig = comptime_mod.EvalConfig;
 const parseIntegerLiteral = bridge.parseIntegerLiteral;
 const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
 const fixed_bytes_type_id_base: u32 = 500_000;
+const abi_decode_error_type_id: u32 = 900_000;
 const named_type_id_base: u32 = 1_000_000;
 const named_type_id_module_stride: u32 = 100_000;
 
@@ -716,6 +719,9 @@ const ConstEvaluator = struct {
                     if (builtin.args.len != 1) break :blk null;
                     const trait_item = (try self.resolveReflectionTraitReference(builtin.args[0])) orelse break :blk null;
                     break :blk try self.buildTraitMethodsCtValue(trait_item);
+                }
+                if (std.mem.eql(u8, builtin.name, "abiDecode") or std.mem.eql(u8, builtin.name, "abiDecodePermissive")) {
+                    break :blk try self.evalAbiDecodeBuiltinCtValue(builtin, use_cache);
                 }
                 if (std.mem.eql(u8, builtin.name, "cast") and builtin.type_arg != null and builtin.args.len > 0) {
                     const target = self.valueConstructionTarget(builtin.type_arg.?);
@@ -2527,6 +2533,188 @@ const ConstEvaluator = struct {
             return null;
 
         return .{ .fixed_bytes = try abi_comptime_encoder.encodeComptimeValue(self.allocator, &self.env.heap, layout, value) };
+    }
+
+    fn evalAbiDecodeBuiltinCtValue(self: *ConstEvaluator, builtin: ast.BuiltinExpr, comptime use_cache: bool) anyerror!?CtValue {
+        const expected_value_args: usize = if (builtin.type_arg != null) 1 else 2;
+        if (builtin.args.len != expected_value_args) return null;
+        const typecheck = (try self.currentTypeCheckResult()) orelse (try self.currentModuleTypeCheckResult()) orelse return null;
+        // Source-level @abiDecode(T, bytes) always arrives with type_arg set.
+        // The expression path is retained for defensive direct-AST callers.
+        const target_type = if (builtin.type_arg) |type_arg|
+            try self.abiDecodeTypeFromTypeArg(type_arg)
+        else
+            typecheck.exprType(builtin.args[0]);
+        const bytes_arg = if (builtin.type_arg != null) builtin.args[0] else builtin.args[1];
+        const bytes_value = (try self.evalExprCtValueImpl(bytes_arg, use_cache, true)) orelse return null;
+        const bytes = switch (bytes_value) {
+            .bytes_ref => |heap_id| self.env.heap.getBytes(heap_id),
+            else => return null,
+        };
+
+        const layout_context = (try self.currentLayoutContext()) orelse return null;
+        var layout = layout_context.layoutForType(target_type) catch return error.AbiDecoderInternalShapeMismatch;
+        defer layout.deinit(self.allocator);
+
+        const decoded = if (std.mem.eql(u8, builtin.name, "abiDecodePermissive"))
+            try abi_comptime_decoder.decodeComptimeValuePermissive(
+                self.allocator,
+                &self.env.heap,
+                self.abiDecodeTypeResolver(),
+                layout,
+                target_type,
+                bytes,
+            )
+        else
+            try abi_comptime_decoder.decodeComptimeValue(
+                self.allocator,
+                &self.env.heap,
+                self.abiDecodeTypeResolver(),
+                layout,
+                target_type,
+                bytes,
+            );
+        return switch (decoded) {
+            .ok => |value| try self.abiDecodeOk(value),
+            .err => |err| try self.abiDecodeErr(err),
+        };
+    }
+
+    fn abiDecodeTypeFromTypeArg(self: *ConstEvaluator, type_arg: ast.TypeExprId) !model.Type {
+        const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
+        const raw = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, type_arg);
+        return try self.resolveAbiDecodeTypeAliases(raw);
+    }
+
+    fn resolveAbiDecodeTypeAliases(self: *ConstEvaluator, ty: model.Type) !model.Type {
+        return switch (ty) {
+            .named => |named| blk: {
+                const item_index = (try self.currentItemIndex()) orelse return error.AbiDecoderInternalShapeMismatch;
+                const item_id = item_index.lookup(named.name) orelse break :blk ty;
+                const item = self.file.item(item_id).*;
+                if (item != .TypeAlias) break :blk ty;
+                const target = try type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, item.TypeAlias.target_type);
+                break :blk try self.resolveAbiDecodeTypeAliases(target);
+            },
+            .refinement => |refinement| blk: {
+                var copy = refinement;
+                copy.base_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(refinement.base_type.*));
+                break :blk model.Type{ .refinement = copy };
+            },
+            .array => |array| .{ .array = .{
+                .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(array.element_type.*)),
+                .len = array.len,
+            } },
+            .slice => |slice| .{ .slice = .{
+                .element_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(slice.element_type.*)),
+            } },
+            .tuple => |elements| blk: {
+                const resolved = try self.allocator.alloc(model.Type, elements.len);
+                for (elements, 0..) |element, index| {
+                    resolved[index] = try self.resolveAbiDecodeTypeAliases(element);
+                }
+                break :blk model.Type{ .tuple = resolved };
+            },
+            .anonymous_struct => |struct_type| blk: {
+                const fields = try self.allocator.alloc(model.AnonymousStructField, struct_type.fields.len);
+                for (struct_type.fields, 0..) |field, index| {
+                    fields[index] = .{
+                        .name = field.name,
+                        .ty = try self.resolveAbiDecodeTypeAliases(field.ty),
+                    };
+                }
+                break :blk model.Type{ .anonymous_struct = .{ .fields = fields } };
+            },
+            .error_union => |error_union| blk: {
+                const errors = try self.allocator.alloc(model.Type, error_union.error_types.len);
+                for (error_union.error_types, 0..) |err, index| {
+                    errors[index] = try self.resolveAbiDecodeTypeAliases(err);
+                }
+                break :blk model.Type{ .error_union = .{
+                    .payload_type = try self.storeAbiDecodeType(try self.resolveAbiDecodeTypeAliases(error_union.payload_type.*)),
+                    .error_types = errors,
+                } };
+            },
+            else => ty,
+        };
+    }
+
+    fn storeAbiDecodeType(self: *ConstEvaluator, ty: model.Type) !*model.Type {
+        const ptr = try self.allocator.create(model.Type);
+        ptr.* = ty;
+        return ptr;
+    }
+
+    fn abiDecodeOk(self: *ConstEvaluator, value: CtValue) !CtValue {
+        const payload_id = try self.env.heap.allocTuple(try self.allocator.dupe(CtValue, &.{value}));
+        return .{ .error_union_val = .{
+            .is_error = false,
+            .payload = payload_id,
+        } };
+    }
+
+    fn abiDecodeErr(self: *ConstEvaluator, err: abi_comptime_decoder.DecodeError) !CtValue {
+        const err_value = CtValue{ .adt_val = .{
+            .type_id = abi_decode_error_type_id,
+            .variant_id = @intFromEnum(err),
+            .payload = null,
+        } };
+        const payload_id = try self.env.heap.allocTuple(try self.allocator.dupe(CtValue, &.{err_value}));
+        return .{ .error_union_val = .{
+            .is_error = true,
+            .payload = payload_id,
+        } };
+    }
+
+    fn abiDecodeTypeResolver(self: *ConstEvaluator) abi_comptime_decoder.TypeResolver {
+        return .{
+            .context = self,
+            .typeIdForType = abiDecodeTypeIdForType,
+            .structFields = abiDecodeStructFields,
+            .enumVariantCount = abiDecodeEnumVariantCount,
+        };
+    }
+
+    fn abiDecodeTypeIdForType(context: *anyopaque, ty: model.Type) ?u32 {
+        const self: *ConstEvaluator = @ptrCast(@alignCast(context));
+        return self.typeIdForModelType(ty);
+    }
+
+    fn abiDecodeStructFields(context: *anyopaque, name: []const u8) ?[]const model.AnonymousStructField {
+        const self: *ConstEvaluator = @ptrCast(@alignCast(context));
+        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        if (typecheck.instantiatedStructByName(name)) |instantiated| {
+            const fields = self.allocator.alloc(model.AnonymousStructField, instantiated.fields.len) catch return null;
+            for (instantiated.fields, 0..) |field, index| {
+                fields[index] = .{ .name = field.name, .ty = field.ty };
+            }
+            return fields;
+        }
+        const item_id = self.lookupNamedItem(name) orelse return null;
+        const struct_item = switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return null,
+        };
+        const item_index = (self.currentItemIndex() catch null) orelse return null;
+        const fields = self.allocator.alloc(model.AnonymousStructField, struct_item.fields.len) catch return null;
+        for (struct_item.fields, 0..) |field, index| {
+            fields[index] = .{
+                .name = field.name,
+                .ty = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, item_index, field.type_expr) catch return null,
+            };
+        }
+        return fields;
+    }
+
+    fn abiDecodeEnumVariantCount(context: *anyopaque, name: []const u8) ?usize {
+        const self: *ConstEvaluator = @ptrCast(@alignCast(context));
+        const typecheck = (self.currentModuleTypeCheckResult() catch null) orelse return null;
+        if (typecheck.instantiatedEnumByName(name)) |instantiated| return instantiated.variants.len;
+        const item_id = self.lookupNamedItem(name) orelse return null;
+        return switch (self.file.item(item_id).*) {
+            .Enum => |enum_item| enum_item.variants.len,
+            else => null,
+        };
     }
 
     fn evalAbiEncodeVoidCallArgument(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!bool {

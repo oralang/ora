@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OraToSIR.h"
+#include "patterns/LoweringHelpers.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -109,7 +110,7 @@ namespace mlir
                 // predecessor block, so operands are spilled to deterministic
                 // scratch words before the cond_br and reloaded in the
                 // trampoline block.
-            void normalizeBranches(ModuleOp module)
+            LogicalResult normalizeBranches(ModuleOp module)
             {
                 SmallVector<sir::CondBrOp, 16> condBranchesToFix;
                 module.walk([&](sir::CondBrOp br) {
@@ -129,7 +130,7 @@ namespace mlir
                 Type u256Type = sir::U256Type::get(ctx);
                 Type ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
                 Type intType = ::mlir::IntegerType::get(ctx, 256);
-                uint64_t nextScratchOffset = 0x1000;
+                uint64_t nextScratchOffset = lowering::kSIRTextLegalizerScratchStartBytes;
 
                 auto constU256 = [&](OpBuilder &builder, Location loc, uint64_t value) -> Value {
                     return builder.create<sir::ConstOp>(
@@ -295,6 +296,16 @@ namespace mlir
                     br.erase();
                 }
 
+                if (nextScratchOffset >= lowering::kConstructorDecodeScratchFenceBytes)
+                {
+                    module.emitError()
+                        << "SIR text legalizer scratch range reaches constructor decode scratch fence: next scratch offset "
+                        << nextScratchOffset << " >= fence "
+                        << lowering::kConstructorDecodeScratchFenceBytes;
+                    return failure();
+                }
+
+                return success();
             }
 
             void runOnOperation() override
@@ -302,7 +313,11 @@ namespace mlir
                     ModuleOp module = getOperation();
 
                     // Phase 0: normalize asymmetric cond_br operands.
-                    normalizeBranches(module);
+                    if (failed(normalizeBranches(module)))
+                    {
+                        signalPassFailure();
+                        return;
+                    }
 
                     bool failed_any = false;
 

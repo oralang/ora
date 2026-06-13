@@ -1,5 +1,6 @@
 #include "patterns/Arithmetic.h"
 #include "patterns/EVMConstants.h"
+#include "patterns/LoweringHelpers.h"
 #include "patterns/Naming.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
@@ -19,6 +20,8 @@
 
 using namespace mlir;
 using namespace ora;
+using mlir::ora::lowering::constU256;
+using mlir::ora::lowering::ensureU256;
 
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -103,21 +106,6 @@ static bool isAlreadyMasked160(Value val)
         return isMask160Const(andOp.getLhs()) || isMask160Const(andOp.getRhs());
     }
     return false;
-}
-
-static Value ensureU256(ConversionPatternRewriter &rewriter, Location loc, Value value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    if (llvm::isa<sir::U256Type>(value.getType()))
-        return value;
-    return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-}
-
-static Value constU256(ConversionPatternRewriter &rewriter, Location loc, uint64_t value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
 }
 
 static Value constShiftedSelector(ConversionPatternRewriter &rewriter, Location loc, uint32_t selector)

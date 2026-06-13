@@ -1291,6 +1291,18 @@ namespace mlir
 
         ::mlir::LogicalResult AbiDecodeOp::verify()
         {
+            auto verifyStringEnumAttr = [&](llvm::StringRef attrName,
+                                            llvm::ArrayRef<llvm::StringRef> allowed) -> ::mlir::LogicalResult
+            {
+                auto attr = (*this)->getAttrOfType<::mlir::StringAttr>(attrName);
+                if (!attr)
+                    return emitOpError() << "requires '" << attrName << "' string attribute";
+                if (!llvm::is_contained(allowed, attr.getValue()))
+                    return emitOpError() << "has unsupported '" << attrName << "' value '"
+                                         << attr.getValue() << "'";
+                return success();
+            };
+
             auto returnTypesAttr = (*this)->getAttrOfType<::mlir::ArrayAttr>("return_types");
             if (!returnTypesAttr)
                 return emitOpError("requires 'return_types' array attribute");
@@ -1300,6 +1312,21 @@ namespace mlir
             {
                 if (!llvm::isa<::mlir::StringAttr>(attr))
                     return emitOpError("'return_types' entries must be string attributes");
+            }
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
+            if (failed(verifyStringEnumAttr("source", {"calldata", "returndata", "memory"})))
+                return failure();
+            if (failed(verifyStringEnumAttr("failure_mode", {"result", "revert", "error_union"})))
+                return failure();
+            if (auto modeAttr = (*this)->getAttrOfType<::mlir::StringAttr>("decode_mode"))
+            {
+                if (!llvm::is_contained({"strict", "permissive"}, modeAttr.getValue()))
+                    return emitOpError() << "has unsupported 'decode_mode' value '"
+                                         << modeAttr.getValue() << "'";
             }
 
             return success();

@@ -1,0 +1,7 @@
+contract AbiDecodeConstructorMultiSliceRevert {
+    storage var touched: u256 = 0;
+
+    pub fn init(name: string, owners: slice[address]) {
+        touched = 9;
+    }
+}

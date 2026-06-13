@@ -1,0 +1,7 @@
+contract AbiDecodeConstructorFixedBytesSliceRevert {
+    storage var touched: u256 = 0;
+
+    pub fn init(tags: slice[bytes4]) {
+        touched = 9;
+    }
+}

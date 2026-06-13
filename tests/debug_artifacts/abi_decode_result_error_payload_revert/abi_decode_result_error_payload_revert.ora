@@ -1,0 +1,13 @@
+error Failure(data: bytes);
+
+contract AbiDecodeResultErrorPayloadRevert {
+    storage var touched: u256 = 0;
+
+    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        touched = 11;
+        return match(value) {
+            Ok(inner) -> inner,
+            Err(err) -> err.data.len,
+        };
+    }
+}

@@ -608,6 +608,43 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
         return rewriter.notifyMatchFailure(op, "unknown field in struct_field_extract");
     }
 
+    auto forwardConstructedField = [&](Value fieldValue) -> LogicalResult {
+        Type converted = getTypeConverter()->convertType(expected);
+        if (!converted)
+            converted = expected;
+        Value result = fieldValue;
+        if (result.getType() != converted)
+        {
+            if (llvm::isa<sir::U256Type>(result.getType()) &&
+                llvm::isa<mlir::IntegerType>(converted) &&
+                llvm::cast<mlir::IntegerType>(converted).getWidth() == 256)
+            {
+                result = rewriter.create<sir::BitcastOp>(loc, converted, result);
+            }
+            else
+            {
+                result = getTypeConverter()->materializeTargetConversion(rewriter, loc, converted, result);
+                if (!result)
+                    return failure();
+            }
+        }
+        rewriter.replaceOp(op, result);
+        return success();
+    };
+
+    if (auto init = op.getStructValue().getDefiningOp<ora::StructInitOp>())
+    {
+        if (fieldIndex < init.getFieldValues().size() &&
+            succeeded(forwardConstructedField(init.getFieldValues()[fieldIndex])))
+            return success();
+    }
+    if (auto instantiate = op.getStructValue().getDefiningOp<ora::StructInstantiateOp>())
+    {
+        if (fieldIndex < instantiate.getFieldValues().size() &&
+            succeeded(forwardConstructedField(instantiate.getFieldValues()[fieldIndex])))
+            return success();
+    }
+
     if (auto memrefType = dyn_cast<mlir::MemRefType>(expected);
         memrefType && !memrefType.hasStaticShape())
     {

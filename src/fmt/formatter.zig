@@ -255,7 +255,7 @@ pub const Formatter = struct {
     }
 
     fn emitPostTokenSpacing(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
-        if (isKeywordThatNeedsSpaceAfter(token.type, next)) {
+        if (isKeywordThatNeedsSpaceAfter(token, next)) {
             self.pending_space = true;
             return;
         }
@@ -310,6 +310,10 @@ fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) boo
             .LeftParen, .LeftBracket, .Dot => false,
             else => true,
         },
+        .LeftBracket => switch (prev) {
+            .Equal => true,
+            else => false,
+        },
         .LeftParen => switch (prev) {
             .If, .Else, .While, .For, .Switch, .Catch => true,
             else => false,
@@ -319,9 +323,10 @@ fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) boo
     };
 }
 
-fn isKeywordThatNeedsSpaceAfter(token: lib.TokenType, next: ?lib.Token) bool {
+fn isKeywordThatNeedsSpaceAfter(token: lib.Token, next: ?lib.Token) bool {
     _ = next;
-    return switch (token) {
+    if (token.type == .Identifier and std.mem.eql(u8, token.lexeme, "type")) return true;
+    return switch (token.type) {
         .Contract,
         .Pub,
         .Fn,

@@ -1708,6 +1708,8 @@ public:
             phase4Patterns.add<ConvertArithIndexCastUIOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithIndexCastOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertArithTruncIOp>(typeConverter, ctx);
+            phase4Patterns.add<ConvertAddrToI160Op>(typeConverter, ctx);
+            phase4Patterns.add<ConvertI160ToAddrOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTensorInsertOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTensorExtractOp>(typeConverter, ctx);
             phase4Patterns.add<ConvertTensorDimOp>(typeConverter, ctx);
@@ -1780,6 +1782,8 @@ public:
             phase4Target.addIllegalOp<ora::ContinueOp>();
             phase4Target.addIllegalOp<ora::TryStmtOp>();
             phase4Target.addIllegalOp<ora::SwitchOp>();
+            phase4Target.addIllegalOp<ora::AddrToI160Op>();
+            phase4Target.addIllegalOp<ora::I160ToAddrOp>();
             phase4Target.addIllegalOp<ora::StructInitOp>();
             phase4Target.addIllegalOp<ora::StructInstantiateOp>();
             phase4Target.addIllegalOp<ora::AdtConstructOp>();
@@ -1898,7 +1902,7 @@ public:
                             Value tag = asU256(castOp.getOperand(0));
                             Value payload = asU256(castOp.getOperand(1));
                             Value one = b.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
-                            Value shifted = b.create<sir::ShlOp>(loc, u256Ty, payload, one);
+                            Value shifted = b.create<sir::ShlOp>(loc, u256Ty, one, payload);
                             Value packed = b.create<sir::OrOp>(loc, u256Ty, shifted, tag);
                             castOp.getResult(0).replaceAllUsesWith(packed);
                             b.eraseOp(castOp);
@@ -2167,6 +2171,8 @@ public:
             finalResidualPatterns.add<ConvertArithConstantOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertArithAndIOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertArithCmpIOp>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertAddrToI160Op>(typeConverter, ctx);
+            finalResidualPatterns.add<ConvertI160ToAddrOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertTupleCreateOp>(typeConverter, ctx);
             finalResidualPatterns.add<ConvertTupleExtractOp>(typeConverter, ctx);
 
@@ -2177,6 +2183,8 @@ public:
             finalResidualTarget.addLegalDialect<mlir::cf::ControlFlowDialect>();
             finalResidualTarget.addIllegalDialect<mlir::arith::ArithDialect>();
             finalResidualTarget.addIllegalOp<mlir::UnrealizedConversionCastOp>();
+            finalResidualTarget.addIllegalOp<ora::AddrToI160Op>();
+            finalResidualTarget.addIllegalOp<ora::I160ToAddrOp>();
             finalResidualTarget.addIllegalOp<ora::TupleCreateOp>();
             finalResidualTarget.addIllegalOp<ora::TupleExtractOp>();
             finalResidualTarget.addLegalDialect<ora::OraDialect>();

@@ -345,6 +345,65 @@ test "compiler rejects bare self in ordinary functions" {
     try testing.expect(diagnosticMessagesContain(ast_diags, "bare 'self' parameter is only allowed in trait and impl methods"));
 }
 
+test "compiler rejects single-element tuple type syntax instead of unwrapping it" {
+    const source_text =
+        \\type Wrapped = (u256,);
+        \\pub fn f(value: (u256,)) -> (u256,) {
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "single-element tuple types are not supported; use the element type directly"));
+}
+
+test "compiler accepts parenthesized type syntax without treating it as a one-tuple" {
+    const source_text =
+        \\type Items = (slice[u256]);
+        \\type Bound = (MinValue<u256, 1>);
+        \\type Pair = (u256, bool,);
+        \\pub fn f(value: (Items)) -> u256 {
+        \\    return 0;
+        \\}
+        \\pub fn g(value: Bound, pair: Pair) -> u256 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_diags = try compilation.db.astDiagnostics(module.file_id);
+    try testing.expect(ast_diags.isEmpty());
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects negative refinement bounds on unsigned integer bases" {
+    const source_text =
+        \\type BadMin = MinValue<u8, -5>;
+        \\type BadMax = MaxValue<u8, -100>;
+        \\type BadRange = InRange<u8, -1, 10>;
+        \\pub fn f(value: BadMin, max: BadMax, other: BadRange) -> u8 {
+        \\    return 0;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "MinValue bound -5 is negative; u8 base requires non-negative bound"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "MaxValue bound -100 is negative; u8 base requires non-negative bound"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "InRange bound -1 is negative; u8 base requires non-negative bound"));
+}
+
 test "compiler reports sema diagnostics for unresolved names and invalid operations" {
     const source_text =
         \\pub fn broken(flag: bool, value: u256) -> u256 {

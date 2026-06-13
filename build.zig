@@ -603,13 +603,28 @@ pub fn build(b: *std.Build) void {
     compiler_test_mod.addImport("ora_lib", lib_mod);
     compiler_test_mod.addImport("mlir_c_api", mlir_c_mod);
     compiler_test_mod.addImport("ora_z3_verification", z3_verification_mod);
-    const compiler_tests = b.addTest(.{ .root_module = compiler_test_mod });
+    const compiler_tests = b.addTest(.{
+        .root_module = compiler_test_mod,
+        .filters = compilerTestFilters(
+            b,
+            b.option([]const u8, "compiler-test-filter", "Filter compiler tests by test name substring"),
+        ),
+    });
     linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target);
     linkZ3Libraries(b, compiler_tests, z3_step, target);
     test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
     const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
-    test_compiler_step.dependOn(&b.addRunArtifact(compiler_tests).step);
+    const compiler_tests_run = b.addRunArtifact(compiler_tests);
+    compiler_tests_run.step.dependOn(b.getInstallStep());
+    const evm_debug_probe_install_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build",
+        "install",
+    });
+    evm_debug_probe_install_cmd.setCwd(b.path("lib/evm"));
+    compiler_tests_run.step.dependOn(&evm_debug_probe_install_cmd.step);
+    test_compiler_step.dependOn(&compiler_tests_run.step);
 
     // ========================================================================
     // Per-module test targets (no MLIR/Z3 required)
@@ -675,6 +690,15 @@ pub fn build(b: *std.Build) void {
     const check_abi_layout_ownership_step = b.step("check-abi-layout-ownership", "Run ABI layout source-of-truth static checks");
     check_abi_layout_ownership_step.dependOn(&abi_layout_ownership_cmd.step);
     test_step.dependOn(&abi_layout_ownership_cmd.step);
+
+    // zig build check-sir-shift-operand-order
+    const sir_shift_operand_order_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-sir-shift-operand-order.sh",
+    });
+    const check_sir_shift_operand_order_step = b.step("check-sir-shift-operand-order", "Run SIR shift operand-order static checks");
+    check_sir_shift_operand_order_step.dependOn(&sir_shift_operand_order_cmd.step);
+    test_step.dependOn(&sir_shift_operand_order_cmd.step);
 
     // zig build check-smt-modifies-corpus
     const smt_modifies_corpus_cmd = b.addSystemCommand(&[_][]const u8{
@@ -1715,4 +1739,29 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+fn compilerTestFilters(b: *std.Build, option_filter: ?[]const u8) []const []const u8 {
+    var filters = std.ArrayList([]const u8){};
+    if (option_filter) |filter| {
+        filters.append(b.allocator, filter) catch @panic("OOM");
+    }
+
+    const args = b.args orelse {
+        return filters.toOwnedSlice(b.allocator) catch @panic("OOM");
+    };
+
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--test-filter")) {
+            index += 1;
+            if (index >= args.len) @panic("--test-filter requires a value");
+            filters.append(b.allocator, args[index]) catch @panic("OOM");
+        } else if (std.mem.startsWith(u8, arg, "--test-filter=")) {
+            filters.append(b.allocator, arg["--test-filter=".len..]) catch @panic("OOM");
+        }
+    }
+
+    return filters.toOwnedSlice(b.allocator) catch @panic("OOM");
 }

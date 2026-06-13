@@ -534,17 +534,11 @@ namespace
             std::string t = names.allocateName("sel_t");
             std::string inv = names.allocateName("sel_inv");
             std::string f = names.allocateName("sel_f");
-            // Reuse existing zero const or emit one.
-            std::string zero;
-            std::string zeroKey = formatConstKey(APInt(256, 0));
-            auto zIt = names.constNames.find(zeroKey);
-            if (zIt != names.constNames.end())
-                zero = names.nameFor(zIt->second);
-            else
-            {
-                zero = names.allocateName("sel_zero");
-                os << zero << " = const 0x0\n" << ind;
-            }
+            // Select expansion may be emitted inside CFG blocks. Emit a local
+            // zero so the generated text never references a const from a
+            // sibling block that does not dominate this select.
+            std::string zero = names.allocateName("sel_zero");
+            os << zero << " = const 0x0\n" << ind;
             // mask = 0 - cond  (0→0, 1→0xFF..FF)
             os << mask << " = sub " << zero << " " << condN << "\n" << ind;
             os << t << " = and " << mask << " " << trueN << "\n" << ind;
@@ -1136,9 +1130,10 @@ namespace mlir
 
                 if (isa<sir::SelectOp>(op))
                 {
-                    std::string zeroKey = formatConstKey(APInt(256, 0));
-                    bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                    uint32_t expandCount = needsZero ? 6 : 5;
+                    // emitOperationText always emits a local sel_zero for select expansion
+                    // so the source-map expansion count must remain six even if another
+                    // zero const already exists in the block.
+                    uint32_t expandCount = 6;
                     for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                     {
                         callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
@@ -1230,7 +1225,7 @@ namespace mlir
             // CRITICAL: The op indexing must exactly match the serialized backend
             // execution order used by Sensei source-map emission. Skipped ops
             // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too,
-            // and expanded ops (SelectOp -> 5-6 SIR ops) must produce matching
+            // and expanded ops (SelectOp -> 6 SIR ops) must produce matching
             // synthetic indices. The separate line map ties these backend indices
             // back to textual .sir lines.
 
@@ -1516,9 +1511,9 @@ namespace mlir
 
                         if (isa<sir::SelectOp>(op))
                         {
-                            std::string zeroKey = formatConstKey(APInt(256, 0));
-                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                            uint32_t expandCount = needsZero ? 6 : 5;
+                            // emitOperationText always emits a local sel_zero for select expansion
+                            // so textual line accounting must match that six-line shape.
+                            uint32_t expandCount = 6;
                             for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                             {
                                 textLineByOp[{&op, expandIdx}] = currentLine;

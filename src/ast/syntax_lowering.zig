@@ -49,6 +49,19 @@ pub fn mixin(Builder: type) type {
                     .node => |node| {
                         const item_id = try Lowering.lowerTopLevelItemNode(self, node, null);
                         try self.root_items.append(self.allocator, item_id);
+                        if (self.items.items[item_id.index()] == .Function) {
+                            const function = self.items.items[item_id.index()].Function;
+                            if (function.abi_decode_permissive) {
+                                try self.diagnostics.appendErrorWithDebug(
+                                    "@decodePermissive is only supported on public contract functions",
+                                    "decodePermissive marker was attached to a root-scope function",
+                                    .{
+                                        .file_id = self.file.file_id,
+                                        .range = function.range,
+                                    },
+                                );
+                            }
+                        }
                     },
                 }
             }
@@ -162,6 +175,10 @@ pub fn mixin(Builder: type) type {
             const params_node = firstDirectChildOfKind(node, .ParameterList) orelse return Lowering.malformedItem(self, node, "missing function parameter list");
             const parameters = try Lowering.lowerParameterListNode(self, params_node, allow_bare_self);
             const return_type = firstDirectTypeChild(node) orelse null;
+            const abi_decode_permissive = try Lowering.functionAbiDecodePermissive(self, node);
+            if (abi_decode_permissive and visibility != .public) {
+                _ = try Lowering.malformedItem(self, node, "@decodePermissive is only supported on public functions");
+            }
 
             var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
@@ -197,6 +214,7 @@ pub fn mixin(Builder: type) type {
                 .name = name,
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
                 .is_generic = is_generic,
+                .abi_decode_permissive = abi_decode_permissive,
                 .visibility = visibility,
                 .parameters = parameters,
                 .return_type = if (return_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
@@ -205,6 +223,23 @@ pub fn mixin(Builder: type) type {
                 .body = body_id,
                 .parent_contract = parent_contract,
             } });
+        }
+
+        fn functionAbiDecodePermissive(self: *Builder, node: SyntaxNode) !bool {
+            _ = self;
+            var permissive = false;
+            var it = node.children();
+            while (it.next()) |child| {
+                const child_node = switch (child) {
+                    .token => continue,
+                    .node => |n| n,
+                };
+                if (child_node.kind() != .BuiltinExpr) continue;
+                const name_token = nthDirectIdentifierLikeToken(child_node, 0) orelse continue;
+                if (!std.mem.eql(u8, tokenText(name_token), "decodePermissive")) continue;
+                permissive = true;
+            }
+            return permissive;
         }
 
         fn lowerStructItemNode(self: *Builder, node: SyntaxNode) !ItemId {
@@ -1591,13 +1626,55 @@ pub fn mixin(Builder: type) type {
                     .name = name.name,
                 } }) },
                 .TypeValue => |type_value| .{ .Type = type_value.type_expr },
-                .IntegerLiteral => |literal| .{ .Integer = .{
-                    .range = literal.range,
-                    .text = literal.text,
-                } },
+                .IntegerLiteral => |literal| try Lowering.integerTypeArg(self, literal.range, .positive, literal.text),
                 .Group => |group| try Lowering.callStyleTypeArg(self, group.expr),
+                .Unary => |unary| if (unary.op == .neg)
+                    try Lowering.negativeIntegerCallStyleTypeArg(self, unary)
+                else
+                    null,
                 else => null,
             };
+        }
+
+        fn negativeIntegerCallStyleTypeArg(self: *Builder, unary: nodes.UnaryExpr) !?TypeArg {
+            const signed = Lowering.signedIntegerTextFromExpr(self, unary.operand, .negative) orelse return null;
+            return try Lowering.integerTypeArg(self, unary.range, signed.sign, signed.text);
+        }
+
+        const IntegerArgSign = enum { positive, negative };
+
+        const SignedIntegerText = struct {
+            sign: IntegerArgSign,
+            text: []const u8,
+        };
+
+        fn signedIntegerTextFromExpr(self: *Builder, expr_id: ExprId, sign: IntegerArgSign) ?SignedIntegerText {
+            return switch (Support.exprRef(self, expr_id).*) {
+                .IntegerLiteral => |literal| .{
+                    .sign = sign,
+                    .text = std.mem.trim(u8, literal.text, " \t\n\r"),
+                },
+                .Group => |group| Lowering.signedIntegerTextFromExpr(self, group.expr, sign),
+                .Unary => |unary| if (unary.op == .neg)
+                    Lowering.signedIntegerTextFromExpr(self, unary.operand, switch (sign) {
+                        .positive => .negative,
+                        .negative => .positive,
+                    })
+                else
+                    null,
+                else => null,
+            };
+        }
+
+        fn integerTypeArg(self: *Builder, range: source.TextRange, sign: IntegerArgSign, text: []const u8) !TypeArg {
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            return .{ .Integer = .{
+                .range = range,
+                .text = switch (sign) {
+                    .positive => try std.fmt.allocPrint(self.allocator, "{s}", .{trimmed}),
+                    .negative => try std.fmt.allocPrint(self.allocator, "-{s}", .{trimmed}),
+                },
+            } };
         }
 
         fn typeValueBaseName(self: *Builder, type_expr_id: TypeExprId) ?[]const u8 {
@@ -1795,20 +1872,36 @@ pub fn mixin(Builder: type) type {
         fn lowerGenericTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing generic type name");
             var args: std.ArrayList(TypeArg) = .{};
+            var pending_minus: ?SyntaxToken = null;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => |token| switch (token.kind()) {
-                        .IntegerLiteral, .BinaryLiteral, .HexLiteral => try args.append(self.allocator, .{ .Integer = .{
-                            .range = token.range(),
-                            .text = tokenText(token),
-                        } }),
+                        .Minus => pending_minus = token,
+                        .IntegerLiteral, .BinaryLiteral, .HexLiteral => {
+                            if (pending_minus) |minus| {
+                                try args.append(self.allocator, try Lowering.integerTypeArg(self, .{ .start = minus.range().start, .end = token.range().end }, .negative, tokenText(token)));
+                                pending_minus = null;
+                            } else {
+                                try args.append(self.allocator, try Lowering.integerTypeArg(self, token.range(), .positive, tokenText(token)));
+                            }
+                        },
                         else => {},
                     },
                     .node => |arg_node| if (isTypeKind(arg_node.kind())) {
+                        // The parser only emits '-' in generic type arguments
+                        // when it is immediately followed by an integer token.
+                        // Treat any other survival as malformed syntax.
+                        if (pending_minus != null) {
+                            return Lowering.malformedType(self, node, "negative integer type argument must be followed by an integer literal");
+                        }
                         try args.append(self.allocator, .{ .Type = try Lowering.lowerTypeNode(self, arg_node) });
                     },
                 }
+            }
+            // Same parser invariant as above, but for a trailing '-' token.
+            if (pending_minus != null) {
+                return Lowering.malformedType(self, node, "negative integer type argument must be followed by an integer literal");
             }
             return Support.pushTypeExpr(self, .{ .Generic = .{
                 .range = node.range(),
@@ -1819,16 +1912,22 @@ pub fn mixin(Builder: type) type {
 
         fn lowerTupleTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             var elements: std.ArrayList(TypeExprId) = .{};
+            var comma_count: usize = 0;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
-                    .token => {},
+                    .token => |token| if (token.kind() == .Comma) {
+                        comma_count += 1;
+                    },
                     .node => |element_node| if (isTypeKind(element_node.kind())) {
                         try elements.append(self.allocator, try Lowering.lowerTypeNode(self, element_node));
                     },
                 }
             }
-            if (elements.items.len == 1) return elements.items[0];
+            if (elements.items.len == 1) {
+                if (comma_count == 0) return elements.items[0];
+                return Lowering.malformedType(self, node, "single-element tuple types are not supported; use the element type directly");
+            }
             return Support.pushTypeExpr(self, .{ .Tuple = .{
                 .range = node.range(),
                 .elements = try elements.toOwnedSlice(self.allocator),

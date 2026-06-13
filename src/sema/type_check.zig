@@ -44,6 +44,10 @@ const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
 const refinements = @import("refinements.zig");
 
+fn isAbiDecodeBuiltinName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "abiDecode") or std.mem.eql(u8, name, "abiDecodePermissive");
+}
+
 pub const ImportQuery = struct {
     context: *anyopaque,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
@@ -552,6 +556,7 @@ const TypeChecker = struct {
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
+    comptime_depth: usize = 0,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?source.ModuleId {
@@ -1408,7 +1413,7 @@ const TypeChecker = struct {
         if (!self.publicAbiErrorTypeHasPayload(error_union.error_types[0])) return true;
         if (!self.publicAbiSupportsResultCarrierType(error_union.error_types[0])) return false;
         const error_words = self.publicAbiStaticWordCount(error_union.error_types[0]);
-        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return false;
+        if (payload_words == 1 and error_words != null and error_words.? > 1) return false;
         return true;
     }
 
@@ -1418,20 +1423,52 @@ const TypeChecker = struct {
             .bytes, .string => true,
             .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(slice.element_type.*),
             .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(array.element_type.*),
+            .anonymous_struct => |struct_type| {
+                for (struct_type.fields) |field| {
+                    if (!self.publicAbiSupportsResultCarrierType(field.ty)) return false;
+                }
+                return true;
+            },
+            .tuple => |elements| {
+                for (elements) |element| {
+                    if (!self.publicAbiSupportsResultCarrierType(element)) return false;
+                }
+                return true;
+            },
             .refinement => |refinement| self.publicAbiSupportsResultCarrierType(refinement.base_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .ErrorDecl => |error_decl| error_blk: {
+                        for (error_decl.parameters) |parameter| {
+                            const payload = self.pattern_types[parameter.pattern.index()].type;
+                            if (!self.publicAbiSupportsResultCarrierType(payload)) break :error_blk false;
+                        }
+                        break :error_blk true;
+                    },
+                    else => false,
+                };
+            },
             else => false,
         };
     }
 
     fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
         return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
+            .bool, .address, .fixed_bytes => true,
+            .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
             .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
             .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "u256") or
+                    std.mem.eql(u8, named.name, "bool") or
+                    std.mem.eql(u8, named.name, "address") or
+                    runtimeFixedBytesSpellingLen(named.name) != null)
+                {
+                    break :blk true;
+                }
                 const item_id = self.item_index.lookup(named.name) orelse break :blk false;
                 break :blk switch (self.file.item(item_id).*) {
-                    .Enum => !self.enumHasPayload(named.name),
-                    .Bitfield => true,
+                    .TypeAlias => |type_alias| self.publicAbiSupportsResultDynamicArrayElement(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk false),
                     else => false,
                 };
             },
@@ -2217,6 +2254,9 @@ const TypeChecker = struct {
                 for (switch_expr.arms) |arm| {
                     try self.visitSwitchPattern(arm.pattern, condition_type, arm.range);
                     try self.visitExpr(arm.value);
+                    if (result_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(arm.value, result_type);
+                    }
                     const arm_type = self.expr_types[arm.value.index()];
                     if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !typesAssignable(result_type, arm_type) and !typesAssignable(arm_type, result_type)) {
                         saw_mismatch = true;
@@ -2231,6 +2271,9 @@ const TypeChecker = struct {
                 }
                 if (switch_expr.else_expr) |else_expr| {
                     try self.visitExpr(else_expr);
+                    if (result_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(else_expr, result_type);
+                    }
                     const else_type = self.expr_types[else_expr.index()];
                     if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !typesAssignable(result_type, else_type) and !typesAssignable(else_type, result_type)) {
                         saw_mismatch = true;
@@ -2249,6 +2292,8 @@ const TypeChecker = struct {
                 try self.warnWildcardCoversNamedSumVariants(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
             },
             .Comptime => |comptime_expr| {
+                self.comptime_depth += 1;
+                defer self.comptime_depth -= 1;
                 try self.visitBody(comptime_expr.body);
                 const body = self.file.body(comptime_expr.body).*;
                 if (body.statements.len == 0) {
@@ -3375,6 +3420,9 @@ const TypeChecker = struct {
         if (std.mem.eql(u8, builtin.name, "abiEncode")) {
             try self.checkAbiEncodeBuiltinArguments(builtin);
         }
+        if (isAbiDecodeBuiltinName(builtin.name)) {
+            try self.checkAbiDecodeBuiltinArguments(builtin);
+        }
         if (std.mem.eql(u8, builtin.name, "chainId")) {
             try self.checkChainIdBuiltinArguments(builtin);
         }
@@ -3433,6 +3481,53 @@ const TypeChecker = struct {
         }
     }
 
+    fn checkAbiDecodeBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        const logical_arg_count = builtin.args.len + @as(usize, if (builtin.type_arg != null) 1 else 0);
+        const expected_value_args: usize = if (builtin.type_arg != null) 1 else 2;
+        if (builtin.args.len != expected_value_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects 2 arguments, found {d}", .{ builtin.name, logical_arg_count });
+            return;
+        }
+
+        // The parser routes source-level @abiDecode(T, bytes) through type_arg.
+        // The expression-type fallback is defensive for manually constructed ASTs.
+        const target_type = if (builtin.type_arg) |type_arg|
+            try self.resolveTypeExprInCurrentContext(type_arg)
+        else blk: {
+            if (!self.exprIsTypeValue(builtin.args[0])) {
+                const arg_type = self.expr_types[builtin.args[0].index()];
+                try self.emitRangeError(builtin.range, "@{s} expects a type as its first argument, found '{s}'", .{
+                    builtin.name, diagnosticTypeDisplayName(self, arg_type),
+                });
+                return;
+            }
+            break :blk self.expr_types[builtin.args[0].index()];
+        };
+
+        if (self.abiDecodeIsUnsupported(target_type)) {
+            try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
+                builtin.name, diagnosticTypeDisplayName(self, target_type),
+            });
+        } else if (std.mem.eql(u8, builtin.name, "abiDecodePermissive") and self.comptime_depth == 0 and !self.runtimeAbiDecodePermissiveSupportsType(target_type)) {
+            try self.emitRangeError(builtin.range, "runtime @abiDecodePermissive does not yet support target type '{s}'", .{
+                diagnosticTypeDisplayName(self, target_type),
+            });
+        } else if (self.comptime_depth == 0 and !self.runtimeAbiDecodeSupportsType(target_type)) {
+            try self.emitRangeError(builtin.range, "runtime @abiDecode does not yet support target type '{s}'", .{
+                diagnosticTypeDisplayName(self, target_type),
+            });
+        }
+
+        const bytes_arg = if (builtin.type_arg != null) builtin.args[0] else builtin.args[1];
+        const bytes_type = self.expr_types[bytes_arg.index()];
+        switch (bytes_type.kind()) {
+            .bytes, .fixed_bytes => {},
+            else => try self.emitRangeError(builtin.range, "@{s} expects bytes as its second argument, found '{s}'", .{
+                builtin.name, diagnosticTypeDisplayName(self, bytes_type),
+            }),
+        }
+    }
+
     fn abiEncodeIsUnsupported(self: *TypeChecker, ty: Type) bool {
         return switch (ty) {
             .bool, .address, .fixed_bytes, .integer, .bitfield, .void => false,
@@ -3460,6 +3555,280 @@ const TypeChecker = struct {
             .named => |named| self.abiEncodeNamedIsUnsupported(named.name),
             .refinement => |refinement| self.abiEncodeIsUnsupported(refinement.base_type.*),
             else => true,
+        };
+    }
+
+    fn abiDecodeIsUnsupported(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .refinement => |refinement| refinements.isCompileTimeOnly(refinement) or self.abiDecodeIsUnsupported(refinement.base_type.*),
+            .slice => |slice| self.abiDecodeIsUnsupported(slice.element_type.*),
+            .array => |array| self.abiDecodeIsUnsupported(array.element_type.*),
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (self.abiDecodeIsUnsupported(element)) break :blk true;
+                }
+                break :blk false;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (self.abiDecodeIsUnsupported(field.ty)) break :blk true;
+                }
+                break :blk false;
+            },
+            .struct_ => |named| self.abiDecodeStructIsUnsupported(named.name),
+            .named => |named| self.abiDecodeNamedIsUnsupported(named.name),
+            else => self.abiEncodeIsUnsupported(ty),
+        };
+    }
+
+    fn runtimeAbiDecodeSupportsType(self: *TypeChecker, ty: Type) bool {
+        return self.runtimeAbiDecodeSupportsTypeInContext(ty, true);
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsType(self: *TypeChecker, ty: Type) bool {
+        return self.runtimeAbiDecodePermissiveSupportsTypeInContext(ty, true);
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
+        return switch (ty) {
+            .bool, .address, .fixed_bytes, .enum_, .bitfield, .void => true,
+            .integer => |integer| (integer.bits orelse 256) > 0,
+            .string, .bytes => allow_top_level_dynamic,
+            .slice => |slice| allow_top_level_dynamic and self.isRuntimeAbiDecodeU256(slice.element_type.*),
+            .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
+                refinements.hasNativeMlirTypeName(refinement.name) and
+                self.runtimeAbiDecodePermissiveSupportsTypeInContext(refinement.base_type.*, allow_top_level_dynamic),
+            .tuple => |elements| blk: {
+                if (elements.len <= 1) break :blk false;
+                if (allow_top_level_dynamic and elements.len == 2 and
+                    self.isRuntimeAbiDecodeU256(elements[0]) and
+                    (self.isRuntimeAbiDecodeDynamicBytesLike(elements[1]) or self.isRuntimeAbiDecodeU256Slice(elements[1])))
+                {
+                    break :blk true;
+                }
+                for (elements) |element| {
+                    if (element == .void or !self.runtimeAbiDecodePermissiveSupportsTypeInContext(element, false)) break :blk false;
+                }
+                break :blk true;
+            },
+            .named => |named| self.runtimeAbiDecodePermissiveSupportsNamed(named.name, allow_top_level_dynamic),
+            else => false,
+        };
+    }
+
+    fn runtimeAbiDecodePermissiveSupportsNamed(self: *TypeChecker, name: []const u8, allow_top_level_dynamic: bool) bool {
+        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
+        if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
+        if (parseIntegerSpelling(name) != null) return true;
+        if (parseFixedBytesSpelling(name) != null) return true;
+        if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
+        if (self.instantiatedBitfieldByName(name) != null) return true;
+
+        const item_id = self.item_index.lookup(name) orelse return false;
+        return switch (self.file.item(item_id).*) {
+            .Enum => !self.enumHasPayload(name),
+            .Bitfield => true,
+            .TypeAlias => |type_alias| self.runtimeAbiDecodePermissiveSupportsTypeInContext(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false, allow_top_level_dynamic),
+            else => false,
+        };
+    }
+
+    fn runtimeAbiDecodeSupportsTypeInContext(self: *TypeChecker, ty: Type, allow_top_level_dynamic: bool) bool {
+        // This is narrower than ABI representability. It tracks the runtime
+        // memory/result lowering surface so source code fails in sema instead
+        // of reaching OraToSIR with an accepted-but-unlowerable decode op.
+        return switch (ty) {
+            .bool, .address, .fixed_bytes, .enum_, .bitfield, .void => true,
+            .integer => |integer| (integer.bits orelse 256) > 0,
+            .string, .bytes => allow_top_level_dynamic,
+            .slice => |slice| allow_top_level_dynamic and
+                (self.isRuntimeAbiDecodeU256(slice.element_type.*) or
+                    self.isRuntimeAbiDecodeAddress(slice.element_type.*) or
+                    self.isRuntimeAbiDecodeBool(slice.element_type.*) or
+                    self.isRuntimeAbiDecodeFixedBytes(slice.element_type.*)),
+            .refinement => |refinement| refinements.supportsRuntimeGuard(refinement) and
+                refinements.hasNativeMlirTypeName(refinement.name) and
+                self.runtimeAbiDecodeSupportsTypeInContext(refinement.base_type.*, allow_top_level_dynamic),
+            .tuple => |elements| blk: {
+                // Source-level one-element tuple types are rejected during AST
+                // lowering. Keep this defensive guard for synthetic Type values
+                // and for empty tuples, which runtime memory/result decode does
+                // not lower yet.
+                if (elements.len <= 1) break :blk false;
+                if (allow_top_level_dynamic and self.runtimeAbiDecodeSupportsTopLevelMixedDynamicTuple(elements)) break :blk true;
+                for (elements) |element| {
+                    if (element == .void or !self.runtimeAbiDecodeSupportsTypeInContext(element, false)) break :blk false;
+                }
+                break :blk true;
+            },
+            .named => |named| self.runtimeAbiDecodeSupportsNamed(named.name, allow_top_level_dynamic),
+            else => false,
+        };
+    }
+
+    fn runtimeAbiDecodeSupportsNamed(self: *TypeChecker, name: []const u8, allow_top_level_dynamic: bool) bool {
+        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return true;
+        if ((std.mem.eql(u8, name, "string") or std.mem.eql(u8, name, "bytes")) and allow_top_level_dynamic) return true;
+        if (parseIntegerSpelling(name) != null) return true;
+        if (parseFixedBytesSpelling(name) != null) return true;
+        if (self.instantiatedEnumByName(name) != null) return !self.enumHasPayload(name);
+        if (self.instantiatedBitfieldByName(name) != null) return true;
+
+        const item_id = self.item_index.lookup(name) orelse return false;
+        return switch (self.file.item(item_id).*) {
+            .Enum => !self.enumHasPayload(name),
+            .Bitfield => true,
+            .TypeAlias => |type_alias| self.runtimeAbiDecodeSupportsTypeInContext(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false, allow_top_level_dynamic),
+            else => false,
+        };
+    }
+
+    fn runtimeAbiDecodeSupportsTopLevelMixedDynamicTuple(self: *TypeChecker, elements: []const Type) bool {
+        return elements.len == 2 and
+            self.isRuntimeAbiDecodeU256(elements[0]) and
+            (self.isRuntimeAbiDecodeDynamicBytesLike(elements[1]) or
+                self.isRuntimeAbiDecodeU256Slice(elements[1]) or
+                self.isRuntimeAbiDecodeAddressSlice(elements[1]) or
+                self.isRuntimeAbiDecodeBoolSlice(elements[1]) or
+                self.isRuntimeAbiDecodeFixedBytesSlice(elements[1]));
+    }
+
+    fn isRuntimeAbiDecodeDynamicBytesLike(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .string, .bytes => true,
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "string") or std.mem.eql(u8, named.name, "bytes")) break :blk true;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeDynamicBytesLike(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeU256Slice(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .slice => |slice| self.isRuntimeAbiDecodeU256(slice.element_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeU256Slice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeAddressSlice(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .slice => |slice| self.isRuntimeAbiDecodeAddress(slice.element_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeAddressSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeBoolSlice(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .slice => |slice| self.isRuntimeAbiDecodeBool(slice.element_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeBoolSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeFixedBytesSlice(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .slice => |slice| self.isRuntimeAbiDecodeFixedBytes(slice.element_type.*),
+            .named => |named| blk: {
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeFixedBytesSlice(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeFixedBytes(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .fixed_bytes => |fixed_bytes| fixed_bytes.len >= 1 and fixed_bytes.len <= 32,
+            .named => |named| blk: {
+                if (runtimeFixedBytesSpellingLen(named.name) != null) break :blk true;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeFixedBytes(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn runtimeFixedBytesSpellingLen(name: []const u8) ?u8 {
+        if (!std.mem.startsWith(u8, name, "bytes")) return null;
+        const digits = name["bytes".len..];
+        if (digits.len == 0) return null;
+        const len = std.fmt.parseInt(u8, digits, 10) catch return null;
+        return if (len >= 1 and len <= 32) len else null;
+    }
+
+    fn isRuntimeAbiDecodeU256(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .integer => |integer| !(integer.signed orelse false) and (integer.bits orelse 256) == 256,
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "u256")) break :blk true;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeU256(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeBool(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .bool => true,
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "bool")) break :blk true;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeBool(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    fn isRuntimeAbiDecodeAddress(self: *TypeChecker, ty: Type) bool {
+        return switch (ty) {
+            .address => true,
+            .named => |named| blk: {
+                if (std.mem.eql(u8, named.name, "address")) break :blk true;
+                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
+                break :blk switch (self.file.item(item_id).*) {
+                    .TypeAlias => |type_alias| self.isRuntimeAbiDecodeAddress(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return false),
+                    else => false,
+                };
+            },
+            else => false,
         };
     }
 
@@ -3499,6 +3868,48 @@ const TypeChecker = struct {
         for (struct_item.fields) |field| {
             const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return true;
             if (self.abiEncodeIsUnsupported(field_type)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn abiDecodeNamedIsUnsupported(self: *TypeChecker, name: []const u8) bool {
+        if (std.mem.eql(u8, name, "bool") or std.mem.eql(u8, name, "address")) return false;
+        if (parseIntegerSpelling(name) != null) return false;
+        if (parseFixedBytesSpelling(name) != null) return false;
+        if (self.instantiatedEnumByName(name)) |_| return self.enumHasPayload(name);
+        if (self.instantiatedBitfieldByName(name)) |_| return false;
+        if (self.instantiatedStructByName(name)) |_| return self.abiDecodeStructIsUnsupported(name);
+
+        const item_id = self.item_index.lookup(name) orelse return true;
+        return switch (self.file.item(item_id).*) {
+            .Enum => self.enumHasPayload(name),
+            .Bitfield => false,
+            .Struct => self.abiDecodeStructIsUnsupported(name),
+            .TypeAlias => |type_alias| self.abiDecodeIsUnsupported(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch return true),
+            else => true,
+        };
+    }
+
+    fn abiDecodeStructIsUnsupported(self: *TypeChecker, name: []const u8) bool {
+        if (self.instantiatedStructByName(name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (self.abiDecodeIsUnsupported(field.ty)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        const item_id = self.item_index.lookup(name) orelse return true;
+        const struct_item = switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| struct_item,
+            else => return true,
+        };
+        for (struct_item.fields) |field| {
+            const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return true;
+            if (self.abiDecodeIsUnsupported(field_type)) {
                 return true;
             }
         }
@@ -4113,10 +4524,31 @@ const TypeChecker = struct {
     }
 
     fn exprIntegerText(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return self.signedExprIntegerText(expr_id, .positive);
+    }
+
+    const ExprIntegerSign = enum { positive, negative };
+
+    fn signedExprIntegerText(self: *const TypeChecker, expr_id: ast.ExprId, sign: ExprIntegerSign) ?[]const u8 {
         return switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
-            .Group => |group| self.exprIntegerText(group.expr),
+            .IntegerLiteral => |literal| self.normalizedExprIntegerText(sign, literal.text),
+            .Group => |group| self.signedExprIntegerText(group.expr, sign),
+            .Unary => |unary| if (unary.op == .neg)
+                self.signedExprIntegerText(unary.operand, switch (sign) {
+                    .positive => .negative,
+                    .negative => .positive,
+                })
+            else
+                null,
             else => null,
+        };
+    }
+
+    fn normalizedExprIntegerText(self: *const TypeChecker, sign: ExprIntegerSign, text: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, text, " \t\n\r");
+        return switch (sign) {
+            .positive => trimmed,
+            .negative => std.fmt.allocPrint(self.arena, "-{s}", .{trimmed}) catch null,
         };
     }
 
@@ -4545,9 +4977,13 @@ const TypeChecker = struct {
         if (refinements.isKnownName(generic.name)) {
             if (generic.args.len > 0 and generic.args[0] == .Type) {
                 const resolved_args = try self.substituteGenericArgs(generic.args, bindings);
+                const base_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+                if (!try self.validateRefinementGenericBounds(generic.range, generic.name, base_type, resolved_args)) {
+                    return .{ .unknown = {} };
+                }
                 return .{ .refinement = .{
                     .name = generic.name,
-                    .base_type = try self.storeType(try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings)),
+                    .base_type = try self.storeType(base_type),
                     .args = resolved_args,
                 } };
             }
@@ -4558,6 +4994,62 @@ const TypeChecker = struct {
         }
 
         return descriptorFromPathName(self.file, self.item_index, generic.name);
+    }
+
+    fn validateRefinementGenericBounds(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        base_type: Type,
+        args: []const ast.TypeArg,
+    ) !bool {
+        var local_base = base_type;
+        const refinement: model.RefinementType = .{
+            .name = name,
+            .base_type = &local_base,
+            .args = args,
+        };
+        const info = refinements.bounds(refinement) orelse return true;
+        const signed = refinementIntegerBaseSignedness(info.base_type) orelse return true;
+        if (signed) return true;
+
+        if (negativeIntegerText(info.min_text) orelse negativeIntegerText(info.max_text)) |bound| {
+            try self.emitRangeError(
+                range,
+                "{s} bound {s} is negative; {s} base requires non-negative bound",
+                .{ name, bound, refinementIntegerBaseName(info.base_type) },
+            );
+            return false;
+        }
+        return true;
+    }
+
+    fn refinementIntegerBaseSignedness(ty: Type) ?bool {
+        return switch (ty) {
+            .refinement => |refinement| refinementIntegerBaseSignedness(refinement.base_type.*),
+            .integer => |integer| integer.signed orelse signedFromIntegerSpelling(integer.spelling),
+            else => null,
+        };
+    }
+
+    fn refinementIntegerBaseName(ty: Type) []const u8 {
+        return switch (ty) {
+            .refinement => |refinement| refinementIntegerBaseName(refinement.base_type.*),
+            .integer => |integer| integer.spelling orelse "unsigned integer",
+            else => "unsigned integer",
+        };
+    }
+
+    fn signedFromIntegerSpelling(spelling: ?[]const u8) ?bool {
+        const text = spelling orelse return null;
+        if (std.mem.startsWith(u8, text, "u")) return false;
+        if (std.mem.startsWith(u8, text, "i")) return true;
+        return null;
+    }
+
+    fn negativeIntegerText(text: ?[]const u8) ?[]const u8 {
+        const raw = std.mem.trim(u8, text orelse return null, " \t\n\r");
+        return if (std.mem.startsWith(u8, raw, "-")) raw else null;
     }
 
     fn lookupTypeItemInScope(self: *const TypeChecker, name: []const u8) ?ast.ItemId {
@@ -5121,7 +5613,7 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn builtinReturnType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
+    fn builtinReturnType(self: *TypeChecker, builtin: ast.BuiltinExpr) Type {
         if (std.mem.eql(u8, builtin.name, "cast") or
             std.mem.eql(u8, builtin.name, "bitCast") or
             std.mem.eql(u8, builtin.name, "truncate"))
@@ -5178,6 +5670,23 @@ const TypeChecker = struct {
 
         if (std.mem.eql(u8, builtin.name, "abiEncode")) {
             return .{ .bytes = {} };
+        }
+
+        if (isAbiDecodeBuiltinName(builtin.name)) {
+            const target_type = if (builtin.type_arg) |type_arg|
+                self.resolveTypeExprInCurrentContext(type_arg) catch Type{ .unknown = {} }
+            else blk: {
+                if (builtin.args.len == 0) return .{ .unknown = {} };
+                break :blk self.expr_types[builtin.args[0].index()];
+            };
+            const payload_type = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+            payload_type[0] = target_type;
+            const error_types = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+            error_types[0] = .{ .named = .{ .name = "AbiDecodeError" } };
+            return .{ .error_union = .{
+                .payload_type = &payload_type[0],
+                .error_types = error_types,
+            } };
         }
 
         if (std.mem.eql(u8, builtin.name, "selector")) {
