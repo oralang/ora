@@ -22,6 +22,7 @@
 using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::ensureU256;
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
@@ -71,17 +72,13 @@ static Value buildDebugNamedMemoryPtr(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(ctx, evm::kU64Bits, mlir::IntegerType::Unsigned);
 
     Value base = rewriter.create<sir::CodeSizeOp>(loc, u256Type);
     const uint64_t byteOffset = slot.value() * evm::kWordBytes;
     Value addr = base;
     if (byteOffset != 0)
     {
-        Value offset = rewriter.create<sir::ConstOp>(
-            loc,
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, byteOffset));
+        Value offset = constU256(rewriter, loc, byteOffset);
         addr = rewriter.create<sir::AddOp>(loc, u256Type, base, offset);
     }
     return rewriter.create<sir::BitcastOp>(loc, ptrType, addr);
@@ -108,15 +105,11 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     // Create a revert block.
     auto *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
     rewriter.setInsertionPointToStart(revertBlock);
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     // revert(0, 0) — zero-length revert data.
-    Value zeroU256 = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroU256 = constU256(rewriter, loc, 0);
     Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
-    Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroLen = constU256(rewriter, loc, 0);
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
 
     // At the end of parentBlock, branch based on the guard condition.
@@ -164,7 +157,6 @@ LogicalResult ConvertMLoadOp::matchAndRewrite(
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
 
     if (isDebugInfoLoweringEnabled(op.getOperation()))
     {
@@ -177,8 +169,7 @@ LogicalResult ConvertMLoadOp::matchAndRewrite(
     }
 
     // Allocate a word-sized slot and load from it.
-    Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
+    Value size = constU256(rewriter, loc, evm::kWordBytes);
     Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
     Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
     rewriter.replaceOp(op, result);
@@ -194,9 +185,7 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
     if (!val)
         return failure();
@@ -211,8 +200,7 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
         }
     }
 
-    Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
+    Value size = constU256(rewriter, loc, evm::kWordBytes);
     Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
     rewriter.create<sir::StoreOp>(loc, ptr, val);
     rewriter.eraseOp(op);
@@ -239,7 +227,7 @@ LogicalResult ConvertMLoad8Op::matchAndRewrite(
     if (!offset)
         return failure();
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
-    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    Value zero = constU256(rewriter, loc, 0);
     Value result = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
     rewriter.replaceOp(op, result);
     return success();
@@ -264,7 +252,7 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
-    Value zero = rewriter.create<sir::ConstOp>(loc, val.getType(), mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    Value zero = constU256(rewriter, loc, 0);
     rewriter.create<sir::Store8Op>(loc, addr, zero, val);
     rewriter.eraseOp(op);
     return success();
@@ -300,7 +288,6 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
             return success();
         }
     }
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), evm::kWordBits, mlir::IntegerType::Unsigned);
     auto normalizeDiscriminant = [&](mlir::IntegerAttr attr) -> mlir::IntegerAttr {
         return mlir::IntegerAttr::get(u256IntType, attr.getValue().zextOrTrunc(evm::kWordBits));
@@ -388,7 +375,7 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     if (!discriminantAttr)
         return rewriter.notifyMatchFailure(op, "missing enum discriminant metadata");
 
-    Value result = rewriter.create<sir::ConstOp>(loc, u256Type, discriminantAttr);
+    Value result = constU256(rewriter, loc, discriminantAttr);
     rewriter.replaceOp(op, result);
     return success();
 }

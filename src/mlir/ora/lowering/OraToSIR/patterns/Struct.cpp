@@ -1,6 +1,7 @@
 #include "Struct.h"
 
 #include "patterns/MissingOps.h"
+#include "patterns/LoweringHelpers.h"
 #include "patterns/Storage.h"
 #include "patterns/StorageLayout.h"
 #include "OraMaterializationKinds.h"
@@ -15,6 +16,7 @@ using namespace mlir;
 using namespace mlir::ora;
 
 using mlir::ora::lowering::addStorageWordOffset;
+using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::getStructFieldStorageOffset;
 using mlir::ora::lowering::getStructFields;
 using mlir::ora::lowering::getStructFieldsFromDecl;
@@ -105,11 +107,7 @@ namespace
             if (!slotIndexOpt)
                 return Value();
 
-            auto *ctx = rewriter.getContext();
-            auto u256Type = sir::U256Type::get(ctx);
-            auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-            return rewriter.create<sir::ConstOp>(
-                loc, u256Type, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+            return constU256(rewriter, loc, *slotIndexOpt);
         }
 
         if (auto extract = structValue.getDefiningOp<ora::StructFieldExtractOp>())
@@ -238,11 +236,8 @@ namespace
             return basePtr;
 
         auto *ctx = rewriter.getContext();
-        auto u256Type = sir::U256Type::get(ctx);
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
-        auto offsetAttr = mlir::IntegerAttr::get(ui64Type, fieldIndex * 32ULL);
-        Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+        Value offset = constU256(rewriter, loc, fieldIndex * 32ULL);
         return rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, offset);
     }
 
@@ -251,13 +246,11 @@ namespace
         auto *ctx = rewriter.getContext();
         auto u256Type = sir::U256Type::get(ctx);
         auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-        auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
         const uint64_t fieldCount = static_cast<uint64_t>(fieldValues.size());
         const uint64_t byteSize = fieldCount * 32ULL;
 
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
-        Value sizeVal = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+        Value sizeVal = constU256(rewriter, loc, byteSize);
         Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, sizeVal);
         bool hasStorageMemRefField = false;
 
@@ -426,7 +419,6 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
     auto *ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     StringRef fieldName = op.getFieldName();
     size_t fieldIndex = 0;
@@ -592,13 +584,11 @@ LogicalResult ConvertStructFieldExtractOp::matchAndRewrite(
             if (!slotIndexOpt)
                 return rewriter.notifyMatchFailure(op, "missing slot for dynamic struct storage field");
 
-            Value baseSlot = rewriter.create<sir::ConstOp>(
-                loc, u256Type, mlir::IntegerAttr::get(ui64Type, *slotIndexOpt));
+            Value baseSlot = constU256(rewriter, loc, *slotIndexOpt);
             Value fieldSlot = baseSlot;
             if (fieldIndex > 0)
             {
-                Value offset = rewriter.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(fieldIndex)));
+                Value offset = constU256(rewriter, loc, static_cast<uint64_t>(fieldIndex));
                 fieldSlot = rewriter.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
             }
 
@@ -816,8 +806,7 @@ LogicalResult ConvertStructFieldUpdateOp::matchAndRewrite(
     // Allocate new struct buffer
     const uint64_t fieldCount = static_cast<uint64_t>(fieldNames.size());
     const uint64_t byteSize = fieldCount * 32ULL;
-    auto sizeAttr = mlir::IntegerAttr::get(ui64Type, byteSize);
-    Value sizeVal = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+    Value sizeVal = constU256(rewriter, loc, byteSize);
     Value newPtr = rewriter.create<sir::MallocOp>(loc, ptrType, sizeVal);
     Value carrierBase = basePtr;
     while (auto bitcast = carrierBase.getDefiningOp<sir::BitcastOp>())

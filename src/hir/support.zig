@@ -471,7 +471,7 @@ pub fn parseArrayLen(text: []const u8) ?u32 {
     return std.fmt.parseInt(u32, std.mem.trim(u8, text, " \t\n\r"), 10) catch null;
 }
 
-pub fn parseIntLiteral(text: []const u8) ?i64 {
+pub fn parseI64Literal(text: []const u8) ?i64 {
     const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
     const digits = if (base == 10) text else text[2..];
     return std.fmt.parseInt(i64, digits, base) catch null;

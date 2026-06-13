@@ -54,7 +54,7 @@ namespace mlir::ora::lowering
         return constU256(rewriter, loc, llvm::APInt(256, value));
     }
 
-    inline Value createPtrViewMaterializationCast(PatternRewriter &rewriter, Location loc, Type resultType, Value input)
+    inline Value createPtrViewMaterializationCast(OpBuilder &rewriter, Location loc, Type resultType, Value input)
     {
         auto cast = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, TypeRange{resultType}, ValueRange{input});
         cast->setAttr(kOraMaterializationKindAttr, rewriter.getStringAttr(mat_kind::kPtrView));

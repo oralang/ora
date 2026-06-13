@@ -16,7 +16,6 @@ LogicalResult ConvertLogOp::matchAndRewrite(
     auto ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     SmallVector<Value> params;
     params.reserve(adaptor.getParameters().size());
@@ -28,16 +27,14 @@ LogicalResult ConvertLogOp::matchAndRewrite(
 
     if (params.empty())
     {
-        auto zeroAttr = mlir::IntegerAttr::get(ui64Type, 0);
-        Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, zeroAttr);
+        Value zero = constU256(rewriter, loc, 0);
         dataPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zero);
         dataLen = zero;
     }
     else
     {
         const uint64_t totalSizeBytes = static_cast<uint64_t>(params.size()) * 32;
-        auto sizeAttr = mlir::IntegerAttr::get(ui64Type, totalSizeBytes);
-        Value totalSize = rewriter.create<sir::ConstOp>(loc, u256Type, sizeAttr);
+        Value totalSize = constU256(rewriter, loc, totalSizeBytes);
         dataPtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
         dataLen = totalSize;
 
@@ -45,8 +42,7 @@ LogicalResult ConvertLogOp::matchAndRewrite(
         {
             Value val = params[i];
             Value valU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, val);
-            auto offsetAttr = mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(i * 32));
-            Value offset = rewriter.create<sir::ConstOp>(loc, u256Type, offsetAttr);
+            Value offset = constU256(rewriter, loc, static_cast<uint64_t>(i * 32));
             Value slotPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, dataPtr, offset);
             rewriter.create<sir::StoreOp>(loc, slotPtr, valU256);
         }

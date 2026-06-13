@@ -185,6 +185,17 @@ fn readArtifacts(allocator: std.mem.Allocator, output_dir: []const u8, stem: []c
 }
 
 pub fn runConformanceSpec(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8) !void {
+    return runConformanceSpecImpl(allocator, source_path, spec_path, null);
+}
+
+/// Like runConformanceSpec but records numeric metrics (per-call gas + per-contract
+/// bytecode size) into `metrics`. Still asserts all spec outcomes, so it only
+/// measures on a green corpus.
+pub fn runConformanceSpecMetrics(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: MetricSink) !void {
+    return runConformanceSpecImpl(allocator, source_path, spec_path, metrics);
+}
+
+fn runConformanceSpecImpl(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: ?MetricSink) !void {
     var run_arena = std.heap.ArenaAllocator.init(allocator);
     defer run_arena.deinit();
     const arena = run_arena.allocator();
@@ -217,7 +228,11 @@ pub fn runConformanceSpec(allocator: std.mem.Allocator, source_path: []const u8,
     defer doc.deinit();
     try testing.expectError(error.UnknownFunction, doc.findFunction("missing()"));
 
-    try executeSpec(arena, parsed.value, artifacts.bytecode, &doc);
+    if (metrics) |sink| {
+        try sink.record("__bytecode_bytes", artifacts.bytecode.len);
+    }
+
+    try executeSpec(arena, parsed.value, artifacts.bytecode, &doc, metrics);
 }
 
 fn sourceStem(source_path: []const u8) ?[]const u8 {
@@ -256,7 +271,20 @@ pub fn freeStringList(allocator: std.mem.Allocator, list: [][]const u8) void {
     allocator.free(list);
 }
 
-fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const u8, doc: *const abi_doc.AbiDoc) !void {
+/// Optional metrics sink: when present, the runner records numeric metrics —
+/// per-call metered gas and per-contract bytecode size — for the metrics
+/// benchmark. Keys are duped into the sink's allocator so they outlive the arena.
+pub const MetricSample = struct { key: []const u8, value: u64 };
+pub const MetricSink = struct {
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList(MetricSample),
+
+    fn record(self: MetricSink, key: []const u8, value: u64) !void {
+        try self.list.append(self.allocator, .{ .key = try self.allocator.dupe(u8, key), .value = value });
+    }
+};
+
+fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const u8, doc: *const abi_doc.AbiDoc, metrics: ?MetricSink) !void {
     var host = HarnessHost.init(allocator);
     defer host.deinit();
     try host.setBalance(spec.deploy.caller, std.math.maxInt(u256));
@@ -317,6 +345,10 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
         try host.check();
         if (call.gas_max) |max| {
             try testing.expect(result.gasConsumed(types.DEFAULT_GAS) <= max);
+        }
+        if (metrics) |sink| {
+            const label = call.@"fn" orelse "calldata";
+            try sink.record(label, result.gasConsumed(types.DEFAULT_GAS));
         }
 
         switch (call.outcome) {

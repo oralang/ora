@@ -2124,7 +2124,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn switchPatternValueStrict(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?i64 {
             switch (self.parent.file.expression(expr_id).*) {
-                .IntegerLiteral => |literal| return support.parseIntLiteral(literal.text),
+                .IntegerLiteral => |literal| return support.parseI64Literal(literal.text),
                 .BoolLiteral => |literal| return if (literal.value) 1 else 0,
                 else => {},
             }

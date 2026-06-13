@@ -24,61 +24,6 @@ namespace euh = mlir::ora::error_union_helpers;
 
 namespace
 {
-static LogicalResult getErrorUnionEncodingTypes(const TypeConverter *typeConverter,
-                                                Type resultType,
-                                                Operation *op,
-                                                SmallVector<Type> &convertedTypes)
-{
-    if (!typeConverter)
-        return failure();
-    if (failed(typeConverter->convertType(resultType, convertedTypes)))
-        convertedTypes.clear();
-
-    if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
-    {
-        auto *ctx = resultType.getContext();
-        if (!ctx)
-            return failure();
-        auto u256 = sir::U256Type::get(ctx);
-        const bool narrow = euh::isNarrowErrorUnion(errType);
-        if (narrow && !euh::hasForceWideErrorUnionAttr(op))
-        {
-            if (convertedTypes.size() != 1 || !isa<sir::U256Type>(convertedTypes.front()))
-            {
-                convertedTypes.clear();
-                convertedTypes.push_back(u256);
-            }
-        }
-        else
-        {
-            if (convertedTypes.size() != 2)
-            {
-                convertedTypes.clear();
-                convertedTypes.push_back(u256);
-                convertedTypes.push_back(euh::getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
-            }
-        }
-    }
-
-    if (auto adtType = llvm::dyn_cast<ora::AdtType>(resultType))
-    {
-        auto *ctx = resultType.getContext();
-        if (!ctx)
-            return failure();
-        auto u256 = sir::U256Type::get(ctx);
-        if (convertedTypes.size() != 2)
-        {
-            convertedTypes.clear();
-            convertedTypes.push_back(u256);
-            convertedTypes.push_back(u256);
-        }
-    }
-
-    if (convertedTypes.empty())
-        return failure();
-    return success();
-}
-
     static bool isSupportedNarrowScalarAbiNodeForType(const AbiLayoutNode &node, Type successType)
     {
         successType = abiDecodeUnwrapRefinementType(successType);
@@ -1145,7 +1090,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
         Value length = rewriter.create<sir::LoadOp>(op.getLoc(), u256Type, bytesPtr);
 
         SmallVector<Type> convertedResultTypes;
-        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
+        if (failed(euh::getErrorUnionOrAdtEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
             convertedResultTypes.empty())
         {
             return rewriter.notifyMatchFailure(op, "failed to convert memory/result ABI decode result type");
@@ -1815,7 +1760,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             return branchWide(WideAbiDecodeResult{tag, payload}, payloadCarrierType);
         }
 
-        return rewriter.notifyMatchFailure(op, "unreachable memory/result ABI decode branch");
+        return rewriter.notifyMatchFailure(op, "unsupported memory/result ABI decode branch");
     }
 
     // The dialect verifier accepts all planned decode sources and failure
@@ -1845,7 +1790,7 @@ LogicalResult ConvertAbiDecodeOp::matchAndRewrite(
             return rewriter.notifyMatchFailure(op, "strict returndata ABI decode currently requires a non-empty tuple layout");
 
         SmallVector<Type> convertedResultTypes;
-        if (failed(getErrorUnionEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
+        if (failed(euh::getErrorUnionOrAdtEncodingTypes(typeConverter, op.getResult().getType(), op.getOperation(), convertedResultTypes)) ||
             convertedResultTypes.empty())
         {
             return rewriter.notifyMatchFailure(op, "failed to convert strict returndata ABI decode result type");

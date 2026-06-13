@@ -20,6 +20,7 @@ using namespace mlir;
 using namespace ora;
 using namespace sir;
 namespace euh = mlir::ora::error_union_helpers;
+using mlir::ora::lowering::constU256;
 
 namespace
 {
@@ -172,10 +173,7 @@ namespace mlir
                             if (llvm::isa<sir::U256Type>(errCast.getOperand(1).getType()) &&
                                 tupleType.getElementTypes().size() == 1)
                             {
-                                auto u256Type = sir::U256Type::get(builder.getContext());
-                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                Value size = builder.create<sir::ConstOp>(
-                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value size = constU256(builder, loc, 32);
                                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                                 builder.create<sir::StoreOp>(loc, ptr, errCast.getOperand(1));
                                 return ptr;
@@ -187,23 +185,14 @@ namespace mlir
                 if (auto tupleCreate = input.getDefiningOp<ora::TupleCreateOp>())
                 {
                     auto u256Type = sir::U256Type::get(builder.getContext());
-                    auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                    Value size = builder.create<sir::ConstOp>(
-                        loc,
-                        u256Type,
-                        mlir::IntegerAttr::get(
-                            ui64Type,
-                            static_cast<uint64_t>(tupleCreate.getNumOperands()) * 32ULL));
+                    Value size = constU256(builder, loc, static_cast<uint64_t>(tupleCreate.getNumOperands()) * 32ULL);
                     Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                     for (auto [index, element] : llvm::enumerate(tupleCreate.getOperands()))
                     {
                         Value slotPtr = ptr;
                         if (index != 0)
                         {
-                            Value offset = builder.create<sir::ConstOp>(
-                                loc,
-                                u256Type,
-                                mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                            Value offset = constU256(builder, loc, static_cast<uint64_t>(index) * 32ULL);
                             slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
                         }
                         Value stored = element;
@@ -225,9 +214,7 @@ namespace mlir
                             if (tupleCreate.getNumOperands() == 1)
                             {
                                 auto u256Type = sir::U256Type::get(builder.getContext());
-                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                Value size = builder.create<sir::ConstOp>(
-                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value size = constU256(builder, loc, 32);
                                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                                 Value element = tupleCreate.getOperand(0);
                                 if (!llvm::isa<sir::U256Type>(element.getType()))
@@ -255,10 +242,7 @@ namespace mlir
                             auto anonType = llvm::cast<ora::AnonymousStructType>(input.getType());
                             if (anonType.getFieldTypes().size() == 1)
                             {
-                                auto u256Type = sir::U256Type::get(builder.getContext());
-                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                Value size = builder.create<sir::ConstOp>(
-                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value size = constU256(builder, loc, 32);
                                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                                 builder.create<sir::StoreOp>(loc, ptr, payload);
                                 return ptr;
@@ -270,10 +254,7 @@ namespace mlir
                             auto tupleType = llvm::cast<ora::TupleType>(input.getType());
                             if (tupleType.getElementTypes().size() == 1)
                             {
-                                auto u256Type = sir::U256Type::get(builder.getContext());
-                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                Value size = builder.create<sir::ConstOp>(
-                                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, 32));
+                                Value size = constU256(builder, loc, 32);
                                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                                 builder.create<sir::StoreOp>(loc, ptr, payload);
                                 return ptr;
@@ -299,23 +280,14 @@ namespace mlir
             if (auto structInit = input.getDefiningOp<ora::StructInitOp>())
             {
                 auto u256Type = sir::U256Type::get(builder.getContext());
-                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                Value size = builder.create<sir::ConstOp>(
-                    loc,
-                    u256Type,
-                    mlir::IntegerAttr::get(
-                        ui64Type,
-                        static_cast<uint64_t>(structInit.getFieldValues().size()) * 32ULL));
+                Value size = constU256(builder, loc, static_cast<uint64_t>(structInit.getFieldValues().size()) * 32ULL);
                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                 for (auto [index, element] : llvm::enumerate(structInit.getFieldValues()))
                 {
                     Value slotPtr = ptr;
                     if (index != 0)
                     {
-                        Value offset = builder.create<sir::ConstOp>(
-                            loc,
-                            u256Type,
-                            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                        Value offset = constU256(builder, loc, static_cast<uint64_t>(index) * 32ULL);
                         slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
                     }
                     Value stored = element;
@@ -329,23 +301,14 @@ namespace mlir
             if (auto structInstantiate = input.getDefiningOp<ora::StructInstantiateOp>())
             {
                 auto u256Type = sir::U256Type::get(builder.getContext());
-                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                Value size = builder.create<sir::ConstOp>(
-                    loc,
-                    u256Type,
-                    mlir::IntegerAttr::get(
-                        ui64Type,
-                        static_cast<uint64_t>(structInstantiate.getFieldValues().size()) * 32ULL));
+                Value size = constU256(builder, loc, static_cast<uint64_t>(structInstantiate.getFieldValues().size()) * 32ULL);
                 Value ptr = builder.create<sir::MallocOp>(loc, ptrType, size);
                 for (auto [index, element] : llvm::enumerate(structInstantiate.getFieldValues()))
                 {
                     Value slotPtr = ptr;
                     if (index != 0)
                     {
-                        Value offset = builder.create<sir::ConstOp>(
-                            loc,
-                            u256Type,
-                            mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(index) * 32ULL));
+                        Value offset = constU256(builder, loc, static_cast<uint64_t>(index) * 32ULL);
                         slotPtr = builder.create<sir::AddPtrOp>(loc, ptrType, ptr, offset);
                     }
                     Value stored = element;
@@ -623,11 +586,8 @@ namespace mlir
                                                     return Value();
 
                                                 auto u256Type = sir::U256Type::get(builder.getContext());
-                                                auto ui64Type = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                auto oneAttr = mlir::IntegerAttr::get(ui64Type, 1);
-                                                auto zeroAttr = mlir::IntegerAttr::get(ui64Type, 0);
-                                                Value one = builder.create<sir::ConstOp>(loc, u256Type, oneAttr);
-                                                Value zero = builder.create<sir::ConstOp>(loc, u256Type, zeroAttr);
+                                                Value one = constU256(builder, loc, 1);
+                                                Value zero = constU256(builder, loc, 0);
 
                                                 auto toU256 = [&](Value v) -> Value {
                                                     if (llvm::isa<sir::U256Type>(v.getType()))
@@ -675,9 +635,7 @@ namespace mlir
                                                     if (intType.isSigned())
                                                     {
                                                         auto u256 = sir::U256Type::get(builder.getContext());
-                                                        auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                        auto bAttr = mlir::IntegerAttr::get(ui64, intType.getWidth() / 8);
-                                                        Value bConst = builder.create<sir::ConstOp>(loc, u256, bAttr);
+                                                        Value bConst = constU256(builder, loc, intType.getWidth() / 8);
                                                         return builder.create<sir::SignExtendOp>(loc, u256, bConst, value);
                                                     }
                                                     if (Value mask = makeMask(intType.getWidth()))
@@ -701,9 +659,7 @@ namespace mlir
                                              if (is_signed)
                                              {
                                                  auto u256 = sir::U256Type::get(builder.getContext());
-                                                 auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                 auto bAttr = mlir::IntegerAttr::get(ui64, width / 8);
-                                                 Value bConst = builder.create<sir::ConstOp>(loc, u256, bAttr);
+                                                 Value bConst = constU256(builder, loc, width / 8);
                                                  return builder.create<sir::SignExtendOp>(loc, u256, bConst, input);
                                              }
                                              if (Value mask = makeMask(width))
@@ -829,9 +785,7 @@ namespace mlir
                                                  if (intType.isSigned())
                                                  {
                                                      auto u256 = sir::U256Type::get(builder.getContext());
-                                                     auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                     auto bAttr = mlir::IntegerAttr::get(ui64, intType.getWidth() / 8);
-                                                     Value bConst = builder.create<sir::ConstOp>(loc, u256, bAttr);
+                                                     Value bConst = constU256(builder, loc, intType.getWidth() / 8);
                                                      Value extended = builder.create<sir::SignExtendOp>(loc, u256, bConst, input);
                                                      return builder.create<sir::BitcastOp>(loc, type, extended);
                                                  }
@@ -929,12 +883,10 @@ namespace mlir
                                              }
                                          }
                                          // Otherwise, decompose via loads from a malloc'd pair.
-                                         auto u256 = sir::U256Type::get(builder.getContext());
                                          auto ptrType = sir::PtrType::get(builder.getContext(), 1);
-                                         auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
                                          Value bitcast = builder.create<sir::BitcastOp>(loc, ptrType, input);
                                          Value tag = builder.create<sir::LoadOp>(loc, resultTypes[0], bitcast);
-                                         Value off = builder.create<sir::ConstOp>(loc, u256, mlir::IntegerAttr::get(ui64, 32));
+                                         Value off = constU256(builder, loc, 32);
                                          Value ptr2 = builder.create<sir::AddPtrOp>(loc, ptrType, bitcast, off);
                                          Value payload = builder.create<sir::LoadOp>(loc, resultTypes[1], ptr2);
                                          return SmallVector<Value>{tag, payload};
@@ -1003,9 +955,7 @@ namespace mlir
                                                  if (intType.isSigned() && intType.getWidth() < 256)
                                                  {
                                                      auto u256 = sir::U256Type::get(builder.getContext());
-                                                     auto ui64 = mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Unsigned);
-                                                     auto bAttr = mlir::IntegerAttr::get(ui64, intType.getWidth() / 8);
-                                                     Value bConst = builder.create<sir::ConstOp>(loc, u256, bAttr);
+                                                     Value bConst = constU256(builder, loc, intType.getWidth() / 8);
                                                      Value extended = builder.create<sir::SignExtendOp>(loc, u256, bConst, input);
                                                      return materializeInteger(extended);
                                                  }

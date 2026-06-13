@@ -240,7 +240,7 @@
       "sir_goldens": [
         "tests/sir_text/storage_result_scalar.check#fn set_ok:",
         "tests/sir_text/storage_result_scalar.check#const 0xFF7E9F57",
-        "tests/sir_text/storage_result_scalar.check#sload slot_saved"
+        "tests/sir_text/storage_result_scalar.check#v1 = sload c0"
       ]
     },
     {
@@ -328,7 +328,7 @@
         "tests/conformance/environment_log.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log0"
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log1"
       ]
     },
     {
@@ -341,8 +341,8 @@
         "tests/conformance/environment_log.spec.toml"
       ],
       "sir_goldens": [
-        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log0",
-        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check#sir.log0"
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log1",
+        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check#sir.log1"
       ]
     },
     {

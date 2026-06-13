@@ -20,8 +20,9 @@
 // CHECK: sstore
 
 // CHECK-LABEL: fn get:
-// CHECK: slot_saved = const 0x0
-// CHECK: sload slot_saved
-// CHECK: sload
+// CHECK: c0 = const 0x0
+// CHECK: v0 = const 0x1
+// CHECK: v1 = sload c0
+// CHECK: v2 = sload v0
 // CHECK: and
 // CHECK: eq

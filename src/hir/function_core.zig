@@ -24,7 +24,7 @@ const cmpPredicate = support.cmpPredicate;
 const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
-const parseIntLiteral = support.parseIntLiteral;
+const parseI64Literal = support.parseI64Literal;
 const reprIntegerType = support.reprIntegerType;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
@@ -3511,7 +3511,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         pub fn evalKnownExprValue(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?KnownExprValue {
             return switch (self.parent.file.expression(expr_id).*) {
-                .IntegerLiteral => |literal| .{ .integer = parseIntLiteral(literal.text) orelse return null },
+                .IntegerLiteral => |literal| .{ .integer = parseI64Literal(literal.text) orelse return null },
                 .BoolLiteral => |literal| .{ .boolean = literal.value },
                 .Group => |group| @This().evalKnownExprValue(self, group.expr, locals),
                 .Name => |name| blk: {

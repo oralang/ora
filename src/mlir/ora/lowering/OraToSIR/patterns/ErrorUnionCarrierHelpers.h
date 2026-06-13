@@ -11,6 +11,8 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Casting.h"
 
 #include <optional>
@@ -149,6 +151,90 @@ namespace mlir
                 return !isNarrowErrorUnion(type) || hasForceWideErrorUnionAttr(op);
             }
 
+            inline bool funcArgForcesWideErrorUnion(::mlir::func::FuncOp func, unsigned index)
+            {
+                if (!func || index >= func.getNumArguments())
+                    return false;
+                if (auto attr = func.getArgAttrOfType<::mlir::BoolAttr>(index, "ora.force_wide_error_union"))
+                    return attr.getValue();
+                return false;
+            }
+
+            inline bool funcResultForcesWideErrorUnion(::mlir::func::FuncOp func, unsigned index)
+            {
+                if (!func || index >= func.getNumResults())
+                    return false;
+                if (auto attr = func.getResultAttrOfType<::mlir::BoolAttr>(index, "ora.force_wide_error_union"))
+                    return attr.getValue();
+                if (auto attr = func->getAttrOfType<::mlir::BoolAttr>("ora.force_wide_error_union"))
+                    return attr.getValue();
+                return false;
+            }
+
+            inline ::mlir::LogicalResult getErrorUnionOrAdtEncodingTypes(
+                const ::mlir::TypeConverter *typeConverter,
+                ::mlir::Type resultType,
+                bool forceWideErrorUnion,
+                ::llvm::SmallVectorImpl<::mlir::Type> &convertedTypes)
+            {
+                if (!typeConverter)
+                    return ::mlir::failure();
+                if (::mlir::failed(typeConverter->convertType(resultType, convertedTypes)))
+                    convertedTypes.clear();
+
+                if (auto errType = llvm::dyn_cast<::mlir::ora::ErrorUnionType>(resultType))
+                {
+                    auto *ctx = resultType.getContext();
+                    if (!ctx)
+                        return ::mlir::failure();
+                    auto u256 = ::sir::U256Type::get(ctx);
+                    const bool useWideCarrier = forceWideErrorUnion || !isNarrowErrorUnion(errType);
+                    if (!useWideCarrier)
+                    {
+                        if (convertedTypes.size() != 1 || !llvm::isa<::sir::U256Type>(convertedTypes.front()))
+                        {
+                            convertedTypes.clear();
+                            convertedTypes.push_back(u256);
+                        }
+                    }
+                    else if (convertedTypes.size() != 2)
+                    {
+                        convertedTypes.clear();
+                        convertedTypes.push_back(u256);
+                        convertedTypes.push_back(getWideErrorUnionCarrierType(ctx, errType.getSuccessType()));
+                    }
+                }
+
+                if (auto adtType = llvm::dyn_cast<::mlir::ora::AdtType>(resultType))
+                {
+                    (void)adtType;
+                    auto *ctx = resultType.getContext();
+                    if (!ctx)
+                        return ::mlir::failure();
+                    auto u256 = ::sir::U256Type::get(ctx);
+                    if (convertedTypes.size() != 2)
+                    {
+                        convertedTypes.clear();
+                        convertedTypes.push_back(u256);
+                        convertedTypes.push_back(u256);
+                    }
+                }
+
+                if (convertedTypes.empty())
+                    return ::mlir::failure();
+                return ::mlir::success();
+            }
+
+            inline ::mlir::LogicalResult getErrorUnionOrAdtEncodingTypes(
+                const ::mlir::TypeConverter *typeConverter,
+                ::mlir::Type resultType,
+                ::mlir::Operation *op,
+                ::llvm::SmallVectorImpl<::mlir::Type> &convertedTypes)
+            {
+                return getErrorUnionOrAdtEncodingTypes(
+                    typeConverter, resultType, hasForceWideErrorUnionAttr(op), convertedTypes);
+            }
+
             inline ::mlir::Value narrowTagMaskI256Const(::mlir::OpBuilder &builder,
                                                         ::mlir::Location loc)
             {
@@ -163,6 +249,35 @@ namespace mlir
                 auto i256Type = ::mlir::IntegerType::get(builder.getContext(), 256);
                 return builder.create<::mlir::arith::ConstantOp>(
                     loc, i256Type, ::mlir::IntegerAttr::get(i256Type, 0));
+            }
+
+            inline ::mlir::FailureOr<::mlir::Value>
+            valueToI256ForNarrowCarrier(::mlir::OpBuilder &builder,
+                                        ::mlir::Location loc,
+                                        ::mlir::Value value)
+            {
+                auto i256Type = ::mlir::IntegerType::get(builder.getContext(), 256);
+                if (llvm::isa<::sir::U256Type>(value.getType()))
+                    return builder.create<::sir::BitcastOp>(loc, i256Type, value).getResult();
+                if (llvm::isa<::mlir::NoneType>(value.getType()))
+                    return builder.create<::mlir::arith::ConstantOp>(
+                                      loc, i256Type, builder.getIntegerAttr(i256Type, 0))
+                        .getResult();
+                if (auto intType = llvm::dyn_cast<::mlir::IntegerType>(value.getType()))
+                {
+                    if (intType.getWidth() == 256)
+                        return value;
+                    return builder.create<::mlir::arith::ExtUIOp>(loc, i256Type, value).getResult();
+                }
+
+                if (auto addrType = llvm::dyn_cast<::mlir::ora::AddressType>(value.getType()))
+                {
+                    auto i160Type = ::mlir::IntegerType::get(builder.getContext(), 160);
+                    auto i160Val = builder.create<::mlir::ora::AddrToI160Op>(loc, i160Type, value);
+                    return builder.create<::mlir::arith::ExtUIOp>(loc, i256Type, i160Val).getResult();
+                }
+
+                return ::mlir::failure();
             }
 
             inline ::mlir::Value packNarrowCarrierI256WithShift(::mlir::OpBuilder &builder,
@@ -200,6 +315,38 @@ namespace mlir
                 ::mlir::Value tag = narrowPackedCarrierTagI256WithMask(builder, loc, tagWord, one);
                 return builder.create<::mlir::arith::CmpIOp>(
                     loc, ::mlir::arith::CmpIPredicate::eq, tag, one);
+            }
+
+            inline ::mlir::Value buildIsErrorFromI256TagWordWithMask(::mlir::OpBuilder &builder,
+                                                                     ::mlir::Location loc,
+                                                                     ::mlir::Value tagWord,
+                                                                     ::mlir::Value one,
+                                                                     ::mlir::Type resultType)
+            {
+                auto i1Type = builder.getI1Type();
+                auto u256Type = ::sir::U256Type::get(builder.getContext());
+                ::mlir::Value cmp = tagWordIsErrorI256WithMask(builder, loc, tagWord, one);
+                if (resultType == i1Type)
+                    return cmp;
+
+                ::mlir::Value isErrU256 = builder.create<::sir::BitcastOp>(loc, u256Type, cmp);
+                if (resultType == u256Type)
+                    return isErrU256;
+
+                return builder.create<::sir::BitcastOp>(loc, resultType, isErrU256);
+            }
+
+            inline ::mlir::Value buildIsErrorFromTag(::mlir::OpBuilder &builder,
+                                                     ::mlir::Location loc,
+                                                     ::mlir::Value tag,
+                                                     ::mlir::Type resultType)
+            {
+                auto tagOr = valueToI256ForNarrowCarrier(builder, loc, tag);
+                if (::mlir::failed(tagOr))
+                    return ::mlir::Value();
+
+                ::mlir::Value one = narrowTagMaskI256Const(builder, loc);
+                return buildIsErrorFromI256TagWordWithMask(builder, loc, *tagOr, one, resultType);
             }
 
             inline ::mlir::Value narrowPackedCarrierTagI256(::mlir::OpBuilder &builder,

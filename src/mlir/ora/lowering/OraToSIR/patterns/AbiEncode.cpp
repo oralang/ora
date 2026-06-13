@@ -1104,7 +1104,6 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     auto *ctx = op.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-    auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
     auto callKind = op->getAttrOfType<mlir::StringAttr>("call_kind");
     if (!callKind)
@@ -1145,10 +1144,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
         calldataPayloadLen = constU256(rewriter, op.getLoc(), calldataRoot.headBytes());
     }
     Value calldataLen = addU256(rewriter, op.getLoc(), constU256(rewriter, op.getLoc(), 4), calldataPayloadLen);
-    Value scratchReturnLen = rewriter.create<sir::ConstOp>(
-        op.getLoc(),
-        u256Type,
-        mlir::IntegerAttr::get(ui64Type, 32));
+    Value scratchReturnLen = constU256(rewriter, op.getLoc(), 32);
     Value scratchReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, scratchReturnLen);
     Value calldataPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, adaptor.getCalldata());
     Value gas = coerceToU256(rewriter, op.getLoc(), adaptor.getGas());
@@ -1169,10 +1165,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     }
     else if (callKind.getValue() == "call")
     {
-        Value zeroValue = rewriter.create<sir::ConstOp>(
-            op.getLoc(),
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, 0));
+        Value zeroValue = constU256(rewriter, op.getLoc(), 0);
         callOp = rewriter.create<sir::CallOp>(
             op.getLoc(),
             u256Type,
@@ -1201,10 +1194,7 @@ LogicalResult ConvertExternalCallOp::matchAndRewrite(
     Value callSuccess = callOp->getResult(0);
     Value fullReturnLen = rewriter.create<sir::ReturnDataSizeOp>(op.getLoc(), u256Type);
     Value fullReturnPtr = rewriter.create<sir::MallocOp>(op.getLoc(), ptrType, fullReturnLen);
-    Value zeroOffset = rewriter.create<sir::ConstOp>(
-        op.getLoc(),
-        u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroOffset = constU256(rewriter, op.getLoc(), 0);
     rewriter.create<sir::ReturnDataCopyOp>(op.getLoc(), fullReturnPtr, zeroOffset, fullReturnLen);
     Value fullReturnPtrU256 = rewriter.create<sir::BitcastOp>(op.getLoc(), u256Type, fullReturnPtr);
     rewriter.replaceOp(op, ValueRange{callSuccess, fullReturnPtrU256});

@@ -13,6 +13,7 @@
 #include "patterns/Logs.h"
 #include "patterns/MissingOps.h"
 #include "patterns/ErrorUnionCarrierHelpers.h"
+#include "patterns/LoweringHelpers.h"
 #include "patterns/StorageLayout.h"
 
 #include "OraDialect.h"
@@ -52,6 +53,7 @@
 using namespace mlir;
 using namespace ora;
 namespace euh = mlir::ora::error_union_helpers;
+using mlir::ora::lowering::constU256;
 
 namespace
 {
@@ -664,7 +666,7 @@ static bool normalizeFuncTerminators(mlir::func::FuncOp funcOp)
         {
             llvm::errs() << "[OraToSIR] ERROR: Terminator has trailing ops in function "
                          << funcOp.getName() << " at " << terminator->getLoc() << "\n";
-            // Keep IR valid for downstream passes by dropping unreachable ops
+            // Keep IR valid for downstream passes by dropping trailing ops
             // that were left after a terminator.
             Operation *extra = terminator->getNextNode();
             while (extra)
@@ -721,7 +723,7 @@ static LogicalResult normalizeResidualAdtExtractOps(ModuleOp module)
                       mlir::MemRefType, mlir::UnrankedMemRefType>(resultType))
         {
             Value payloadPtr = rewriter.create<sir::BitcastOp>(op.getLoc(), ptrType, payload);
-            auto view = ora::createMaterializationCast(rewriter, op.getLoc(), resultType, payloadPtr, mat_kind::kPtrView);
+            auto view = lowering::createPtrViewMaterializationCast(rewriter, op.getLoc(), resultType, payloadPtr);
             rewriter.replaceOp(op, view);
             continue;
         }
@@ -1066,10 +1068,8 @@ static bool foldConstantArithmeticSIR(ModuleOp module)
         if (!lhsInt || !rhsInt) return;
         APInt result = lhsInt.getValue().zextOrTrunc(256) + rhsInt.getValue().zextOrTrunc(256);
         OpBuilder builder(addOp);
-        auto u256Type = sir::U256Type::get(addOp.getContext());
-        auto ui256 = mlir::IntegerType::get(addOp.getContext(), 256, mlir::IntegerType::Unsigned);
-        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
-        addOp.getResult().replaceAllUsesWith(newConst.getResult());
+        Value newConst = constU256(builder, addOp.getLoc(), result);
+        addOp.getResult().replaceAllUsesWith(newConst);
         addOp.erase();
         changed = true; });
 
@@ -1084,10 +1084,8 @@ static bool foldConstantArithmeticSIR(ModuleOp module)
         if (!lhsInt || !rhsInt) return;
         APInt result = lhsInt.getValue().zextOrTrunc(256) * rhsInt.getValue().zextOrTrunc(256);
         OpBuilder builder(mulOp);
-        auto u256Type = sir::U256Type::get(mulOp.getContext());
-        auto ui256 = mlir::IntegerType::get(mulOp.getContext(), 256, mlir::IntegerType::Unsigned);
-        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, IntegerAttr::get(ui256, result));
-        mulOp.getResult().replaceAllUsesWith(newConst.getResult());
+        Value newConst = constU256(builder, mulOp.getLoc(), result);
+        mulOp.getResult().replaceAllUsesWith(newConst);
         mulOp.erase();
         changed = true; });
 
@@ -2153,10 +2151,9 @@ public:
                     {
                         if (isNarrowErr(errType))
                         {
-                            auto u256IntTy = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
                             Value tag = asU256(castOp.getOperand(0));
                             Value payload = asU256(castOp.getOperand(1));
-                            Value one = b.create<sir::ConstOp>(loc, u256Ty, mlir::IntegerAttr::get(u256IntTy, 1));
+                            Value one = constU256(b, loc, 1);
                             Value shifted = b.create<sir::ShlOp>(loc, u256Ty, one, payload);
                             Value packed = b.create<sir::OrOp>(loc, u256Ty, shifted, tag);
                             castOp.getResult(0).replaceAllUsesWith(packed);
@@ -2288,9 +2285,7 @@ public:
                     int64_t id = errorIds[op.getCalleeAttr().getValue()];
                     OpBuilder b(op);
                     auto u256 = sir::U256Type::get(ctx);
-                    auto ui256 = mlir::IntegerType::get(ctx, 256, mlir::IntegerType::Unsigned);
-                    auto idConst = b.create<sir::ConstOp>(
-                        op.getLoc(), u256, mlir::IntegerAttr::get(ui256, id));
+                    Value idConst = constU256(b, op.getLoc(), static_cast<uint64_t>(id));
                     // Replace all results with the error ID constant or zero.
                     for (unsigned i = 0; i < op.getNumResults(); ++i)
                     {
@@ -2866,9 +2861,7 @@ namespace mlir
                         OpBuilder builder(addOp);
                         auto resultType = addOp.getResult().getType();
                         auto u256Type = sir::U256Type::get(addOp.getContext());
-                        auto ui256 = mlir::IntegerType::get(addOp.getContext(), 256, mlir::IntegerType::Unsigned);
-                        auto newConst = builder.create<sir::ConstOp>(addOp.getLoc(), u256Type, mlir::IntegerAttr::get(ui256, result));
-                        Value resultVal = newConst.getResult();
+                        Value resultVal = constU256(builder, addOp.getLoc(), result);
                         if (resultType != u256Type)
                             resultVal = builder.create<sir::BitcastOp>(addOp.getLoc(), resultType, resultVal);
                         addOp.getResult().replaceAllUsesWith(resultVal);
@@ -2886,9 +2879,7 @@ namespace mlir
                         OpBuilder builder(mulOp);
                         auto resultType = mulOp.getResult().getType();
                         auto u256Type = sir::U256Type::get(mulOp.getContext());
-                        auto ui256 = mlir::IntegerType::get(mulOp.getContext(), 256, mlir::IntegerType::Unsigned);
-                        auto newConst = builder.create<sir::ConstOp>(mulOp.getLoc(), u256Type, mlir::IntegerAttr::get(ui256, result));
-                        Value resultVal = newConst.getResult();
+                        Value resultVal = constU256(builder, mulOp.getLoc(), result);
                         if (resultType != u256Type)
                             resultVal = builder.create<sir::BitcastOp>(mulOp.getLoc(), resultType, resultVal);
                         mulOp.getResult().replaceAllUsesWith(resultVal);

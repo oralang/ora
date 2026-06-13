@@ -20,6 +20,7 @@
 #include "llvm/Support/Casting.h"
 
 using namespace mlir;
+using mlir::ora::lowering::constU256;
 
 namespace mlir
 {
@@ -574,9 +575,7 @@ namespace mlir
                             {
                                 OpBuilder b(op);
                                 auto u256 = sir::U256Type::get(op.getContext());
-                                auto ui256 = mlir::IntegerType::get(op.getContext(), 256, mlir::IntegerType::Unsigned);
-                                auto idConst = b.create<sir::ConstOp>(
-                                    op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
+                                Value idConst = constU256(b, op.getLoc(), static_cast<uint64_t>(it->second));
                                 for (unsigned i = 0; i < op.getNumResults(); ++i)
                                 {
                                     Value oldRes = op.getResult(i);
@@ -624,8 +623,7 @@ namespace mlir
                             }
                             if (op.getNumResults() > newCall.getNumResults())
                             {
-                                auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
-                                                                   IntegerAttr::get(b.getI64Type(), 0));
+                                Value zero = constU256(b, op.getLoc(), 0);
                                 for (unsigned i = common; i < op.getNumResults(); ++i)
                                 {
                                     Value oldRes = op.getResult(i);

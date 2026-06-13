@@ -429,6 +429,29 @@ test "OraToSIR rejects generic aggregate to scalar cast fallback" {
     try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
 }
 
+test "OraToSIR rejects value typed try_stmt with empty yield" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @bad() -> i256 {
+        \\    %0 = "ora.try_stmt"() ({
+        \\      ora.yield
+        \\    }, {
+        \\      ora.yield
+        \\    }) : () -> i256
+        \\    ora.return %0 : i256
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
 test "OraToSIR keeps narrow signed arithmetic in u256 carrier" {
     const source_text =
         \\pub fn div_i128(a: i128, b: i128) -> i128 {

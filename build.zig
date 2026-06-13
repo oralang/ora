@@ -628,6 +628,24 @@ pub fn build(b: *std.Build) void {
     const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
     conformance_one_step.dependOn(&conformance_one_install.step);
 
+    // Metrics snapshot harness — prints gas + bytecode-size metrics per corpus
+    // entry for the change-quality benchmark.
+    const metrics_snapshot_mod = b.createModule(.{
+        .root_source_file = b.path("tests/conformance/metrics_snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    metrics_snapshot_mod.addImport("ora_evm", ora_evm_mod);
+    metrics_snapshot_mod.addImport("voltaire", evm_primitives_mod);
+    const metrics_snapshot_exe = b.addExecutable(.{
+        .name = "metrics-snapshot",
+        .root_module = metrics_snapshot_mod,
+    });
+    metrics_snapshot_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    const metrics_snapshot_install = b.addInstallArtifact(metrics_snapshot_exe, .{});
+    const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
+    metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
+
     const evm_tests_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",

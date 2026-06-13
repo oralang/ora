@@ -94,7 +94,7 @@ static Value signExtendToU256(ConversionPatternRewriter &rewriter, Location loc,
         return input;
 
     llvm::APInt shiftAmount(256, 256 - sourceWidth);
-    Value shift = rewriter.create<sir::ConstOp>(loc, shiftAmount);
+    Value shift = constU256(rewriter, loc, shiftAmount);
     Value shiftedLeft = rewriter.create<sir::ShlOp>(loc, u256Type, shift, input).getResult();
     return rewriter.create<sir::SarOp>(loc, u256Type, shift, shiftedLeft).getResult();
 }
@@ -612,10 +612,10 @@ LogicalResult ConvertConstOp::matchAndRewrite(
         val = val.zext(256);
     else if (val.getBitWidth() > 256)
         val = val.trunc(256);
-    auto constOp = rewriter.create<sir::ConstOp>(loc, val);
-    constOp->setAttr("ora.name", op.getNameAttr());
 
-    Value result = constOp.getResult();
+    Value result = constU256(rewriter, loc, val);
+    if (Operation *constOp = result.getDefiningOp())
+        constOp->setAttr("ora.name", op.getNameAttr());
     if (convertedType != u256Type)
         result = rewriter.create<sir::BitcastOp>(loc, convertedType, result);
 
@@ -1261,14 +1261,15 @@ LogicalResult ConvertArithConstantOp::matchAndRewrite(
     else if (val.getBitWidth() > 256)
         val = val.trunc(256);
 
-    auto constOp = rewriter.create<sir::ConstOp>(loc, val);
+    Value constResult = constU256(rewriter, loc, val);
 
     auto &naming = getNamingHelper(op);
     if (val.ule(10000))
     {
-        naming.nameConst(constOp.getOperation(), 0, val.getZExtValue());
+        if (Operation *constOp = constResult.getDefiningOp())
+            naming.nameConst(constOp, 0, val.getZExtValue());
     }
-    rewriter.replaceOp(op, constOp.getResult());
+    rewriter.replaceOp(op, constResult);
     return success();
 }
 
@@ -1684,7 +1685,7 @@ LogicalResult ConvertArithExtSIOp::matchAndRewrite(
     if (sourceWidth < 256)
     {
         llvm::APInt shiftAmount(256, 256 - sourceWidth);
-        Value shift = rewriter.create<sir::ConstOp>(loc, shiftAmount);
+        Value shift = constU256(rewriter, loc, shiftAmount);
         Value shiftedLeft = rewriter.create<sir::ShlOp>(loc, u256Type, shift, input).getResult();
         input = rewriter.create<sir::SarOp>(loc, u256Type, shift, shiftedLeft).getResult();
     }
@@ -1775,7 +1776,7 @@ LogicalResult ConvertArithTruncIOp::matchAndRewrite(
 
     // Emit AND with low-bits mask: (1 << targetWidth) - 1
     llvm::APInt mask = llvm::APInt::getLowBitsSet(256, targetWidth);
-    Value maskConst = rewriter.create<sir::ConstOp>(loc, mask);
+    Value maskConst = constU256(rewriter, loc, mask);
     Value inputU256 = coerceToU256(rewriter, loc, input);
     Value masked = rewriter.create<sir::AndOp>(loc, u256Type, inputU256, maskConst);
 

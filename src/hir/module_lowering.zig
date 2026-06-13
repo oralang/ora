@@ -22,6 +22,9 @@ const strRef = support.strRef;
 const zeroInitAttr = support.zeroInitAttr;
 const reprIntegerType = support.reprIntegerType;
 
+const no_public_result_input_error_id: i64 = 0;
+const no_abi_param_enum_count: usize = 0;
+
 pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSymbolKind: type) type {
     return struct {
         pub fn lowerItem(self: *Lowerer, item_id: ast.ItemId, parent_block: mlir.MlirBlock) anyerror!void {
@@ -841,11 +844,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 ) catch return error.OutOfMemory;
                 result_input_error_id_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast((try @This().publicResultInputErrorId(self, param_type)) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(try @This().publicResultInputErrorIdAttrValue(self, param_type))),
                 ) catch return error.OutOfMemory;
                 abi_param_enum_count_attrs.append(
                     self.allocator,
-                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(@This().enumVariantCountForType(self, param_type) orelse 0)),
+                    mlir.oraIntegerAttrCreateI64FromType(reprIntegerType(self.context), @intCast(@This().enumVariantCountAttrValue(self, param_type))),
                 ) catch return error.OutOfMemory;
                 const refinement_spec = try @This().abiParamRefinementSpec(self, param_type);
                 defer self.allocator.free(refinement_spec);
@@ -1630,6 +1633,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             return @intCast(abi_support.keccakSelectorValue(signature));
         }
 
+        fn publicResultInputErrorIdAttrValue(self: *Lowerer, ty: sema.Type) anyerror!i64 {
+            return (try @This().publicResultInputErrorId(self, ty)) orelse no_public_result_input_error_id;
+        }
+
         fn enumVariantCountForType(self: *Lowerer, ty: sema.Type) ?usize {
             const enum_name = ty.name() orelse return null;
             for (self.typecheck.instantiated_enums) |instantiated| {
@@ -1641,6 +1648,10 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 else => return null,
             };
             return enum_item.variants.len;
+        }
+
+        fn enumVariantCountAttrValue(self: *Lowerer, ty: sema.Type) usize {
+            return @This().enumVariantCountForType(self, ty) orelse no_abi_param_enum_count;
         }
 
         fn abiParamRefinementSpec(self: *Lowerer, ty: sema.Type) ![]const u8 {

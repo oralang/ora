@@ -1,4 +1,0 @@
-# FINDINGS.md#f-005 — characterizes the current lowering failure. Remove this
-# entry (and add a positive conformance spec) when trait calls from contract
-# functions are supported.
-expect_error = "does not reference a valid function"
