@@ -602,6 +602,12 @@ namespace mlir
                             report(op.getOperation(), "icall argument count does not match callee function inputs");
                         if (funcType.getNumResults() != op.getResults().size())
                         {
+                            if (op.getNumResults() > funcType.getNumResults())
+                            {
+                                report(op.getOperation(), "icall result count exceeds callee function results");
+                                continue;
+                            }
+
                             OpBuilder b(op);
                             auto u256 = sir::U256Type::get(op.getContext());
                             SmallVector<Type, 4> newResults;
@@ -620,21 +626,6 @@ namespace mlir
                                 }
                                 else
                                     oldRes.replaceAllUsesWith(newRes);
-                            }
-                            if (op.getNumResults() > newCall.getNumResults())
-                            {
-                                Value zero = constU256(b, op.getLoc(), 0);
-                                for (unsigned i = common; i < op.getNumResults(); ++i)
-                                {
-                                    Value oldRes = op.getResult(i);
-                                    if (isa<sir::PtrType>(oldRes.getType()))
-                                    {
-                                        auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), zero);
-                                        oldRes.replaceAllUsesWith(bc.getResult());
-                                    }
-                                    else
-                                        oldRes.replaceAllUsesWith(zero);
-                                }
                             }
                             op.erase();
                         }

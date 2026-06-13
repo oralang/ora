@@ -141,6 +141,11 @@ test "formatter width must be nonzero" {
     try testing.expectError(error.UnknownArgument, cli.parseArgs(&args));
 }
 
+test "bare fmt token is not positional formatter mode" {
+    const args = [_][]const u8{ "contract.ora", "fmt" };
+    try testing.expectError(error.UnknownArgument, cli.parseArgs(&args));
+}
+
 test "emit ast formats validate at parse time" {
     const bad_ast = [_][]const u8{"--emit=ast:xml"};
     try testing.expectError(error.UnknownArgument, cli.parseArgs(&bad_ast));

@@ -177,7 +177,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     var seen_validate_mlir = false;
     var seen_canonicalize = false;
     var seen_chain_id = false;
-    var seen_fmt = false;
     var seen_fmt_check = false;
     var seen_fmt_diff = false;
     var seen_fmt_stdout = false;
@@ -316,10 +315,6 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
             opts.chain_id = std.fmt.parseInt(u64, arg["--chain-id=".len..], 0) catch {
                 return error.UnknownArgument;
             };
-            i += 1;
-        } else if (std.mem.eql(u8, arg, "fmt")) {
-            try claim(&seen_fmt);
-            opts.fmt = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--check")) {
             try claim(&seen_fmt_check);

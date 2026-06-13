@@ -168,9 +168,9 @@ namespace mlir
                 return func.getLoc();
             }
 
-            static uint64_t computeDebugNamedMemoryReserveBytes(ModuleOp module)
+            static uint64_t computeNamedMemoryReserveBytes(ModuleOp module)
             {
-                if (!module || !module->hasAttr("ora.debug_info"))
+                if (!module)
                     return 0;
                 auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
                 if (!slotsAttr || slotsAttr.empty())
@@ -1477,25 +1477,11 @@ namespace mlir
                             oldRes.replaceAllUsesWith(newRes);
                         }
 
-                        // If old call had fewer results, the prefix mapping above is sufficient.
                         if (icall.getNumResults() > newCall.getNumResults())
                         {
-                            auto zero = lowering::constU256(callBuilder, icall.getLoc(), 0);
-                            for (unsigned i = common; i < icall.getNumResults(); ++i)
-                            {
-                                Value oldRes = icall.getResult(i);
-                                if (isa<sir::PtrType>(oldRes.getType()))
-                                {
-                                    auto bc = callBuilder.create<sir::BitcastOp>(icall.getLoc(),
-                                                                                 oldRes.getType(),
-                                                                                 zero);
-                                    oldRes.replaceAllUsesWith(bc.getResult());
-                                }
-                                else
-                                {
-                                    oldRes.replaceAllUsesWith(zero);
-                                }
-                            }
+                            icall.emitError("dispatcher icall result count exceeds rewritten callee result count");
+                            signalPassFailure();
+                            return;
                         }
 
                         icall.erase();
@@ -2117,13 +2103,13 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
                     // Sensei initializes memory[0x20] to its static memory high-water mark
-                    // before entering main. Only raise it here when debug named-memory slots
-                    // need room after CODESIZE.
+                    // before entering main. Raise it past compiler-owned named-memory slots
+                    // placed after CODESIZE so user allocations cannot collide with them.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
                     Value runtimeHeapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
-                    if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
+                    if (uint64_t namedMemoryBytes = computeNamedMemoryReserveBytes(module))
                     {
-                        Value reservedBytes = lowering::constU256(builder, dispatcherMainLoc, debugNamedMemoryBytes);
+                        Value reservedBytes = lowering::constU256(builder, dispatcherMainLoc, namedMemoryBytes);
                         runtimeHeapBase = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, runtimeHeapBase, reservedBytes);
                     }
                     Value currentFreePtr = builder.create<sir::LoadOp>(dispatcherMainLoc, u256Type, freePtrSlot);

@@ -739,7 +739,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return appendValueOp(self.block, op);
         }
 
+        fn returnExprTypeIsDeclaredError(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            const function = self.function orelse return false;
+            const return_type = self.parent.typecheck.body_types[function.body.index()];
+            if (return_type.kind() != .error_union) return false;
+
+            const expr_type = self.parent.typecheck.exprType(expr_id);
+            for (return_type.errorTypes()) |error_type| {
+                if (type_descriptors.typeEql(expr_type, error_type)) return true;
+            }
+            return false;
+        }
+
         fn returnExprIsErrorShaped(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            if (@This().returnExprTypeIsDeclaredError(self, expr_id)) return true;
+
             return switch (self.parent.file.expression(expr_id).*) {
                 .ErrorReturn => true,
                 .Name => |name| blk: {

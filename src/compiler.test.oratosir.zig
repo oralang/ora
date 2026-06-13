@@ -3341,6 +3341,76 @@ test "OraToSIR rejects missing strict storage slot metadata" {
     try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
 }
 
+test "OraToSIR lowers named memory slots without release malloc fallback" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module attributes {ora.global_slots_built, ora.global_slots = {scratch = 0 : ui64}} {
+        \\  ora.contract @C {
+        \\    func.func @roundtrip(%arg0: !sir.u256) {
+        \\      ora.mstore %arg0, "scratch" : !sir.u256
+        \\      %0 = ora.mload "scratch" : !sir.u256
+        \\      sir.iret %0
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+    const rendered = try renderSirTextForModule(ctx, module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "codesize"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mstore256"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "mload256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "malloc"));
+}
+
+test "SIR text legalizer rejects icall result underflow instead of zero filling" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() {
+        \\    sir.stop
+        \\  }
+        \\  func.func @main() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraLegalizeSIRText(ctx, module));
+}
+
+test "SIR dispatcher rejects icall result underflow instead of zero filling" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() {
+        \\    sir.stop
+        \\  }
+        \\  func.func @caller() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraBuildSIRDispatcher(ctx, module));
+}
+
 test "OraToSIR rejects malformed ABI encode and decode layout attributes" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);

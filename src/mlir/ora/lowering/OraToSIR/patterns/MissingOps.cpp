@@ -35,15 +35,6 @@ static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
 }
 
-static bool isDebugInfoLoweringEnabled(Operation *op)
-{
-    if (!op)
-        return false;
-    if (auto module = op->getParentOfType<ModuleOp>())
-        return module->hasAttr("ora.debug_info");
-    return false;
-}
-
 static std::optional<uint64_t> lookupNamedRootSlot(Operation *op, StringRef rootName)
 {
     if (!op)
@@ -59,7 +50,7 @@ static std::optional<uint64_t> lookupNamedRootSlot(Operation *op, StringRef root
     return std::nullopt;
 }
 
-static Value buildDebugNamedMemoryPtr(
+static Value buildNamedMemoryPtr(
     PatternRewriter &rewriter,
     Location loc,
     Operation *op,
@@ -143,11 +134,7 @@ LogicalResult ConvertPowerOp::matchAndRewrite(
 }
 
 // ---------------------------------------------------------------------------
-// ora.mload → sir.malloc + sir.load
-// Named memory variables: allocate a slot and load from it.
-// At SIR level, named variables are lowered to memory pointers that the
-// upstream alloc pass will resolve. For now, emit a sir.freeptr to get the
-// current free memory pointer and use it as the load address.
+// ora.mload → sir.load from the deterministic named memory slot.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertMLoadOp::matchAndRewrite(
     ora::MLoadOp op,
@@ -156,28 +143,18 @@ LogicalResult ConvertMLoadOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
 
-    if (isDebugInfoLoweringEnabled(op.getOperation()))
-    {
-        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
-        {
-            Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
-            rewriter.replaceOp(op, result);
-            return success();
-        }
-    }
+    Value ptr = buildNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable());
+    if (!ptr)
+        return rewriter.notifyMatchFailure(op, "missing named memory slot metadata");
 
-    // Allocate a word-sized slot and load from it.
-    Value size = constU256(rewriter, loc, evm::kWordBytes);
-    Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
     Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
     rewriter.replaceOp(op, result);
     return success();
 }
 
 // ---------------------------------------------------------------------------
-// ora.mstore → sir.malloc + sir.store
+// ora.mstore → sir.store to the deterministic named memory slot.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertMStoreOp::matchAndRewrite(
     ora::MStoreOp op,
@@ -185,23 +162,14 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
     Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
     if (!val)
         return failure();
 
-    if (isDebugInfoLoweringEnabled(op.getOperation()))
-    {
-        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
-        {
-            rewriter.create<sir::StoreOp>(loc, ptr, val);
-            rewriter.eraseOp(op);
-            return success();
-        }
-    }
+    Value ptr = buildNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable());
+    if (!ptr)
+        return rewriter.notifyMatchFailure(op, "missing named memory slot metadata");
 
-    Value size = constU256(rewriter, loc, evm::kWordBytes);
-    Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
     rewriter.create<sir::StoreOp>(loc, ptr, val);
     rewriter.eraseOp(op);
     return success();

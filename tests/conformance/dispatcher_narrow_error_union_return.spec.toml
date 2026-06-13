@@ -25,6 +25,13 @@ args = [2]
 reverts = { selector = "0xff7e9f57" }
 
 [[call]]
+fn = "runtime_error_value()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = { selector = "0xff7e9f57" }
+
+[[call]]
 fn = "rich(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
