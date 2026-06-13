@@ -11,12 +11,12 @@ integer map keys, nested mappings, structs under maps, and packed bitfields.
 The sidecar ABI encoder accepts static ABI words (`uintN`/`intN`, `address`,
 `bool`, `bytes1` through `bytes32`) plus dynamic ABI head/tail encoding for
 arrays and tuples. The live corpus includes `uint256[]` calldata; tuple-array
-encoding is unit-tested in the harness but blocked from live execution by the
-compiler dispatcher.
+encoding is unit-tested in the harness, and mixed dynamic tuple calldata is
+covered by the dispatcher corpus.
 
 Still open from the shell smoke matrix:
 
-- dynamic tuple ABI types, currently blocked by the compiler dispatcher
+- storage slice struct fixtures
   (`storage_slice_struct.ora` and `storage_slice_dynamic_struct.ora` are
   explicit in `SKIP`);
 - multi-contract deploy/call scenarios;

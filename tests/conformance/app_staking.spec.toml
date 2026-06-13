@@ -1,0 +1,50 @@
+# Gas benchmark + execution coverage: staking flow over
+# ora-example/corpus/patterns/staking.ora (stake / unstake / claimRewards).
+[deploy]
+source = "ora-example/corpus/patterns/staking.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+ignore_logs = true
+
+[[call]]
+fn = "stake(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1000]
+returns = {}
+
+[[call]]
+fn = "getStake(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "getTotalStaked()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "unstake(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [400]
+returns = { bool = true }
+
+[[call]]
+fn = "getStake(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { u256 = 600 }
+
+[[call]]
+fn = "claimRewards()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+succeeds = {}

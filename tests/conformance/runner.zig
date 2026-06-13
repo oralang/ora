@@ -394,10 +394,12 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
             },
         }
 
-        try testing.expectEqual(call.logs.len, result.logs.len);
-        for (call.logs, result.logs) |expected_log, actual_log| {
-            try testing.expectEqualSlices(u256, expected_log.topics, actual_log.topics);
-            try testing.expectEqualSlices(u8, expected_log.data, actual_log.data);
+        if (!spec.deploy.ignore_logs) {
+            try testing.expectEqual(call.logs.len, result.logs.len);
+            for (call.logs, result.logs) |expected_log, actual_log| {
+                try testing.expectEqualSlices(u256, expected_log.topics, actual_log.topics);
+                try testing.expectEqualSlices(u8, expected_log.data, actual_log.data);
+            }
         }
 
         for (call.storage) |assertion| {

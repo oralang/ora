@@ -89,6 +89,12 @@ namespace mlir
                 return loc;
             }
 
+            static bool isPtrWordResultRepair(Type from, Type to)
+            {
+                return (isa<sir::PtrType>(from) && isa<sir::U256Type>(to)) ||
+                       (isa<sir::U256Type>(from) && isa<sir::PtrType>(to));
+            }
+
             static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
             {
                 MLIRContext *ctx = loc.getContext();
@@ -600,6 +606,19 @@ namespace mlir
                         auto funcType = func.getFunctionType();
                         if (funcType.getNumInputs() != op.getArgs().size())
                             report(op.getOperation(), "icall argument count does not match callee function inputs");
+                        if (funcType.getNumResults() == op.getResults().size())
+                        {
+                            for (unsigned i = 0; i < funcType.getNumResults(); ++i)
+                            {
+                                Type expected = funcType.getResult(i);
+                                Type actual = op.getResult(i).getType();
+                                if (isPtrWordResultRepair(actual, expected))
+                                {
+                                    report(op.getOperation(), "icall ptr/u256 result mismatch requires explicit lowering");
+                                    break;
+                                }
+                            }
+                        }
                         if (funcType.getNumResults() != op.getResults().size())
                         {
                             if (op.getNumResults() > funcType.getNumResults())
@@ -621,6 +640,11 @@ namespace mlir
                                 Value newRes = newCall.getResult(i);
                                 if (oldRes.getType() != newRes.getType())
                                 {
+                                    if (isPtrWordResultRepair(oldRes.getType(), newRes.getType()))
+                                    {
+                                        report(op.getOperation(), "icall ptr/u256 result mismatch requires explicit lowering");
+                                        continue;
+                                    }
                                     auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), newRes);
                                     oldRes.replaceAllUsesWith(bc.getResult());
                                 }

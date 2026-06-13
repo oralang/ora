@@ -1,0 +1,45 @@
+# Gas benchmark + execution coverage: AMM flow over
+# ora-example/corpus/patterns/amm_pool.ora (addLiquidity / swap). First
+# addLiquidity mints shares == amountA; swap output isn't asserted (fee math),
+# only that it executes (gas measured).
+[deploy]
+source = "ora-example/corpus/patterns/amm_pool.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+ignore_logs = true
+
+[[call]]
+fn = "addLiquidity(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1000, 1000]
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "getReserves()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "getShares(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "swapAForB(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [100]
+succeeds = {}
+
+[[call]]
+fn = "getShares(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { u256 = 1000 }

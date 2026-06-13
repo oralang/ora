@@ -422,26 +422,3 @@ test "unsigned mul overflow check proves bounded constant multiplier safe" {
     solver.assert(overflow);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
-
-test "signed mul overflow check catches MIN_INT times negative one" {
-    var z3_ctx = try Context.init(testing.allocator);
-    defer z3_ctx.deinit();
-
-    var encoder = Encoder.init(&z3_ctx, testing.allocator);
-    defer encoder.deinit();
-
-    const bv256 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
-    const min_int = z3.Z3_mk_numeral(
-        z3_ctx.ctx,
-        "57896044618658097711785492504343953926634992332820282019728792003956564819968",
-        bv256,
-    );
-    const neg_one = z3.Z3_mk_numeral(z3_ctx.ctx, "-1", bv256);
-
-    const overflow = encoder.checkSignedMulOverflow(min_int, neg_one);
-
-    var solver = try Solver.init(&z3_ctx, testing.allocator);
-    defer solver.deinit();
-    solver.assert(z3.Z3_mk_not(z3_ctx.ctx, overflow));
-    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
-}

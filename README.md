@@ -274,10 +274,49 @@ Stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-l
 
 ## Development
 
-Run tests:
-```bash
-zig build test
-```
+### Testing
+
+`zig build gate` is the single bar — it runs the full pre-push suite, and the
+pre-push hook runs it on your committed state. Everything else below is a subset
+you can run directly for faster feedback. Append `-Dskip-mlir=true` to any command
+to reuse the prebuilt MLIR libraries and skip the slow MLIR rebuild.
+
+**Core commands**
+
+| Command | What it runs |
+|---|---|
+| `zig build gate` | The full pre-push bar: unit tests + OraToSIR gate + Ora/SIR FileCheck snapshots + bytecode conformance + negative corpus + verifier-mutation soundness + SMT corpus + LSP smoke. |
+| `zig build test` | All Zig unit tests (compiler core, types, MLIR, LSP). |
+| `zig build test-conformance` | Executes emitted **bytecode** on the in-process `lib/evm` against every `.ora` + `.spec.toml` pair. The primary correctness oracle. |
+| `zig build test-evm` | `lib/evm` (the EVM implementation) unit tests. |
+
+**Targeted / fast subsets**
+
+| Command | What it runs |
+|---|---|
+| `zig build test-compiler -Dcompiler-test-filter="<substr>"` | Compiler core tests matching a name substring. |
+| `zig build test-lexer` / `test-types` / `test-mlir` / `test-lsp` | Individual subsystem suites (lexer & lsp need no MLIR/Z3). |
+| `zig build conformance-one` then `./zig-out/bin/conformance-one <file.ora> <spec.toml>` | Run a single conformance spec on `lib/evm`. |
+
+**Snapshots & invariant tripwires**
+
+| Command | What it checks |
+|---|---|
+| `zig build check-mlir-ora` / `check-mlir-sir` / `check-sir-text` | FileCheck snapshots of Ora MLIR, SIR MLIR, and SIR text. Needs the `FileCheck` binary (set `FILECHECK=/path/to/FileCheck` to override). |
+| `zig build check-negative-corpus` | The negative corpus still yields the expected diagnostics and **no bytecode**. |
+| `zig build check-findings-ledger` | Validates `tests/conformance/FINDINGS.md` and reports masked known defects. |
+| `zig build check-verifier-mutations` | Bounded verifier-soundness mutation set. |
+| `zig build check-feature-execution-coverage` | Every tracked feature has an executing test. |
+
+**Gas / size metrics & differential**
+
+| Command | What it does |
+|---|---|
+| `zig build metrics-snapshot` then `python3 scripts/metrics-check.py` | Gas + bytecode-size benchmark over the corpus; diffs against the committed baseline with a per-category better/worse verdict. |
+| `python3 scripts/metrics-check.py --update` | Rewrite the baseline after an intentional codegen change (review the diff first). |
+| `bash scripts/anvil-diff-corpus.sh` | Cross-check `lib/evm` against Anvil/revm over the whole corpus; fails only on a real divergence. Requires Foundry (`anvil`/`cast`). |
+
+### Other checks
 
 Validate examples:
 ```bash

@@ -3716,59 +3716,6 @@ pub const Encoder = struct {
         return z3.Z3_mk_and(self.context.ctx, 2, &[_]z3.Z3_ast{ rhs_non_zero, lhs_too_large });
     }
 
-    /// Check for signed overflow in addition.
-    /// Overflow iff operands have same sign and result has different sign:
-    ///   ((result ^ a) & (result ^ b))[MSB] == 1
-    pub fn checkSignedAddOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        const ctx = self.context.ctx;
-        const result = z3.Z3_mk_bv_add(ctx, lhs, rhs);
-        const xor_ra = z3.Z3_mk_bvxor(ctx, result, lhs);
-        const xor_rb = z3.Z3_mk_bvxor(ctx, result, rhs);
-        const both = z3.Z3_mk_bvand(ctx, xor_ra, xor_rb);
-        const sort = z3.Z3_get_sort(ctx, lhs);
-        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
-        return z3.Z3_mk_bvslt(ctx, both, zero); // MSB set → overflow
-    }
-
-    /// Check for signed overflow in subtraction.
-    /// Overflow iff operands have different sign and result has different sign from lhs:
-    ///   ((a ^ b) & (result ^ a))[MSB] == 1
-    pub fn checkSignedSubOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        const ctx = self.context.ctx;
-        const result = z3.Z3_mk_bv_sub(ctx, lhs, rhs);
-        const xor_ab = z3.Z3_mk_bvxor(ctx, lhs, rhs);
-        const xor_ra = z3.Z3_mk_bvxor(ctx, result, lhs);
-        const both = z3.Z3_mk_bvand(ctx, xor_ab, xor_ra);
-        const sort = z3.Z3_get_sort(ctx, lhs);
-        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
-        return z3.Z3_mk_bvslt(ctx, both, zero);
-    }
-
-    /// Check for signed overflow in multiplication.
-    /// Overflow iff b != 0 && sdiv(a*b, b) != a, with special case for MIN_INT * -1.
-    pub fn checkSignedMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        const ctx = self.context.ctx;
-        const sort = z3.Z3_get_sort(ctx, lhs);
-        const zero = z3.Z3_mk_unsigned_int64(ctx, 0, sort);
-        const one = z3.Z3_mk_unsigned_int64(ctx, 1, sort);
-        const width = z3.Z3_get_bv_sort_size(ctx, sort);
-        const shift_amount_sort = z3.Z3_mk_bv_sort(ctx, width);
-        const shift_amount = z3.Z3_mk_unsigned_int64(ctx, width - 1, shift_amount_sort);
-        const min_int = z3.Z3_mk_bvshl(ctx, one, shift_amount);
-        const neg_one = z3.Z3_mk_numeral(ctx, "-1", sort);
-
-        const lhs_is_min = z3.Z3_mk_eq(ctx, lhs, min_int);
-        const rhs_is_neg_one = z3.Z3_mk_eq(ctx, rhs, neg_one);
-        const special = z3.Z3_mk_and(ctx, 2, &[_]z3.Z3_ast{ lhs_is_min, rhs_is_neg_one });
-
-        const rhs_nz = z3.Z3_mk_not(ctx, z3.Z3_mk_eq(ctx, rhs, zero));
-        const product = z3.Z3_mk_bv_mul(ctx, lhs, rhs);
-        const recovered = z3.Z3_mk_bvsdiv(ctx, product, rhs);
-        const mismatch = z3.Z3_mk_not(ctx, z3.Z3_mk_eq(ctx, recovered, lhs));
-        const general = z3.Z3_mk_and(ctx, 2, &[_]z3.Z3_ast{ rhs_nz, mismatch });
-        return z3.Z3_mk_or(ctx, 2, &[_]z3.Z3_ast{ special, general });
-    }
-
     /// Check for division by zero
     pub fn checkDivByZero(self: *Encoder, divisor: z3.Z3_ast) z3.Z3_ast {
         // create zero constant of same width as divisor

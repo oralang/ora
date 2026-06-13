@@ -1,0 +1,65 @@
+# Gas benchmark + execution coverage: realistic ERC-20 flow over
+# ora-example/corpus/patterns/full_token.ora (init / transfer / approve /
+# transferFrom). Deployer is the init msg.sender and holds the initial supply.
+[deploy]
+source = "ora-example/corpus/patterns/full_token.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1000000]
+ignore_logs = true
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { u256 = 1000000 }
+
+[[call]]
+fn = "transfer(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1000]
+returns = { bool = true }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 1000 }
+
+[[call]]
+fn = "approve(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002", 500]
+returns = { bool = true }
+
+[[call]]
+fn = "allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x2000000000000000000000000000000000000002"]
+returns = { u256 = 500 }
+
+[[call]]
+fn = "transferFrom(address,address,uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x1000000000000000000000000000000000000001", 500]
+returns = { bool = true }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { u256 = 1500 }
+
+[[call]]
+fn = "allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x2000000000000000000000000000000000000002"]
+returns = { u256 = 0 }

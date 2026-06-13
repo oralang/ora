@@ -2352,6 +2352,16 @@ fn rejectIfExecutableFallbacksSurvive(
     }
 }
 
+fn exitIfCompilationNotArtifactEmittable(
+    writer: anytype,
+    compilation: *const compiler.driver.Compilation,
+) !void {
+    if (compilation.isArtifactEmittable()) return;
+    try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+    try writer.flush();
+    std.process.exit(1);
+}
+
 fn writeDetectOnlyTypeFallbacks(
     writer: anytype,
     sources: ?*const compiler.source.SourceStore,
@@ -4633,11 +4643,13 @@ fn runAbiEmit(
         .compile_options = compileOptionsForChain(chain_id),
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
+    try exitIfCompilationNotArtifactEmittable(stdout, &compilation);
 
     var contract_abi = lib.abi.generateCompilerAbi(allocator, &compilation) catch |err| switch (err) {
         error.MissingContract => {

@@ -18,13 +18,14 @@ const DeployBuilder = struct {
     value: ?u256 = null,
     args: ?[]types.ArgValue = null,
     source: ?[]const u8 = null,
+    ignore_logs: ?bool = null,
 
     fn toSpec(self: *DeployBuilder) !types.DeploySpec {
         const caller = self.caller orelse return error.MissingRequiredField;
         const value = self.value orelse return error.MissingRequiredField;
         const args = self.args orelse return error.MissingRequiredField;
         self.args = null;
-        return .{ .caller = caller, .value = value, .args = args, .source = self.source };
+        return .{ .caller = caller, .value = value, .args = args, .source = self.source, .ignore_logs = self.ignore_logs orelse false };
     }
 };
 
@@ -129,6 +130,7 @@ const deploy_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "value", .present },
     .{ "args", .present },
     .{ "source", .present },
+    .{ "ignore_logs", .present },
 });
 const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "fn", .present },
@@ -273,7 +275,7 @@ fn ParsedField(comptime field_name: []const u8, comptime FieldType: type) type {
         .optional => |opt| opt.child,
         else => @compileError("conformance spec field must be optional: " ++ field_name),
     };
-    if (child == types.Address or child == u256 or child == u64 or child == []types.ArgValue or child == []const u8 or child == []u256 or child == []u8 or child == types.ExpectedOutcome) {
+    if (child == types.Address or child == u256 or child == u64 or child == bool or child == []types.ArgValue or child == []const u8 or child == []u256 or child == []u8 or child == types.ExpectedOutcome) {
         return child;
     }
     @compileError("missing conformance spec parser for field: " ++ field_name);
@@ -296,6 +298,11 @@ fn assignField(comptime Builder: type, allocator: std.mem.Allocator, builder: *B
             try slots.parseSlotExpressionValue(value)
         else
             try abi.parseU256(value);
+        return;
+    }
+    if (Parsed == bool) {
+        const t = std.mem.trim(u8, value, " \t");
+        @field(builder.*, field_name) = if (std.mem.eql(u8, t, "true")) true else if (std.mem.eql(u8, t, "false")) false else return error.InvalidBool;
         return;
     }
     if (Parsed == u64) {

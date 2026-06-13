@@ -3411,6 +3411,48 @@ test "SIR dispatcher rejects icall result underflow instead of zero filling" {
     try testing.expect(!mlir.oraBuildSIRDispatcher(ctx, module));
 }
 
+test "SIR text legalizer rejects ptr word icall result repair" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() -> !sir.ptr<1> {
+        \\    sir.stop
+        \\  }
+        \\  func.func @main() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraLegalizeSIRText(ctx, module));
+}
+
+test "SIR dispatcher rejects ptr word icall result repair" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @callee() -> !sir.ptr<1> {
+        \\    sir.stop
+        \\  }
+        \\  func.func @caller() {
+        \\    %0 = sir.icall @callee() : !sir.u256
+        \\    sir.stop
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(!mlir.oraBuildSIRDispatcher(ctx, module));
+}
+
 test "OraToSIR rejects malformed ABI encode and decode layout attributes" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);

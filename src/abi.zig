@@ -1070,8 +1070,7 @@ const CompilerAbiGenerator = struct {
         defer inputs.deinit(self.allocator);
 
         for (log_decl.fields) |field| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr);
-            const resolved = try self.resolveSemaType(ctx, field_type, &.{});
+            const resolved = try self.resolveTypeExpr(ctx, field.type_expr);
             try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
             try inputs.append(self.allocator, .{
                 .name = field.name,
@@ -1237,6 +1236,18 @@ const CompilerAbiGenerator = struct {
         return .{ .integer = .{ .bits = bits, .signed = signed, .spelling = name } };
     }
 
+    fn resolveTypeExpr(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        type_expr: compiler.ast.TypeExprId,
+    ) anyerror!ResolvedType {
+        var type_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer type_arena.deinit();
+
+        const ty = try compiler_type_descriptors.descriptorFromTypeExpr(type_arena.allocator(), ctx.file, ctx.item_index, type_expr);
+        return self.resolveSemaType(ctx, ty, &.{});
+    }
+
     fn resolveArrayType(
         self: *CompilerAbiGenerator,
         ctx: CompilerModuleContext,
@@ -1388,8 +1399,7 @@ const CompilerAbiGenerator = struct {
             wire_parts.deinit(self.allocator);
         }
         for (struct_item.fields, 0..) |field, index| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, field.type_expr);
-            const resolved = try self.resolveSemaType(owner_ctx, field_type, &.{});
+            const resolved = try self.resolveTypeExpr(owner_ctx, field.type_expr);
             fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
             try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
         }
@@ -1434,11 +1444,10 @@ const CompilerAbiGenerator = struct {
         const ref = self.global_enums.get(name) orelse return error.UnknownEnumType;
         const owner_ctx = try self.moduleContext(ref.module_id);
         const enum_item = owner_ctx.file.item(ref.item_id).Enum;
-        const repr_type = if (enum_item.base_type) |base_type|
-            try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, base_type)
+        const repr = if (enum_item.base_type) |base_type|
+            try self.resolveTypeExpr(owner_ctx, base_type)
         else
-            defaultEnumReprType();
-        const repr = try self.resolveSemaType(owner_ctx, repr_type, &.{});
+            try self.resolveSemaType(owner_ctx, defaultEnumReprType(), &.{});
         var variants = try self.allocator.alloc(AbiEnumVariant, enum_item.variants.len);
         errdefer self.allocator.free(variants);
         for (enum_item.variants, 0..) |variant, index| {
@@ -1521,8 +1530,7 @@ const CompilerAbiGenerator = struct {
         const owner_ctx = try self.moduleContext(ref.module_id);
         const bitfield_item = owner_ctx.file.item(ref.item_id).Bitfield;
         if (bitfield_item.base_type) |type_expr| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, type_expr);
-            return self.resolveSemaType(owner_ctx, field_type, &.{});
+            return self.resolveTypeExpr(owner_ctx, type_expr);
         }
         return self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, &.{});
     }
