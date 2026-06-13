@@ -59,9 +59,6 @@ fn removeUnderscores(allocator: std.mem.Allocator, text: []const u8) ![]const u8
 
 pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstValue) !?ConstValue {
     if (value) |v| {
-        if (try tryEvalUnaryWithSharedEngine(allocator, op, v)) |shared| return shared;
-    }
-    if (value) |v| {
         return switch (op) {
             .neg => switch (v) {
                 .integer => |integer| .{ .integer = try negateInteger(allocator, integer) },
@@ -85,7 +82,6 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
     if (lhs == null or rhs == null) return null;
     const left = lhs.?;
     const right = rhs.?;
-    if (try tryEvalBinaryWithSharedEngine(allocator, op, left, right)) |shared| return shared;
     return switch (op) {
         .add => switch (left) {
             .string => |a| switch (right) {
@@ -233,13 +229,6 @@ fn negateInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
     return result;
 }
 
-fn cloneInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
-    const zero = try BigInt.initSet(allocator, 0);
-    var result = try BigInt.init(allocator);
-    try BigInt.add(&result, &value, &zero);
-    return result;
-}
-
 fn bitwiseNotInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
     var one = try BigInt.initSet(allocator, 1);
     defer one.deinit();
@@ -362,22 +351,6 @@ fn evalBoolBool(lhs: ConstValue, rhs: ConstValue, comptime op: fn (bool, bool) b
 pub fn positiveShiftAmount(value: BigInt) ?usize {
     if (!value.isPositive() and !value.eqlZero()) return null;
     return value.toInt(usize) catch null;
-}
-
-// TEST STUB: fast-path disabled to verify BigInt fallback handles everything.
-fn tryEvalUnaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ConstValue) !?ConstValue {
-    _ = allocator;
-    _ = op;
-    _ = value;
-    return null;
-}
-
-fn tryEvalBinaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ConstValue, rhs: ConstValue) !?ConstValue {
-    _ = allocator;
-    _ = op;
-    _ = lhs;
-    _ = rhs;
-    return null;
 }
 
 pub fn constToCtValue(value: ConstValue) !?CtValue {

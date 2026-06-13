@@ -862,22 +862,6 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.ErrorDeclItem, children.items);
     }
 
-    fn parseBracedItem(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseDelimited(SyntaxKind.GroupBrace, .RightBrace) });
-        } else {
-            try self.reportHere("expected braced body");
-        }
-        return self.finishNode(kind, children.items);
-    }
-
     fn parseStructItem(self: *Parser) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
@@ -1061,46 +1045,6 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
     }
 
-    fn parseMemberItem(self: *Parser, item_kind: SyntaxKind, member_kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
-        }
-
-        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (!self.at(.LeftBrace)) {
-            try self.reportHere("expected braced body");
-            return self.finishNode(item_kind, children.items);
-        }
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                continue;
-            }
-            try children.append(self.allocator, .{ .node = try self.parseMemberNode(member_kind, message) });
-        }
-
-        if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportUnterminated("unterminated braced item body", children.items);
-        }
-
-        return self.finishNode(item_kind, children.items);
-    }
-
     fn parseMemberNode(self: *Parser, kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
@@ -1218,39 +1162,6 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.BitfieldField, children.items);
-    }
-
-    fn parseSemicolonOrBracedItem(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseDelimited(SyntaxKind.GroupBrace, .RightBrace) });
-        } else if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportHere("expected ';' or braced body");
-        }
-        return self.finishNode(kind, children.items);
-    }
-
-    fn parseDelimitedItem(self: *Parser, kind: SyntaxKind, terminator: green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        while (!self.at(.Eof) and !self.at(terminator)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(terminator)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportUnterminated("unterminated item", children.items);
-        }
-        return self.finishNode(kind, children.items);
     }
 
     fn parseDelimitedLike(
