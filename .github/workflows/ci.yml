@@ -90,7 +90,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor/mlir/
-          key: ${{ runner.os }}-${{ runner.arch }}-mlir-build-${{ env.LLVM_COMMIT }}-${{ hashFiles('build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
+          # -fc1 suffix: forces a one-time rebuild so the FileCheck-staging step below
+          # runs and the staged binary enters the cache. Bump again if FileCheck staging changes.
+          key: ${{ runner.os }}-${{ runner.arch }}-mlir-build-fc1-${{ env.LLVM_COMMIT }}-${{ hashFiles('build.zig', 'src/mlir/ora/**', 'src/mlir/IR/**') }}
 
       - name: Build MLIR libraries if needed
         shell: bash
@@ -103,6 +105,28 @@ jobs:
             echo "🔨 Building MLIR libraries..."
             zig build
             echo "✅ MLIR libraries built"
+          fi
+
+      - name: Stage FileCheck into MLIR artifact
+        shell: bash
+        run: |
+          # The gate's FileCheck-based checks (check-mlir-ora / check-mlir-sir /
+          # check-sir-text) need the FileCheck binary, which the build emits under
+          # vendor/llvm-project/build-mlir/bin but which is NOT part of vendor/mlir.
+          # Stage it into the uploaded artifact so downstream jobs (which only
+          # download vendor/mlir) have it. This rides the MLIR cache too.
+          mkdir -p vendor/mlir/bin
+          if [ -x vendor/mlir/bin/FileCheck ]; then
+            echo "✅ FileCheck already staged (cache hit)"
+          else
+            FC=$(find vendor/llvm-project -type f -name FileCheck -perm -111 2>/dev/null | head -1)
+            if [ -n "$FC" ]; then
+              cp "$FC" vendor/mlir/bin/FileCheck
+              echo "✅ Staged FileCheck from $FC"
+            else
+              echo "❌ FileCheck not found after MLIR build — FileCheck-based gate checks would fail" >&2
+              exit 1
+            fi
           fi
 
       - name: Upload MLIR artifact
@@ -387,19 +411,22 @@ jobs:
           zig build -Dskip-mlir=true
           echo "✅ Build successful"
 
-      - name: Run OraToSIR de-bloat gate
+      - name: Run full gate (== local pre-push bar)
         shell: bash
+        env:
+          # Use the FileCheck staged into the MLIR artifact by the mlir-build job.
+          # upload/download-artifact drops the exec bit, so restore it first.
+          FILECHECK: ${{ github.workspace }}/vendor/mlir/bin/FileCheck
         run: |
-          echo "🧪 Running OraToSIR de-bloat gate..."
-          zig build gate-oratosir-debloat --summary all
-          echo "✅ OraToSIR de-bloat gate completed"
-
-      - name: Run SMT modifies corpus
-        shell: bash
-        run: |
-          echo "🧪 Running SMT modifies corpus checks..."
-          zig build check-smt-modifies-corpus -Dskip-mlir=true
-          echo "✅ SMT modifies corpus checks completed"
+          chmod +x "$FILECHECK" 2>/dev/null || true
+          echo "🧪 Running the full gate — identical to local 'zig build gate' and the pre-push hook..."
+          # Single source of truth: this is the same bar developers run locally.
+          # It composes test + OraToSIR gate (coverage/mlir-sir/sir-text/conformance/evm)
+          # + check-mlir-ora + negative-corpus + findings-ledger + verifier-mutations
+          # + smt-corpus + lsp-smoke. Do not hand-list constituent steps here — that
+          # is how CI silently drifts from the local bar. Add new checks to 'gate' in build.zig.
+          zig build gate -Dskip-mlir=true --summary all
+          echo "✅ Full gate completed"
 
       - name: Run release artifact smoke
         shell: bash
@@ -513,8 +540,8 @@ jobs:
         shell: bash
         run: python3 scripts/verify_mutations.py --compiler ./zig-out/bin/ora --timeout 60
 
-  bytecode-equivalence-smoke:
-    name: Bytecode Storage Equivalence Smoke
+  anvil-differential:
+    name: Anvil Differential (corpus)
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule'
     needs: [mlir-build]
@@ -532,9 +559,6 @@ jobs:
 
       - name: Setup Foundry
         uses: foundry-rs/foundry-toolchain@v1
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Install system dependencies
         shell: bash
@@ -573,63 +597,21 @@ jobs:
         shell: bash
         run: zig build -Dskip-mlir=true
 
-      - name: Build Sensei SIR CLI
-        shell: bash
-        run: zig build sensei-sir
-
-      - name: Run bytecode storage equivalence smoke
-        shell: bash
-        run: scripts/bytecode_storage_equivalence_smoke.sh
-
-  security:
-    name: Security Scan
-    runs-on: macos-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Run security scan
+      - name: Run Anvil differential over the corpus
         shell: bash
         run: |
-          echo "🔍 Running basic security scan..."
-          # Basic security checks - more comprehensive scans in security.yml
+          echo "🧪 Cross-checking lib/evm (our oracle) against Anvil/revm over the whole corpus..."
+          # Fails (exit 1) ONLY on a real divergence: lib/evm and revm disagree on
+          # real Ora bytecode -> a compiler bug, a lib/evm bug, or a hardfork mismatch.
+          # Unsupported/compile errors are tallied, not failed.
+          scripts/anvil-diff-corpus.sh
 
-      - name: Check for security issues
-        shell: bash
-        run: |
-          echo "🔒 Running security checks..."
-          
-          # Check for common security patterns
-          echo "🔍 Checking for unsafe patterns..."
-          if grep -r "unsafe" src/ 2>/dev/null; then
-            echo "❌ Found unsafe code patterns"
-            exit 1
-          fi
-          echo "✅ No unsafe patterns found"
-          
-          # Check for TODO/FIXME security notes
-          echo "🔍 Checking for security TODOs..."
-          if grep -r -i "todo.*security\|fixme.*security" src/ 2>/dev/null; then
-            echo "❌ Found security-related TODOs"
-            exit 1
-          fi
-          echo "✅ No security TODOs found"
-          
-          echo "✅ Security scan completed"
-
-  performance:
-    name: Performance Benchmarks
-    runs-on: ${{ matrix.os }}
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'performance')
+  metrics:
+    name: Gas + Bytecode Metrics (informational)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
     needs: [mlir-build]
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -644,33 +626,19 @@ jobs:
       - name: Install system dependencies
         shell: bash
         run: |
-          echo "🔧 Installing system dependencies for ${{ runner.os }}..."
-          case "${{ runner.os }}" in
-            Linux)
-              sudo apt-get update -qq
-              sudo apt-get install -y \
-                build-essential \
-                cmake \
-                clang \
-                libc++-dev \
-                libc++abi-dev \
-                libboost-all-dev \
-                libssl-dev \
-                pkg-config \
-                z3 \
-                libz3-dev \
-                git
-              echo "✅ Linux dependencies installed"
-              ;;
-            macOS)
-              brew install boost openssl cmake z3
-              echo "✅ macOS dependencies installed"
-              ;;
-            Windows)
-              choco install boost-msvc-14.3 cmake openssl
-              echo "✅ Windows dependencies installed"
-              ;;
-          esac
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            clang \
+            libc++-dev \
+            libc++abi-dev \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config \
+            z3 \
+            libz3-dev \
+            git
 
       - name: Cache Zig artifacts
         uses: actions/cache@v4
@@ -688,34 +656,24 @@ jobs:
           name: mlir-${{ runner.os }}-${{ runner.arch }}
           path: vendor/mlir
 
-      - name: Build with optimizations
+      - name: Build metrics harness (cached MLIR)
         shell: bash
-        run: |
-          echo "🚀 Building optimized version..."
-          zig build -Dskip-mlir=true -Doptimize=ReleaseFast
+        run: zig build metrics-snapshot -Dskip-mlir=true
 
-      - name: Run performance tests
+      - name: Report gas + bytecode deltas vs baseline
         shell: bash
         run: |
-          echo "⚡ Running performance benchmarks..."
-          
-          # Time compilation of test files
-          if [ -f "zig-out/bin/ora" ]; then
-            echo "📊 Timing compilation performance..."
-            time ./zig-out/bin/ora --version 2>/dev/null || echo "⚠️  Compiler version check failed"
-          fi
-          
-          # Memory usage tests
-          echo "💾 Checking memory usage..."
-          /usr/bin/time -v zig build -Dskip-mlir=true 2>&1 | grep -E "(Maximum resident set size|User time|System time)" || echo "⚠️  Memory profiling failed"
-          
-          echo "✅ Performance benchmarks completed"
+          echo "📊 Gas + bytecode-size deltas vs committed baseline (informational — never fails the build)..."
+          # Reporting only: surfaces per-op gas and per-contract size drift against
+          # tests/conformance/metrics_snapshot.txt. To make a change deliberate,
+          # run 'python3 scripts/metrics-check.py --update' locally and commit the baseline.
+          python3 scripts/metrics-check.py || true
 
   release:
     name: Release Check
     runs-on: ${{ matrix.os }}
     if: github.ref == 'refs/heads/main'
-    needs: [lint, test, comprehensive-tests, security]
+    needs: [lint, test, comprehensive-tests]
     strategy:
       fail-fast: false
       matrix:
@@ -796,7 +754,6 @@ jobs:
           echo "- Date: $(date)" >> release-summary.md
           echo "- Tests: ✅ Passed" >> release-summary.md
           echo "- Comprehensive Tests: ✅ Passed" >> release-summary.md
-          echo "- Security: ✅ Scanned" >> release-summary.md
           
           echo "📋 Release summary created"
           cat release-summary.md
@@ -814,8 +771,8 @@ jobs:
     name: Notification
     runs-on: macos-latest
     if: always()
-    needs: [lint, test, comprehensive-tests, security]
-    
+    needs: [lint, test, comprehensive-tests]
+
     steps:
       - name: Notify on success
         if: needs.lint.result == 'success' && needs.test.result == 'success' && needs.comprehensive-tests.result == 'success'
@@ -825,7 +782,6 @@ jobs:
           echo "  - Lint: ✅"
           echo "  - Test: ✅"
           echo "  - Comprehensive Tests: ✅"
-          echo "  - Security: ✅"
 
       - name: Notify on failure
         if: needs.lint.result == 'failure' || needs.test.result == 'failure' || needs.comprehensive-tests.result == 'failure'
@@ -835,4 +791,3 @@ jobs:
           echo "  - Lint: ${{ needs.lint.result }}"
           echo "  - Test: ${{ needs.test.result }}"
           echo "  - Comprehensive Tests: ${{ needs.comprehensive-tests.result }}"
-          echo "  - Security: ${{ needs.security.result }}" 
