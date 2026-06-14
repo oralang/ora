@@ -4,12 +4,14 @@
 // CHECK: module {
 // CHECK-NEXT:   func.func @tag4() -> !sir.u256 attributes {ora.abi_return = "bytes4", ora.abi_return_layout = "bytes4", ora.abi_return_words = 1 : i256, ora.selector = "0x039f8588", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 2882400018 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:16)))
-// CHECK-NEXT:     %1 = sir.const 224 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
-// CHECK-NEXT:     %2 = sir.shl %1 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
-// CHECK-NEXT:     %3 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
-// CHECK-NEXT:     %4 = sir.malloc %3 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
-// CHECK-NEXT:     sir.store %4 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
-// CHECK-NEXT:     sir.return %4 : !sir.ptr<1>, %3 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %1 = sir.const 4294967295 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %2 = sir.and %0 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %3 = sir.const 224 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %4 = sir.shl %3 : !sir.u256, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %5 = sir.const 32 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     %6 = sir.malloc %5 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %4 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":5:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":4:5)
 // CHECK-NEXT:   func.func @tag32() -> !sir.u256 attributes {ora.abi_return = "bytes32", ora.abi_return_layout = "bytes32", ora.abi_return_words = 1 : i256, ora.selector = "0xf4c9e3d7", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 455867356320691211509944977504407603390036387149619137164185182714736811808 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/expressions/fixed_bytes_return.ora":9:16)))

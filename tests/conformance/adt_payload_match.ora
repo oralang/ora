@@ -1,0 +1,48 @@
+enum Choice {
+    Empty,
+    Value(u256),
+    Pair(u256, u256),
+    Named { code: u256, amount: u256 },
+}
+
+contract AdtPayloadMatch {
+    pub fn value_path(v: u256) -> u256 {
+        let choice = Choice.Value(v);
+        return match (choice) {
+            Choice.Empty => 0,
+            Choice.Value(inner) => inner +% 1,
+            Choice.Pair(lhs, rhs) => lhs +% rhs,
+            Choice.Named { amount, code } => amount +% code,
+        };
+    }
+
+    pub fn pair_path(lhs: u256, rhs: u256) -> u256 {
+        let choice = Choice.Pair(lhs, rhs);
+        return match (choice) {
+            Choice.Empty => 0,
+            Choice.Value(inner) => inner,
+            Choice.Pair(a, b) => a +% b,
+            Choice.Named { amount, code } => amount +% code,
+        };
+    }
+
+    pub fn named_path(amount: u256, code: u256) -> u256 {
+        let choice = Choice.Named { code: code, amount: amount };
+        return match (choice) {
+            Choice.Empty => 0,
+            Choice.Value(inner) => inner,
+            Choice.Pair(lhs, rhs) => lhs +% rhs,
+            Choice.Named { amount: value, code: tag } => value +% tag,
+        };
+    }
+
+    pub fn empty_path() -> u256 {
+        let choice = Choice.Empty;
+        return match (choice) {
+            Choice.Empty => 7,
+            Choice.Value(inner) => inner,
+            Choice.Pair(lhs, rhs) => lhs +% rhs,
+            Choice.Named { amount, code } => amount +% code,
+        };
+    }
+}

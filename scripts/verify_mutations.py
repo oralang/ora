@@ -199,6 +199,21 @@ contract MutationLoopInvariant {
 """
 
 
+BASE_STATE_INVARIANT = """\
+contract MutationStateInvariant {
+    storage var x: u256 = 0;
+
+    invariant bounded(x <= 100);
+
+    pub fn set(v: u256)
+        requires(v <= 100)
+    {
+        x = v;
+    }
+}
+"""
+
+
 BASE_ASSERTION = """\
 contract MutationAssert {
     pub fn assertBound(x: u256)
@@ -383,6 +398,22 @@ CASES = (
         find="ensures(counter == n)",
         replace="ensures(counter == n + 1)",
         reason="loop-invariant-derived postcondition overclaims the final counter value",
+    ),
+    MutationCase(
+        name="loop_invariant_body_corruption",
+        source=BASE_LOOP_INVARIANT,
+        function="countTo",
+        find="counter = counter + 1;",
+        replace="counter = counter + 2;",
+        reason="loop body no longer preserves the invariant-derived postcondition",
+    ),
+    MutationCase(
+        name="state_invariant_precondition_removed",
+        source=BASE_STATE_INVARIANT,
+        function="set",
+        find="requires(v <= 100)",
+        replace="requires(true)",
+        reason="weakened precondition permits a storage write that violates the state invariant",
     ),
     MutationCase(
         name="assert_requires_weakened",

@@ -715,6 +715,9 @@ pub const VerificationPass = struct {
                 }
 
                 if (std.mem.eql(u8, op_name, "func.func")) {
+                    if (self.current_function_verify_enabled) {
+                        try self.recordGlobalContractInvariantPostObligations();
+                    }
                     self.current_function_name = prev_function;
                     self.current_function_verify_enabled = prev_verify_enabled;
                 }
@@ -2117,6 +2120,66 @@ pub const VerificationPass = struct {
         // Clear expression caches so later annotation encoding re-materializes
         // those constraints instead of reusing under-constrained ASTs.
         self.encoder.invalidateValueCaches();
+    }
+
+    fn recordGlobalContractInvariantPostObligations(self: *VerificationPass) !void {
+        const function_name = self.current_function_name orelse return;
+        const original_len = self.encoded_annotations.items.len;
+
+        for (0..original_len) |annotation_index| {
+            const ann = self.encoded_annotations.items[annotation_index];
+            if (!isGlobalContractInvariantAnnotation(ann)) continue;
+            const condition_value = ann.condition_value orelse continue;
+
+            // Re-encode the top-level invariant expression after the function
+            // body has updated the verifier's storage model. Without this, a
+            // global invariant is only checked against entry-state storage.
+            self.encoder.value_map.clearRetainingCapacity();
+            self.encoder.value_map_old.clearRetainingCapacity();
+            const encoded = try self.encoder.encodeValue(condition_value);
+            const extra_constraints = try takeConstraintRecordsAndRegisterTags(
+                self,
+                function_name,
+                ann.file,
+                ann.line,
+                ann.column,
+            );
+
+            try appendEncodedAnnotationUnique(self, .{
+                .function_name = function_name,
+                .kind = .ContractInvariant,
+                .condition = encoded,
+                .condition_value = condition_value,
+                .source_op = ann.source_op,
+                .extra_constraints = extra_constraints,
+                .path_constraints = &[_]z3.Z3_ast{},
+                .old_condition = null,
+                .old_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_condition = null,
+                .loop_step_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_head_condition = null,
+                .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_condition = null,
+                .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_backedge_condition = null,
+                .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_obligations = &[_]z3.Z3_ast{},
+                .loop_post_condition = null,
+                .loop_post_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_exit_condition = null,
+                .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_snapshot_value_bindings = &[_]SnapshotValueBinding{},
+                .file = ann.file,
+                .line = ann.line,
+                .column = ann.column,
+                .label = ann.label,
+                .verification_context = ann.verification_context,
+                .imported_obligation_source = null,
+                .guard_id = null,
+                .loop_owner = null,
+            });
+        }
     }
 
     /// Get MLIR operation name as string
@@ -4835,6 +4898,62 @@ pub const VerificationPass = struct {
                         }
                         try addConstraintSlice(&step_constraints, ann.loop_step_backedge_extra_constraints);
                         try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.loop_step_backedge_extra_constraints);
+                        const step_body_condition = ann.loop_step_body_condition orelse ann.condition;
+                        if (ensure_annotations.items.len > 0) {
+                            if (ann.loop_step_backedge_condition) |backedge_condition| {
+                                var exit_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                                defer exit_constraints.deinit();
+                                var tracked_exit_assumptions = ManagedArrayList(TrackedAssumption).init(self.allocator);
+                                defer tracked_exit_assumptions.deinit();
+
+                                try addConstraintSlice(&exit_constraints, step_constraints.items);
+                                for (tracked_step_assumptions.items) |tracked| {
+                                    try tracked_exit_assumptions.append(tracked);
+                                }
+
+                                const negated_backedge = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(backedge_condition));
+                                try exit_constraints.append(negated_backedge);
+                                try appendTrackedAssumption(
+                                    &tracked_exit_assumptions,
+                                    negated_backedge,
+                                    makeTrackedAssumptionTag(.loop_invariant, ann),
+                                );
+                                const negated_exit_invariant = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                                try exit_constraints.append(negated_exit_invariant);
+                                try appendGoalTrackedAssumption(&tracked_exit_assumptions, fn_name, ann, negated_exit_invariant);
+                                try materializeTrackedAssumptionProxies(self, &tracked_exit_assumptions);
+
+                                const exit_fragment = inferQueryFragment(self.context.ctx, exit_constraints.items);
+                                const exit_solver_logic = solverLogicForFragment(exit_fragment);
+                                const exit_query = try buildSmtlibForConstraints(self.allocator, &self.solver, exit_constraints.items, exit_solver_logic);
+                                const exit_smtlib = exit_query.smtlib_z;
+                                const exit_hash = std.hash.Wyhash.hash(0, exit_smtlib);
+                                const exit_tag = try formatQueryTag(self.allocator, exit_constraints.items.len, exit_hash);
+                                defer self.allocator.free(exit_tag);
+                                const exit_log_prefix = try std.fmt.allocPrint(
+                                    self.allocator,
+                                    "{s} [invariant-exit]{s}",
+                                    .{ fn_name, exit_tag },
+                                );
+                                try appendPreparedQueryUnique(&queries, self.allocator, .{
+                                    .kind = .LoopInvariantStep,
+                                    .fragment = exit_fragment,
+                                    .solver_logic = exit_solver_logic,
+                                    .function_name = fn_name,
+                                    .obligation_kind = .LoopInvariant,
+                                    .file = ann.file,
+                                    .line = ann.line,
+                                    .column = ann.column,
+                                    .constraints = try cloneConstraintAstSlice(self.allocator, exit_constraints.items),
+                                    .tracked_assumptions = try cloneTrackedAssumptionSlice(self.allocator, tracked_exit_assumptions.items),
+                                    .smtlib_z = exit_smtlib,
+                                    .constraint_count = exit_constraints.items.len,
+                                    .smtlib_bytes = exit_smtlib.len,
+                                    .smtlib_hash = exit_hash,
+                                    .log_prefix = exit_log_prefix,
+                                });
+                            }
+                        }
                         if (ann.loop_step_backedge_condition) |backedge_condition| {
                             try step_constraints.append(backedge_condition);
                             try appendTrackedAssumption(
@@ -4843,7 +4962,6 @@ pub const VerificationPass = struct {
                                 makeTrackedAssumptionTag(.loop_invariant, ann),
                             );
                         }
-                        const step_body_condition = ann.loop_step_body_condition orelse ann.condition;
                         const negated_step = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
                         try step_constraints.append(negated_step);
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
