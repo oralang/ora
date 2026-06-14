@@ -1,4 +1,4 @@
-// Target for adversarial raw-calldata cases (T2). A single public fn taking a
+// Target for adversarial raw-calldata cases. A single public fn taking a
 // dynamic argument exposes the dispatcher's calldata bounds/offset checks.
 contract AdversarialCalldata {
     pub fn echo_len(s: string) -> u256 {

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "Feature coverage map (test-quality program T1.1/T1.5). Every runtime language feature listed here must have at least one EXECUTED conformance spec (bytecode run on lib/evm). Features whose correct behavior is compile-time rejection may instead list negative expected-diagnostic specs. Otherwise an explicit skip reason is required.",
+  "description": "Feature coverage map. Every runtime language feature listed here must have at least one EXECUTED conformance spec (bytecode run on lib/evm). Features whose correct behavior is compile-time rejection may instead list negative expected-diagnostic specs. Otherwise an explicit skip reason is required.",
   "ci_commands": [
     "zig build check-feature-execution-coverage",
     "zig build check-negative-corpus",
@@ -379,7 +379,7 @@
     {
       "id": "verification.falsification_pairing",
       "area": "verification",
-      "behavior": "Execution falsification (T3.4): verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
+      "behavior": "Execution falsification: verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
       "specs": [
         "tests/conformance/falsification_arith.spec.toml",
         "tests/conformance/falsification_map_effect.spec.toml",
@@ -392,7 +392,7 @@
     {
       "id": "arithmetic.checked_arith_runtime_behavior",
       "area": "arithmetic",
-      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - S1 finding with audit",
+      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - known finding with audit",
       "specs": [
         "tests/conformance/arithmetic_checked_revert.spec.toml"
       ]

@@ -1,4 +1,4 @@
-//! Structured ABI fuzzer (test-quality program T2.3).
+//! Structured ABI fuzzer for dynamic ABI dispatcher inputs.
 //!
 //! Property: for dynamic-argument public functions, structurally-broken calldata
 //! (truncated below the head, out-of-bounds dynamic offset, oversized length)

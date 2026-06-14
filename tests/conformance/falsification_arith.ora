@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges `ensures(result == a + b)`
+// Falsification pairing: the verifier discharges `ensures(result == a + b)`
 // under the requires envelope. This contract's conformance spec then EXECUTES it
 // on in-envelope boundary inputs and asserts the same property at runtime. If a
 // future change made the verifier unsoundly prove a false ensures (a false-UNSAT),

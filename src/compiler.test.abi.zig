@@ -5006,7 +5006,7 @@ test "compiler abiDecode N4b runtime mutation fuzz matches comptime oracle" {
     try expectRuntimeU256Returns(runtime_source.items, expected);
 }
 
-test "compiler abiDecode round-trips encoder M2 static corpus" {
+test "compiler abiDecode round-trips encoder static corpus" {
     const scalar_tuple_source =
         \\type Scalars = (u256, bool);
         \\pub fn run() -> u256 {
@@ -5888,7 +5888,7 @@ test "compiler abiEncode encodes dynamic arrays with dynamic elements" {
         "6262000000000000000000000000000000000000000000000000000000000000");
 }
 
-test "compiler abiEncode encodes M6 nested dynamic aggregates" {
+test "compiler abiEncode encodes nested dynamic aggregates" {
     const nested_tuple_source =
         \\pub fn run() -> bytes {
         \\    return comptime {
@@ -6815,7 +6815,7 @@ test "compiler runtime dynamic array ABI materializer matches comptime abiEncode
         "6262000000000000000000000000000000000000000000000000000000000000");
 }
 
-test "compiler runtime M6 nested dynamic aggregates match comptime abiEncode and cast" {
+test "compiler runtime nested dynamic aggregates match comptime abiEncode and cast" {
     const nested_tuple_comptime_source =
         \\pub fn expected() -> bytes {
         \\    return comptime {

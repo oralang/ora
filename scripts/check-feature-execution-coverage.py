@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the feature coverage manifest (test-quality program T1.1/T1.5).
+"""Validate the feature coverage manifest.
 
 Fail-closed in both directions:
   - every feature has executed spec(s), negative expected-diagnostic spec(s),

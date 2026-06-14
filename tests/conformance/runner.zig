@@ -389,7 +389,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []cons
         else
             &contracts[0].doc;
 
-        // Raw-calldata calls (T2 adversarial) bypass the ABI; typed calls
+        // Raw-calldata calls bypass the ABI; typed calls
         // resolve a function and encode args. A raw call has no function_abi,
         // so its outcome is restricted to succeeds/reverts (enforced at parse).
         var function_abi: ?abi_doc.FunctionAbi = null;

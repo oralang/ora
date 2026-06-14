@@ -13,7 +13,7 @@ test "conformance properties execute and catch planted failures" {
     try properties.run(testing.allocator);
 }
 
-test "structured ABI fuzzer rejects malformed calldata (T2.3)" {
+test "structured ABI fuzzer rejects malformed calldata" {
     try fuzz.run(testing.allocator);
 }
 
@@ -26,7 +26,7 @@ test "structured ABI fuzzer detects acceptance (teeth)" {
     return error.FuzzTeethDidNotFire;
 }
 
-// Suite self-test (gap #6): prove the conformance layer has teeth — a correct
+// Suite self-test: prove the conformance layer has teeth — a correct
 // spec passes, and the SAME spec with one wrong expected value is caught. If a
 // corrupted expectation still "passed", the whole layer would be vacuously green.
 test "conformance runner detects a wrong expected return (suite teeth)" {

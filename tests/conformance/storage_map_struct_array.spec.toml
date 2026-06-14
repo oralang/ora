@@ -1,4 +1,4 @@
-# Combinatorial layout (gap #5): struct-with-static-array under a map.
+# Combinatorial layout: struct-with-static-array under a map.
 # buckets at slot 0; map<u256,Bucket> key k -> base = keccak(k.0);
 # Bucket { slots:[u256;3], tail:u256 } -> slots[i] at base+i, tail at base+3.
 [deploy]

@@ -302,7 +302,7 @@ CASES = (
         replace="requires(false)",
         reason="contradictory assumptions must fail vacuity checks",
     ),
-    # Per-construct mutants (T3.2): broaden beyond the counter/vault shapes.
+    # Per-construct mutants broaden coverage beyond the counter/vault shapes.
     MutationCase(
         name="signed_postcondition_flip",
         source=BASE_SIGNED,

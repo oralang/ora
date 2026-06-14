@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "By-construction coverage map for OraToSIR de-bloat. Every conversion pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden.",
+  "description": "By-construction coverage map for OraToSIR conversion patterns. Every pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden.",
   "ci_commands": [
     "zig build check-oratosir-coverage",
     "zig build check-mlir-sir",

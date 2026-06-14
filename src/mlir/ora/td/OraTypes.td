@@ -130,7 +130,7 @@ def Ora_MapType : Ora_Type<"Map", "map"> {
   let assemblyFormat = "`<` $keyType `,` $valueType `>`";
 }
 
-// Tuple type (T1, T2, ..., Tn)
+// Tuple type containing one or more element types.
 def Ora_TupleType : Ora_Type<"Tuple", "tuple"> {
   let summary = "Tuple type";
   let description = [{

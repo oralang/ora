@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges a map-frame
+// Falsification pairing: the verifier discharges a map-frame
 // postcondition under who != other. This spec executes the same shape.
 contract FalsificationMapFrame {
     storage var balances: map<address, u256>;

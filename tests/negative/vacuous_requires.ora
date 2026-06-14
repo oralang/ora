@@ -1,4 +1,4 @@
-// Negative (T3.3 vacuity): contradictory preconditions make the function
+// Negative vacuity check: contradictory preconditions make the function
 // vacuously satisfy any postcondition. The verifier must REJECT this (base
 // obligation UNSAT -> VerificationFailed, no bytecode), never silently "verify"
 // a spec that holds only because its assumptions are unsatisfiable.

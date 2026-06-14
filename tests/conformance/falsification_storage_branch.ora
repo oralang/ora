@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges a postcondition whose
+// Falsification pairing: the verifier discharges a postcondition whose
 // result depends on a storage read and branch condition, and this spec executes
 // both sides of that branch.
 contract FalsificationStorageBranch {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Known-defects ledger tripwire (test-quality program; gap #2).
+"""Known-defects ledger tripwire for the conformance suite.
 
 The gate is intentionally GREEN over known compiler/EVM defects: characterization
 rows assert the current WRONG behavior so the suite locks it until it is fixed.
@@ -129,7 +129,7 @@ def main() -> None:
             info = findings[fid]
             print(f"    {fid.upper()} ({info['severity']}) OPEN — owner: {info['owner']} — {tag}")
 
-    # Gap #1 visibility: the dangerous backlog must be impossible to miss.
+    # Make the dangerous backlog impossible to miss in green gate output.
     s1_open = sorted(f for f in open_ids if findings[f]["severity"] == "S1")
     if s1_open:
         print(

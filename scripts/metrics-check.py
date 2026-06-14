@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Change-quality metrics benchmark (test-quality program).
+"""Change-quality metrics benchmark.
 
 Runs the metrics-snapshot harness over the conformance corpus and compares every
 metric (per-call gas, per-contract bytecode size) against a committed baseline.

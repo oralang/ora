@@ -630,7 +630,7 @@ pub fn build(b: *std.Build) void {
 
     // Local Anvil/revm differential over the conformance corpus. This is
     // intentionally not part of the default gate because it drives a live RPC
-    // process, but it is the T2.4 local entrypoint and mirrors the scheduled CI
+    // process, but it is the local entrypoint and mirrors the scheduled CI
     // differential job.
     const conformance_anvil_cmd = b.addSystemCommand(&[_][]const u8{
         "bash",
@@ -1490,7 +1490,7 @@ pub fn build(b: *std.Build) void {
         "scripts/check-oratosir-coverage.py",
         "tests/oratosir_debloat_coverage.json",
     });
-    const check_oratosir_coverage_step = b.step("check-oratosir-coverage", "Validate OraToSIR de-bloat coverage manifest");
+    const check_oratosir_coverage_step = b.step("check-oratosir-coverage", "Validate the OraToSIR coverage manifest");
     check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
     test_step.dependOn(&oratosir_coverage_cmd.step);
 
@@ -1562,7 +1562,7 @@ pub fn build(b: *std.Build) void {
     check_sir_text_step.dependOn(&sir_text_checks_cmd.step);
 
     // zig build gate-oratosir-debloat
-    const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR de-bloat merge gate");
+    const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR regression gate");
     oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
     oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
     oratosir_debloat_gate_step.dependOn(check_sir_text_step);

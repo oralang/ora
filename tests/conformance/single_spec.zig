@@ -3,8 +3,8 @@
 //! Runs ONE `.ora` + `.spec.toml` pair through the in-process lib/evm, outside
 //! the test harness. Used by the Anvil differential proof to exercise lib/evm on
 //! exactly one (possibly hostile) call and observe its behavior — including a
-//! crash. If lib/evm panics (e.g. F-003), this process aborts with a signal,
-//! which the caller detects as the divergence.
+//! crash. If lib/evm panics, this process aborts with a signal, which the caller
+//! detects as the divergence.
 //!
 //! Usage: conformance-one <source.ora> <spec.toml>
 //!   exit 0  -> spec passed on lib/evm
