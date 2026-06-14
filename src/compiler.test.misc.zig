@@ -887,8 +887,13 @@ test "compiler does not count unary negation zero as a HIR default value" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
     try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
     try testing.expect(hir_result.isEmittable());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "checked negation overflow"));
 }
 
 test "compiler lowers void error-union success without HIR default values" {

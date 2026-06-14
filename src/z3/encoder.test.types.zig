@@ -591,6 +591,59 @@ test "nested map_store rethreads inner update through outer map" {
     _ = inner_after_value;
 }
 
+test "nested map_store degrades when root map cannot be resolved to storage" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+    const inner_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, i256_ty);
+    const outer_map_ty = mlir.oraMapTypeGet(mlir_ctx, i256_ty, inner_map_ty);
+
+    const attrs = [_]mlir.MlirNamedAttribute{
+        namedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, stringRef("rootlessNestedMap"))),
+    };
+    const func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &attrs, attrs.len, &[_]mlir.MlirType{outer_map_ty}, &[_]mlir.MlirLocation{loc}, 1);
+    const body = mlir.oraFuncOpGetBodyBlock(func);
+    const outer_arg = mlir.oraBlockGetArgument(body, 0);
+
+    const owner = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 11),
+    ), 0);
+    const spender = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 22),
+    ), 0);
+    const value = mlir.oraOperationGetResult(mlir.oraArithConstantOpCreate(
+        mlir_ctx,
+        loc,
+        i256_ty,
+        mlir.oraIntegerAttrCreateI64FromType(i256_ty, 99),
+    ), 0);
+
+    const inner = mlir.oraMapGetOpCreate(mlir_ctx, loc, outer_arg, owner, inner_map_ty);
+    const store = mlir.oraMapStoreOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(inner, 0), spender, value);
+    _ = try encoder.encodeOperation(store);
+
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqual(@as(usize, 1), encoder.soundnessLosses().len);
+    try testing.expectEqual(Encoder.SoundnessLoss.inexact_state_summary, encoder.soundnessLosses()[0]);
+    try testing.expectEqualStrings("nested map store summary could not resolve root global", encoder.degradationReason().?);
+}
+
 test "nested map_store with address keys rethreads inner update exactly" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

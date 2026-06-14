@@ -1845,6 +1845,36 @@ test "compiler lowers shift compound assignment" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
 }
 
+test "compiler resolves generic compound shift signedness before lowering" {
+    const source_text =
+        \\fn shift_generic(comptime T: type, input: T, amount: u256) -> T {
+        \\    var value = input;
+        \\    value >>= amount;
+        \\    return value;
+        \\}
+        \\
+        \\pub fn shift_signed(input: i256, amount: u256) -> i256 {
+        \\    return shift_generic(i256, input, amount);
+        \\}
+        \\
+        \\pub fn shift_unsigned(input: u256, amount: u256) -> u256 {
+        \\    return shift_generic(u256, input, amount);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
+}
+
 test "compiler lowers power and wrapping compound assignment" {
     const source_text =
         \\pub fn update_all(input: u256, exp: u256, delta: u256) -> u256 {

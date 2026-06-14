@@ -446,6 +446,39 @@ test "verification requires byte concat bounds before using projected length" {
     try testing.expect(!checked.degraded);
 }
 
+test "verification checks safety obligations from branch conditions" {
+    const source_text =
+        \\pub fn branch_div_unchecked(x: u256) -> u256
+        \\{
+        \\    if (1 / x == 0) {
+        \\        return 1;
+        \\    }
+        \\    return 2;
+        \\}
+        \\
+        \\pub fn branch_div_checked(x: u256) -> u256
+        \\    requires(x != 0)
+        \\{
+        \\    if (1 / x == 0) {
+        \\        return 1;
+        \\    }
+        \\    return 2;
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "branch_div_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "branch_div_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
 test "verification proves checked power for a bounded safe case without degradation" {
     const source_text =
         \\pub fn square_ten(x: u8) -> u8
@@ -850,6 +883,42 @@ test "verification frames distinct struct fields across internal callee modifies
     try testing.expect(!result.degraded);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves callee requires when summary inlining falls back" {
+    const source_text =
+        \\contract V {
+        \\    fn require_nonzero(x: u256)
+        \\        requires(x != 0)
+        \\    {
+        \\    }
+        \\
+        \\    pub fn unchecked(x: u256) -> u256 {
+        \\        require_nonzero(x);
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn checked(x: u256) -> u256
+        \\        requires(x != 0)
+        \\    {
+        \\        require_nonzero(x);
+        \\        return 1;
+        \\    }
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "unchecked", 0);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(!unchecked.degraded);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, unchecked.error_kinds, "PreconditionViolation") != null);
+
+    var checked = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "checked", 0);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+    try testing.expectEqual(@as(usize, 0), checked.errors_len);
 }
 
 test "verification uses opaque modifies metadata for struct fields when internal summary inlining is disabled" {
