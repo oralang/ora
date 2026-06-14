@@ -3701,9 +3701,15 @@ pub const Encoder = struct {
 
     /// Check for overflow in addition (u256 + u256 can overflow)
     pub fn checkAddOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
-        // overflow occurs when result < lhs (unsigned comparison)
-        const result = z3.Z3_mk_bv_add(self.context.ctx, lhs, rhs);
-        return z3.Z3_mk_bvult(self.context.ctx, result, lhs);
+        // Unsigned overflow iff lhs > MAX - rhs. This is equivalent to the
+        // usual wraparound check (lhs + rhs) < lhs, but matches the guard form
+        // Ora users write and keeps Z3 out of expensive bit-blasting paths.
+        const sort = z3.Z3_get_sort(self.context.ctx, lhs);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        const one = z3.Z3_mk_unsigned_int64(self.context.ctx, 1, sort);
+        const max_value = z3.Z3_mk_bv_sub(self.context.ctx, zero, one);
+        const max_minus_rhs = z3.Z3_mk_bv_sub(self.context.ctx, max_value, rhs);
+        return z3.Z3_mk_bvugt(self.context.ctx, lhs, max_minus_rhs);
     }
 
     /// Check for underflow in subtraction (u256 - u256 can underflow)

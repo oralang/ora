@@ -1875,6 +1875,30 @@ test "compiler resolves generic compound shift signedness before lowering" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
 }
 
+test "compiler preserves source signedness for contextual integer widening" {
+    const source_text =
+        \\pub fn widen_signed(input: i8) -> i256 {
+        \\    return input;
+        \\}
+        \\
+        \\pub fn widen_unsigned(input: u8) -> u256 {
+        \\    return input;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.extsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.extui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
+}
+
 test "compiler lowers power and wrapping compound assignment" {
     const source_text =
         \\pub fn update_all(input: u256, exp: u256, delta: u256) -> u256 {

@@ -2146,7 +2146,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return @This().convertValueForFlowWithSignedness(self, value, target_type, null, range);
         }
 
-        fn convertValueForFlowWithSignedness(
+        pub fn convertValueForFlowWithSignedness(
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
@@ -2255,7 +2255,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, op);
             }
 
-            const op = if (source_is_signed orelse false)
+            const resolved_source_is_signed = source_is_signed orelse if (mlir.oraTypeIsIntegerType(value_type))
+                mlir.oraIntegerTypeIsSigned(value_type)
+            else {
+                try self.parent.emitLoweringError(
+                    range,
+                    "cannot determine signedness for integer widening conversion",
+                    .{},
+                );
+                const placeholder = try self.createAggregatePlaceholder("ora.lowering_error", range, &.{}, target_type);
+                return appendValueOp(self.block, placeholder);
+            };
+
+            const op = if (resolved_source_is_signed)
                 mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
             else
                 mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);

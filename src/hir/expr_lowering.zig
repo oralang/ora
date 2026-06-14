@@ -562,7 +562,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk try self.lowerExpr(expr_id, locals);
                 },
-                else => try self.lowerExpr(expr_id, locals),
+                else => blk: {
+                    const raw_value = try self.lowerExpr(expr_id, locals);
+                    const value_type = mlir.oraValueGetType(raw_value);
+                    const source_is_signed = if (mlir.oraTypeIsAInteger(value_type) and
+                        mlir.oraTypeIsAInteger(target_type) and
+                        mlir.oraIntegerTypeGetWidth(value_type) < mlir.oraIntegerTypeGetWidth(target_type))
+                        try @This().integerExprSignedness(self, expr_id)
+                    else
+                        null;
+                    break :blk try self.convertValueForFlowWithSignedness(raw_value, target_type, source_is_signed, exprRange(self.parent.file, expr_id));
+                },
             };
         }
 
@@ -3589,7 +3599,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
                 );
                 for (struct_literal.fields) |init| {
-                    const field_value = try @This().lowerExprForFlowTarget(self, init.value, word_type, locals);
+                    const field_value = try self.lowerExpr(init.value, locals);
                     packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
                 }
                 return packed_word;

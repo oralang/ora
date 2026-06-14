@@ -705,6 +705,8 @@ pub const VerificationPass = struct {
                     try self.walkTryStmtRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.switch")) {
                     try self.walkOraSwitchRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "scf.while")) {
+                    try self.walkScfWhileRegions(current_op);
                 } else {
                     // walk nested regions (for functions, loops, etc.)
                     const num_regions = mlir.oraOperationGetNumRegions(current_op);
@@ -1361,6 +1363,42 @@ pub const VerificationPass = struct {
                 .initialized = fallback_init,
             });
         }
+    }
+
+    fn walkScfWhileRegions(self: *VerificationPass, while_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(while_op);
+        if (num_regions == 0) return;
+
+        const before_region = mlir.oraOperationGetRegion(while_op, 0);
+        try self.walkMLIRRegion(before_region);
+
+        if (num_regions < 2) return;
+
+        self.encoder.invalidateValueCaches();
+        const continue_condition = (try self.encodeScfWhileContinueCondition(while_op, false)) orelse {
+            const after_region = mlir.oraOperationGetRegion(while_op, 1);
+            try self.walkMLIRRegion(after_region);
+            return;
+        };
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(while_op);
+        const condition_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        defer if (condition_constraints.len > 0) self.allocator.free(condition_constraints);
+        const condition_obligations = try self.encoder.takeObligationRecords(self.allocator);
+        defer if (condition_obligations.len > 0) self.allocator.free(condition_obligations);
+        try self.preserveControlConditionObligations(while_op, condition_obligations);
+
+        const saved_len = self.active_path_assumptions.items.len;
+        const scoped_constraints = try self.cloneConstraintsWithObligations(condition_constraints, condition_obligations);
+        defer self.releaseActivePathAssumptionsFrom(saved_len);
+        try self.active_path_assumptions.append(.{
+            .condition = self.encoder.coerceBoolean(continue_condition),
+            .extra_constraints = scoped_constraints,
+            .owned_extra_constraints = true,
+        });
+
+        const after_region = mlir.oraOperationGetRegion(while_op, 1);
+        try self.walkMLIRRegion(after_region);
     }
 
     fn walkScfIfRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
@@ -2602,6 +2640,57 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    fn encodeScfWhileContinueCondition(
+        self: *VerificationPass,
+        loop_op: mlir.MlirOperation,
+        rebind_before_args_to_after_args: bool,
+    ) !?z3.Z3_ast {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
+        if (mlir.oraBlockIsNull(before_block)) return null;
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
+
+        var rebound_before_args: usize = 0;
+        if (rebind_before_args_to_after_args and !mlir.oraBlockIsNull(after_block)) {
+            const bind_count = @min(
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
+            );
+            var i: usize = 0;
+            while (i < bind_count) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+                try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
+                rebound_before_args += 1;
+            }
+        }
+        defer {
+            var i: usize = 0;
+            while (i < rebound_before_args) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
+            }
+        }
+
+        var op = mlir.oraBlockGetFirstOperation(before_block);
+        while (!mlir.oraOperationIsNull(op)) {
+            const op_name_ref = mlir.oraOperationGetName(op);
+            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                ""
+            else
+                op_name_ref.data[0..op_name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "scf.condition")) {
+                const num_operands = mlir.oraOperationGetNumOperands(op);
+                if (num_operands < 1) return null;
+                const continue_value = mlir.oraOperationGetOperand(op, 0);
+                return try self.encoder.encodeValue(continue_value);
+            }
+            op = mlir.oraOperationGetNextInBlock(op);
+        }
+        return null;
+    }
+
     fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return &[_]z3.Z3_ast{};
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
@@ -2844,50 +2933,11 @@ pub const VerificationPass = struct {
             loop_name_ref.data[0..loop_name_ref.length];
 
         if (std.mem.eql(u8, loop_name, "scf.while")) {
-            const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
-            if (mlir.oraBlockIsNull(before_block)) return null;
             const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
-
-            var rebound_before_args: usize = 0;
-            if (!mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr) {
-                const bind_count = @min(
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
-                );
-                var i: usize = 0;
-                while (i < bind_count) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
-                    try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
-                    rebound_before_args += 1;
-                }
-            }
-            defer {
-                var i: usize = 0;
-                while (i < rebound_before_args) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
-                }
-            }
-
-            var op = mlir.oraBlockGetFirstOperation(before_block);
-            while (!mlir.oraOperationIsNull(op)) {
-                const op_name_ref = mlir.oraOperationGetName(op);
-                defer @import("mlir_c_api").freeStringRef(op_name_ref);
-                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
-                    ""
-                else
-                    op_name_ref.data[0..op_name_ref.length];
-
-                if (std.mem.eql(u8, op_name, "scf.condition")) {
-                    const num_operands = mlir.oraOperationGetNumOperands(op);
-                    if (num_operands < 1) return null;
-                    const continue_value = mlir.oraOperationGetOperand(op, 0);
-                    return try self.encoder.encodeValue(continue_value);
-                }
-                op = mlir.oraOperationGetNextInBlock(op);
-            }
-            return null;
+            return try self.encodeScfWhileContinueCondition(
+                loop_op,
+                !mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr,
+            );
         }
 
         if (std.mem.eql(u8, loop_name, "scf.for")) {

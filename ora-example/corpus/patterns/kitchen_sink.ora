@@ -367,7 +367,13 @@ contract KitchenSink {
 
     // --- Try/catch pattern ---
 
-    pub fn safeDeposit(amount: u256) -> bool {
+    pub fn safeDeposit(amount: MinValue<u256, 1>) -> bool
+        requires(amount > 0)
+        requires(totalDeposits <= std.constants.U256_MAX - amount)
+        requires(balances[std.msg.sender()] <= std.constants.U256_MAX - amount)
+        requires(specTotalBalance <= std.constants.U256_MAX - amount)
+        requires(specDepositCount <= std.constants.U256_MAX - amount)
+    {
         try {
             let res: bool = try deposit(amount);
             return res;

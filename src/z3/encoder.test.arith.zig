@@ -453,6 +453,42 @@ test "precision note cap reports truncation explicitly" {
     try testing.expectEqual(Encoder.PrecisionNoteKind.precision_note_cap_exceeded, notes[9]);
 }
 
+test "unsigned add overflow check matches max-minus-rhs guard" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv256 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 256);
+    const lhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "add_lhs"),
+        bv256,
+    );
+    const rhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "add_rhs"),
+        bv256,
+    );
+    const zero = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 0, bv256);
+    const one = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 1, bv256);
+    const max = z3.Z3_mk_bv_sub(z3_ctx.ctx, zero, one);
+    const bound = z3.Z3_mk_bv_sub(z3_ctx.ctx, max, rhs_sym);
+    const overflow = encoder.checkAddOverflow(lhs_sym, rhs_sym);
+    const overflow_text = std.mem.span(z3.Z3_ast_to_string(z3_ctx.ctx, overflow));
+    try testing.expect(std.mem.indexOf(u8, overflow_text, "bvugt") != null);
+    try testing.expect(std.mem.indexOf(u8, overflow_text, "bvsub") != null);
+    try testing.expect(std.mem.indexOf(u8, overflow_text, "bvadd") == null);
+    try testing.expect(std.mem.indexOf(u8, overflow_text, "bvult") == null);
+
+    var solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer solver.deinit();
+    solver.assert(z3.Z3_mk_bvule(z3_ctx.ctx, lhs_sym, bound));
+    solver.assert(overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
 test "unsigned mul overflow check proves bounded constant multiplier safe" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

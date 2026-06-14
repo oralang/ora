@@ -1,8 +1,12 @@
+comptime const std = @import("std");
+
 contract I64Ops {
     storage var a: i64;
     storage var b: i64;
 
-    pub fn arithmetic(x: i64, y: i64) -> i64 {
+    pub fn arithmetic(x: i64, y: i64) -> i64
+        requires(x != std.constants.I64_MIN)
+    {
         let add: i64 = x +% y;
         let sub: i64 = x -% y;
         let mul: i64 = x *% y;
