@@ -204,6 +204,21 @@ contract MutationMapFrame {
 """
 
 
+BASE_NESTED_MAP_EFFECT = """\
+contract MutationNestedMapEffect {
+    storage var allowances: map<address, map<address, u256>>;
+
+    pub fn approve(owner: address, spender: address, amount: u256)
+        requires(owner != spender)
+        requires(amount <= 100)
+        ensures(allowances[owner][spender] == amount)
+    {
+        allowances[owner][spender] = amount;
+    }
+}
+"""
+
+
 BASE_LOOP_INVARIANT = """\
 contract MutationLoopInvariant {
     storage var counter: u256 = 0;
@@ -310,6 +325,7 @@ class MutationCase:
     find: str
     replace: str
     reason: str
+    covers: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -318,6 +334,17 @@ class NegativeBuildCase:
     source: str
     reason: str
     expected_fragment: str
+    covers: tuple[str, ...] = ()
+
+
+REQUIRED_S1_COVERAGE = {
+    "S1-1": "narrow-width const-mul overflow",
+    "S1-2": "condition/scrutinee arithmetic obligations",
+    "S1-NEW-A": "nested map-store state summary",
+    "S1-NEW-B": "signed unary negation overflow",
+    "S1-NEW-D": "callee precondition on fallback/inline paths",
+    "DEGRADED-NO-ARTIFACT": "degraded query must fail closed without bytecode",
+}
 
 
 CASES = (
@@ -361,6 +388,7 @@ CASES = (
         find="requires(x <= 127)",
         replace="requires(true)",
         reason="weakened precondition permits u8 multiplication overflow at x=128",
+        covers=("S1-1",),
     ),
     MutationCase(
         name="signed_postcondition_flip",
@@ -385,6 +413,7 @@ CASES = (
         find="requires(x > -57896044618658097711785492504343953926634992332820282019728792003956564819968)",
         replace="requires(true)",
         reason="weakened precondition permits negating i256.min",
+        covers=("S1-NEW-B",),
     ),
     MutationCase(
         name="refinement_bound_overclaim",
@@ -425,6 +454,7 @@ CASES = (
         find="requires(y != 0)",
         replace="requires(true)",
         reason="division inside a branch condition must still prove its non-zero divisor",
+        covers=("S1-2",),
     ),
     MutationCase(
         name="if_condition_div_precondition_removed",
@@ -433,6 +463,7 @@ CASES = (
         find="requires(y != 0)",
         replace="requires(true)",
         reason="division inside an if condition must prove its non-zero divisor before branch facts apply",
+        covers=("S1-2",),
     ),
     MutationCase(
         name="switch_scrutinee_div_precondition_removed",
@@ -441,6 +472,7 @@ CASES = (
         find="requires(y != 0)",
         replace="requires(true)",
         reason="division inside a switch scrutinee must prove its non-zero divisor before case facts apply",
+        covers=("S1-2",),
     ),
     MutationCase(
         name="callee_precondition_removed",
@@ -449,6 +481,7 @@ CASES = (
         find="requires(x != 0)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
         replace="requires(true)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
         reason="caller must prove the callee's non-zero divisor precondition",
+        covers=("S1-NEW-D",),
     ),
     MutationCase(
         name="map_store_postcondition_body_corruption",
@@ -457,6 +490,15 @@ CASES = (
         find="balances[who] = amount;",
         replace="balances[who] = amount + 1;",
         reason="map storage postcondition no longer matches the stored value",
+    ),
+    MutationCase(
+        name="nested_map_store_postcondition_body_corruption",
+        source=BASE_NESTED_MAP_EFFECT,
+        function="approve",
+        find="allowances[owner][spender] = amount;",
+        replace="allowances[owner][spender] = amount + 1;",
+        reason="nested map storage postcondition no longer matches the stored value",
+        covers=("S1-NEW-A",),
     ),
     MutationCase(
         name="map_frame_alias_precondition_removed",
@@ -548,6 +590,7 @@ contract DegradedMustNotSucceed {
 """,
         reason="SMT degradation must fail closed and must not erase checks into bytecode",
         expected_fragment="SMT encoding degraded",
+        covers=("DEGRADED-NO-ARTIFACT",),
     ),
 )
 
@@ -682,11 +725,50 @@ def run_negative_build_case(
     return True
 
 
+def validate_required_s1_coverage(
+    cases: Iterable[MutationCase],
+    negative_cases: Iterable[NegativeBuildCase],
+) -> bool:
+    covered: dict[str, list[str]] = {key: [] for key in REQUIRED_S1_COVERAGE}
+    unknown: list[tuple[str, str]] = []
+
+    for case in cases:
+        for key in case.covers:
+            if key in covered:
+                covered[key].append(case.name)
+            else:
+                unknown.append((case.name, key))
+    for case in negative_cases:
+        for key in case.covers:
+            if key in covered:
+                covered[key].append(case.name)
+            else:
+                unknown.append((case.name, key))
+
+    ok = True
+    for case_name, key in unknown:
+        print(f"[fail] {case_name}: unknown required-S1 coverage key {key!r}", file=sys.stderr)
+        ok = False
+    for key, description in REQUIRED_S1_COVERAGE.items():
+        if not covered[key]:
+            print(f"[fail] missing required-S1 witness for {key}: {description}", file=sys.stderr)
+            ok = False
+
+    if ok:
+        joined = ", ".join(f"{key}={len(covered[key])}" for key in sorted(covered))
+        print(f"[pass] required S1 witness coverage: {joined}")
+    return ok
+
+
 def run_cases(cases: Iterable[MutationCase], compiler: pathlib.Path, timeout: int, keep_tmp: bool) -> int:
     if not compiler.exists() or not os.access(compiler, os.X_OK):
         print(f"error: compiler not found or not executable: {compiler}", file=sys.stderr)
         print("hint: run 'zig build' first", file=sys.stderr)
         return 2
+
+    cases = tuple(cases)
+    if not validate_required_s1_coverage(cases, NEGATIVE_BUILD_CASES):
+        return 1
 
     temp_context = tempfile.TemporaryDirectory(prefix="ora-mutation-")
     tmpdir = pathlib.Path(temp_context.name)
