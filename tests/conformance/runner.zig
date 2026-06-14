@@ -219,20 +219,58 @@ fn runConformanceSpecImpl(allocator: std.mem.Allocator, source_path: []const u8,
     try tmp.dir.makeDir("out");
     const out_path = try pathFromTmpAlloc(arena, tmp, "out");
 
-    try runOraEmit(arena, effective_source, out_path);
+    // Compile the primary contract, then every [[contract]] secondary. Each
+    // .ora has a distinct stem so all artifacts coexist in one out dir.
+    var compiled = std.ArrayList(CompiledContract){};
+    const primary = try compileOne(arena, effective_source, out_path);
+    try testing.expectError(error.UnknownFunction, primary.doc.findFunction("missing()"));
+    if (metrics) |sink| try sink.record("__bytecode_bytes", primary.bytecode.len);
+    try compiled.append(arena, .{
+        .name = "self",
+        .caller = parsed.value.deploy.caller,
+        .value = parsed.value.deploy.value,
+        .args = parsed.value.deploy.args,
+        .bytecode = primary.bytecode,
+        .doc = primary.doc,
+    });
 
-    const stem = sourceStem(effective_source) orelse return error.InvalidSourcePath;
-    const artifacts = try readArtifacts(arena, out_path, stem);
-
-    var doc = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
-    defer doc.deinit();
-    try testing.expectError(error.UnknownFunction, doc.findFunction("missing()"));
-
-    if (metrics) |sink| {
-        try sink.record("__bytecode_bytes", artifacts.bytecode.len);
+    for (parsed.value.secondary) |c| {
+        std.fs.cwd().access(c.source, .{}) catch {
+            std.debug.print("secondary contract source not found: {s}\n", .{c.source});
+            return error.DeclaredSourceMissing;
+        };
+        const built = try compileOne(arena, c.source, out_path);
+        try compiled.append(arena, .{
+            .name = c.name,
+            .caller = c.caller,
+            .value = c.value,
+            .args = c.args,
+            .bytecode = built.bytecode,
+            .doc = built.doc,
+        });
     }
 
-    try executeSpec(arena, parsed.value, artifacts.bytecode, &doc, metrics);
+    try executeSpec(arena, parsed.value, compiled.items, metrics);
+}
+
+const CompiledContract = struct {
+    name: []const u8,
+    caller: types.Address,
+    value: u256,
+    args: []types.ArgValue,
+    bytecode: []const u8,
+    doc: abi_doc.AbiDoc,
+};
+
+fn compileOne(arena: std.mem.Allocator, source_path: []const u8, out_path: []const u8) !struct {
+    bytecode: []const u8,
+    doc: abi_doc.AbiDoc,
+} {
+    try runOraEmit(arena, source_path, out_path);
+    const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
+    const artifacts = try readArtifacts(arena, out_path, stem);
+    const doc = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
+    return .{ .bytecode = artifacts.bytecode, .doc = doc };
 }
 
 fn sourceStem(source_path: []const u8) ?[]const u8 {
@@ -284,7 +322,14 @@ pub const MetricSink = struct {
     }
 };
 
-fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const u8, doc: *const abi_doc.AbiDoc, metrics: ?MetricSink) !void {
+fn findContract(contracts: []const CompiledContract, name: []const u8) ?*const CompiledContract {
+    for (contracts) |*c| {
+        if (std.mem.eql(u8, c.name, name)) return c;
+    }
+    return null;
+}
+
+fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []const CompiledContract, metrics: ?MetricSink) !void {
     var host = HarnessHost.init(allocator);
     defer host.deinit();
     try host.setBalance(spec.deploy.caller, std.math.maxInt(u256));
@@ -296,23 +341,54 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
 
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(spec.deploy.caller);
-    const constructor_abi = try doc.findConstructor();
-    defer constructor_abi.deinit(allocator);
-    const deploy_args = try abi.encodeArgs(allocator, constructor_abi.inputs, spec.deploy.args);
 
-    var init_code = std.ArrayList(u8){};
-    defer init_code.deinit(allocator);
-    try init_code.appendSlice(allocator, bytecode);
-    try init_code.appendSlice(allocator, deploy_args);
+    // Deploy primary first, then each secondary in declaration order, all from
+    // the same origin (sequential nonces → distinct deterministic addresses).
+    // Each contract's constructor args may reference an already-deployed
+    // contract by @name (resolved against the map built so far).
+    var addresses = std.StringHashMap(types.Address).init(allocator);
+    defer addresses.deinit();
 
-    const create_result = try evm.inner_create(spec.deploy.value, init_code.items, types.DEFAULT_GAS, null);
-    try host.check();
-    try testing.expect(create_result.success);
+    for (contracts, 0..) |c, i| {
+        // inner_create does not bump the deployer nonce for top-level creates
+        // (it expects the runner to). Advance it per deploy so each contract
+        // gets a distinct CREATE address instead of colliding on nonce 1.
+        try host.setNonce(spec.deploy.caller, @intCast(1 + i));
 
-    const contract_address = create_result.address;
-    try testing.expect(host.getCodeForAddress(contract_address).len > 0);
+        const ctor = try c.doc.findConstructor();
+        defer ctor.deinit(allocator);
+        const resolved = try resolveAddressArgs(allocator, ctor.inputs, c.args, null, &addresses);
+        defer deinitResolvedAddressArgs(allocator, c.args, resolved);
+        const ctor_args = try abi.encodeArgs(allocator, ctor.inputs, resolved);
+        defer allocator.free(ctor_args);
+
+        var init_code = std.ArrayList(u8){};
+        defer init_code.deinit(allocator);
+        try init_code.appendSlice(allocator, c.bytecode);
+        try init_code.appendSlice(allocator, ctor_args);
+
+        const create_result = try evm.inner_create(c.value, init_code.items, types.DEFAULT_GAS, null);
+        try host.check();
+        if (!create_result.success) {
+            std.debug.print("contract deployment failed: {s}\n", .{c.name});
+        }
+        try testing.expect(create_result.success);
+        try testing.expect(host.getCodeForAddress(create_result.address).len > 0);
+        try addresses.put(c.name, create_result.address);
+    }
+
+    const primary_address = addresses.get("self").?;
 
     for (spec.calls) |call| {
+        const target_address = if (call.to) |name|
+            (addresses.get(name) orelse return error.UnknownContractTarget)
+        else
+            primary_address;
+        const target_doc = if (call.to) |name|
+            &(findContract(contracts, name) orelse return error.UnknownContractTarget).doc
+        else
+            &contracts[0].doc;
+
         // Raw-calldata calls (T2 adversarial) bypass the ABI; typed calls
         // resolve a function and encode args. A raw call has no function_abi,
         // so its outcome is restricted to succeeds/reverts (enforced at parse).
@@ -325,10 +401,10 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
         if (call.calldata) |raw| {
             try calldata.appendSlice(allocator, raw);
         } else {
-            const fa = try doc.findFunction(call.@"fn".?);
+            const fa = try target_doc.findFunction(call.@"fn".?);
             function_abi = fa;
-            const resolved_args = try resolveContractAddressArgs(allocator, fa.inputs, call.args, contract_address);
-            defer deinitResolvedContractAddressArgs(allocator, call.args, resolved_args);
+            const resolved_args = try resolveAddressArgs(allocator, fa.inputs, call.args, target_address, &addresses);
+            defer deinitResolvedAddressArgs(allocator, call.args, resolved_args);
             const encoded_args = try abi.encodeArgs(allocator, fa.inputs, resolved_args);
             defer allocator.free(encoded_args);
             try calldata.appendSlice(allocator, &fa.selector);
@@ -337,7 +413,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
 
         const result = evm.call(.{ .call = .{
             .caller = call.caller,
-            .to = contract_address,
+            .to = target_address,
             .value = call.value,
             .input = calldata.items,
             .gas = types.DEFAULT_GAS,
@@ -403,7 +479,7 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, bytecode: []const
         }
 
         for (call.storage) |assertion| {
-            try testing.expectEqual(assertion.value, host.getStorageSlot(contract_address, assertion.slot));
+            try testing.expectEqual(assertion.value, host.getStorageSlot(target_address, assertion.slot));
         }
     }
 }
@@ -428,6 +504,7 @@ fn resolveContractAddressArgs(
                 break :blk .{ .literal = try allocAddressLiteral(allocator, contract_address) };
             } else arg,
             .boolean => arg,
+            .contract_ref => return error.UnsupportedArgType,
         };
         initialized += 1;
     }
@@ -444,11 +521,69 @@ fn freeResolvedContractAddressLiterals(allocator: std.mem.Allocator, original: [
         const original_literal = switch (original_arg) {
             .literal => |literal| literal,
             .boolean => continue,
+            .contract_ref => continue,
         };
         if (!std.mem.eql(u8, original_literal, "$contract")) continue;
         switch (resolved_arg) {
             .literal => |literal| allocator.free(@constCast(literal)),
             .boolean => {},
+            .contract_ref => {},
+        }
+    }
+}
+
+/// Generalized arg resolution for multi-contract specs: `$contract` → the
+/// call's target address (`self_address`), `@name` → the named contract's
+/// deployed address (looked up in `addresses`). Used by executeSpec.
+fn resolveAddressArgs(
+    allocator: std.mem.Allocator,
+    wires: []const []const u8,
+    args: []const types.ArgValue,
+    self_address: ?types.Address,
+    addresses: *const std.StringHashMap(types.Address),
+) ![]types.ArgValue {
+    if (wires.len != args.len) return error.ArgumentCountMismatch;
+    const resolved = try allocator.alloc(types.ArgValue, args.len);
+    var initialized: usize = 0;
+    errdefer {
+        freeResolvedAddressLiterals(allocator, args[0..initialized], resolved[0..initialized]);
+        allocator.free(resolved);
+    }
+    for (args, 0..) |arg, i| {
+        resolved[i] = switch (arg) {
+            .literal => |literal| if (std.mem.eql(u8, literal, "$contract")) blk: {
+                if (!std.mem.eql(u8, wires[i], "address")) return error.UnsupportedArgType;
+                const self = self_address orelse return error.NoSelfAddress;
+                break :blk .{ .literal = try allocAddressLiteral(allocator, self) };
+            } else arg,
+            .contract_ref => |name| blk: {
+                if (!std.mem.eql(u8, wires[i], "address")) return error.UnsupportedArgType;
+                const addr = addresses.get(name) orelse return error.UnknownContractRef;
+                break :blk .{ .literal = try allocAddressLiteral(allocator, addr) };
+            },
+            .boolean => arg,
+        };
+        initialized += 1;
+    }
+    return resolved;
+}
+
+fn deinitResolvedAddressArgs(allocator: std.mem.Allocator, original: []const types.ArgValue, resolved: []const types.ArgValue) void {
+    freeResolvedAddressLiterals(allocator, original, resolved);
+    allocator.free(resolved);
+}
+
+fn freeResolvedAddressLiterals(allocator: std.mem.Allocator, original: []const types.ArgValue, resolved: []const types.ArgValue) void {
+    for (original, resolved) |original_arg, resolved_arg| {
+        const was_resolved = switch (original_arg) {
+            .literal => |literal| std.mem.eql(u8, literal, "$contract"),
+            .contract_ref => true,
+            .boolean => false,
+        };
+        if (!was_resolved) continue;
+        switch (resolved_arg) {
+            .literal => |literal| allocator.free(@constCast(literal)),
+            else => {},
         }
     }
 }

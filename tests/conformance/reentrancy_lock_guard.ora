@@ -1,0 +1,34 @@
+// Reentrancy guard via @lock/@unlock (executed multi-contract conformance).
+//
+// `withdraw` locks `gate`, then makes an external call to `hook` — the
+// reentrancy window. If `hook` re-enters `withdraw`, the second `@lock(gate)`
+// must trip the held lock and revert, so the re-entrant entry can NOT complete.
+// The attacker contract (reentrancy_attacker.ora) drives the re-entry; the spec
+// asserts `entryCount() == 1`, proving exactly one entry committed.
+comptime const std = @import("std");
+
+extern trait ReentryHook {
+    call fn onCall(self) -> bool;
+}
+
+error ExternalCallFailed;
+
+contract ReentrancyVictim {
+    storage var gate: u256 = 0;
+    storage var entries: u256 = 0;
+
+    pub fn withdraw(hook: address) -> u256 {
+        @lock(gate);
+        let hook_result = external<ReentryHook>(hook, gas: 200000).onCall();
+        entries += 1;
+        @unlock(gate);
+        return match (hook_result) {
+            Ok(_) => entries,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn entryCount() -> u256 {
+        return entries;
+    }
+}

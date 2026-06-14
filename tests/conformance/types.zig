@@ -12,6 +12,10 @@ pub const Evm = evm_mod.Evm(.{});
 pub const ArgValue = union(enum) {
     literal: []const u8,
     boolean: bool,
+    /// `@name` — resolved at execution time to the deployed address of the
+    /// named contract (primary or a `[[contract]]` secondary). Enables
+    /// cross-contract wiring (e.g. handing the victim the attacker's address).
+    contract_ref: []const u8,
 };
 
 pub const ExpectedStaticReturn = struct {
@@ -63,6 +67,9 @@ pub const DeploySpec = struct {
 };
 
 pub const CallSpec = struct {
+    /// Target contract by name; null = the primary `[deploy]` contract.
+    /// Names come from `[[contract]]` sections (and "self"/primary is implicit).
+    to: ?[]const u8 = null,
     /// Either @"fn"+args (typed) or calldata (raw hostile bytes) is set, never both.
     @"fn": ?[]const u8,
     /// Raw calldata bytes; when set, the call bypasses ABI encoding. Such calls
@@ -84,12 +91,31 @@ pub const CallSpec = struct {
     }
 };
 
+/// A named secondary contract deployed alongside the primary `[deploy]`.
+/// Declared via `[[contract]]` sections. `source` is required (its own .ora).
+pub const ContractSpec = struct {
+    name: []const u8,
+    source: []const u8,
+    caller: Address,
+    value: u256,
+    args: []ArgValue,
+
+    pub fn deinit(self: ContractSpec, allocator: std.mem.Allocator) void {
+        allocator.free(self.args);
+    }
+};
+
 pub const Spec = struct {
     deploy: DeploySpec,
+    /// Secondary contracts (`[[contract]]`), deployed after the primary in
+    /// declaration order so earlier ones can be referenced by later args.
+    secondary: []ContractSpec = &.{},
     calls: []CallSpec,
 
     pub fn deinit(self: Spec, allocator: std.mem.Allocator) void {
         self.deploy.deinit(allocator);
+        for (self.secondary) |c| c.deinit(allocator);
+        allocator.free(self.secondary);
         for (self.calls) |call| call.deinit(allocator);
         allocator.free(self.calls);
     }

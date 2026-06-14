@@ -94,6 +94,156 @@ contract MutationErrorUnion {
 """
 
 
+BASE_ERROR_UNION_ERR = """\
+contract MutationErrorUnionErr {
+    error E;
+
+    pub fn fail(v: u256) -> !u256 | E
+        requires(v <= 1000)
+        ensures_err(v <= 1000)
+    {
+        return E;
+    }
+}
+"""
+
+
+BASE_BRANCH_CONDITION = """\
+contract MutationBranchCondition {
+    pub fn guarded_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        if (x / y == 0) {
+            return 0;
+        }
+        return x / y;
+    }
+}
+"""
+
+
+BASE_IF_CONDITION = """\
+contract MutationIfCondition {
+    pub fn branch_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        var out: u256 = 2;
+        if (x / y == 0) {
+            out = 1;
+        }
+        return out;
+    }
+}
+"""
+
+
+BASE_SWITCH_SCRUTINEE = """\
+contract MutationSwitchScrutinee {
+    pub fn switch_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        switch (x / y) {
+            0 => { return 0; }
+            else => { return 1; }
+        }
+    }
+}
+"""
+
+
+BASE_MAP_EFFECT = """\
+contract MutationMapEffect {
+    storage var balances: map<address, u256>;
+
+    pub fn set(who: address, amount: u256)
+        requires(amount <= 100)
+        ensures(balances[who] == amount)
+    {
+        balances[who] = amount;
+    }
+}
+"""
+
+
+BASE_MAP_FRAME = """\
+contract MutationMapFrame {
+    storage var balances: map<address, u256>;
+
+    pub fn setOther(who: address, other: address, amount: u256)
+        requires(who != other)
+        requires(amount <= 100)
+        ensures(balances[other] == old(balances[other]))
+    {
+        balances[who] = amount;
+    }
+}
+"""
+
+
+BASE_LOOP_INVARIANT = """\
+contract MutationLoopInvariant {
+    storage var counter: u256 = 0;
+
+    pub fn countTo(n: u256)
+        requires(n <= 1000)
+        requires(counter == 0)
+        ensures(counter == n)
+    {
+        while (counter < n)
+            invariant(counter <= n)
+        {
+            counter = counter + 1;
+        }
+    }
+}
+"""
+
+
+BASE_ASSERTION = """\
+contract MutationAssert {
+    pub fn assertBound(x: u256)
+        requires(x <= 100)
+    {
+        assert(x <= 100, "bound");
+    }
+}
+"""
+
+
+BASE_STORAGE_BRANCH = """\
+contract MutationStorageBranch {
+    storage var limit: u256;
+
+    pub fn set_limit(value: u256)
+        requires(value <= 20)
+    {
+        limit = value;
+    }
+
+    pub fn classify(x: u256) -> u256
+        requires(x <= 20)
+        ensures((x <= limit && result == 1) || (x > limit && result == 2))
+    {
+        if (x <= limit) {
+            return 1;
+        }
+        return 2;
+    }
+}
+"""
+
+
+BASE_QUANTIFIED = """\
+contract MutationQuantified {
+    pub fn check(x: u256) -> bool
+        ensures(forall i: u256 where i < x => i <= x)
+    {
+        return true;
+    }
+}
+"""
+
+
 @dataclasses.dataclass(frozen=True)
 class MutationCase:
     name: str
@@ -169,6 +319,94 @@ CASES = (
         find="ensures_ok(result == v)",
         replace="ensures_ok(result == v + 1)",
         reason="error-union Ok postcondition no longer matches the returned value",
+    ),
+    MutationCase(
+        name="error_union_ok_body_corruption",
+        source=BASE_ERROR_UNION,
+        function="get",
+        find="return v;",
+        replace="return v + 1;",
+        reason="error-union Ok body changed so it no longer proves the postcondition",
+    ),
+    MutationCase(
+        name="error_union_err_postcondition_flip",
+        source=BASE_ERROR_UNION_ERR,
+        function="fail",
+        find="ensures_err(v <= 1000)",
+        replace="ensures_err(v > 1000)",
+        reason="error-union Err postcondition no longer follows from the precondition",
+    ),
+    MutationCase(
+        name="branch_condition_div_precondition_removed",
+        source=BASE_BRANCH_CONDITION,
+        function="guarded_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside a branch condition must still prove its non-zero divisor",
+    ),
+    MutationCase(
+        name="if_condition_div_precondition_removed",
+        source=BASE_IF_CONDITION,
+        function="branch_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside an if condition must prove its non-zero divisor before branch facts apply",
+    ),
+    MutationCase(
+        name="switch_scrutinee_div_precondition_removed",
+        source=BASE_SWITCH_SCRUTINEE,
+        function="switch_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside a switch scrutinee must prove its non-zero divisor before case facts apply",
+    ),
+    MutationCase(
+        name="map_store_postcondition_body_corruption",
+        source=BASE_MAP_EFFECT,
+        function="set",
+        find="balances[who] = amount;",
+        replace="balances[who] = amount + 1;",
+        reason="map storage postcondition no longer matches the stored value",
+    ),
+    MutationCase(
+        name="map_frame_alias_precondition_removed",
+        source=BASE_MAP_FRAME,
+        function="setOther",
+        find="requires(who != other)",
+        replace="requires(true)",
+        reason="map frame postcondition no longer follows when keys may alias",
+    ),
+    MutationCase(
+        name="loop_invariant_postcondition_overclaim",
+        source=BASE_LOOP_INVARIANT,
+        function="countTo",
+        find="ensures(counter == n)",
+        replace="ensures(counter == n + 1)",
+        reason="loop-invariant-derived postcondition overclaims the final counter value",
+    ),
+    MutationCase(
+        name="assert_requires_weakened",
+        source=BASE_ASSERTION,
+        function="assertBound",
+        find="requires(x <= 100)",
+        replace="requires(true)",
+        reason="assert obligation no longer follows from the weakened precondition",
+    ),
+    MutationCase(
+        name="storage_branch_body_corruption",
+        source=BASE_STORAGE_BRANCH,
+        function="classify",
+        find="return 1;",
+        replace="return 2;",
+        reason="storage-backed branch result no longer proves the conditional postcondition",
+    ),
+    MutationCase(
+        name="quantified_postcondition_flip",
+        source=BASE_QUANTIFIED,
+        function="check",
+        find="ensures(forall i: u256 where i < x => i <= x)",
+        replace="ensures(forall i: u256 where i < x => i > x)",
+        reason="quantified postcondition no longer follows for values below x",
     ),
 )
 

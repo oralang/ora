@@ -3651,6 +3651,8 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
     const touch_total = try functionSlice(rendered, "touch_total");
     try expectOrderedNeedles(touch_total, &.{
         lock_prefix,
+        "tload",
+        "revert",
         "tstore",
     });
 
@@ -3669,6 +3671,8 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
         "keccak256",
         lock_prefix,
         "add",
+        "tload",
+        "revert",
         "tstore",
     });
 
@@ -3685,7 +3689,7 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
     });
 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "tstore"));
-    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "tload"));
+    try testing.expectEqual(@as(usize, 4), std.mem.count(u8, rendered, "tload"));
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, rendered, lock_prefix));
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "keccak256"));
 }

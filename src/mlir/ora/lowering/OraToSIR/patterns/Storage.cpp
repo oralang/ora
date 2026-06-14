@@ -1995,6 +1995,31 @@ static Value deriveMapElementSlot(
     return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
 }
 
+static Block *emitLockedKeyRevertGuard(
+    Operation *op,
+    Location loc,
+    ConversionPatternRewriter &rewriter,
+    Value lockKey,
+    Type u256,
+    Type ptrType)
+{
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    Block *afterBlock = rewriter.splitBlock(parentBlock, std::next(Block::iterator(op)));
+
+    Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.setInsertionPointToStart(revertBlock);
+    Value zeroU256 = constU256(rewriter, loc, 0);
+    Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
+    Value zeroLen = constU256(rewriter, loc, 0);
+    rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
+
+    rewriter.setInsertionPoint(op);
+    Value val = rewriter.create<sir::TLoadOp>(loc, u256, lockKey);
+    rewriter.create<sir::CondBrOp>(loc, val, ValueRange{}, ValueRange{}, revertBlock, afterBlock);
+    return afterBlock;
+}
+
 // -----------------------------------------------------------------------------
 // Lower ora.tstore.guard -> key = LOCK_PREFIX+slot; if TLOAD(key) != 0 then REVERT(0,0)
 // -----------------------------------------------------------------------------
@@ -2023,28 +2048,16 @@ LogicalResult ConvertTStoreGuardOp::matchAndRewrite(
         slot = deriveMapElementSlot(loc, rewriter, adaptor.getResource(), slotBase, u256, ptrType);
     }
 
-    Block *parentBlock = op->getBlock();
-    Region *parentRegion = parentBlock->getParent();
-    Block *afterBlock = rewriter.splitBlock(parentBlock, std::next(Block::iterator(op)));
-
-    Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
-    rewriter.setInsertionPointToStart(revertBlock);
-    Value zeroU256 = constU256(rewriter, loc, 0);
-    Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
-    Value zeroLen = constU256(rewriter, loc, 0);
-    rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
-
     rewriter.setInsertionPoint(op);
     Value lockPrefix = constU256(rewriter, loc, getLockPrefixAPInt());
     Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
-    Value val = rewriter.create<sir::TLoadOp>(loc, u256, lockKey);
-    rewriter.create<sir::CondBrOp>(loc, val, ValueRange{}, ValueRange{}, revertBlock, afterBlock);
+    emitLockedKeyRevertGuard(op.getOperation(), loc, rewriter, lockKey, u256, ptrType);
     rewriter.eraseOp(op);
     return success();
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.lock -> TSTORE(LOCK_PREFIX+slot, 1)
+// Lower ora.lock -> if TLOAD(LOCK_PREFIX+slot) != 0 then REVERT(0,0), else TSTORE(..., 1)
 // -----------------------------------------------------------------------------
 LogicalResult ConvertLockOp::matchAndRewrite(
     ora::LockOp op,
@@ -2074,6 +2087,8 @@ LogicalResult ConvertLockOp::matchAndRewrite(
     rewriter.setInsertionPoint(op);
     Value lockPrefix = constU256(rewriter, loc, getLockPrefixAPInt());
     Value lockKey = rewriter.create<sir::AddOp>(loc, u256, lockPrefix, slot);
+    Block *afterBlock = emitLockedKeyRevertGuard(op.getOperation(), loc, rewriter, lockKey, u256, ptrType);
+    rewriter.setInsertionPointToStart(afterBlock);
     Value one = constU256(rewriter, loc, 1);
     rewriter.create<sir::TStoreOp>(loc, lockKey, one);
     rewriter.eraseOp(op);

@@ -234,7 +234,18 @@
     {
       "id": "storage.slice_of_structs",
       "area": "storage",
-      "skip": "layout unresolved; inputs intentionally listed in tests/conformance/SKIP"
+      "behavior": "Dynamic array of fixed structs (uint256,uint256,uint256)[] stores at keccak(slot) base with correct per-element offsets; get_middle reads back",
+      "specs": [
+        "tests/conformance/storage_slice_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.slice_of_dynamic_structs",
+      "area": "storage",
+      "behavior": "Dynamic array of structs containing a dynamic array (uint256,uint256[],uint256)[] resolves nested keccak-rooted layout for inner slices",
+      "specs": [
+        "tests/conformance/storage_slice_dynamic_struct.spec.toml"
+      ]
     },
     {
       "id": "storage.store_load_roundtrip_property",
@@ -364,9 +375,14 @@
     {
       "id": "verification.falsification_pairing",
       "area": "verification",
-      "behavior": "Execution falsification (T3.4): the verified ensures(result==a+b) is checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
+      "behavior": "Execution falsification (T3.4): verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
       "specs": [
-        "tests/conformance/falsification_arith.spec.toml"
+        "tests/conformance/falsification_arith.spec.toml",
+        "tests/conformance/falsification_map_effect.spec.toml",
+        "tests/conformance/falsification_map_frame.spec.toml",
+        "tests/conformance/falsification_error_union_ok.spec.toml",
+        "tests/conformance/falsification_loop_invariant.spec.toml",
+        "tests/conformance/falsification_storage_branch.spec.toml"
       ]
     },
     {
@@ -447,6 +463,14 @@
       ]
     },
     {
+      "id": "locks.reentrancy_guard_cross_contract",
+      "area": "locks",
+      "behavior": "@lock rejects a re-entrant cross-contract entry before the inner call can commit state",
+      "specs": [
+        "tests/conformance/reentrancy_lock_guard.spec.toml"
+      ]
+    },
+    {
       "id": "storage.combinatorial_map_struct_array",
       "area": "storage",
       "behavior": "Struct with a static-array field stored under a map: array-offset within struct within map-derived slot, with raw-slot parity and key independence",
@@ -457,7 +481,7 @@
     {
       "id": "adversarial.calldata_decode",
       "area": "adversarial",
-      "behavior": "Hostile raw calldata against the dispatcher decode surface (unknown selector, truncated args, out-of-bounds dynamic offset) must revert, never accept-and-misbehave",
+      "behavior": "Hostile raw calldata against the dispatcher decode surface (unknown selector, truncated args, out-of-bounds dynamic offsets, non-canonical bool/address/fixed-bytes/signed-narrow scalar/array/tuple fields, nested dynamic tuple tails, and non-canonical static elements inside nested dynamic tuple arrays) must revert, never accept-and-misbehave",
       "specs": [
         "tests/conformance/adversarial_calldata.spec.toml"
       ]

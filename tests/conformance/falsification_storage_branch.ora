@@ -1,0 +1,22 @@
+// Falsification pairing (T3.4): the verifier discharges a postcondition whose
+// result depends on a storage read and branch condition, and this spec executes
+// both sides of that branch.
+contract FalsificationStorageBranch {
+    storage var limit: u256;
+
+    pub fn set_limit(value: u256)
+        requires(value <= 20)
+    {
+        limit = value;
+    }
+
+    pub fn classify(x: u256) -> u256
+        requires(x <= 20)
+        ensures((x <= limit && result == 1) || (x > limit && result == 2))
+    {
+        if (x <= limit) {
+            return 1;
+        }
+        return 2;
+    }
+}

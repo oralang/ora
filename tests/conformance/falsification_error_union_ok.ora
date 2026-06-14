@@ -1,0 +1,12 @@
+// Falsification pairing (T3.4): the verifier discharges ensures_ok(result == v),
+// and this conformance spec executes the Ok path on concrete boundary inputs.
+error Failure;
+
+contract FalsificationErrorUnionOk {
+    pub fn get(v: u256) -> !u256 | Failure
+        requires(v <= 1000)
+        ensures_ok(result == v)
+    {
+        return v;
+    }
+}
