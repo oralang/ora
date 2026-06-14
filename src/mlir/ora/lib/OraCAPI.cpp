@@ -7231,6 +7231,8 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
         const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
+        const bool enablePhase0SIRFrameworkCleanup =
+            moduleOp->hasAttr("ora.phase0.run_sir_framework_cleanup");
         if (debugInfo && !hadDebugInfoAttr)
         {
             moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
@@ -7277,6 +7279,14 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
             // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
             pm.addPass(createSIRCleanupPass());
 
+        }
+        if (enablePhase0SIRFrameworkCleanup)
+        {
+            // Phase 0 framework-first spike: let MLIR canonicalization/DCE
+            // exercise dialect folders on SIR after conversion. This is opt-in
+            // so normal builds remain byte-identical while the spike measures
+            // framework behavior against the existing manual cleanup baseline.
+            pm.addPass(createSimpleDCEPass());
         }
 
         // Run the pass

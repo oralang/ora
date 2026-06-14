@@ -959,6 +959,7 @@ def BitcastOp : SIR_PureOp<"bitcast"> {
   }];
   let arguments = (ins AnyType:$input);
   let results = (outs AnyType:$output);
+  let hasFolder = 1;
   let assemblyFormat =
     "$input `:` type($input) attr-dict `:` type($output)";
 }

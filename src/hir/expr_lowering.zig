@@ -1287,7 +1287,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 &.{};
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
+                var arg_value: mlir.MlirValue = undefined;
                 if (index < runtime_parameters.len) {
                     const parameter = runtime_parameters[index];
                     if (callee_function != null) {
@@ -1299,8 +1299,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         else
                             try self.parent.resolvedRuntimeParameterTypeForCall(callee_function.?, parameter, call);
                         const target_type = self.parent.lowerSemaType(target_sema_type, parameter.range);
-                        arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                        arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
+                    } else {
+                        arg_value = try self.lowerExpr(arg, locals);
                     }
+                } else {
+                    arg_value = try self.lowerExpr(arg, locals);
                 }
                 try args.append(self.parent.allocator, arg_value);
             }
@@ -2349,10 +2353,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try args.append(self.parent.allocator, receiver_value);
 
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
                 const parameter = runtime_parameters[index + 1];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
-                arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                const arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
                 try args.append(self.parent.allocator, arg_value);
             }
 
@@ -2485,10 +2488,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
                 const parameter = runtime_parameters[index];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
-                arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                const arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
                 try args.append(self.parent.allocator, arg_value);
             }
 

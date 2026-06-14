@@ -12,6 +12,8 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+#include <optional>
+
 using namespace mlir;
 using namespace sir;
 
@@ -88,6 +90,59 @@ void ConstOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
 {
     // Just return the constant attribute; this makes the op foldable and DCE-able
     return getValueAttr();
+}
+
+//===----------------------------------------------------------------------===//
+// BitcastOp Folding
+//===----------------------------------------------------------------------===//
+
+static std::optional<unsigned> getSIRBitcastPayloadWidth(Type type)
+{
+    if (auto intType = llvm::dyn_cast<IntegerType>(type))
+        return intType.getWidth();
+    if (llvm::isa<U256Type, PtrType>(type))
+        return 256u;
+    return std::nullopt;
+}
+
+static bool hasSameKnownSIRBitcastPayloadWidth(Type lhs, Type rhs)
+{
+    auto lhsWidth = getSIRBitcastPayloadWidth(lhs);
+    auto rhsWidth = getSIRBitcastPayloadWidth(rhs);
+    return lhsWidth && rhsWidth && *lhsWidth == *rhsWidth;
+}
+
+static bool hasFoldBlockingAttrs(Operation *op)
+{
+    // Bitcast attrs are sometimes used as lowering breadcrumbs. The framework
+    // folder is intentionally narrower than OraToSIR's final safety-net fold:
+    // do not let a dialect-local fold erase metadata unless a later slice proves
+    // that attribute class is discardable.
+    return !op->getAttrs().empty();
+}
+
+::mlir::OpFoldResult BitcastOp::fold(FoldAdaptor adaptor)
+{
+    if (hasFoldBlockingAttrs(getOperation()))
+        return {};
+
+    Value input = getInput();
+    Type inputType = input.getType();
+    Type resultType = getResult().getType();
+
+    if (inputType == resultType)
+        return input;
+
+    auto inner = input.getDefiningOp<BitcastOp>();
+    if (!inner || hasFoldBlockingAttrs(inner.getOperation()))
+        return {};
+
+    Type startType = inner.getInput().getType();
+    Type middleType = inputType;
+    if (startType == resultType && hasSameKnownSIRBitcastPayloadWidth(startType, middleType))
+        return inner.getInput();
+
+    return {};
 }
 
 //===----------------------------------------------------------------------===//

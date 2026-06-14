@@ -65,6 +65,15 @@ fn parseOraModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
     return module;
 }
 
+fn setModuleBoolAttr(ctx: mlir.MlirContext, module: mlir.MlirModule, name: []const u8) void {
+    const attr = mlir.oraBoolAttrCreate(ctx, true);
+    mlir.oraOperationSetAttributeByName(
+        mlir.oraModuleGetOperation(module),
+        mlir.oraStringRefCreate(name.ptr, name.len),
+        attr,
+    );
+}
+
 fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {
     const header = try std.fmt.allocPrint(testing.allocator, "fn {s}:", .{function_name});
     defer testing.allocator.free(header);
@@ -300,6 +309,91 @@ test "OraToSIR folds redundant integer/u256 bitcast round trips" {
     try testing.expect(!std.mem.containsAtLeast(u8, increment_fn, 1, "bitcast"));
 }
 
+test "Phase0 bitcast folder runs when final manual bitcast fold is skipped" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @same_width_roundtrip(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : i256
+        \\    %1 = sir.bitcast %0 : i256 : !sir.u256
+        \\    sir.iret %1
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    setModuleBoolAttr(ctx, module, "ora.phase0.skip_manual_bitcast_fold");
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.iret %arg0"));
+}
+
+test "Phase0 framework cleanup folds identity sir.bitcast without manual fold" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @identity(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : !sir.u256
+        \\    sir.iret %0
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    setModuleBoolAttr(ctx, module, "ora.phase0.skip_manual_bitcast_fold");
+    setModuleBoolAttr(ctx, module, "ora.phase0.run_sir_framework_cleanup");
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.iret %arg0"));
+}
+
+test "Phase0 framework cleanup folds same-width sir.bitcast round trip" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @same_width_roundtrip(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : i256
+        \\    %1 = sir.bitcast %0 : i256 : !sir.u256
+        \\    sir.iret %1
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    setModuleBoolAttr(ctx, module, "ora.phase0.skip_manual_bitcast_fold");
+    setModuleBoolAttr(ctx, module, "ora.phase0.run_sir_framework_cleanup");
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.iret %arg0"));
+}
+
 test "OraToSIR keeps width-changing bitcast round trips" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);
@@ -326,6 +420,66 @@ test "OraToSIR keeps width-changing bitcast round trips" {
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": !sir.u256 : i1"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": i1 : !sir.u256"));
+}
+
+test "Phase0 framework cleanup keeps width-changing sir.bitcast round trip" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @guard(%arg0: !sir.u256) {
+        \\    %0 = sir.bitcast %arg0 : !sir.u256 : i1
+        \\    %1 = sir.bitcast %0 : i1 : !sir.u256
+        \\    sir.iret %1
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    setModuleBoolAttr(ctx, module, "ora.phase0.skip_manual_bitcast_fold");
+    setModuleBoolAttr(ctx, module, "ora.phase0.run_sir_framework_cleanup");
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "sir.bitcast"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": !sir.u256 : i1"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, ": i1 : !sir.u256"));
+}
+
+test "Phase0 framework cleanup converts loop-containing source in release and debug modes" {
+    const source_text =
+        \\pub fn loop_sum(limit: u256) -> u256 {
+        \\    var value: u256 = 0;
+        \\    var total: u256 = 0;
+        \\    while (value < limit) {
+        \\        total = total + value;
+        \\        value = value + 1;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    inline for (.{ false, true }) |debug_info| {
+        var compilation = try compileText(source_text);
+        defer compilation.deinit();
+
+        const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+        try testing.expect(hir_result.diagnostics.isEmpty());
+
+        setModuleBoolAttr(hir_result.context, hir_result.module.raw_module, "ora.phase0.skip_manual_bitcast_fold");
+        setModuleBoolAttr(hir_result.context, hir_result.module.raw_module, "ora.phase0.run_sir_framework_cleanup");
+        try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, debug_info));
+
+        const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+        defer testing.allocator.free(rendered);
+        try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "loop_sum"));
+    }
 }
 
 test "OraToSIR keeps arithmetic width-changing carrier round trips" {

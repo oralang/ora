@@ -57,6 +57,9 @@ using mlir::ora::lowering::constU256;
 
 namespace
 {
+    constexpr llvm::StringLiteral kPhase0SkipManualBitcastFoldAttr =
+        "ora.phase0.skip_manual_bitcast_fold";
+
     template <typename... Dialects>
     static void addLegalDialects(ConversionTarget &target)
     {
@@ -2472,7 +2475,15 @@ public:
                 op.erase();
         }
 
-        foldRedundantSirBitcasts(module);
+        if (!module->hasAttr(kPhase0SkipManualBitcastFoldAttr))
+        {
+            foldRedundantSirBitcasts(module);
+        }
+        else if (mlir::ora::isDebugEnabled())
+        {
+            llvm::errs() << "[OraToSIR] Phase0: skipped manual sir.bitcast fold\n";
+            llvm::errs().flush();
+        }
 
         // Guard: fail if any lowering-phase dialect ops remain after all lowering phases.
         if (mlir::ora::isDebugEnabled())
@@ -2636,7 +2647,9 @@ namespace mlir
                 module.walk([&](mlir::func::FuncOp funcOp)
                             {
                     OpPassManager funcPM("func.func");
-                    funcPM.addPass(mlir::createCanonicalizerPass());
+                    GreedyRewriteConfig config;
+                    config.enableConstantCSE(false);
+                    funcPM.addPass(mlir::createCanonicalizerPass(config));
                     funcPM.addPass(mlir::createRemoveDeadValuesPass());
 
                     if (failed(runPipeline(funcPM, funcOp)))

@@ -1899,6 +1899,39 @@ test "compiler preserves source signedness for contextual integer widening" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
 }
 
+test "compiler preserves source signedness for local and call integer widening" {
+    const source_text =
+        \\fn accept_u256(input: u256) {
+        \\}
+        \\
+        \\fn accept_i256(input: i256) {
+        \\}
+        \\
+        \\pub fn widen_unsigned_local_and_call() {
+        \\    let small: u8 = 42;
+        \\    let medium: u16 = small;
+        \\    accept_u256(medium);
+        \\}
+        \\
+        \\pub fn widen_signed_local_and_call(input: i8) {
+        \\    let medium: i16 = input;
+        \\    accept_i256(medium);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.extui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.extsi"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
+}
+
 test "compiler lowers power and wrapping compound assignment" {
     const source_text =
         \\pub fn update_all(input: u256, exp: u256, delta: u256) -> u256 {
