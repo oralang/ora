@@ -1623,20 +1623,59 @@ pub const Encoder = struct {
         return .{ .element_text = element_text, .rank = if (rank == 0) default_rank else rank };
     }
 
+    fn parsePrintedIntegerWidth(self: *Encoder, width_text: []const u8, detail: []const u8) error{UnsupportedOperation}!u32 {
+        const trimmed_width = std.mem.trim(u8, width_text, " \t\n\r");
+        if (trimmed_width.len == 0) {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        }
+        const width = std.fmt.parseInt(u32, trimmed_width, 10) catch {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        };
+        if (width == 0) {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        }
+        return width;
+    }
+
+    fn parsePrintedOraIntegerWidth(self: *Encoder, trimmed: []const u8) error{UnsupportedOperation}!u32 {
+        const prefix = "!ora.int<";
+        if (!std.mem.endsWith(u8, trimmed, ">")) {
+            self.recordSoundnessLoss(.missing_type_metadata, "malformed printed Ora integer type missing width");
+            return error.UnsupportedOperation;
+        }
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        var width_end: usize = 0;
+        while (width_end < body.len) : (width_end += 1) {
+            switch (body[width_end]) {
+                ',', ' ', '\t', '\n', '\r' => break,
+                else => {},
+            }
+        }
+        return self.parsePrintedIntegerWidth(body[0..width_end], "malformed printed Ora integer type missing width");
+    }
+
     fn sortFromPrintedType(self: *Encoder, type_text: []const u8) error{ OutOfMemory, UnsupportedOperation }!z3.Z3_sort {
         const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
         if (trimmed.len == 0) return error.UnsupportedOperation;
         if (std.mem.eql(u8, trimmed, "i1") or std.mem.eql(u8, trimmed, "bool")) return z3.Z3_mk_bool_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "index")) return self.mkBitVectorSort(256);
         if (std.mem.eql(u8, trimmed, "!ora.address") or std.mem.eql(u8, trimmed, "address")) return self.mkBitVectorSort(160);
         if (std.mem.eql(u8, trimmed, "!ora.bytes") or std.mem.eql(u8, trimmed, "bytes")) return self.byteSequenceSort();
         if (std.mem.eql(u8, trimmed, "!ora.string") or std.mem.eql(u8, trimmed, "string")) return self.byteSequenceSort();
         if (std.mem.eql(u8, trimmed, "none") or std.mem.eql(u8, trimmed, "!ora.none")) return z3.Z3_mk_bool_sort(self.context.ctx);
         if (trimmed[0] == 'i' or trimmed[0] == 'u') {
-            const width = std.fmt.parseInt(u32, trimmed[1..], 10) catch 256;
+            const width = try self.parsePrintedIntegerWidth(trimmed[1..], "malformed printed integer type missing width");
             if (width == 1) return z3.Z3_mk_bool_sort(self.context.ctx);
             return self.mkBitVectorSort(width);
         }
-        if (std.mem.startsWith(u8, trimmed, "!ora.int<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.int<")) {
+            const width = try self.parsePrintedOraIntegerWidth(trimmed);
+            if (width == 1) return z3.Z3_mk_bool_sort(self.context.ctx);
+            return self.mkBitVectorSort(width);
+        }
         if (std.mem.startsWith(u8, trimmed, "!ora.tuple<") or
             std.mem.startsWith(u8, trimmed, "!ora.struct<") or
             std.mem.startsWith(u8, trimmed, "!ora.struct_anon<"))
@@ -1668,8 +1707,8 @@ pub const Encoder = struct {
             }
             return sort;
         }
-        self.recordSoundnessLoss(.unsupported_operation, "unsupported printed type encoded via opaque bv256 fallback");
-        return self.mkBitVectorSort(256);
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported printed type has no exact SMT sort metadata");
+        return error.UnsupportedOperation;
     }
 
     fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
@@ -3462,7 +3501,7 @@ pub const Encoder = struct {
         ShrUnsigned,
     };
 
-    fn coerceBitwiseOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+    fn coerceBitwiseOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) EncodeError!struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
         const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
         const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
@@ -3489,7 +3528,14 @@ pub const Encoder = struct {
         } else if (lhs_kind == z3.Z3_BV_SORT and rhs_kind == z3.Z3_BV_SORT) {
             const lhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
             const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
-            target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
+            if (lhs_width != rhs_width) {
+                self.recordSoundnessLoss(.unsupported_sort_coercion, "bitwise operands have unequal bitvector widths; sema must reject before SMT encoding");
+                return error.UnsupportedOperation;
+            }
+            target_sort = lhs_sort;
+        } else {
+            self.recordSoundnessLoss(.unsupported_sort_coercion, "bitwise operands must be bool or equal-width bitvectors");
+            return error.UnsupportedOperation;
         }
 
         return .{
@@ -3536,7 +3582,7 @@ pub const Encoder = struct {
             };
         }
 
-        const coerced = self.coerceBitwiseOperands(lhs, rhs);
+        const coerced = try self.coerceBitwiseOperands(lhs, rhs);
         const lhs_bv = coerced.lhs;
         const rhs_bv = coerced.rhs;
 
@@ -5625,23 +5671,22 @@ pub const Encoder = struct {
             return try self.encodeArithOp(op_name, operands, mlir_op);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.div") or std.mem.eql(u8, op_name, "ora.rem")) {
+            self.recordSoundnessLoss(.unsupported_operation, "legacy ora.div/rem has no signedness-safe SMT encoding; use arith.divui/divsi/remui/remsi");
+            return error.UnsupportedOperation;
+        }
+
         if (std.mem.eql(u8, op_name, "ora.add") or
             std.mem.eql(u8, op_name, "ora.sub") or
-            std.mem.eql(u8, op_name, "ora.mul") or
-            std.mem.eql(u8, op_name, "ora.div") or
-            std.mem.eql(u8, op_name, "ora.rem"))
+            std.mem.eql(u8, op_name, "ora.mul"))
         {
             if (operands.len < 2) return error.InvalidOperandCount;
             const arith_op = if (std.mem.eql(u8, op_name, "ora.add"))
                 ArithmeticOp.Add
             else if (std.mem.eql(u8, op_name, "ora.sub"))
                 ArithmeticOp.Sub
-            else if (std.mem.eql(u8, op_name, "ora.mul"))
-                ArithmeticOp.Mul
-            else if (std.mem.eql(u8, op_name, "ora.div"))
-                ArithmeticOp.DivUnsigned
             else
-                ArithmeticOp.RemUnsigned;
+                ArithmeticOp.Mul;
             self.emitArithmeticSafetyObligations(arith_op, operands[0], operands[1]);
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }

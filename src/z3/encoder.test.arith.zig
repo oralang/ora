@@ -136,6 +136,69 @@ test "arith divui by zero still emits nonzero divisor obligation" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "legacy ora div and rem fail closed instead of assuming unsigned semantics" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const operands = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(lhs_const, 0),
+        mlir.oraOperationGetResult(rhs_const, 0),
+    };
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const empty_attrs = [_]mlir.MlirNamedAttribute{};
+
+    inline for (.{ "ora.div", "ora.rem" }) |op_name| {
+        const legacy_op = mlir.oraOperationCreate(
+            mlir_ctx,
+            loc,
+            stringRef(op_name),
+            &operands,
+            operands.len,
+            &result_types,
+            result_types.len,
+            &empty_attrs,
+            empty_attrs.len,
+            0,
+            false,
+        );
+
+        try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(legacy_op));
+        try testing.expect(encoder.isDegraded());
+        try testing.expectEqualStrings("legacy ora.div/rem has no signedness-safe SMT encoding; use arith.divui/divsi/remui/remsi", encoder.degradationReason().?);
+        encoder.clearDegradation();
+    }
+}
+
+test "bitwise encoding rejects unequal bitvector widths" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const lhs = try encoder.encodeIntegerConstant(1, 8);
+    const rhs = try encoder.encodeIntegerConstant(1, 16);
+
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeBitwiseOp(.And, lhs, rhs));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("bitwise operands have unequal bitvector widths; sema must reject before SMT encoding", encoder.degradationReason().?);
+}
+
 test "signed div and rem int_min by negative one are explicit and portable" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();

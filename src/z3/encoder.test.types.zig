@@ -157,6 +157,44 @@ test "sortFromPrintedType maps named struct to product sort when declaration met
     try testing.expect(!encoder.isDegraded());
 }
 
+test "sortFromPrintedType preserves exact integer widths" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const i8_sort = try encoder.sortFromPrintedTypeForTesting("i8");
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, i8_sort))));
+    try testing.expectEqual(@as(u32, 8), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, i8_sort))));
+
+    const ora_i16_sort = try encoder.sortFromPrintedTypeForTesting("!ora.int<16, true>");
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, ora_i16_sort))));
+    try testing.expectEqual(@as(u32, 16), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, ora_i16_sort))));
+
+    const index_sort = try encoder.sortFromPrintedTypeForTesting("index");
+    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, index_sort))));
+    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, index_sort))));
+    try testing.expect(!encoder.isDegraded());
+}
+
+test "sortFromPrintedType rejects malformed integer widths" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    try testing.expectError(error.UnsupportedOperation, encoder.sortFromPrintedTypeForTesting("i_not_a_width"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("malformed printed integer type missing width", encoder.degradationReason().?);
+
+    encoder.clearDegradation();
+    try testing.expectError(error.UnsupportedOperation, encoder.sortFromPrintedTypeForTesting("!ora.int<not_a_width, false>"));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("malformed printed Ora integer type missing width", encoder.degradationReason().?);
+}
+
 test "transparent cast rebuilds matching product value into target product sort" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -267,18 +305,16 @@ test "printed memref and slice sorts match shaped array encoding" {
     try testing.expect(z3.Z3_is_seq_sort(z3_ctx.ctx, slice_leaf));
 }
 
-test "unknown printed types degrade before opaque bv256 fallback" {
+test "unknown printed types degrade instead of becoming opaque bv256" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
 
     var encoder = Encoder.init(&z3_ctx, testing.allocator);
     defer encoder.deinit();
 
-    const opaque_sort = try encoder.sortFromPrintedTypeForTesting("!ora.future_magic_type");
-    try testing.expectEqual(@as(u32, z3.Z3_BV_SORT), @as(u32, @intCast(z3.Z3_get_sort_kind(z3_ctx.ctx, opaque_sort))));
-    try testing.expectEqual(@as(u32, 256), @as(u32, @intCast(z3.Z3_get_bv_sort_size(z3_ctx.ctx, opaque_sort))));
+    try testing.expectError(error.UnsupportedOperation, encoder.sortFromPrintedTypeForTesting("!ora.future_magic_type"));
     try testing.expect(encoder.isDegraded());
-    try testing.expectEqualStrings("unsupported printed type encoded via opaque bv256 fallback", encoder.degradationReason().?);
+    try testing.expectEqualStrings("unsupported printed type has no exact SMT sort metadata", encoder.degradationReason().?);
 }
 
 test "uninitialized memref load degrades encoding" {
