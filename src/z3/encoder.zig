@@ -328,6 +328,8 @@ pub const Encoder = struct {
     quantified_bindings: std.ArrayList(QuantifiedBinding),
     /// Active branch assumptions used during pure-return extraction.
     return_path_assumptions: std.ArrayList(z3.Z3_ast),
+    /// Monotonic suffix for the emergency fallback if Z3_mk_fresh_const fails.
+    degraded_coercion_fallback_id: u64,
 
     pub fn init(context: *Context, allocator: std.mem.Allocator) Encoder {
         return .{
@@ -373,6 +375,7 @@ pub const Encoder = struct {
             .adt_sorts = std.StringHashMap(AdtSort).init(allocator),
             .quantified_bindings = std.ArrayList(QuantifiedBinding){},
             .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
+            .degraded_coercion_fallback_id = 0,
         };
     }
 
@@ -3977,12 +3980,23 @@ pub const Encoder = struct {
 
     fn degradeAstCoercion(self: *Encoder, target_sort: z3.Z3_sort, reason: []const u8) z3.Z3_ast {
         self.recordSoundnessLoss(.unsupported_sort_coercion, reason);
-        return z3.Z3_mk_fresh_const(self.context.ctx, "ora_degraded_coercion", target_sort) orelse
-            z3.Z3_mk_const(
-                self.context.ctx,
-                z3.Z3_mk_string_symbol(self.context.ctx, "ora_degraded_coercion_fallback"),
-                target_sort,
-            );
+        if (z3.Z3_mk_fresh_const(self.context.ctx, "ora_degraded_coercion", target_sort)) |fresh| {
+            return fresh;
+        }
+
+        const fallback_id = self.degraded_coercion_fallback_id;
+        self.degraded_coercion_fallback_id +%= 1;
+        var name_buf: [96]u8 = undefined;
+        const fallback_name = std.fmt.bufPrintZ(
+            &name_buf,
+            "ora_degraded_coercion_fallback_{d}",
+            .{fallback_id},
+        ) catch "ora_degraded_coercion_fallback_overflow";
+        return z3.Z3_mk_const(
+            self.context.ctx,
+            z3.Z3_mk_string_symbol(self.context.ctx, fallback_name.ptr),
+            target_sort,
+        );
     }
 
     fn coerceAstToSort(self: *Encoder, ast: z3.Z3_ast, target_sort: z3.Z3_sort) z3.Z3_ast {
@@ -4877,7 +4891,10 @@ pub const Encoder = struct {
 
             const lb_ast = try self.encodeValueWithMode(lower_bound, mode);
             const ub_ast = try self.encodeValueWithMode(upper_bound, mode);
-            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(parent_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(parent_op) catch {
+                self.noteSoundnessLossAtOp(.missing_control_flow_summary, parent_op, "scf.for missing unsignedCmp metadata");
+                return error.UnsupportedOperation;
+            };
             const lower_ok = if (unsigned_cmp)
                 z3.Z3_mk_bvuge(self.context.ctx, ast, lb_ast)
             else
@@ -6539,7 +6556,6 @@ pub const Encoder = struct {
         ok_ctor: z3.Z3_func_decl,
         err_ctor: z3.Z3_func_decl,
         is_ok: z3.Z3_func_decl,
-        is_err: z3.Z3_func_decl,
         proj_ok: z3.Z3_func_decl,
         proj_err: z3.Z3_func_decl,
         ok_sort: z3.Z3_sort,
@@ -6629,7 +6645,6 @@ pub const Encoder = struct {
         z3.Z3_query_constructor(self.context.ctx, ok_constructor, 1, &ok_ctor, &is_ok, &ok_accessors);
 
         var err_ctor: z3.Z3_func_decl = undefined;
-        var is_err: z3.Z3_func_decl = undefined;
         var proj_err: z3.Z3_func_decl = undefined;
         var err_sort = self.mkBitVectorSort(256);
         var error_variants = try self.allocator.alloc(ErrorVariantSort, effective_error_count);
@@ -6648,7 +6663,6 @@ pub const Encoder = struct {
             };
             if (index == 0) {
                 err_ctor = ctor;
-                is_err = tester;
                 proj_err = accessors[0];
                 err_sort = variant_payload_sorts[index];
             }
@@ -6659,7 +6673,6 @@ pub const Encoder = struct {
             .ok_ctor = ok_ctor,
             .err_ctor = err_ctor,
             .is_ok = is_ok,
-            .is_err = is_err,
             .proj_ok = ok_accessors[0],
             .proj_err = proj_err,
             .ok_sort = ok_sort,
@@ -11796,7 +11809,12 @@ pub const Encoder = struct {
         const body_pred_text = std.mem.span(z3.Z3_ast_to_string(self.context.ctx, body_pred));
         if (std.mem.indexOf(u8, body_pred_text, iv_name) != null) return null;
 
-        const enters_loop = if (mlir_helpers.getScfForUnsignedCmp(for_op))
+        const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(for_op) catch {
+            self.noteSoundnessLossAtOp(.missing_control_flow_summary, for_op, "scf.for missing unsignedCmp metadata");
+            return error.UnsupportedOperation;
+        };
+
+        const enters_loop = if (unsigned_cmp)
             z3.Z3_mk_bvult(self.context.ctx, lb_ast, ub_ast)
         else
             z3.Z3_mk_bvslt(self.context.ctx, lb_ast, ub_ast);
@@ -11931,7 +11949,11 @@ pub const Encoder = struct {
         defer miss_cases.deinit(self.allocator);
         for (targets.items, branch_preds.items) |target, pred| {
             const target_ast = try self.encodeValueWithMode(target, mode);
-            const reaches_target = if (mlir_helpers.getScfForUnsignedCmp(for_op))
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(for_op) catch {
+                self.noteSoundnessLossAtOp(.missing_control_flow_summary, for_op, "scf.for missing unsignedCmp metadata");
+                return error.UnsupportedOperation;
+            };
+            const reaches_target = if (unsigned_cmp)
                 z3.Z3_mk_bvugt(self.context.ctx, ub_ast, target_ast)
             else
                 z3.Z3_mk_bvsgt(self.context.ctx, ub_ast, target_ast);

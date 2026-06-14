@@ -2235,7 +2235,9 @@ pub const VerificationPass = struct {
             op;
         var base_encoder_state = try self.captureEncoderBranchState();
         defer base_encoder_state.deinit(self.allocator);
-        defer self.restoreEncoderBranchState(&base_encoder_state) catch {};
+        defer self.restoreEncoderBranchState(&base_encoder_state) catch {
+            self.encoder.noteSoundnessLoss(.internal_encoding_failure, "failed to restore annotation encoder branch state");
+        };
 
         const encoded = blk: {
             if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
@@ -2903,7 +2905,10 @@ pub const VerificationPass = struct {
             const iv_ast = try self.encoder.encodeValue(induction_var);
             const ub_ast = try self.encoder.encodeValue(upper_bound);
 
-            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op) catch {
+                self.encoder.noteSoundnessLossAtOp(.missing_control_flow_summary, loop_op, "scf.for missing unsignedCmp metadata");
+                return error.UnsupportedOperation;
+            };
 
             return self.buildNumericLt(iv_ast, ub_ast, unsigned_cmp);
         }
@@ -7253,67 +7258,6 @@ fn collectFunctionNamesInRegion(
         }
         current_block = mlir.oraBlockGetNextInRegion(current_block);
     }
-}
-
-fn mergeVerificationResults(
-    allocator: std.mem.Allocator,
-    dest: *errors.VerificationResult,
-    src: *errors.VerificationResult,
-) !void {
-    if (!src.success) {
-        dest.success = false;
-    }
-
-    for (src.errors.items) |err| {
-        const cloned = try cloneVerificationError(allocator, err);
-        try dest.addError(cloned);
-    }
-
-    var it = src.proven_guard_ids.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        if (!dest.proven_guard_ids.contains(key)) {
-            const key_copy = try allocator.dupe(u8, key);
-            try dest.proven_guard_ids.put(key_copy, {});
-        }
-    }
-
-    for (src.z3_proofs.items) |proof| {
-        try dest.z3_proofs.append(allocator, .{
-            .file = try allocator.dupe(u8, proof.file),
-            .line = proof.line,
-            .column = proof.column,
-            .query = try allocator.dupe(u8, proof.query),
-            .proof = try allocator.dupe(u8, proof.proof),
-        });
-    }
-}
-
-fn cloneVerificationError(allocator: std.mem.Allocator, err: errors.VerificationError) !errors.VerificationError {
-    const message = try allocator.dupe(u8, err.message);
-    errdefer allocator.free(message);
-    const file = try allocator.dupe(u8, err.file);
-    errdefer allocator.free(file);
-    const counterexample = if (err.counterexample) |ce| try cloneCounterexample(allocator, ce) else null;
-
-    return errors.VerificationError{
-        .error_type = err.error_type,
-        .message = message,
-        .file = file,
-        .line = err.line,
-        .column = err.column,
-        .counterexample = counterexample,
-        .allocator = allocator,
-    };
-}
-
-fn cloneCounterexample(allocator: std.mem.Allocator, ce: errors.Counterexample) !errors.Counterexample {
-    var copy = errors.Counterexample.init(allocator);
-    var it = ce.variables.iterator();
-    while (it.next()) |entry| {
-        try copy.addVariable(entry.key_ptr.*, entry.value_ptr.*);
-    }
-    return copy;
 }
 
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {

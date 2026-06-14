@@ -66,15 +66,6 @@ pub const Solver = struct {
         return status;
     }
 
-    pub fn checkAssumptions(self: *Solver, assumptions: []const c.Z3_ast) c.Z3_lbool {
-        return c.Z3_solver_check_assumptions(
-            self.context.ctx,
-            self.solver,
-            @intCast(assumptions.len),
-            if (assumptions.len == 0) null else assumptions.ptr,
-        );
-    }
-
     pub fn checkAssumptionsChecked(self: *Solver, assumptions: []const c.Z3_ast) !c.Z3_lbool {
         self.context.clearLastError();
         const status = c.Z3_solver_check_assumptions(
@@ -87,19 +78,11 @@ pub const Solver = struct {
         return status;
     }
 
-    pub fn getModel(self: *Solver) ?c.Z3_model {
-        return c.Z3_solver_get_model(self.context.ctx, self.solver);
-    }
-
     pub fn getModelChecked(self: *Solver) !?c.Z3_model {
         self.context.clearLastError();
         const model = c.Z3_solver_get_model(self.context.ctx, self.solver);
         try self.context.checkNoError();
         return model;
-    }
-
-    pub fn getProof(self: *Solver) ?c.Z3_ast {
-        return c.Z3_solver_get_proof(self.context.ctx, self.solver);
     }
 
     pub fn getProofChecked(self: *Solver) !?c.Z3_ast {
@@ -114,10 +97,6 @@ pub const Solver = struct {
         const raw = c.Z3_ast_to_string(self.context.ctx, proof);
         if (raw == null) return null;
         return try self.allocator.dupe(u8, std.mem.span(raw));
-    }
-
-    pub fn getUnsatCore(self: *Solver) c.Z3_ast_vector {
-        return c.Z3_solver_get_unsat_core(self.context.ctx, self.solver);
     }
 
     pub fn getUnsatCoreChecked(self: *Solver) !c.Z3_ast_vector {
@@ -233,6 +212,21 @@ pub const Solver = struct {
 };
 
 const testing = std.testing;
+
+test "advanced solver operations expose checked wrappers only" {
+    const source = @embedFile("solver.zig");
+
+    inline for (.{ "checkAssumptions", "getModel", "getProof", "getUnsatCore" }) |name| {
+        const unchecked_signature = try std.fmt.allocPrint(testing.allocator, "pub fn {s}(self", .{name});
+        defer testing.allocator.free(unchecked_signature);
+        try testing.expect(std.mem.indexOf(u8, source, unchecked_signature) == null);
+    }
+
+    try testing.expect(std.mem.indexOf(u8, source, "pub fn checkAssumptionsChecked") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "pub fn getModelChecked") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "pub fn getProofChecked") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "pub fn getUnsatCoreChecked") != null);
+}
 
 test "loadFromSmtlib rejects malformed smtlib" {
     var context = try Context.init(testing.allocator);

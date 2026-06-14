@@ -69,6 +69,30 @@ contract MutationSigned {
 """
 
 
+BASE_NARROW_MUL = """\
+contract MutationNarrowMul {
+    pub fn double(x: u8) -> u8
+        requires(x <= 127)
+        ensures(result == x * 2)
+    {
+        return x * 2;
+    }
+}
+"""
+
+
+BASE_SIGNED_NEG = """\
+contract MutationSignedNeg {
+    pub fn negate(x: i256) -> i256
+        requires(x > -57896044618658097711785492504343953926634992332820282019728792003956564819968)
+        ensures(result == -x)
+    {
+        return -x;
+    }
+}
+"""
+
+
 BASE_REFINEMENT = """\
 contract MutationRefinement {
     pub fn atLeast(x: MinValue<u256, 100>) -> u256
@@ -248,6 +272,25 @@ contract MutationStorageBranch {
 """
 
 
+BASE_CALLEE_REQUIRES = """\
+contract MutationCalleeRequires {
+    fn divide(x: u256) -> u256
+        requires(x != 0)
+        ensures(result == 100 / x)
+    {
+        return 100 / x;
+    }
+
+    pub fn use_divide(x: u256) -> u256
+        requires(x != 0)
+        ensures(result == 100 / x)
+    {
+        return divide(x);
+    }
+}
+"""
+
+
 BASE_QUANTIFIED = """\
 contract MutationQuantified {
     pub fn check(x: u256) -> bool
@@ -267,6 +310,14 @@ class MutationCase:
     find: str
     replace: str
     reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class NegativeBuildCase:
+    name: str
+    source: str
+    reason: str
+    expected_fragment: str
 
 
 CASES = (
@@ -304,6 +355,14 @@ CASES = (
     ),
     # Per-construct mutants broaden coverage beyond the counter/vault shapes.
     MutationCase(
+        name="narrow_mul_precondition_removed",
+        source=BASE_NARROW_MUL,
+        function="double",
+        find="requires(x <= 127)",
+        replace="requires(true)",
+        reason="weakened precondition permits u8 multiplication overflow at x=128",
+    ),
+    MutationCase(
         name="signed_postcondition_flip",
         source=BASE_SIGNED,
         function="addSigned",
@@ -318,6 +377,14 @@ CASES = (
         find="return a + b;",
         replace="return a - b;",
         reason="signed body changed so it no longer proves the postcondition",
+    ),
+    MutationCase(
+        name="signed_neg_min_precondition_removed",
+        source=BASE_SIGNED_NEG,
+        function="negate",
+        find="requires(x > -57896044618658097711785492504343953926634992332820282019728792003956564819968)",
+        replace="requires(true)",
+        reason="weakened precondition permits negating i256.min",
     ),
     MutationCase(
         name="refinement_bound_overclaim",
@@ -374,6 +441,14 @@ CASES = (
         find="requires(y != 0)",
         replace="requires(true)",
         reason="division inside a switch scrutinee must prove its non-zero divisor before case facts apply",
+    ),
+    MutationCase(
+        name="callee_precondition_removed",
+        source=BASE_CALLEE_REQUIRES,
+        function="use_divide",
+        find="requires(x != 0)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
+        replace="requires(true)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
+        reason="caller must prove the callee's non-zero divisor precondition",
     ),
     MutationCase(
         name="map_store_postcondition_body_corruption",
@@ -438,6 +513,41 @@ CASES = (
         find="ensures(forall i: u256 where i < x => i <= x)",
         replace="ensures(forall i: u256 where i < x => i > x)",
         reason="quantified postcondition no longer follows for values below x",
+    ),
+)
+
+
+NEGATIVE_BUILD_CASES = (
+    NegativeBuildCase(
+        name="degraded_query_does_not_emit_artifact",
+        source="""\
+comptime const std = @import("std");
+
+contract DegradedMustNotSucceed {
+    storage var lock_count: u256 = 0;
+
+    pub fn incrementLock(n: u256)
+        requires n <= 32
+        ensures lock_count >= old(lock_count)
+    {
+        var acc: u256 = 1;
+        var i: u256 = 0;
+
+        while (i < n) {
+            if ((i % 3) == 0) {
+                acc = (acc * 2) + 1;
+            } else {
+                acc = acc + i;
+            }
+            i = i + 1;
+        }
+
+        lock_count = acc;
+    }
+}
+""",
+        reason="SMT degradation must fail closed and must not erase checks into bytecode",
+        expected_fragment="SMT encoding degraded",
     ),
 )
 
@@ -534,6 +644,44 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
     return True
 
 
+def emitted_hex_artifacts(artifact_dir: pathlib.Path) -> list[pathlib.Path]:
+    if not artifact_dir.exists():
+        return []
+    return sorted(artifact_dir.glob("**/*.hex"))
+
+
+def run_negative_build_case(
+    case: NegativeBuildCase,
+    compiler: pathlib.Path,
+    tmpdir: pathlib.Path,
+    timeout: int,
+) -> bool:
+    source_path = tmpdir / f"{case.name}.ora"
+    artifact_dir = tmpdir / f"{case.name}.artifacts"
+    source_path.write_text(case.source, encoding="utf-8")
+
+    result = run_verifier(compiler, source_path, artifact_dir, timeout)
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    if result.returncode == 0:
+        print(f"[fail] {case.name}: negative verification case unexpectedly built ({case.reason})", file=sys.stderr)
+        print(f"       file: {source_path}", file=sys.stderr)
+        return False
+    if case.expected_fragment not in combined_output:
+        print(f"[fail] {case.name}: failure did not mention {case.expected_fragment!r}", file=sys.stderr)
+        print_failure_output(result)
+        return False
+
+    hex_artifacts = emitted_hex_artifacts(artifact_dir)
+    if hex_artifacts:
+        print(f"[fail] {case.name}: failed verification still emitted hex artifacts", file=sys.stderr)
+        for artifact in hex_artifacts:
+            print(f"       artifact: {artifact}", file=sys.stderr)
+        return False
+
+    print(f"[pass] {case.name}: negative case rejected without bytecode")
+    return True
+
+
 def run_cases(cases: Iterable[MutationCase], compiler: pathlib.Path, timeout: int, keep_tmp: bool) -> int:
     if not compiler.exists() or not os.access(compiler, os.X_OK):
         print(f"error: compiler not found or not executable: {compiler}", file=sys.stderr)
@@ -552,6 +700,10 @@ def run_cases(cases: Iterable[MutationCase], compiler: pathlib.Path, timeout: in
         for case in cases:
             total += 1
             if run_case(case, compiler, tmpdir, timeout):
+                passed += 1
+        for case in NEGATIVE_BUILD_CASES:
+            total += 1
+            if run_negative_build_case(case, compiler, tmpdir, timeout):
                 passed += 1
         failed = total - passed
         print()

@@ -26,6 +26,181 @@ test "structured ABI fuzzer detects acceptance (teeth)" {
     return error.FuzzTeethDidNotFire;
 }
 
+test "falsification harness compares checks-kept and checks-removed builds" {
+    const source =
+        \\contract FalsificationHarnessSmoke {
+        \\    pub fn clamp_sum(a: u256, b: u256) -> u256
+        \\        requires a <= 100
+        \\        requires b <= 100
+        \\        ensures result == a + b
+        \\    {
+        \\        return a + b;
+        \\    }
+        \\}
+        \\
+    ;
+
+    try runner.compileAndRunPropertySourceDifferential(
+        testing.allocator,
+        "falsification_harness_smoke",
+        source,
+        &.{},
+        &.{"--keep-proved-checks"},
+        runFalsificationHarnessSmoke,
+    );
+}
+
+test "falsification harness detects a kept-check divergence" {
+    const source =
+        \\contract FalsificationHarnessTeeth {
+        \\    storage var values: map<u256, u256>;
+        \\
+        \\    pub fn narrow_mul_obligation(x: u8) -> u8
+        \\        ensures result == x *% 2
+        \\    {
+        \\        return x;
+        \\    }
+        \\
+        \\    pub fn div_obligation(x: u256, y: u256) -> u256
+        \\        ensures result == x / y
+        \\    {
+        \\        return x;
+        \\    }
+        \\
+        \\    pub fn signed_neg_obligation(x: i256) -> i256
+        \\        ensures result == -x
+        \\    {
+        \\        return x;
+        \\    }
+        \\
+        \\    pub fn map_obligation(k: u256, v: u256) -> u256
+        \\        ensures values[k] == v
+        \\    {
+        \\        return values[k];
+        \\    }
+        \\
+        \\    pub fn lie(x: u256) -> u256
+        \\        ensures result == x + 1
+        \\    {
+        \\        return x;
+        \\    }
+        \\}
+        \\
+    ;
+
+    try runner.compileAndRunPropertySourceDifferential(
+        testing.allocator,
+        "falsification_harness_teeth",
+        source,
+        &.{"--no-verify"},
+        &.{ "--no-verify", "--keep-proved-checks" },
+        runFalsificationHarnessTeeth,
+    );
+}
+
+test "falsification corpus executes with checks removed and checks kept" {
+    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    const stems = [_][]const u8{
+        "falsification_arith",
+        "falsification_error_union_ok",
+        "falsification_loop_invariant",
+        "falsification_map_effect",
+        "falsification_map_frame",
+        "falsification_storage_branch",
+    };
+
+    const allocator = testing.allocator;
+    for (stems) |stem| {
+        const source_name = try std.fmt.allocPrint(allocator, "{s}.ora", .{stem});
+        defer allocator.free(source_name);
+        const spec_name = try std.fmt.allocPrint(allocator, "{s}.spec.toml", .{stem});
+        defer allocator.free(spec_name);
+        const source_path = try std.fs.path.join(allocator, &.{ types.CONFORMANCE_DIR_REL, source_name });
+        defer allocator.free(source_path);
+        const spec_path = try std.fs.path.join(allocator, &.{ types.CONFORMANCE_DIR_REL, spec_name });
+        defer allocator.free(spec_path);
+
+        runner.runConformanceSpecDifferential(allocator, source_path, spec_path) catch |err| {
+            std.debug.print("falsification differential spec failed: {s}\n", .{spec_path});
+            return err;
+        };
+    }
+}
+
+fn runFalsificationHarnessSmoke(
+    checks_removed: *runner.PropertyRuntime,
+    checks_kept: *runner.PropertyRuntime,
+) !void {
+    const zero_zero = [_]types.ArgValue{ .{ .literal = "0" }, .{ .literal = "0" } };
+    try expectSameCall(checks_removed, checks_kept, "clamp_sum(uint256,uint256)", zero_zero[0..]);
+
+    const max_envelope = [_]types.ArgValue{ .{ .literal = "100" }, .{ .literal = "100" } };
+    try expectSameCall(checks_removed, checks_kept, "clamp_sum(uint256,uint256)", max_envelope[0..]);
+
+    const requires_violation = [_]types.ArgValue{ .{ .literal = "101" }, .{ .literal = "0" } };
+    try expectBothRevert(checks_removed, checks_kept, "clamp_sum(uint256,uint256)", requires_violation[0..]);
+}
+
+fn runFalsificationHarnessTeeth(
+    checks_removed: *runner.PropertyRuntime,
+    checks_kept: *runner.PropertyRuntime,
+) !void {
+    const narrow_args = [_]types.ArgValue{.{ .literal = "7" }};
+    try expectRemovedSucceedsKeptReverts(checks_removed, checks_kept, "narrow_mul_obligation(uint8)", narrow_args[0..]);
+
+    const div_args = [_]types.ArgValue{ .{ .literal = "7" }, .{ .literal = "2" } };
+    try expectRemovedSucceedsKeptReverts(checks_removed, checks_kept, "div_obligation(uint256,uint256)", div_args[0..]);
+
+    const signed_args = [_]types.ArgValue{.{ .literal = "5" }};
+    try expectRemovedSucceedsKeptReverts(checks_removed, checks_kept, "signed_neg_obligation(int256)", signed_args[0..]);
+
+    const map_args = [_]types.ArgValue{ .{ .literal = "1" }, .{ .literal = "9" } };
+    try expectRemovedSucceedsKeptReverts(checks_removed, checks_kept, "map_obligation(uint256,uint256)", map_args[0..]);
+
+    const generic_args = [_]types.ArgValue{.{ .literal = "7" }};
+    try expectRemovedSucceedsKeptReverts(checks_removed, checks_kept, "lie(uint256)", generic_args[0..]);
+}
+
+fn expectRemovedSucceedsKeptReverts(
+    checks_removed: *runner.PropertyRuntime,
+    checks_kept: *runner.PropertyRuntime,
+    signature: []const u8,
+    args: []const types.ArgValue,
+) !void {
+    const removed = try checks_removed.call(signature, args);
+    const kept = try checks_kept.call(signature, args);
+    try testing.expect(removed.success);
+    try testing.expect(!kept.success);
+}
+
+fn expectBothRevert(
+    checks_removed: *runner.PropertyRuntime,
+    checks_kept: *runner.PropertyRuntime,
+    signature: []const u8,
+    args: []const types.ArgValue,
+) !void {
+    const removed = try checks_removed.call(signature, args);
+    const kept = try checks_kept.call(signature, args);
+    try testing.expect(!removed.success);
+    try testing.expect(!kept.success);
+}
+
+fn expectSameCall(
+    checks_removed: *runner.PropertyRuntime,
+    checks_kept: *runner.PropertyRuntime,
+    signature: []const u8,
+    args: []const types.ArgValue,
+) !void {
+    const removed = try checks_removed.call(signature, args);
+    const kept = try checks_kept.call(signature, args);
+    try testing.expectEqual(removed.success, kept.success);
+    try testing.expectEqualSlices(u8, removed.output, kept.output);
+}
+
 // Suite self-test: prove the conformance layer has teeth — a correct
 // spec passes, and the SAME spec with one wrong expected value is caught. If a
 // corrupted expectation still "passed", the whole layer would be vacuously green.

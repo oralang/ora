@@ -4147,7 +4147,10 @@ MlirOperation oraScfForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue low
 
         OpBuilder builder(context);
         auto op = builder.create<scf::ForOp>(location, lb, ub, st, init, nullptr, unsignedCmp);
-
+        if (!unsignedCmp)
+        {
+            op->setAttr("ora.signedCmp", builder.getBoolAttr(true));
+        }
 
         return wrap(op.getOperation());
     }

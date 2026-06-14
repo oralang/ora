@@ -15,11 +15,24 @@ pub fn cleanupRefinementGuards(
     module: c.MlirModule,
     proven_guard_ids: *const std.StringHashMap(void),
 ) void {
+    cleanupRefinementGuardsWithOptions(ctx, module, proven_guard_ids, .{});
+}
+
+pub const CleanupOptions = struct {
+    keep_proved_checks: bool = false,
+};
+
+pub fn cleanupRefinementGuardsWithOptions(
+    ctx: c.MlirContext,
+    module: c.MlirModule,
+    proven_guard_ids: *const std.StringHashMap(void),
+    options: CleanupOptions,
+) void {
     const module_op = c.oraModuleGetOperation(module);
     const debug_env = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_GUARD_DEBUG") catch null;
     const debug_enabled = debug_env != null;
     if (debug_env) |val| std.heap.page_allocator.free(val);
-    walkOperation(ctx, module_op, proven_guard_ids, debug_enabled);
+    walkOperation(ctx, module_op, proven_guard_ids, debug_enabled, options);
 }
 
 fn walkOperation(
@@ -27,6 +40,7 @@ fn walkOperation(
     op: c.MlirOperation,
     proven_guard_ids: *const std.StringHashMap(void),
     debug_enabled: bool,
+    options: CleanupOptions,
 ) void {
     const num_regions = c.oraOperationGetNumRegions(op);
     var region_index: usize = 0;
@@ -34,7 +48,7 @@ fn walkOperation(
         const region = c.oraOperationGetRegion(op, region_index);
         var block = c.oraRegionGetFirstBlock(region);
         while (block.ptr != null) {
-            walkBlock(ctx, block, proven_guard_ids, debug_enabled);
+            walkBlock(ctx, block, proven_guard_ids, debug_enabled, options);
             block = c.oraBlockGetNextInRegion(block);
         }
     }
@@ -45,16 +59,17 @@ fn walkBlock(
     block: c.MlirBlock,
     proven_guard_ids: *const std.StringHashMap(void),
     debug_enabled: bool,
+    options: CleanupOptions,
 ) void {
     var current = c.oraBlockGetFirstOperation(block);
     while (current.ptr != null) {
         const next = c.oraOperationGetNextInBlock(current);
         if (isRefinementGuard(current)) {
-            handleRefinementGuard(ctx, block, current, proven_guard_ids, debug_enabled);
+            handleRefinementGuard(ctx, block, current, proven_guard_ids, debug_enabled, options);
         } else if (isVerificationOp(current)) {
-            handleVerificationOp(ctx, block, current, proven_guard_ids, debug_enabled);
+            handleVerificationOp(ctx, block, current, proven_guard_ids, debug_enabled, options);
         } else {
-            walkOperation(ctx, current, proven_guard_ids, debug_enabled);
+            walkOperation(ctx, current, proven_guard_ids, debug_enabled, options);
         }
         current = next;
     }
@@ -86,11 +101,12 @@ fn handleRefinementGuard(
     op: c.MlirOperation,
     proven_guard_ids: *const std.StringHashMap(void),
     debug_enabled: bool,
+    options: CleanupOptions,
 ) void {
     const guard_id_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.guard_id"));
     const guard_id = getStringAttr(guard_id_attr);
 
-    if (guard_id != null and proven_guard_ids.contains(guard_id.?)) {
+    if (!options.keep_proved_checks and guard_id != null and proven_guard_ids.contains(guard_id.?)) {
         if (debug_enabled) {
             std.debug.print("[guard-cleanup] removed {s}\n", .{guard_id.?});
         }
@@ -124,12 +140,18 @@ fn handleVerificationOp(
     op: c.MlirOperation,
     proven_guard_ids: *const std.StringHashMap(void),
     debug_enabled: bool,
+    options: CleanupOptions,
 ) void {
     const name = c.oraOperationGetName(op);
     if (name.data == null or name.length == 0) return;
     const op_name = name.data[0..name.length];
 
-    if (std.mem.eql(u8, op_name, "ora.assert")) {
+    if (std.mem.eql(u8, op_name, "ora.assert") or
+        (options.keep_proved_checks and
+            (std.mem.eql(u8, op_name, "ora.requires") or
+                std.mem.eql(u8, op_name, "ora.ensures") or
+                std.mem.eql(u8, op_name, "ora.invariant"))))
+    {
         const context_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_context"));
         const context = getStringAttr(context_attr);
         const verification_type_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_type"));

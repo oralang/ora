@@ -2739,15 +2739,23 @@ test "encoder source keeps fresh-symbol and soundness-loss undef APIs separate" 
     try testing.expect(std.mem.indexOf(u8, source, "fn soundnessLossUndef") != null);
     try testing.expect(std.mem.indexOf(u8, source, "\"try_state_global\"") != null);
     try testing.expect(std.mem.indexOf(u8, source, ".inexact_state_summary") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "ora_degraded_coercion_fallback_{d}") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "\"ora_degraded_coercion_fallback\"") == null);
 }
 
 test "production verifier uses typed soundness loss instead of annotation degradation escape hatch" {
+    const verifier_source = @embedFile("verification.zig");
+    const mlir_helpers_source = @embedFile("mlir_helpers.zig");
     var found_typed_annotation_failure = false;
     for (production_z3_sources) |source| {
         try testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, ".noteDegradationAtOp("));
         found_typed_annotation_failure = found_typed_annotation_failure or
             std.mem.indexOf(u8, source, ".noteSoundnessLossAtOp(.unsupported_operation") != null;
     }
+    try testing.expect(std.mem.indexOf(u8, verifier_source, "restoreEncoderBranchState(&base_encoder_state) catch {};") == null);
+    try testing.expect(std.mem.indexOf(u8, verifier_source, ".noteSoundnessLoss(.internal_encoding_failure") != null);
+    try testing.expect(std.mem.indexOf(u8, mlir_helpers_source, "if (mlir.oraAttributeIsNull(unsigned_attr)) return false;") == null);
+    try testing.expect(std.mem.indexOf(u8, mlir_helpers_source, "return error.UnsupportedOperation;") != null);
     try testing.expect(found_typed_annotation_failure);
 }
 
