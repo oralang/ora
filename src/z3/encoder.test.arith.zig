@@ -136,6 +136,69 @@ test "arith divui by zero still emits nonzero divisor obligation" {
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
 
+test "legacy ora div and rem fail closed instead of assuming unsigned semantics" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const mlir_ctx = mlir.oraContextCreate();
+    defer mlir.oraContextDestroy(mlir_ctx);
+    loadAllDialects(mlir_ctx);
+    _ = mlir.oraDialectRegister(mlir_ctx);
+
+    const loc = mlir.oraLocationUnknownGet(mlir_ctx);
+    const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
+
+    const lhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 10);
+    const rhs_attr = mlir.oraIntegerAttrCreateI64FromType(i256_ty, 3);
+    const lhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, lhs_attr);
+    const rhs_const = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i256_ty, rhs_attr);
+    const operands = [_]mlir.MlirValue{
+        mlir.oraOperationGetResult(lhs_const, 0),
+        mlir.oraOperationGetResult(rhs_const, 0),
+    };
+    const result_types = [_]mlir.MlirType{i256_ty};
+    const empty_attrs = [_]mlir.MlirNamedAttribute{};
+
+    inline for (.{ "ora.div", "ora.rem" }) |op_name| {
+        const legacy_op = mlir.oraOperationCreate(
+            mlir_ctx,
+            loc,
+            stringRef(op_name),
+            &operands,
+            operands.len,
+            &result_types,
+            result_types.len,
+            &empty_attrs,
+            empty_attrs.len,
+            0,
+            false,
+        );
+
+        try testing.expectError(error.UnsupportedOperation, encoder.encodeOperation(legacy_op));
+        try testing.expect(encoder.isDegraded());
+        try testing.expectEqualStrings("legacy ora.div/rem has no signedness-safe SMT encoding; use arith.divui/divsi/remui/remsi", encoder.degradationReason().?);
+        encoder.clearDegradation();
+    }
+}
+
+test "bitwise encoding rejects unequal bitvector widths" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const lhs = try encoder.encodeIntegerConstant(1, 8);
+    const rhs = try encoder.encodeIntegerConstant(1, 16);
+
+    try testing.expectError(error.UnsupportedOperation, encoder.encodeBitwiseOp(.And, lhs, rhs));
+    try testing.expect(encoder.isDegraded());
+    try testing.expectEqualStrings("bitwise operands have unequal bitvector widths; sema must reject before SMT encoding", encoder.degradationReason().?);
+}
+
 test "signed div and rem int_min by negative one are explicit and portable" {
     var z3_ctx = try Context.init(testing.allocator);
     defer z3_ctx.deinit();
@@ -421,4 +484,55 @@ test "unsigned mul overflow check proves bounded constant multiplier safe" {
     solver.assert(z3.Z3_mk_bvule(z3_ctx.ctx, lhs_sym, bound));
     solver.assert(overflow);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
+}
+
+test "unsigned mul overflow check uses narrow width for constant multiplier bound" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv8 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const two = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 2, bv8);
+    const max_safe = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 127, bv8);
+    const first_overflow = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 128, bv8);
+
+    const lhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "lhs8"),
+        bv8,
+    );
+    const rhs_const_overflow = encoder.checkMulOverflow(lhs_sym, two);
+
+    var safe_rhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer safe_rhs_const_solver.deinit();
+    safe_rhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, lhs_sym, max_safe));
+    safe_rhs_const_solver.assert(rhs_const_overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), safe_rhs_const_solver.check());
+
+    var overflow_rhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer overflow_rhs_const_solver.deinit();
+    overflow_rhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, lhs_sym, first_overflow));
+    overflow_rhs_const_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, rhs_const_overflow));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), overflow_rhs_const_solver.check());
+
+    const rhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "rhs8"),
+        bv8,
+    );
+    const lhs_const_overflow = encoder.checkMulOverflow(two, rhs_sym);
+
+    var safe_lhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer safe_lhs_const_solver.deinit();
+    safe_lhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, rhs_sym, max_safe));
+    safe_lhs_const_solver.assert(lhs_const_overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), safe_lhs_const_solver.check());
+
+    var overflow_lhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer overflow_lhs_const_solver.deinit();
+    overflow_lhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, rhs_sym, first_overflow));
+    overflow_lhs_const_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, lhs_const_overflow));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), overflow_lhs_const_solver.check());
 }

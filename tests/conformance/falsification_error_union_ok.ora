@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges ensures_ok(result == v),
+// Falsification pairing: the verifier discharges ensures_ok(result == v),
 // and this conformance spec executes the Ok path on concrete boundary inputs.
 error Failure;
 

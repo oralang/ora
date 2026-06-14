@@ -5,11 +5,13 @@
 // CHECK-NOT: ora.tstore.guard
 //
 // CHECK-LABEL: func.func @touch_guarded
+// CHECK: sir.tload
+// CHECK: sir.cond_br
+// CHECK: sir.revert
 // CHECK: sir.tstore
 // CHECK: sir.tstore
 // CHECK: sir.tload
 // CHECK: sir.cond_br
-// CHECK: sir.revert
 // CHECK: sir.sstore
 //
 // CHECK-LABEL: func.func @touch_plain

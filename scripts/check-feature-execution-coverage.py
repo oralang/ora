@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the feature-execution coverage manifest (test-quality program T1.1).
+"""Validate the feature coverage manifest.
 
 Fail-closed in both directions:
-  - every feature has executed spec(s) XOR an explicit skip reason;
+  - every feature has executed spec(s), negative expected-diagnostic spec(s),
+    or an explicit skip reason;
   - every tests/conformance/*.spec.toml is claimed by at least one feature.
 """
 
@@ -17,10 +18,11 @@ DEFAULT_MANIFEST = ROOT / "tests/conformance/feature_coverage.json"
 CONFORMANCE_DIR = ROOT / "tests/conformance"
 REQUIRED_CI_COMMANDS = {
     "zig build check-feature-execution-coverage",
+    "zig build check-negative-corpus",
     "zig build test-conformance",
     "zig build gate",
 }
-ALLOWED_FEATURE_KEYS = {"id", "area", "behavior", "specs", "skip"}
+ALLOWED_FEATURE_KEYS = {"id", "area", "behavior", "specs", "negative_specs", "skip"}
 
 
 def fail(message: str) -> None:
@@ -52,6 +54,17 @@ def validate_spec_ref(ref: str, context: str, claimed: set[str]) -> None:
     claimed.add(path.name)
 
 
+def validate_negative_ref(ref: str, context: str) -> None:
+    path = ROOT / ref
+    if not path.exists():
+        fail(f"{context} references missing negative source: {ref}")
+    if path.suffix != ".ora" or path.parent != ROOT / "tests" / "negative":
+        fail(f"{context}.negative_specs must reference tests/negative/*.ora, got: {ref}")
+    sidecar = path.with_suffix(".expect.toml")
+    if not sidecar.exists():
+        fail(f"{context} negative source is missing sidecar: {sidecar.relative_to(ROOT)}")
+
+
 def main() -> None:
     manifest_path = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_MANIFEST
     if not manifest_path.is_absolute():
@@ -78,6 +91,7 @@ def main() -> None:
     seen_ids: set[str] = set()
     claimed_specs: set[str] = set()
     covered = 0
+    negative_covered = 0
     skipped: list[str] = []
 
     for index, feature in enumerate(features):
@@ -94,9 +108,10 @@ def main() -> None:
         require_string(feature.get("area"), f"{feature_id}.area")
 
         has_specs = "specs" in feature
+        has_negative_specs = "negative_specs" in feature
         has_skip = "skip" in feature
-        if has_specs == has_skip:
-            fail(f"{feature_id} must have exactly one of 'specs' or 'skip'")
+        if sum([has_specs, has_negative_specs, has_skip]) != 1:
+            fail(f"{feature_id} must have exactly one of 'specs', 'negative_specs', or 'skip'")
 
         if has_skip:
             require_string(feature.get("skip"), f"{feature_id}.skip")
@@ -104,13 +119,22 @@ def main() -> None:
             continue
 
         require_string(feature.get("behavior"), f"{feature_id}.behavior")
-        specs = feature.get("specs")
-        if not isinstance(specs, list) or not specs:
-            fail(f"{feature_id}.specs must be a non-empty list")
-        for ref_index, ref in enumerate(specs):
-            ref_str = require_string(ref, f"{feature_id}.specs[{ref_index}]")
-            validate_spec_ref(ref_str, feature_id, claimed_specs)
-        covered += 1
+        if has_negative_specs:
+            specs = feature.get("negative_specs")
+            if not isinstance(specs, list) or not specs:
+                fail(f"{feature_id}.negative_specs must be a non-empty list")
+            for ref_index, ref in enumerate(specs):
+                ref_str = require_string(ref, f"{feature_id}.negative_specs[{ref_index}]")
+                validate_negative_ref(ref_str, feature_id)
+            negative_covered += 1
+        else:
+            specs = feature.get("specs")
+            if not isinstance(specs, list) or not specs:
+                fail(f"{feature_id}.specs must be a non-empty list")
+            for ref_index, ref in enumerate(specs):
+                ref_str = require_string(ref, f"{feature_id}.specs[{ref_index}]")
+                validate_spec_ref(ref_str, feature_id, claimed_specs)
+            covered += 1
 
     all_specs = {p.name for p in CONFORMANCE_DIR.glob("*.spec.toml")}
     unclaimed = sorted(all_specs - claimed_specs)
@@ -122,7 +146,7 @@ def main() -> None:
 
     print(
         f"check-feature-execution-coverage: ok "
-        f"({covered} covered, {len(skipped)} skipped of {len(features)} features; "
+        f"({covered} executed, {negative_covered} negative, {len(skipped)} skipped of {len(features)} features; "
         f"{len(all_specs)} specs all claimed)"
     )
     if skipped:

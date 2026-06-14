@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Differential conformance backend (test-quality program gap #3 / T2.4).
+"""Run a conformance spec against Anvil and compare execution results.
 
-Runs a conformance spec against a real Anvil node and compares the results to
-the spec's expectations — which were produced/validated against the in-process
-lib/evm. Agreement corroborates lib/evm (our only oracle); a divergence is the
-highest-value signal the suite can produce (a compiler bug, a lib/evm bug, or a
-hardfork mismatch — F-003 was lib/evm itself panicking).
+The spec expectations are also checked by the in-process lib/evm runner.
+Agreement corroborates lib/evm as an oracle; a divergence points to a compiler
+bug, a lib/evm bug, or a hardfork mismatch.
 
 LOCAL-FIRST, not in the blocking gate (Anvil is a live process). Pins the
 hardfork to lib/evm's Ora target (OSAKA). Unsupported shapes are reported

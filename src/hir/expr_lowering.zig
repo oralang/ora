@@ -813,7 +813,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     );
                     const op = mlir.oraArithSubIOpCreate(self.parent.context, loc, zero, operand);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
-                    break :blk appendValueOp(self.block, op);
+                    const value = appendValueOp(self.block, op);
+                    if (mlir.oraTypeIsAInteger(mlir.oraValueGetType(value))) {
+                        const is_signed = try @This().integerExprSignedness(self, unary.operand);
+                        try @This().emitCheckedUnaryNegOverflowAssert(self, operand, is_signed, unary.range);
+                    }
+                    break :blk value;
                 },
                 .not_ => blk: {
                     const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
@@ -1097,6 +1102,32 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => return,
             };
             try FunctionLowerer.emitOverflowAssert(self, overflow_flag, message, range);
+        }
+
+        fn emitCheckedUnaryNegOverflowAssert(
+            self: *FunctionLowerer,
+            operand: mlir.MlirValue,
+            is_signed: bool,
+            range: source.TextRange,
+        ) anyerror!void {
+            const value_ty = mlir.oraValueGetType(operand);
+            if (!mlir.oraTypeIsAInteger(value_ty)) return;
+
+            const loc = self.parent.location(range);
+            const overflow_flag = if (is_signed) blk: {
+                const bit_width: i64 = @intCast(mlir.oraIntegerTypeGetWidth(value_ty) - 1);
+                const one = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 1));
+                const shift = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, bit_width));
+                const min_op = mlir.oraArithShlIOpCreate(self.parent.context, loc, one, shift);
+                if (mlir.oraOperationIsNull(min_op)) return error.MlirOperationCreationFailed;
+                const min_int = appendValueOp(self.block, min_op);
+                break :blk appendValueOp(self.block, self.createCompareOp(loc, "eq", operand, min_int));
+            } else blk: {
+                const zero = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, value_ty, 0));
+                break :blk appendValueOp(self.block, self.createCompareOp(loc, "ne", operand, zero));
+            };
+
+            try FunctionLowerer.emitOverflowAssert(self, overflow_flag, "checked negation overflow", range);
         }
 
         fn lowerShortCircuitLogical(

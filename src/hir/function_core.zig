@@ -492,7 +492,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), min_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const predicate = comparePredicateForSignedness(@This().refinementIntegerSignedness(refinement), true);
+            const predicate = comparePredicateForSignedness(try @This().refinementIntegerSignedness(self, refinement, .{ .start = 0, .end = 0 }), true);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
@@ -502,7 +502,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const constant = try @This().createTypedIntegerConstant(self, mlir.oraValueGetType(value), max_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const predicate = comparePredicateForSignedness(@This().refinementIntegerSignedness(refinement), false);
+            const predicate = comparePredicateForSignedness(try @This().refinementIntegerSignedness(self, refinement, .{ .start = 0, .end = 0 }), false);
             const op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), predicate, value, constant);
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             return appendValueOp(self.block, op);
@@ -515,7 +515,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const ty = mlir.oraValueGetType(value);
             const min_constant = try @This().createTypedIntegerConstant(self, ty, min_value, self.parent.location(.{ .start = 0, .end = 0 }));
             const max_constant = try @This().createTypedIntegerConstant(self, ty, max_value, self.parent.location(.{ .start = 0, .end = 0 }));
-            const is_signed = @This().refinementIntegerSignedness(refinement);
+            const is_signed = try @This().refinementIntegerSignedness(self, refinement, .{ .start = 0, .end = 0 });
             const ge_predicate = comparePredicateForSignedness(is_signed, true);
             const le_predicate = comparePredicateForSignedness(is_signed, false);
             const ge_op = mlir.oraArithCmpIOpCreate(self.parent.context, self.parent.location(.{ .start = 0, .end = 0 }), ge_predicate, value, min_constant);
@@ -533,7 +533,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const bounds = refinements.bounds(refinement) orelse return error.MlirOperationCreationFailed;
             const min_value = parseU256Literal(bounds.min_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
             const max_value = parseU256Literal(bounds.max_text orelse return error.MlirOperationCreationFailed) orelse return error.MlirOperationCreationFailed;
-            return @This().buildRangeBoundsCheck(self, value, min_value, max_value, @This().refinementIntegerSignedness(refinement));
+            return @This().buildRangeBoundsCheck(self, value, min_value, max_value, try @This().refinementIntegerSignedness(self, refinement, .{ .start = 0, .end = 0 }));
         }
 
         fn buildNonZeroCheck(self: *FunctionLowerer, value: mlir.MlirValue, refinement: RefinementType) anyerror!mlir.MlirValue {
@@ -629,19 +629,36 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return std.fmt.parseInt(u256, digits, base) catch null;
         }
 
-        fn semaIntegerTypeIsSigned(ty: sema.Type) ?bool {
-            return switch (support.unwrapRefinementSemaType(ty)) {
-                .integer => |integer| integer.signed,
-                else => null,
+        fn semaIntegerTypeIsSigned(self: *FunctionLowerer, ty: sema.Type) anyerror!?bool {
+            const unwrapped = support.unwrapRefinementSemaType(ty);
+            if (unwrapped == .named) {
+                if (self.parent.substitutedType(unwrapped.named.name)) |substituted| {
+                    return try @This().semaIntegerTypeIsSigned(self, substituted);
+                }
+            }
+            return support.resolvedIntegerSignedness(ty) catch |err| switch (err) {
+                error.MlirOperationCreationFailed => null,
+                else => return err,
             };
         }
 
-        fn refinementIntegerSignedness(refinement: RefinementType) bool {
-            return @This().semaIntegerTypeIsSigned(refinement.base_type.*) orelse false;
+        fn reportIndeterminateIntegerSignedness(self: *FunctionLowerer, range: source.TextRange) anyerror!bool {
+            try self.parent.emitLoweringError(
+                range,
+                "cannot determine signedness for integer expression; annotate the expression or one operand with a concrete integer type",
+                .{},
+            );
+            return false;
         }
 
-        fn patternIntegerSignedness(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv) bool {
-            return @This().semaIntegerTypeIsSigned(@This().patternType(self, pattern_id, locals)) orelse false;
+        fn refinementIntegerSignedness(self: *FunctionLowerer, refinement: RefinementType, range: source.TextRange) anyerror!bool {
+            return (try @This().semaIntegerTypeIsSigned(self, refinement.base_type.*)) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, range);
+        }
+
+        fn patternIntegerSignedness(self: *FunctionLowerer, pattern_id: ast.PatternId, locals: *LocalEnv, range: source.TextRange) anyerror!bool {
+            return (try @This().semaIntegerTypeIsSigned(self, @This().patternType(self, pattern_id, locals))) orelse
+                try @This().reportIndeterminateIntegerSignedness(self, range);
         }
 
         fn comparePredicateForSignedness(is_signed: bool, lower_bound: bool) i64 {
@@ -1311,7 +1328,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithAddIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, @This().patternIntegerSignedness(self, assign.target, locals), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .add, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
                         },
                         .wrapping_add_assign => blk: {
@@ -1334,7 +1351,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithSubIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, @This().patternIntegerSignedness(self, assign.target, locals), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .sub, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
                         },
                         .wrapping_sub_assign => blk: {
@@ -1357,7 +1374,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const op = mlir.oraArithMulIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
                             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                             const value = appendValueOp(self.block, op);
-                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, @This().patternIntegerSignedness(self, assign.target, locals), assign.range);
+                            try FunctionLowerer.maybeEmitCheckedBinaryOverflowAssert(self, .mul, lhs, rhs, value, try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                             break :blk value;
                         },
                         .wrapping_mul_assign => blk: {
@@ -1384,7 +1401,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .shr_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
+                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
                                 mlir.oraArithShrSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithShrUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
@@ -1394,12 +1411,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .pow_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            break :blk try @This().lowerCheckedPower(self, lhs, rhs, mlir.oraValueGetType(lhs), @This().patternIntegerSignedness(self, assign.target, locals), assign.range);
+                            break :blk try @This().lowerCheckedPower(self, lhs, rhs, mlir.oraValueGetType(lhs), try @This().patternIntegerSignedness(self, assign.target, locals, assign.range), assign.range);
                         },
                         .div_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
+                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
                                 mlir.oraArithDivSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithDivUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);
@@ -1409,7 +1426,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         .mod_assign => blk: {
                             const lhs = try @This().lowerPatternValueWithCache(self, assign.target, locals, assignment_cache);
                             const rhs = try @This().convertValueForFlow(self, try self.lowerExpr(assign.value, locals), mlir.oraValueGetType(lhs), assign.range);
-                            const op = if (@This().patternIntegerSignedness(self, assign.target, locals))
+                            const op = if (try @This().patternIntegerSignedness(self, assign.target, locals, assign.range))
                                 mlir.oraArithRemSIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs)
                             else
                                 mlir.oraArithRemUIOpCreate(self.parent.context, self.parent.location(assign.range), lhs, rhs);

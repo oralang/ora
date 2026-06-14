@@ -1,8 +1,9 @@
 {
   "version": 1,
-  "description": "Feature-execution coverage map (test-quality program T1.1). Every language feature listed here must have at least one EXECUTED conformance spec (bytecode run on lib/evm), or an explicit skip reason. A feature PR must add its entry; skips are visible debt, burned down in T1.2.",
+  "description": "Feature coverage map. Every runtime language feature listed here must have at least one EXECUTED conformance spec (bytecode run on lib/evm). Features whose correct behavior is compile-time rejection may instead list negative expected-diagnostic specs. Otherwise an explicit skip reason is required.",
   "ci_commands": [
     "zig build check-feature-execution-coverage",
+    "zig build check-negative-corpus",
     "zig build test-conformance",
     "zig build gate"
   ],
@@ -370,12 +371,15 @@
     {
       "id": "arithmetic.unprovable_overflow_rejected",
       "area": "arithmetic",
-      "skip": "unconstrained checked arithmetic is rejected at COMPILE time (verifier SAT -> no bytecode); belongs to the expected-diagnostic negative corpus - T1.5"
+      "behavior": "Unconstrained checked arithmetic that the verifier cannot prove safe is rejected at compile time with no bytecode artifact",
+      "negative_specs": [
+        "tests/negative/unprovable_overflow.ora"
+      ]
     },
     {
       "id": "verification.falsification_pairing",
       "area": "verification",
-      "behavior": "Execution falsification (T3.4): verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
+      "behavior": "Execution falsification: verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
       "specs": [
         "tests/conformance/falsification_arith.spec.toml",
         "tests/conformance/falsification_map_effect.spec.toml",
@@ -388,7 +392,7 @@
     {
       "id": "arithmetic.checked_arith_runtime_behavior",
       "area": "arithmetic",
-      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - S1 finding with audit",
+      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - known finding with audit",
       "specs": [
         "tests/conformance/arithmetic_checked_revert.spec.toml"
       ]
@@ -452,7 +456,10 @@
     {
       "id": "adt.payload_match_execution",
       "area": "adt_enums",
-      "skip": "no executed ADT payload match spec - sequenced behind adt-design phases"
+      "behavior": "Payload-carrying enum variants are constructed, matched, destructured by positional and named fields, and returned through executed bytecode",
+      "specs": [
+        "tests/conformance/adt_payload_match.spec.toml"
+      ]
     },
     {
       "id": "locks.guard_revert_on_locked_write",

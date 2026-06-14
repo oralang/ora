@@ -1,4 +1,3 @@
-# see FINDINGS.md#f-004 — aggregate catch return coverage
 [deploy]
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0

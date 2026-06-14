@@ -1623,20 +1623,59 @@ pub const Encoder = struct {
         return .{ .element_text = element_text, .rank = if (rank == 0) default_rank else rank };
     }
 
+    fn parsePrintedIntegerWidth(self: *Encoder, width_text: []const u8, detail: []const u8) error{UnsupportedOperation}!u32 {
+        const trimmed_width = std.mem.trim(u8, width_text, " \t\n\r");
+        if (trimmed_width.len == 0) {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        }
+        const width = std.fmt.parseInt(u32, trimmed_width, 10) catch {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        };
+        if (width == 0) {
+            self.recordSoundnessLoss(.missing_type_metadata, detail);
+            return error.UnsupportedOperation;
+        }
+        return width;
+    }
+
+    fn parsePrintedOraIntegerWidth(self: *Encoder, trimmed: []const u8) error{UnsupportedOperation}!u32 {
+        const prefix = "!ora.int<";
+        if (!std.mem.endsWith(u8, trimmed, ">")) {
+            self.recordSoundnessLoss(.missing_type_metadata, "malformed printed Ora integer type missing width");
+            return error.UnsupportedOperation;
+        }
+        const body = trimmed[prefix.len .. trimmed.len - 1];
+        var width_end: usize = 0;
+        while (width_end < body.len) : (width_end += 1) {
+            switch (body[width_end]) {
+                ',', ' ', '\t', '\n', '\r' => break,
+                else => {},
+            }
+        }
+        return self.parsePrintedIntegerWidth(body[0..width_end], "malformed printed Ora integer type missing width");
+    }
+
     fn sortFromPrintedType(self: *Encoder, type_text: []const u8) error{ OutOfMemory, UnsupportedOperation }!z3.Z3_sort {
         const trimmed = std.mem.trim(u8, type_text, " \t\n\r");
         if (trimmed.len == 0) return error.UnsupportedOperation;
         if (std.mem.eql(u8, trimmed, "i1") or std.mem.eql(u8, trimmed, "bool")) return z3.Z3_mk_bool_sort(self.context.ctx);
+        if (std.mem.eql(u8, trimmed, "index")) return self.mkBitVectorSort(256);
         if (std.mem.eql(u8, trimmed, "!ora.address") or std.mem.eql(u8, trimmed, "address")) return self.mkBitVectorSort(160);
         if (std.mem.eql(u8, trimmed, "!ora.bytes") or std.mem.eql(u8, trimmed, "bytes")) return self.byteSequenceSort();
         if (std.mem.eql(u8, trimmed, "!ora.string") or std.mem.eql(u8, trimmed, "string")) return self.byteSequenceSort();
         if (std.mem.eql(u8, trimmed, "none") or std.mem.eql(u8, trimmed, "!ora.none")) return z3.Z3_mk_bool_sort(self.context.ctx);
         if (trimmed[0] == 'i' or trimmed[0] == 'u') {
-            const width = std.fmt.parseInt(u32, trimmed[1..], 10) catch 256;
+            const width = try self.parsePrintedIntegerWidth(trimmed[1..], "malformed printed integer type missing width");
             if (width == 1) return z3.Z3_mk_bool_sort(self.context.ctx);
             return self.mkBitVectorSort(width);
         }
-        if (std.mem.startsWith(u8, trimmed, "!ora.int<")) return self.mkBitVectorSort(256);
+        if (std.mem.startsWith(u8, trimmed, "!ora.int<")) {
+            const width = try self.parsePrintedOraIntegerWidth(trimmed);
+            if (width == 1) return z3.Z3_mk_bool_sort(self.context.ctx);
+            return self.mkBitVectorSort(width);
+        }
         if (std.mem.startsWith(u8, trimmed, "!ora.tuple<") or
             std.mem.startsWith(u8, trimmed, "!ora.struct<") or
             std.mem.startsWith(u8, trimmed, "!ora.struct_anon<"))
@@ -1668,8 +1707,8 @@ pub const Encoder = struct {
             }
             return sort;
         }
-        self.recordSoundnessLoss(.unsupported_operation, "unsupported printed type encoded via opaque bv256 fallback");
-        return self.mkBitVectorSort(256);
+        self.recordSoundnessLoss(.unsupported_operation, "unsupported printed type has no exact SMT sort metadata");
+        return error.UnsupportedOperation;
     }
 
     fn hasWrittenGlobalSlot(self: *const Encoder, name: []const u8) bool {
@@ -2803,14 +2842,15 @@ pub const Encoder = struct {
     /// Encode integer constant to Z3 bitvector
     pub fn encodeIntegerConstant(self: *Encoder, value: u256, width: u32) EncodeError!z3.Z3_ast {
         const sort = self.mkBitVectorSort(width);
+        const narrowed = self.normalizeUnsignedToWidth(value, width);
         // z3_mk_unsigned_int64 only handles 64-bit, so we need to handle larger values
         // for u256, we'll need to use Z3_mk_numeral with string representation
         if (width <= 64) {
-            return z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(value), sort);
+            return z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(narrowed), sort);
         } else {
             // for larger bitvectors, use string representation
             // format as decimal string for Z3_mk_numeral
-            const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+            const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{narrowed});
             defer self.allocator.free(value_str);
             const value_z = try self.allocator.dupeZ(u8, value_str);
             defer self.allocator.free(value_z);
@@ -3461,7 +3501,7 @@ pub const Encoder = struct {
         ShrUnsigned,
     };
 
-    fn coerceBitwiseOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
+    fn coerceBitwiseOperands(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) EncodeError!struct { lhs: z3.Z3_ast, rhs: z3.Z3_ast } {
         const lhs_sort = z3.Z3_get_sort(self.context.ctx, lhs);
         const rhs_sort = z3.Z3_get_sort(self.context.ctx, rhs);
         const lhs_kind = z3.Z3_get_sort_kind(self.context.ctx, lhs_sort);
@@ -3488,7 +3528,14 @@ pub const Encoder = struct {
         } else if (lhs_kind == z3.Z3_BV_SORT and rhs_kind == z3.Z3_BV_SORT) {
             const lhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, lhs_sort);
             const rhs_width = z3.Z3_get_bv_sort_size(self.context.ctx, rhs_sort);
-            target_sort = if (lhs_width >= rhs_width) lhs_sort else rhs_sort;
+            if (lhs_width != rhs_width) {
+                self.recordSoundnessLoss(.unsupported_sort_coercion, "bitwise operands have unequal bitvector widths; sema must reject before SMT encoding");
+                return error.UnsupportedOperation;
+            }
+            target_sort = lhs_sort;
+        } else {
+            self.recordSoundnessLoss(.unsupported_sort_coercion, "bitwise operands must be bool or equal-width bitvectors");
+            return error.UnsupportedOperation;
         }
 
         return .{
@@ -3535,7 +3582,7 @@ pub const Encoder = struct {
             };
         }
 
-        const coerced = self.coerceBitwiseOperands(lhs, rhs);
+        const coerced = try self.coerceBitwiseOperands(lhs, rhs);
         const lhs_bv = coerced.lhs;
         const rhs_bv = coerced.rhs;
 
@@ -3674,6 +3721,7 @@ pub const Encoder = struct {
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
 
         const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const max_value = self.bitMaskForWidth(width);
         const max_value_ast = if (width <= 64) blk: {
             const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
             break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
@@ -3698,14 +3746,16 @@ pub const Encoder = struct {
         };
 
         if (self.tryParseBitVectorNumeral(rhs)) |rhs_value| {
-            if (rhs_value == 0) return self.boolFalse();
-            const bound_value = std.math.maxInt(u256) / rhs_value;
+            const narrowed_rhs = self.normalizeUnsignedToWidth(rhs_value, width);
+            if (narrowed_rhs == 0) return self.boolFalse();
+            const bound_value = max_value / narrowed_rhs;
             const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
             return z3.Z3_mk_bvugt(self.context.ctx, lhs, bound_ast);
         }
         if (self.tryParseBitVectorNumeral(lhs)) |lhs_value| {
-            if (lhs_value == 0) return self.boolFalse();
-            const bound_value = std.math.maxInt(u256) / lhs_value;
+            const narrowed_lhs = self.normalizeUnsignedToWidth(lhs_value, width);
+            if (narrowed_lhs == 0) return self.boolFalse();
+            const bound_value = max_value / narrowed_lhs;
             const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
             return z3.Z3_mk_bvugt(self.context.ctx, rhs, bound_ast);
         }
@@ -5621,23 +5671,22 @@ pub const Encoder = struct {
             return try self.encodeArithOp(op_name, operands, mlir_op);
         }
 
+        if (std.mem.eql(u8, op_name, "ora.div") or std.mem.eql(u8, op_name, "ora.rem")) {
+            self.recordSoundnessLoss(.unsupported_operation, "legacy ora.div/rem has no signedness-safe SMT encoding; use arith.divui/divsi/remui/remsi");
+            return error.UnsupportedOperation;
+        }
+
         if (std.mem.eql(u8, op_name, "ora.add") or
             std.mem.eql(u8, op_name, "ora.sub") or
-            std.mem.eql(u8, op_name, "ora.mul") or
-            std.mem.eql(u8, op_name, "ora.div") or
-            std.mem.eql(u8, op_name, "ora.rem"))
+            std.mem.eql(u8, op_name, "ora.mul"))
         {
             if (operands.len < 2) return error.InvalidOperandCount;
             const arith_op = if (std.mem.eql(u8, op_name, "ora.add"))
                 ArithmeticOp.Add
             else if (std.mem.eql(u8, op_name, "ora.sub"))
                 ArithmeticOp.Sub
-            else if (std.mem.eql(u8, op_name, "ora.mul"))
-                ArithmeticOp.Mul
-            else if (std.mem.eql(u8, op_name, "ora.div"))
-                ArithmeticOp.DivUnsigned
             else
-                ArithmeticOp.RemUnsigned;
+                ArithmeticOp.Mul;
             self.emitArithmeticSafetyObligations(arith_op, operands[0], operands[1]);
             return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
@@ -8519,10 +8568,11 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!?z3.Z3_ast {
         // Old-mode fallbacks should not mutate caller state. Inline only pure callees.
-        if (self.shouldUseOpaqueImportedSummary(call_op)) return null;
+        const should_fallback =
+            self.shouldUseOpaqueImportedSummary(call_op) or
+            self.inlineStackContains(callee) or
+            self.inline_function_stack.items.len >= self.max_summary_inline_depth;
         if (self.functionMayWriteTrackedState(func_op)) return null;
-        if (self.inlineStackContains(callee)) return null;
-        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
 
         var summary_encoder = Encoder.init(self.context, self.allocator);
         defer summary_encoder.deinit();
@@ -8557,6 +8607,17 @@ pub const Encoder = struct {
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
         self.addCalleePreconditions(callee_requires.items, callee);
+        if (should_fallback) {
+            try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
+            if (summary_encoder.isDegraded()) {
+                self.recordCalleeResultDegradation(
+                    call_op,
+                    callee,
+                    summary_encoder.degradationReason() orelse "summary encoder degraded while collecting fallback preconditions",
+                );
+            }
+            return null;
+        }
 
         const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
         if (!self.functionIsExternallyVerified(func_op)) {
@@ -8573,22 +8634,33 @@ pub const Encoder = struct {
         try self.copyErrorUnionRegistryFrom(&summary_encoder);
         try self.copyAdtSortRegistryFrom(&summary_encoder);
 
+        try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
+
+        return encoded;
+    }
+
+    fn replayCalleeSummarySideEffects(
+        self: *Encoder,
+        summary_encoder: *Encoder,
+        func_op: mlir.MlirOperation,
+        callee: []const u8,
+        callee_requires: []const z3.Z3_ast,
+        add_obligations: bool,
+    ) EncodeError!void {
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
         for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
         const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        if (!self.functionIsExternallyVerified(func_op)) {
+        if (add_obligations and !self.functionIsExternallyVerified(func_op)) {
             self.addSummaryObligations(
                 extra_obligations,
                 callee,
-                callee_requires.items,
+                callee_requires,
                 summary_encoder.return_path_assumptions.items,
             );
         }
-
-        return encoded;
     }
 
     fn extractFunctionReturnExpr(
@@ -12527,9 +12599,10 @@ pub const Encoder = struct {
         result_exprs: []?z3.Z3_ast,
     ) EncodeError!bool {
         // Stop recursive/non-terminating expansion; fall back to UF summaries.
-        if (self.shouldUseOpaqueImportedSummary(call_op)) return false;
-        if (self.inlineStackContains(callee)) return false;
-        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return false;
+        const should_fallback =
+            self.shouldUseOpaqueImportedSummary(call_op) or
+            self.inlineStackContains(callee) or
+            self.inline_function_stack.items.len >= self.max_summary_inline_depth;
 
         const body_region = mlir.oraOperationGetRegion(func_op, 0);
         if (mlir.oraRegionIsNull(body_region)) return false;
@@ -12575,11 +12648,13 @@ pub const Encoder = struct {
             try result_encoder.collectRequiresForSummary(func_op, &callee_requires);
             self.addCalleePreconditions(callee_requires.items, callee);
 
-            for (0..result_exprs.len) |i| {
-                const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
-                if (encoded) |expr| {
-                    result_exprs[i] = expr;
-                    any_result = true;
+            if (!should_fallback) {
+                for (0..result_exprs.len) |i| {
+                    const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
+                    if (encoded) |expr| {
+                        result_exprs[i] = expr;
+                        any_result = true;
+                    }
                 }
             }
 
@@ -12592,24 +12667,15 @@ pub const Encoder = struct {
                 }
             }
 
-            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
+            if (!should_fallback and !will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
                 try result_encoder.collectEnsuresForSummary(func_op, callee);
             }
 
-            const extra_constraints = try result_encoder.takeConstraintRecords(self.allocator);
-            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
+            try self.replayCalleeSummarySideEffects(&result_encoder, func_op, callee, callee_requires.items, !will_run_summary_encoder);
+        }
 
-            const extra_obligations = try result_encoder.takeObligationRecords(self.allocator);
-            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(
-                    extra_obligations,
-                    callee,
-                    callee_requires.items,
-                    result_encoder.return_path_assumptions.items,
-                );
-            }
+        if (should_fallback) {
+            return false;
         }
 
         if (will_run_summary_encoder) {
@@ -12671,20 +12737,7 @@ pub const Encoder = struct {
                 }
             }
 
-            const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
-            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
-
-            const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
-            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-            if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(
-                    extra_obligations,
-                    callee,
-                    callee_requires.items,
-                    summary_encoder.return_path_assumptions.items,
-                );
-            }
+            try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
 
             for (slots) |*slot| {
                 if (summary_encoder.global_map.get(slot.name)) |post| {
@@ -13755,8 +13808,14 @@ pub const Encoder = struct {
             break;
         }
 
-        if (chain.items.len == 0) return;
-        const global_name = self.resolveGlobalNameFromMapOperand(root_candidate) orelse return;
+        if (chain.items.len == 0) {
+            self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary could not recover map_get chain");
+            return;
+        }
+        const global_name = self.resolveGlobalNameFromMapOperand(root_candidate) orelse {
+            self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary could not resolve root global");
+            return;
+        };
 
         // Rebuild parent stores from leaf -> root:
         // updated_leaf, then store into each parent map_get site.
@@ -13765,7 +13824,10 @@ pub const Encoder = struct {
         for (chain.items) |ancestor| {
             const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
-            if (!self.isArraySort(parent_sort)) return;
+            if (!self.isArraySort(parent_sort)) {
+                self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary parent is not an array sort");
+                return;
+            }
 
             const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, parent_sort);
             const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);

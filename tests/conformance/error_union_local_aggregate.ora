@@ -1,4 +1,3 @@
-// see FINDINGS.md#f-004
 error Failure;
 
 contract ErrorUnionLocalAggregate {

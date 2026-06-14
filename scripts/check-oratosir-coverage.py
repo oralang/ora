@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the OraToSIR de-bloat coverage manifest."""
+"""Validate the OraToSIR coverage manifest."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges the map write
+// Falsification pairing: the verifier discharges the map write
 // postcondition, and this conformance spec executes the same write/read effect
 // on concrete keys so a false proof becomes observable bytecode behavior.
 contract FalsificationMapEffect {

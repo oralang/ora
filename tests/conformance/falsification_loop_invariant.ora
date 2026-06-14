@@ -1,4 +1,4 @@
-// Falsification pairing (T3.4): the verifier discharges the loop postcondition
+// Falsification pairing: the verifier discharges the loop postcondition
 // from the loop invariant, and this conformance spec executes the same path.
 contract FalsificationLoopInvariant {
     storage var counter: u256 = 0;

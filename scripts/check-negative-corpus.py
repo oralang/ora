@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Negative expected-diagnostic corpus runner (test-quality program T1.5).
+"""Negative expected-diagnostic corpus runner.
 
 For every tests/negative/<name>.ora:
   - require a <name>.expect.toml sidecar (fail-closed; missing = failure);

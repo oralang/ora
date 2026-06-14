@@ -1558,6 +1558,10 @@ test "compiler pins integer coercion and error matrix" {
         \\    return a < b;
         \\}
         \\
+        \\pub fn mixedBitwise(a: u32, b: u64) -> u32 {
+        \\    return a & b;
+        \\}
+        \\
         \\pub fn peerOverflow(x: u8) -> u8 {
         \\    return 1231231231 + x;
         \\}
@@ -1572,6 +1576,7 @@ test "compiler pins integer coercion and error matrix" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value -1 does not fit in type 'u8'"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u32' and 'u64'"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u32' and 'i32'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '&' for types 'u32' and 'u64'"));
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 1231231231 does not fit in type 'u8'"));
 }
 

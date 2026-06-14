@@ -1,4 +1,4 @@
-//! Metrics snapshot harness (test-quality program — change-quality metrics).
+//! Metrics snapshot harness for change-quality metrics.
 //!
 //! Runs the whole conformance corpus and prints numeric compiler/runtime metrics
 //! as a stable, deterministic table so any pipeline change can be judged

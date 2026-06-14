@@ -1,4 +1,4 @@
-# Adversarial raw-calldata cases (T2) against the dispatcher decode surface.
+# Adversarial raw-calldata cases against the dispatcher decode surface.
 # Each uses calldata = "0x..." to send hostile bytes the typed encoder can't
 # express. Property: the dispatcher must revert or behave correctly, never
 # accept-and-misbehave.

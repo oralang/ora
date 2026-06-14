@@ -111,10 +111,12 @@
 // CHECK-NEXT:     %22 = sir.bitcast %21 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":44:9)
 // CHECK-NEXT:     sir.revert %22 : !sir.ptr<1>, %21 : !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":44:9)
 // CHECK-NEXT:   ^bb4:  // pred: ^bb2
-// CHECK-NEXT:     %23 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
-// CHECK-NEXT:     %24 = sir.malloc %23 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
-// CHECK-NEXT:     sir.store %24 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
-// CHECK-NEXT:     sir.return %24 : !sir.ptr<1>, %23 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     %23 = sir.const 1461501637330902918203684832716283019655932542975 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     %24 = sir.and %arg0 : !sir.u256, %23 : !sir.u256 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     %25 = sir.const 32 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     %26 = sir.malloc %25 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     sir.store %26 : !sir.ptr<1>, %24 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
+// CHECK-NEXT:     sir.return %26 : !sir.ptr<1>, %25 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":47:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":43:5)
 // CHECK-NEXT:   func.func @provenNonZeroFromConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":51:41)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["address"], ora.param_names = ["addr"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x8daf0e0e", ora.visibility = "pub"} {
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/smt/guards/nonzero_address_proven.ora":51:5)

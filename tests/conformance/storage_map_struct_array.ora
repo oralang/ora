@@ -1,4 +1,4 @@
-// Combinatorial layout (gap #5): a struct with a static-array field, stored
+// Combinatorial layout: a struct with a static-array field, stored
 // under a map. Exercises array-offset-within-struct-within-map-derived-slot —
 // a combination not covered by the per-feature specs (map_struct = scalar
 // fields, struct_static_array = top-level).
