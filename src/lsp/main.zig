@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const lsp = @import("lsp");
 const types = lsp.types;
 const ora_root = @import("ora_root");
+const embedded_stdlib = ora_root.embedded_stdlib;
 
 const frontend = ora_root.lsp.frontend;
 const workspace = ora_root.lsp.workspace;
@@ -3562,6 +3563,10 @@ const DocumentStore = struct {
     fn getOrCreatePackage(self: *DocumentStore) !compiler.PackageId {
         if (self.package_id) |package_id| return package_id;
         const package_id = try self.compiler_db.addPackage("lsp-open-documents");
+        for (embedded_stdlib.all()) |module| {
+            const file_id = try self.compiler_db.addSourceFile(module.resolved_path, module.source);
+            _ = try self.compiler_db.addModule(package_id, file_id, module.logical_path);
+        }
         self.package_id = package_id;
         return package_id;
     }

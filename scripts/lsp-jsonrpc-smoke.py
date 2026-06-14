@@ -75,6 +75,23 @@ pub fn use_unicode(amount: u256) -> u256 {
 """
 
 
+INTERFACE_ID_SOURCE = """comptime const interfaces = @import("std/interfaces");
+
+trait ERC165 {
+    fn supportsInterface(self, interface_id: bytes4) -> bool;
+}
+
+contract InterfaceIdSmoke {
+    pub fn erc165_id() -> bytes4 {
+        return comptime {
+            const id: bytes4 = interfaces.interfaceId(ERC165);
+            id;
+        };
+    }
+}
+"""
+
+
 BROKEN_SOURCE = """pub fn broken() -> u256 {
     return 1
 }
@@ -105,12 +122,14 @@ def main() -> int:
         unicode_lib_path = root / "unicode_lib.ora"
         importing_path = root / "importing.ora"
         unicode_importing_path = root / "unicode_importing.ora"
+        interface_id_path = root / "interface_id.ora"
         broken_path = root / "broken.ora"
         valid_path.write_text(VALID_SOURCE)
         lib_path.write_text(LIB_SOURCE)
         unicode_lib_path.write_text(UNICODE_LIB_SOURCE)
         importing_path.write_text(IMPORTING_SOURCE)
         unicode_importing_path.write_text(UNICODE_IMPORTING_SOURCE)
+        interface_id_path.write_text(INTERFACE_ID_SOURCE)
         broken_path.write_text(BROKEN_SOURCE)
 
         valid_uri = file_uri(valid_path)
@@ -118,6 +137,7 @@ def main() -> int:
         unicode_lib_uri = file_uri(unicode_lib_path)
         importing_uri = file_uri(importing_path)
         unicode_importing_uri = file_uri(unicode_importing_path)
+        interface_id_uri = file_uri(interface_id_path)
         broken_uri = file_uri(broken_path)
 
         client = JsonRpcClient(server)
@@ -157,6 +177,13 @@ def main() -> int:
             require(
                 not any(diag.get("severity") == 1 for diag in edited_diagnostics_2),
                 "second fresh edit produced error diagnostics",
+            )
+
+            did_open(client, interface_id_uri, INTERFACE_ID_SOURCE)
+            interface_id_diagnostics = wait_diagnostics(client, interface_id_uri)
+            require(
+                not any(diag.get("severity") == 1 for diag in interface_id_diagnostics),
+                "std/interfaces interfaceId smoke document produced error diagnostics",
             )
 
             symbols = client.request("textDocument/documentSymbol", {"textDocument": {"uri": valid_uri}})

@@ -300,7 +300,7 @@ const ConstEvaluator = struct {
                     if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
                 },
                 .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
-                .Assign => |assign| _ = self.evalComptimeAssign(assign) catch null,
+                .Assign => |assign| _ = self.evalComptimeAssign(assign, true) catch null,
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;
                 },
@@ -3499,7 +3499,7 @@ const ConstEvaluator = struct {
                     }
                 },
                 .Assign => |assign| {
-                    last_value = try self.evalComptimeAssign(assign);
+                    last_value = try self.evalComptimeAssign(assign, true);
                 },
                 .Break => return .break_loop,
                 .Continue => return .continue_loop,
@@ -3613,7 +3613,7 @@ const ConstEvaluator = struct {
                     }
                 },
                 .Assign => |assign| {
-                    const value = try self.evalComptimeAssign(assign);
+                    const value = try self.evalComptimeAssign(assign, use_cache);
                     last_value = if (value) |const_value| (try constToCtValue(const_value)) orelse null else null;
                 },
                 .Break => return .break_loop,
@@ -4013,9 +4013,9 @@ const ConstEvaluator = struct {
         };
     }
 
-    fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt) anyerror!?ConstValue {
+    fn evalComptimeAssign(self: *ConstEvaluator, assign: ast.AssignStmt, comptime use_cache: bool) anyerror!?ConstValue {
         const rhs_const = try self.evalExprUncached(assign.value);
-        const rhs_ct = (try self.evalExprCtValue(assign.value)) orelse blk: {
+        const rhs_ct = (try self.evalExprCtValueImpl(assign.value, use_cache, true)) orelse blk: {
             const rhs = rhs_const orelse break :blk null;
             break :blk (try self.constValueToCtValue(rhs)) orelse break :blk null;
         } orelse return null;
@@ -4054,7 +4054,7 @@ const ConstEvaluator = struct {
                 };
                 const base_slot = self.env.lookup(base_name) orelse return null;
                 const base_value = self.env.read(base_slot);
-                const index_value = (try self.evalExprCtValue(index.index)) orelse return null;
+                const index_value = (try self.evalExprCtValueImpl(index.index, use_cache, true)) orelse return null;
                 const maybe_idx = self.ctIndexValue(index_value);
                 const updated = switch (base_value) {
                     .array_ref => |heap_id| blk: {

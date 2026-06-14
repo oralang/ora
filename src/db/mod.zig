@@ -196,6 +196,7 @@ pub const CompilerDb = struct {
     }
 
     pub fn addModule(self: *CompilerDb, package_id: source.PackageId, file_id: source.FileId, name: []const u8) !source.ModuleId {
+        const package_graph_was_built = self.module_graph_slots.items[package_id.index()] != null;
         const module_id = try self.sources.addModule(package_id, file_id, name);
         const required = module_id.index() + 1;
         try ensureSlots(self.allocator, &self.item_index_slots, required);
@@ -208,6 +209,7 @@ pub const CompilerDb = struct {
         try self.verification_slots.append(self.allocator, VerificationCache.init(self.allocator));
         try ensureSlots(self.allocator, &self.module_verification_slots, required);
         try ensureSlots(self.allocator, &self.hir_slots, required);
+        if (package_graph_was_built) self.invalidatePackageModulesFrontendOnly(package_id);
         return module_id;
     }
 
@@ -632,6 +634,14 @@ pub const CompilerDb = struct {
 
     fn invalidatePackage(self: *CompilerDb, package_id: source.PackageId) void {
         clearPtrSlot(self.allocator, sema.ModuleGraphResult, &self.module_graph_slots.items[package_id.index()]);
+    }
+
+    fn invalidatePackageModulesFrontendOnly(self: *CompilerDb, package_id: source.PackageId) void {
+        self.invalidatePackage(package_id);
+        const package = self.sources.package(package_id);
+        for (package.modules.items) |module_id| {
+            self.invalidateModuleFrontendOnly(module_id);
+        }
     }
 
     fn invalidateModule(self: *CompilerDb, module_id: source.ModuleId) void {

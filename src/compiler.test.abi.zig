@@ -7964,6 +7964,9 @@ test "compiler corpus covers std interfaceId helper" {
     var compilation = try compilePackage("ora-example/corpus/comptime/interface_id.ora");
     defer compilation.deinit();
 
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), consteval_diags.len());
+
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
     const item_index = try compilation.db.itemIndex(compilation.root_module_id);

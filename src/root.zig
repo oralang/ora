@@ -25,6 +25,7 @@ pub const builtins = @import("builtins.zig");
 pub const lsp = @import("lsp/mod.zig");
 pub const compiler = @import("compiler.zig");
 pub const compiler_query = @import("compiler_query.zig");
+pub const embedded_stdlib = @import("ora_imports").embedded_stdlib;
 
 // Note: MLIR and Z3 are NOT exported from ora_lib because they import ora_lib themselves,
 // which would create circular dependencies. They should be imported directly by main.zig.
