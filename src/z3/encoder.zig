@@ -2803,14 +2803,15 @@ pub const Encoder = struct {
     /// Encode integer constant to Z3 bitvector
     pub fn encodeIntegerConstant(self: *Encoder, value: u256, width: u32) EncodeError!z3.Z3_ast {
         const sort = self.mkBitVectorSort(width);
+        const narrowed = self.normalizeUnsignedToWidth(value, width);
         // z3_mk_unsigned_int64 only handles 64-bit, so we need to handle larger values
         // for u256, we'll need to use Z3_mk_numeral with string representation
         if (width <= 64) {
-            return z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(value), sort);
+            return z3.Z3_mk_unsigned_int64(self.context.ctx, @intCast(narrowed), sort);
         } else {
             // for larger bitvectors, use string representation
             // format as decimal string for Z3_mk_numeral
-            const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+            const value_str = try std.fmt.allocPrint(self.allocator, "{d}", .{narrowed});
             defer self.allocator.free(value_str);
             const value_z = try self.allocator.dupeZ(u8, value_str);
             defer self.allocator.free(value_z);
@@ -3674,6 +3675,7 @@ pub const Encoder = struct {
         const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
 
         const width = z3.Z3_get_bv_sort_size(self.context.ctx, sort);
+        const max_value = self.bitMaskForWidth(width);
         const max_value_ast = if (width <= 64) blk: {
             const max_u64: u64 = if (width == 64) std.math.maxInt(u64) else (@as(u64, 1) << @intCast(width)) - 1;
             break :blk z3.Z3_mk_unsigned_int64(self.context.ctx, max_u64, sort);
@@ -3698,14 +3700,16 @@ pub const Encoder = struct {
         };
 
         if (self.tryParseBitVectorNumeral(rhs)) |rhs_value| {
-            if (rhs_value == 0) return self.boolFalse();
-            const bound_value = std.math.maxInt(u256) / rhs_value;
+            const narrowed_rhs = self.normalizeUnsignedToWidth(rhs_value, width);
+            if (narrowed_rhs == 0) return self.boolFalse();
+            const bound_value = max_value / narrowed_rhs;
             const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
             return z3.Z3_mk_bvugt(self.context.ctx, lhs, bound_ast);
         }
         if (self.tryParseBitVectorNumeral(lhs)) |lhs_value| {
-            if (lhs_value == 0) return self.boolFalse();
-            const bound_value = std.math.maxInt(u256) / lhs_value;
+            const narrowed_lhs = self.normalizeUnsignedToWidth(lhs_value, width);
+            if (narrowed_lhs == 0) return self.boolFalse();
+            const bound_value = max_value / narrowed_lhs;
             const bound_ast = self.encodeIntegerConstant(bound_value, width) catch max_value_ast;
             return z3.Z3_mk_bvugt(self.context.ctx, rhs, bound_ast);
         }

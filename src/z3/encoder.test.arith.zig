@@ -422,3 +422,54 @@ test "unsigned mul overflow check proves bounded constant multiplier safe" {
     solver.assert(overflow);
     try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), solver.check());
 }
+
+test "unsigned mul overflow check uses narrow width for constant multiplier bound" {
+    var z3_ctx = try Context.init(testing.allocator);
+    defer z3_ctx.deinit();
+
+    var encoder = Encoder.init(&z3_ctx, testing.allocator);
+    defer encoder.deinit();
+
+    const bv8 = z3.Z3_mk_bv_sort(z3_ctx.ctx, 8);
+    const two = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 2, bv8);
+    const max_safe = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 127, bv8);
+    const first_overflow = z3.Z3_mk_unsigned_int64(z3_ctx.ctx, 128, bv8);
+
+    const lhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "lhs8"),
+        bv8,
+    );
+    const rhs_const_overflow = encoder.checkMulOverflow(lhs_sym, two);
+
+    var safe_rhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer safe_rhs_const_solver.deinit();
+    safe_rhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, lhs_sym, max_safe));
+    safe_rhs_const_solver.assert(rhs_const_overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), safe_rhs_const_solver.check());
+
+    var overflow_rhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer overflow_rhs_const_solver.deinit();
+    overflow_rhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, lhs_sym, first_overflow));
+    overflow_rhs_const_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, rhs_const_overflow));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), overflow_rhs_const_solver.check());
+
+    const rhs_sym = z3.Z3_mk_const(
+        z3_ctx.ctx,
+        z3.Z3_mk_string_symbol(z3_ctx.ctx, "rhs8"),
+        bv8,
+    );
+    const lhs_const_overflow = encoder.checkMulOverflow(two, rhs_sym);
+
+    var safe_lhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer safe_lhs_const_solver.deinit();
+    safe_lhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, rhs_sym, max_safe));
+    safe_lhs_const_solver.assert(lhs_const_overflow);
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), safe_lhs_const_solver.check());
+
+    var overflow_lhs_const_solver = try Solver.init(&z3_ctx, testing.allocator);
+    defer overflow_lhs_const_solver.deinit();
+    overflow_lhs_const_solver.assert(z3.Z3_mk_eq(z3_ctx.ctx, rhs_sym, first_overflow));
+    overflow_lhs_const_solver.assert(z3.Z3_mk_not(z3_ctx.ctx, lhs_const_overflow));
+    try testing.expectEqual(@as(z3.Z3_lbool, z3.Z3_L_FALSE), overflow_lhs_const_solver.check());
+}
