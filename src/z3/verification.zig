@@ -1406,7 +1406,7 @@ pub const VerificationPass = struct {
         if (num_regions >= 1) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
@@ -1426,7 +1426,7 @@ pub const VerificationPass = struct {
         if (num_regions >= 2) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
@@ -1485,7 +1485,7 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(then_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
@@ -1506,7 +1506,7 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(else_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
@@ -1541,7 +1541,7 @@ pub const VerificationPass = struct {
         const not_fallthrough = self.encoder.encodeNot(fallthrough_condition);
         if (astSimplifiesToBool(self.context.ctx, not_fallthrough)) |always_true| {
             if (!always_true) {
-                const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+                const fallthrough_constraints = try self.cloneConstraintsWithObligations(fallthrough_leaked_constraints, fallthrough_leaked_obligations);
                 try self.active_path_assumptions.append(.{
                     .condition = not_fallthrough,
                     .extra_constraints = fallthrough_constraints,
@@ -1549,7 +1549,7 @@ pub const VerificationPass = struct {
                 });
             }
         } else {
-            const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+            const fallthrough_constraints = try self.cloneConstraintsWithObligations(fallthrough_leaked_constraints, fallthrough_leaked_obligations);
             try self.active_path_assumptions.append(.{
                 .condition = not_fallthrough,
                 .extra_constraints = fallthrough_constraints,
@@ -1597,7 +1597,7 @@ pub const VerificationPass = struct {
         try self.restoreEncoderBranchState(&base_state);
         {
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = self.encoder.encodeNot(catch_predicate),
@@ -1613,7 +1613,7 @@ pub const VerificationPass = struct {
         try self.restoreEncoderBranchState(&base_state);
         {
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = catch_predicate,
@@ -1691,7 +1691,7 @@ pub const VerificationPass = struct {
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = effective_predicate,
-                .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
+                .extra_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations),
                 .owned_extra_constraints = true,
             });
             const region = mlir.oraOperationGetRegion(switch_op, @intCast(region_idx));
@@ -2582,6 +2582,22 @@ pub const VerificationPass = struct {
             return &[_]z3.Z3_ast{};
         }
         return try self.allocator.dupe(z3.Z3_ast, constraints);
+    }
+
+    fn cloneConstraintsWithObligations(
+        self: *VerificationPass,
+        constraints: []const z3.Z3_ast,
+        obligations: []const Encoder.PendingObligation,
+    ) ![]const z3.Z3_ast {
+        const total_len = constraints.len + obligations.len;
+        if (total_len == 0) return &[_]z3.Z3_ast{};
+
+        var combined = try self.allocator.alloc(z3.Z3_ast, total_len);
+        @memcpy(combined[0..constraints.len], constraints);
+        for (obligations, 0..) |obligation, idx| {
+            combined[constraints.len + idx] = obligation.ast;
+        }
+        return combined;
     }
 
     fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {

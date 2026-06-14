@@ -8523,10 +8523,11 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!?z3.Z3_ast {
         // Old-mode fallbacks should not mutate caller state. Inline only pure callees.
-        if (self.shouldUseOpaqueImportedSummary(call_op)) return null;
+        const should_fallback =
+            self.shouldUseOpaqueImportedSummary(call_op) or
+            self.inlineStackContains(callee) or
+            self.inline_function_stack.items.len >= self.max_summary_inline_depth;
         if (self.functionMayWriteTrackedState(func_op)) return null;
-        if (self.inlineStackContains(callee)) return null;
-        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return null;
 
         var summary_encoder = Encoder.init(self.context, self.allocator);
         defer summary_encoder.deinit();
@@ -8561,6 +8562,17 @@ pub const Encoder = struct {
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
         self.addCalleePreconditions(callee_requires.items, callee);
+        if (should_fallback) {
+            try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
+            if (summary_encoder.isDegraded()) {
+                self.recordCalleeResultDegradation(
+                    call_op,
+                    callee,
+                    summary_encoder.degradationReason() orelse "summary encoder degraded while collecting fallback preconditions",
+                );
+            }
+            return null;
+        }
 
         const encoded = try summary_encoder.extractFunctionReturnExpr(func_op, result_index, mode) orelse return null;
         if (!self.functionIsExternallyVerified(func_op)) {
@@ -8577,22 +8589,33 @@ pub const Encoder = struct {
         try self.copyErrorUnionRegistryFrom(&summary_encoder);
         try self.copyAdtSortRegistryFrom(&summary_encoder);
 
+        try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
+
+        return encoded;
+    }
+
+    fn replayCalleeSummarySideEffects(
+        self: *Encoder,
+        summary_encoder: *Encoder,
+        func_op: mlir.MlirOperation,
+        callee: []const u8,
+        callee_requires: []const z3.Z3_ast,
+        add_obligations: bool,
+    ) EncodeError!void {
         const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
         defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
         for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
 
         const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
         defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-        if (!self.functionIsExternallyVerified(func_op)) {
+        if (add_obligations and !self.functionIsExternallyVerified(func_op)) {
             self.addSummaryObligations(
                 extra_obligations,
                 callee,
-                callee_requires.items,
+                callee_requires,
                 summary_encoder.return_path_assumptions.items,
             );
         }
-
-        return encoded;
     }
 
     fn extractFunctionReturnExpr(
@@ -12531,9 +12554,10 @@ pub const Encoder = struct {
         result_exprs: []?z3.Z3_ast,
     ) EncodeError!bool {
         // Stop recursive/non-terminating expansion; fall back to UF summaries.
-        if (self.shouldUseOpaqueImportedSummary(call_op)) return false;
-        if (self.inlineStackContains(callee)) return false;
-        if (self.inline_function_stack.items.len >= self.max_summary_inline_depth) return false;
+        const should_fallback =
+            self.shouldUseOpaqueImportedSummary(call_op) or
+            self.inlineStackContains(callee) or
+            self.inline_function_stack.items.len >= self.max_summary_inline_depth;
 
         const body_region = mlir.oraOperationGetRegion(func_op, 0);
         if (mlir.oraRegionIsNull(body_region)) return false;
@@ -12579,11 +12603,13 @@ pub const Encoder = struct {
             try result_encoder.collectRequiresForSummary(func_op, &callee_requires);
             self.addCalleePreconditions(callee_requires.items, callee);
 
-            for (0..result_exprs.len) |i| {
-                const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
-                if (encoded) |expr| {
-                    result_exprs[i] = expr;
-                    any_result = true;
+            if (!should_fallback) {
+                for (0..result_exprs.len) |i| {
+                    const encoded = try result_encoder.extractFunctionReturnExpr(func_op, @intCast(i), .Current);
+                    if (encoded) |expr| {
+                        result_exprs[i] = expr;
+                        any_result = true;
+                    }
                 }
             }
 
@@ -12596,24 +12622,15 @@ pub const Encoder = struct {
                 }
             }
 
-            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
+            if (!should_fallback and !will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
                 try result_encoder.collectEnsuresForSummary(func_op, callee);
             }
 
-            const extra_constraints = try result_encoder.takeConstraintRecords(self.allocator);
-            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
+            try self.replayCalleeSummarySideEffects(&result_encoder, func_op, callee, callee_requires.items, !will_run_summary_encoder);
+        }
 
-            const extra_obligations = try result_encoder.takeObligationRecords(self.allocator);
-            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-            if (!will_run_summary_encoder and !self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(
-                    extra_obligations,
-                    callee,
-                    callee_requires.items,
-                    result_encoder.return_path_assumptions.items,
-                );
-            }
+        if (should_fallback) {
+            return false;
         }
 
         if (will_run_summary_encoder) {
@@ -12675,20 +12692,7 @@ pub const Encoder = struct {
                 }
             }
 
-            const extra_constraints = try summary_encoder.takeConstraintRecords(self.allocator);
-            defer if (extra_constraints.len > 0) self.allocator.free(extra_constraints);
-            for (extra_constraints) |record| try self.replayPendingConstraintRecord(record);
-
-            const extra_obligations = try summary_encoder.takeObligationRecords(self.allocator);
-            defer if (extra_obligations.len > 0) self.allocator.free(extra_obligations);
-            if (!self.functionIsExternallyVerified(func_op)) {
-                self.addSummaryObligations(
-                    extra_obligations,
-                    callee,
-                    callee_requires.items,
-                    summary_encoder.return_path_assumptions.items,
-                );
-            }
+            try self.replayCalleeSummarySideEffects(&summary_encoder, func_op, callee, callee_requires.items, true);
 
             for (slots) |*slot| {
                 if (summary_encoder.global_map.get(slot.name)) |post| {
@@ -13759,8 +13763,14 @@ pub const Encoder = struct {
             break;
         }
 
-        if (chain.items.len == 0) return;
-        const global_name = self.resolveGlobalNameFromMapOperand(root_candidate) orelse return;
+        if (chain.items.len == 0) {
+            self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary could not recover map_get chain");
+            return;
+        }
+        const global_name = self.resolveGlobalNameFromMapOperand(root_candidate) orelse {
+            self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary could not resolve root global");
+            return;
+        };
 
         // Rebuild parent stores from leaf -> root:
         // updated_leaf, then store into each parent map_get site.
@@ -13769,7 +13779,10 @@ pub const Encoder = struct {
         for (chain.items) |ancestor| {
             const parent_map_ast = try self.encodeValueWithMode(ancestor.parent_map, mode);
             const parent_sort = z3.Z3_get_sort(self.context.ctx, parent_map_ast);
-            if (!self.isArraySort(parent_sort)) return;
+            if (!self.isArraySort(parent_sort)) {
+                self.recordSoundnessLoss(.inexact_state_summary, "nested map store summary parent is not an array sort");
+                return;
+            }
 
             const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, parent_sort);
             const value_sort = z3.Z3_get_array_sort_range(self.context.ctx, parent_sort);
