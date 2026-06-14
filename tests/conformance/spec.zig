@@ -29,6 +29,24 @@ const DeployBuilder = struct {
     }
 };
 
+const ContractBuilder = struct {
+    name: ?[]const u8 = null,
+    source: ?[]const u8 = null,
+    caller: ?types.Address = null,
+    value: ?u256 = null,
+    args: ?[]types.ArgValue = null,
+
+    fn toSpec(self: *ContractBuilder) !types.ContractSpec {
+        const name = self.name orelse return error.MissingRequiredField;
+        const source = self.source orelse return error.MissingRequiredField;
+        const caller = self.caller orelse return error.MissingRequiredField;
+        const value = self.value orelse return error.MissingRequiredField;
+        const args = self.args orelse return error.MissingRequiredField;
+        self.args = null;
+        return .{ .name = name, .source = source, .caller = caller, .value = value, .args = args };
+    }
+};
+
 const StorageBuilder = struct {
     slot: ?u256 = null,
     value: ?u256 = null,
@@ -55,6 +73,7 @@ const LogBuilder = struct {
 };
 
 const CallBuilder = struct {
+    to: ?[]const u8 = null,
     @"fn": ?[]const u8 = null,
     calldata: ?[]u8 = null,
     caller: ?types.Address = null,
@@ -88,6 +107,7 @@ const CallBuilder = struct {
         self.storage = .{};
         self.logs = .{};
         return .{
+            .to = self.to,
             .@"fn" = self.@"fn",
             .calldata = self.calldata,
             .caller = self.caller orelse return error.MissingRequiredField,
@@ -113,6 +133,7 @@ const CallBuilder = struct {
 const Section = enum {
     none,
     deploy,
+    contract,
     call,
     call_storage,
     call_log,
@@ -121,9 +142,17 @@ const Section = enum {
 const KeyPresence = enum { present };
 const single_section_map = std.StaticStringMap(Section).initComptime(.{.{ "deploy", .deploy }});
 const double_section_map = std.StaticStringMap(Section).initComptime(.{
+    .{ "contract", .contract },
     .{ "call", .call },
     .{ "call.storage", .call_storage },
     .{ "call.log", .call_log },
+});
+const contract_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
+    .{ "name", .present },
+    .{ "source", .present },
+    .{ "caller", .present },
+    .{ "value", .present },
+    .{ "args", .present },
 });
 const deploy_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "caller", .present },
@@ -133,6 +162,7 @@ const deploy_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
     .{ "ignore_logs", .present },
 });
 const call_key_map = std.StaticStringMap(KeyPresence).initComptime(.{
+    .{ "to", .present },
     .{ "fn", .present },
     .{ "calldata", .present },
     .{ "caller", .present },
@@ -164,8 +194,11 @@ fn parseInto(allocator: std.mem.Allocator, source: []const u8) !types.Spec {
     var deploy_seen = false;
     var calls = std.ArrayList(types.CallSpec){};
     errdefer calls.deinit(allocator);
+    var contracts = std.ArrayList(types.ContractSpec){};
+    errdefer contracts.deinit(allocator);
 
     var current_call: ?CallBuilder = null;
+    var current_contract: ?ContractBuilder = null;
     var pending_storage: ?StorageBuilder = null;
     var pending_log: ?LogBuilder = null;
 
@@ -180,7 +213,14 @@ fn parseInto(allocator: std.mem.Allocator, source: []const u8) !types.Spec {
             const name = parseDoubleSectionName(line);
             section = double_section_map.get(name) orelse return error.UnknownSection;
             switch (section) {
+                .contract => {
+                    // Secondary contracts must precede any [[call]].
+                    if (calls.items.len != 0 or current_call != null) return error.InvalidSectionOrder;
+                    try flushCurrentContract(allocator, &contracts, &current_contract);
+                    current_contract = .{};
+                },
                 .call => {
+                    try flushCurrentContract(allocator, &contracts, &current_contract);
                     try flushCurrentCall(allocator, &calls, &current_call);
                     current_call = .{};
                 },
@@ -211,6 +251,10 @@ fn parseInto(allocator: std.mem.Allocator, source: []const u8) !types.Spec {
         const kv = try splitKeyValue(line);
         switch (section) {
             .deploy => try parseBuilderKey(DeployBuilder, allocator, &deploy, kv.key, kv.value),
+            .contract => {
+                if (current_contract == null) return error.ExpectedSection;
+                try parseBuilderKey(ContractBuilder, allocator, &current_contract.?, kv.key, kv.value);
+            },
             .call => {
                 if (current_call == null) return error.ExpectedCall;
                 try parseBuilderKey(CallBuilder, allocator, &current_call.?, kv.key, kv.value);
@@ -229,17 +273,32 @@ fn parseInto(allocator: std.mem.Allocator, source: []const u8) !types.Spec {
 
     try flushPendingChild(allocator, &current_call, &pending_storage, &pending_log);
     try flushCurrentCall(allocator, &calls, &current_call);
+    try flushCurrentContract(allocator, &contracts, &current_contract);
 
     if (!deploy_seen) return error.MissingRequiredField;
     return .{
         .deploy = try deploy.toSpec(),
+        .secondary = try contracts.toOwnedSlice(allocator),
         .calls = try calls.toOwnedSlice(allocator),
     };
+}
+
+fn flushCurrentContract(
+    allocator: std.mem.Allocator,
+    contracts: *std.ArrayList(types.ContractSpec),
+    current_contract: *?ContractBuilder,
+) !void {
+    if (current_contract.*) |*c| {
+        try contracts.append(allocator, try c.toSpec());
+        current_contract.* = null;
+    }
 }
 
 fn keyMap(comptime Builder: type) *const std.StaticStringMap(KeyPresence) {
     return if (Builder == DeployBuilder)
         &deploy_key_map
+    else if (Builder == ContractBuilder)
+        &contract_key_map
     else if (Builder == CallBuilder)
         &call_key_map
     else if (Builder == StorageBuilder)

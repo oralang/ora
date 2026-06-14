@@ -1389,6 +1389,7 @@ pub const VerificationPass = struct {
         }
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
         defer base_state.deinit(self.allocator);
@@ -1467,6 +1468,7 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
         defer base_state.deinit(self.allocator);
@@ -1529,8 +1531,9 @@ pub const VerificationPass = struct {
         const fallthrough_condition = self.encoder.coerceBoolean(fallthrough_raw_condition);
         const fallthrough_leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (fallthrough_leaked_constraints.len > 0) self.allocator.free(fallthrough_leaked_constraints);
-        const fallthrough_leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const fallthrough_leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (fallthrough_leaked_obligations.len > 0) self.allocator.free(fallthrough_leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, fallthrough_leaked_obligations);
 
         const not_fallthrough = self.encoder.encodeNot(fallthrough_condition);
         if (astSimplifiesToBool(self.context.ctx, not_fallthrough)) |always_true| {
@@ -1578,6 +1581,7 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(try_op, leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
         defer base_state.deinit(self.allocator);
@@ -1642,6 +1646,7 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(switch_op, leaked_obligations);
 
         var metadata = try self.getSwitchCaseMetadata(switch_op, num_regions);
         defer metadata.deinit(self.allocator);
@@ -1956,6 +1961,79 @@ pub const VerificationPass = struct {
             }
         }
         return null;
+    }
+
+    fn preserveControlConditionObligations(
+        self: *VerificationPass,
+        source_op: mlir.MlirOperation,
+        leaked_obligations: []const Encoder.PendingObligation,
+    ) !void {
+        if (leaked_obligations.len == 0) return;
+
+        const function_name = self.current_function_name orelse "unknown";
+        if (self.filter_function_name) |target_fn| {
+            if (!std.mem.eql(u8, function_name, target_fn)) return;
+        }
+        const loc = try self.getLocationInfo(source_op);
+        const path_constraints = try self.captureActivePathConstraints();
+        defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
+        const path_guard = if (path_constraints.len > 0)
+            self.encoder.encodeAnd(path_constraints)
+        else
+            null;
+
+        const loop_owner = if (self.findEnclosingLoopOp(source_op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
+        var loop_step_condition: ?z3.Z3_ast = null;
+        var loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
+        defer if (loop_step_extra_constraints.len > 0) self.allocator.free(loop_step_extra_constraints);
+        if (loop_owner != null) {
+            loop_step_condition = try self.encodeLoopContinueCondition(source_op);
+            loop_step_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        }
+
+        for (leaked_obligations) |obligation| {
+            const guarded_obligation = if (path_guard) |guard|
+                self.encoder.encodeImplies(guard, obligation.ast)
+            else
+                obligation.ast;
+            const annotation_kind = pendingObligationAnnotationKind(obligation);
+            const imported_source = if (obligation.imported_callee_name) |callee_name|
+                ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
+            else
+                null;
+            const obligation_label = if (imported_source) |source|
+                try self.importedObligationLabel(source)
+            else
+                null;
+            try appendEncodedAnnotationUnique(self, .{
+                .function_name = function_name,
+                .kind = annotation_kind,
+                .condition = guarded_obligation,
+                .source_op = source_op,
+                .extra_constraints = &[_]z3.Z3_ast{},
+                .path_constraints = try self.cloneConstraintSlice(path_constraints),
+                .old_condition = null,
+                .old_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_condition = loop_step_condition,
+                .loop_step_extra_constraints = try self.cloneConstraintSlice(loop_step_extra_constraints),
+                .loop_step_head_condition = null,
+                .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_condition = null,
+                .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_backedge_condition = null,
+                .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_exit_condition = null,
+                .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
+                .file = loc.file,
+                .line = loc.line,
+                .column = loc.column,
+                .label = obligation_label,
+                .verification_context = "control_condition_safety",
+                .imported_obligation_source = imported_source,
+                .guard_id = null,
+                .loop_owner = loop_owner,
+            });
+        }
     }
 
     fn observeStateOperation(self: *VerificationPass, op: mlir.MlirOperation, op_name: []const u8) !void {
@@ -5778,6 +5856,15 @@ fn pathAssumeAppliesToAnnotation(
     path_assume: EncodedAnnotation,
     ann: EncodedAnnotation,
 ) bool {
+    if (ann.verification_context) |context| {
+        if (std.mem.eql(u8, context, "control_condition_safety") and
+            std.mem.eql(u8, path_assume.file, ann.file) and
+            path_assume.line == ann.line and
+            path_assume.column == ann.column)
+        {
+            return false;
+        }
+    }
     if (!annotationLocationPrecedes(path_assume, ann)) return false;
     return pathConstraintsCompatible(self, path_assume.path_constraints, ann.path_constraints);
 }

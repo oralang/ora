@@ -1,0 +1,21 @@
+// Falsification pairing (T3.4): the verifier discharges a map-frame
+// postcondition under who != other. This spec executes the same shape.
+contract FalsificationMapFrame {
+    storage var balances: map<address, u256>;
+
+    pub fn seed(who: address, amount: u256) {
+        balances[who] = amount;
+    }
+
+    pub fn setOther(who: address, other: address, amount: u256)
+        requires(who != other)
+        requires(amount <= 100)
+        ensures(balances[other] == old(balances[other]))
+    {
+        balances[who] = amount;
+    }
+
+    pub fn balanceOf(who: address) -> u256 {
+        return balances[who];
+    }
+}

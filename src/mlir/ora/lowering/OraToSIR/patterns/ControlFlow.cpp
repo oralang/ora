@@ -1,5 +1,6 @@
 #include "patterns/ControlFlow.h"
 #include "patterns/AdtCarrierHelpers.h"
+#include "patterns/AbiLoweringCommon.h"
 #include "patterns/EVMConstants.h"
 #include "patterns/ErrorUnionCarrierHelpers.h"
 #include "patterns/LoweringHelpers.h"
@@ -35,6 +36,7 @@ using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::createPtrViewMaterializationCast;
 using mlir::ora::lowering::findStructDeclForName;
+namespace abi = mlir::ora::abi_lowering;
 namespace euh = mlir::ora::error_union_helpers;
 
 // Debug logging macro
@@ -3213,7 +3215,7 @@ namespace
         return success();
     }
 
-    static std::optional<unsigned> fixedBytesAbiReturnWidth(ora::ReturnOp op)
+    static std::optional<abi::AbiStaticLeaf> staticAbiReturnLeaf(ora::ReturnOp op)
     {
         auto func = op->getParentOfType<func::FuncOp>();
         if (!func)
@@ -3222,17 +3224,19 @@ namespace
         if (!attr)
             return std::nullopt;
 
-        StringRef abiReturn = attr.getValue();
-        if (!abiReturn.starts_with("bytes") || abiReturn == "bytes")
+        abi::AbiLayoutNode layout;
+        if (!abi::parseAbiLayout(attr.getValue(), layout, abi::AbiLayoutSyntax::CanonicalAbi))
             return std::nullopt;
-        StringRef digits = abiReturn.drop_front(5);
-        if (digits.empty() || (digits.size() > 1 && digits.front() == '0'))
+        if (layout.kind != abi::AbiLayoutKind::Static)
             return std::nullopt;
 
-        unsigned width = 0;
-        if (digits.getAsInteger(10, width) || width < 1 || width > 32)
-            return std::nullopt;
-        return width;
+        abi::AbiStaticLeaf leaf;
+        leaf.kind = layout.staticKind;
+        leaf.width = layout.width;
+        leaf.operandIndex = 0;
+        leaf.aggregateIndex = 0;
+        leaf.loadFromAggregate = false;
+        return leaf;
     }
 
     // Default: scalar EVM-word return. Coerce retVal to sir.u256, malloc 32,
@@ -3246,16 +3250,8 @@ namespace
         }
 
         c.retVal = coerceToU256(c.rewriter, c.loc, c.retVal);
-        if (std::optional<unsigned> fixedBytesWidth = fixedBytesAbiReturnWidth(c.op))
-        {
-            if (*fixedBytesWidth < 32)
-            {
-                // Ora fixed-bytes values carry their bytes in the low bits;
-                // ABI fixed-bytes words are left-aligned.
-                Value shift = constU256(c.rewriter, c.loc, static_cast<uint64_t>(32 - *fixedBytesWidth) * 8ULL);
-                c.retVal = c.rewriter.create<sir::ShlOp>(c.loc, c.u256Type, shift, c.retVal);
-            }
-        }
+        if (std::optional<abi::AbiStaticLeaf> abiLeaf = staticAbiReturnLeaf(c.op))
+            c.retVal = abi::materializeAbiStaticWord(c.rewriter, c.loc, *abiLeaf, c.retVal);
 
         Value sizeConst = constU256(c.rewriter, c.loc, 32);
         Value mem = c.rewriter.create<sir::MallocOp>(c.loc, c.ptrType, sizeConst);

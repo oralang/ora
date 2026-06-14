@@ -1,0 +1,46 @@
+# Executed reentrancy-guard test (two contracts).
+#
+# Primary  = reentrancy_lock_guard.ora (ReentrancyVictim).
+# Secondary= reentrancy_attacker.ora (ReentrancyAttacker), constructed with the
+#            victim's address (@self).
+#
+# attack(@attacker) -> victim.withdraw(attacker): victim @lock(gate), calls back
+# attacker.onCall(), which re-enters victim.withdraw(attacker). The second
+# @lock(gate) must revert, so the re-entrant entry is rejected and the victim
+# commits EXACTLY ONE entry. entryCount() == 1 proves the lock stopped reentrancy
+# (a value > 1, or a non-revert second entry, would mean the guard failed).
+
+[deploy]
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+
+[[contract]]
+name = "attacker"
+source = "tests/conformance/reentrancy_attacker.ora"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = ["@self"]
+
+[[call]]
+to = "attacker"
+fn = "attack(address)"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = ["@attacker"]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "entryCount()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = { u256 = 1 }
+
+[[call]]
+to = "attacker"
+fn = "reentryAttempts()"
+caller = "0x1000000000000000000000000000000000000000"
+value = 0
+args = []
+returns = { u256 = 1 }

@@ -58,6 +58,7 @@ pub fn Evm(comptime config: EvmConfig) type {
 
     return struct {
         const Self = @This();
+        const max_call_depth: usize = config.max_call_depth;
 
         pub const CallParams = call_params.CallParams(config);
         pub const CallResult = call_result.CallResult(config);
@@ -203,7 +204,10 @@ pub fn Evm(comptime config: EvmConfig) type {
             self.code.clearRetainingCapacity();
             self.access_list_manager = AccessListManager.init(arena_allocator);
             self.frames = std.ArrayList(FrameType){};
-            try self.frames.ensureTotalCapacity(arena_allocator, 16);
+            // Call handlers hold pointers to the active frame across nested
+            // calls. Reserve the whole legal call-depth range so appending a
+            // child frame cannot reallocate and dangle those parent pointers.
+            try self.frames.ensureTotalCapacity(arena_allocator, max_call_depth);
             self.logs = std.ArrayList(call_result.Log){};
             self.created_accounts = std.AutoHashMap(primitives.Address, void).init(arena_allocator);
             self.selfdestructed_accounts = std.AutoHashMap(primitives.Address, void).init(arena_allocator);
@@ -909,9 +913,9 @@ pub fn Evm(comptime config: EvmConfig) type {
                 .staticcall => .StaticCall,
                 else => unreachable,
             };
-            // Check call depth (STACK_DEPTH_LIMIT = 1024)
+            // Check call depth (STACK_DEPTH_LIMIT = config.max_call_depth)
             // Per Python reference (system.py:297-300), depth exceeded refunds gas
-            if (self.frames.items.len >= 1024) {
+            if (self.frames.items.len >= max_call_depth) {
                 return makeFailure(self.arena.allocator(), gas);
             }
 
@@ -1190,9 +1194,9 @@ pub fn Evm(comptime config: EvmConfig) type {
             // We detect this when there is no active frame yet.
             // Used to avoid double-incrementing the sender's nonce (runner already increments it)
             const is_top_level_create = self.frames.items.len == 0;
-            // Check call depth (STACK_DEPTH_LIMIT = 1024)
+            // Check call depth (STACK_DEPTH_LIMIT = config.max_call_depth)
             // Per Python reference (system.py:97-99), depth exceeded refunds gas
-            if (self.frames.items.len >= 1024) {
+            if (self.frames.items.len >= max_call_depth) {
                 return .{
                     .address = primitives.ZERO_ADDRESS,
                     .success = false,

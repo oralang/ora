@@ -3826,6 +3826,27 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         );
                         if (!mlir.oraOperationIsNull(op)) return appendValueOp(self.block, op);
                     },
+                    .array, .slice => {
+                        const base_value_type = mlir.oraValueGetType(base);
+                        if (mlir.oraTypeIsAMemRef(base_value_type) and mlir.oraShapedTypeGetRank(base_value_type) == 1) {
+                            const loc = self.parent.location(field.range);
+                            const index_type = mlir.oraIndexTypeCreate(self.parent.context);
+                            const dim_index = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, index_type, 0));
+                            const dim_op = mlir.oraMemrefDimOpCreate(self.parent.context, loc, base, dim_index);
+                            if (mlir.oraOperationIsNull(dim_op)) return error.MlirOperationCreationFailed;
+                            const dim_value = appendValueOp(self.block, dim_op);
+                            if (mlir.oraTypeEqual(result_type, index_type)) return dim_value;
+
+                            const cast_op = mlir.oraArithIndexCastUIOpCreate(
+                                self.parent.context,
+                                loc,
+                                dim_value,
+                                result_type,
+                            );
+                            if (mlir.oraOperationIsNull(cast_op)) return error.MlirOperationCreationFailed;
+                            return appendValueOp(self.block, cast_op);
+                        }
+                    },
                     else => {},
                 }
             }

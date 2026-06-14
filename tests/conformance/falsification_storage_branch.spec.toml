@@ -1,0 +1,44 @@
+# Execution falsification of the verified storage-backed conditional ensures.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_limit(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [10]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 10
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [10]
+returns = { u256 = 1 }
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [11]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "classify(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [20]
+returns = { u256 = 2 }

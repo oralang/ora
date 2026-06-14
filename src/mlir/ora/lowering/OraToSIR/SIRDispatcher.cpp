@@ -639,16 +639,30 @@ namespace mlir
 
             static Value materializeAbiReturnStaticWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiLayoutNode &layout, Value payload)
             {
-                if (layout.kind != AbiLayoutKind::Static ||
-                    layout.staticKind != AbiStaticKind::FixedBytes ||
-                    layout.width == 0 ||
-                    layout.width >= 32)
+                if (layout.kind != AbiLayoutKind::Static)
                     return payload;
 
-                // Ora fixed-bytes values carry their bytes in the low bits
-                // after ABI decode. The ABI word is left-aligned.
-                Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - layout.width) * 8ULL);
-                return builder.create<sir::ShlOp>(loc, sir::U256Type::get(ctx), shift, payload).getResult();
+                auto u256Type = sir::U256Type::get(ctx);
+                if (layout.staticKind == AbiStaticKind::Int &&
+                    layout.width > 0 &&
+                    layout.width < 256 &&
+                    layout.width % 8 == 0)
+                {
+                    Value byteIndex = lowering::constU256(builder, loc, (layout.width / 8) - 1);
+                    return builder.create<sir::SignExtendOp>(loc, u256Type, byteIndex, payload).getResult();
+                }
+
+                if (layout.staticKind == AbiStaticKind::FixedBytes &&
+                    layout.width > 0 &&
+                    layout.width < 32)
+                {
+                    // Ora fixed-bytes values carry their bytes in the low bits
+                    // after ABI decode. The ABI word is left-aligned.
+                    Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - layout.width) * 8ULL);
+                    return builder.create<sir::ShlOp>(loc, u256Type, shift, payload).getResult();
+                }
+
+                return payload;
             }
 
             static Value computeAbiEncodedSize(
@@ -2869,6 +2883,75 @@ namespace mlir
                                 return bounds.nextExpectedOffset;
                             };
 
+                            std::function<bool(const AbiLayoutNode &, Value, int64_t)> validateStaticCalldataFieldsAtHead =
+                                [&](const AbiLayoutNode &layout, Value baseOff, int64_t headByteOffset) -> bool {
+                                if (canonicalAbiLayoutIsDynamic(layout))
+                                    return true;
+
+                                if (layout.kind == AbiLayoutKind::Static)
+                                {
+                                    Value fieldHeadOff = builder.create<sir::AddOp>(
+                                        caseDecodeLoc,
+                                        u256Type,
+                                        baseOff,
+                                        lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(headByteOffset)));
+                                    Value word = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                    std::optional<CalldataStaticDecode> decoded =
+                                        decodeStaticCalldataWord(builder, caseDecodeLoc, ctx, layout, word, 0, false, info.permissiveAbiDecode);
+                                    if (!decoded)
+                                        return true;
+
+                                    for (auto [valid, error] : decoded->checks)
+                                    {
+                                        Block *validBody = mainFunc.addBlock();
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            valid,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            validBody,
+                                            getAbiDecodeRevertBlock(error));
+                                        builder.setInsertionPointToEnd(validBody);
+                                        caseBody = validBody;
+                                    }
+                                    return true;
+                                }
+
+                                if (canonicalAbiLayoutIsTupleLike(layout))
+                                {
+                                    int64_t childHeadByteOffset = headByteOffset;
+                                    for (const auto &childLayoutPtr : layout.children)
+                                    {
+                                        const AbiLayoutNode &childLayout = *childLayoutPtr;
+                                        if (!validateStaticCalldataFieldsAtHead(childLayout, baseOff, childHeadByteOffset))
+                                            return false;
+                                        int64_t slots = canonicalAbiLayoutIsDynamic(childLayout) ? 1 : canonicalAbiLayoutHeadSlots(childLayout);
+                                        if (slots <= 0)
+                                            return false;
+                                        childHeadByteOffset += slots * 32;
+                                    }
+                                    return true;
+                                }
+
+                                if (layout.kind == AbiLayoutKind::FixedArray && layout.children.size() == 1)
+                                {
+                                    const AbiLayoutNode &elementLayout = *layout.children.front();
+                                    int64_t elementSlots = canonicalAbiLayoutHeadSlots(elementLayout);
+                                    if (elementSlots <= 0)
+                                        return false;
+                                    int64_t elementHeadByteOffset = headByteOffset;
+                                    for (unsigned i = 0; i < layout.arrayLen; ++i)
+                                    {
+                                        if (!validateStaticCalldataFieldsAtHead(elementLayout, baseOff, elementHeadByteOffset))
+                                            return false;
+                                        elementHeadByteOffset += elementSlots * 32;
+                                    }
+                                    return true;
+                                }
+
+                                return true;
+                            };
+
                             auto materializeDynamicTupleCarrierAtHead = [&](const AbiLayoutNode &fieldLayout,
                                                                             Value tupleBaseOff,
                                                                             Value fieldHeadOff,
@@ -2940,6 +3023,8 @@ namespace mlir
                                     {
                                         int64_t slots = canonicalAbiLayoutHeadSlots(childLayout);
                                         if (slots <= 0)
+                                            return failure();
+                                        if (!validateStaticCalldataFieldsAtHead(childLayout, fieldBaseOff, childHeadByteOffset))
                                             return failure();
                                         childHeadByteOffset += slots * 32;
                                     }
@@ -3051,6 +3136,8 @@ namespace mlir
                                             {
                                                 int64_t slots = canonicalAbiLayoutHeadSlots(childLayout);
                                                 if (slots <= 0)
+                                                    return failure();
+                                                if (!validateStaticCalldataFieldsAtHead(childLayout, fieldBaseOff, childHeadByteOffset))
                                                     return failure();
                                                 childHeadByteOffset += slots * 32;
                                             }

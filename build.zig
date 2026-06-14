@@ -628,6 +628,18 @@ pub fn build(b: *std.Build) void {
     const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
     conformance_one_step.dependOn(&conformance_one_install.step);
 
+    // Local Anvil/revm differential over the conformance corpus. This is
+    // intentionally not part of the default gate because it drives a live RPC
+    // process, but it is the T2.4 local entrypoint and mirrors the scheduled CI
+    // differential job.
+    const conformance_anvil_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/anvil-diff-corpus.sh",
+    });
+    conformance_anvil_cmd.step.dependOn(b.getInstallStep());
+    const test_conformance_anvil_step = b.step("test-conformance-anvil", "Run Ora conformance differential tests on Anvil/revm");
+    test_conformance_anvil_step.dependOn(&conformance_anvil_cmd.step);
+
     // Metrics snapshot harness — prints gas + bytecode-size metrics per corpus
     // entry for the change-quality benchmark.
     const metrics_snapshot_mod = b.createModule(.{

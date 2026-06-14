@@ -1,0 +1,17 @@
+// Falsification pairing (T3.4): the verifier discharges the map write
+// postcondition, and this conformance spec executes the same write/read effect
+// on concrete keys so a false proof becomes observable bytecode behavior.
+contract FalsificationMapEffect {
+    storage var balances: map<address, u256>;
+
+    pub fn set(who: address, amount: u256)
+        requires(amount <= 100)
+        ensures(balances[who] == amount)
+    {
+        balances[who] = amount;
+    }
+
+    pub fn get(who: address) -> u256 {
+        return balances[who];
+    }
+}

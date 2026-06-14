@@ -5,6 +5,72 @@ contract AdversarialCalldata {
         return s.len;
     }
 
+    pub fn flag(value: bool) -> u256 {
+        if (value) {
+            return 1;
+        }
+        return 0;
+    }
+
+    pub fn who(account: address) -> address {
+        return account;
+    }
+
+    pub fn tag(value: bytes4) -> u256 {
+        return 1;
+    }
+
+    pub fn signed(value: i16) -> i16 {
+        return value;
+    }
+
+    pub fn count_flags(values: slice[bool]) -> u256 {
+        var total: u256 = 0;
+        for (values) |value| {
+            if (value) {
+                total = total + 1;
+            }
+        }
+        return total;
+    }
+
+    pub fn first_address(values: slice[address]) -> address {
+        return values[0];
+    }
+
+    pub fn count_tags(values: slice[bytes4]) -> u256 {
+        return values.len;
+    }
+
+    pub fn tuple_flag(t: (bool, string)) -> u256 {
+        if (t.0) {
+            return t.1.len + 1;
+        }
+        return t.1.len;
+    }
+
+    pub fn tuple_who(t: (address, string)) -> address {
+        return t.0;
+    }
+
+    pub fn tuple_tag(t: (bytes4, string)) -> u256 {
+        return t.1.len + 2;
+    }
+
+    pub fn tuple_sum(t: (slice[u256], string)) -> u256 {
+        return t.0[0] + t.0[1] + t.0[2] + t.1.len;
+    }
+
+    pub fn tuple_count_flags(t: (slice[bool], string)) -> u256 {
+        var total: u256 = 0;
+        for (t.0) |value| {
+            if (value) {
+                total = total + 1;
+            }
+        }
+        return total + t.1.len;
+    }
+
     pub fn add(a: u256, b: u256) -> u256
         requires a <= 1000000
         requires b <= 1000000

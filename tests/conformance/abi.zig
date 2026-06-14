@@ -47,7 +47,12 @@ pub fn parseArgArray(allocator: std.mem.Allocator, value: []const u8) ![]ArgValu
 
 pub fn parseArgValue(token: []const u8) !ArgValue {
     if (token.len == 0) return error.InvalidArgs;
-    if (token[0] == '"') return .{ .literal = try parseString(token) };
+    if (token[0] == '"') {
+        const s = try parseString(token);
+        // `"@name"` is a cross-contract address reference, resolved at run time.
+        if (s.len > 1 and s[0] == '@') return .{ .contract_ref = s[1..] };
+        return .{ .literal = s };
+    }
     if (std.mem.eql(u8, token, "true")) return .{ .boolean = true };
     if (std.mem.eql(u8, token, "false")) return .{ .boolean = false };
     if (std.mem.indexOfAny(u8, token, "{}") != null) return error.InvalidArgs;
@@ -314,7 +319,9 @@ pub fn expectStaticReturn(wire_type: []const u8, expected: ArgValue, actual_word
         const expected_value = try parseSignedArg(expected);
         const bounds = signedBounds(bits);
         if (expected_value < bounds.min or expected_value > bounds.max) return error.ValueOutOfRange;
-        try testing.expectEqual(expected_value, decodeSignedWord(actual_word[0..32], bits));
+        var expected_word: [32]u8 = undefined;
+        try encodeStaticAbiWord(&expected_word, wire_type, expected);
+        if (!std.mem.eql(u8, &expected_word, actual_word[0..32])) return error.NonCanonicalAbiReturn;
         return;
     }
 
@@ -389,12 +396,14 @@ pub fn argAsLiteral(arg: ArgValue) ![]const u8 {
     return switch (arg) {
         .literal => |literal| literal,
         .boolean => error.InvalidArgumentType,
+        .contract_ref => error.UnresolvedContractRef,
     };
 }
 
 pub fn argAsBool(arg: ArgValue) !bool {
     return switch (arg) {
         .boolean => |value| value,
+        .contract_ref => error.InvalidArgumentType,
         .literal => |literal| blk: {
             const trimmed = std.mem.trim(u8, literal, " \t");
             if (std.mem.eql(u8, trimmed, "true") or std.mem.eql(u8, trimmed, "1")) break :blk true;

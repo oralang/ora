@@ -454,15 +454,11 @@ jobs:
         shell: bash
         run: |
           echo "🐍 Running Python feature test script (Ora + SIR)..."
-          if [ -f "scripts/test_ora_features_sir.py" ]; then
-            python3 scripts/test_ora_features_sir.py --compiler ./zig-out/bin/ora --timeout 600 || {
-              echo "❌ Python feature tests failed"
-              exit 1
-            }
-            echo "✅ Python feature tests completed"
-          else
-            echo "⚠️  test_ora_features_sir.py not found, skipping"
-          fi
+          python3 scripts/test_ora_features.py --emit sir --compiler ./zig-out/bin/ora --timeout 600 || {
+            echo "❌ Python feature tests failed"
+            exit 1
+          }
+          echo "✅ Python feature tests completed"
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
@@ -603,7 +599,7 @@ jobs:
           echo "🧪 Cross-checking lib/evm (our oracle) against Anvil/revm over the whole corpus..."
           # Fails (exit 1) ONLY on a real divergence: lib/evm and revm disagree on
           # real Ora bytecode -> a compiler bug, a lib/evm bug, or a hardfork mismatch.
-          # Unsupported/compile errors are tallied, not failed.
+          # Any divergence or unhandled spec fails the scheduled differential.
           scripts/anvil-diff-corpus.sh
 
   metrics:

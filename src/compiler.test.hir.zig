@@ -2191,6 +2191,25 @@ test "compiler lowers native string and bytes len field access" {
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "ora.length"));
 }
 
+test "compiler lowers slice and array len field access without placeholders" {
+    const source_text =
+        \\pub fn slice_len(values: slice[bytes4]) -> u256 {
+        \\    return values.len;
+        \\}
+        \\
+        \\pub fn array_len(values: [bytes4; 3]) -> u256 {
+        \\    return values.len;
+        \\}
+    ;
+
+    const rendered = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "memref.dim"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "arith.index_castui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.field_access"));
+}
+
 test "compiler lowers dynamic byte concat and slice operations" {
     const source_text =
         \\pub fn join_text(a: string, b: string) -> string {
