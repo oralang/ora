@@ -667,6 +667,31 @@ pub fn build(b: *std.Build) void {
     const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
     metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
 
+    // Compiler frontend metrics harness — prints deterministic compile-time
+    // allocation/work-count metrics for package-mode Ora examples.
+    const compile_metrics_mod = b.createModule(.{
+        .root_source_file = b.path("tests/compile_metrics_snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    compile_metrics_mod.addImport("ora_root", lib_mod);
+    const compile_metrics_exe = b.addExecutable(.{
+        .name = "compile-metrics",
+        .root_module = compile_metrics_mod,
+    });
+    linkMlirLibraries(b, compile_metrics_exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
+    const compile_metrics_install = b.addInstallArtifact(compile_metrics_exe, .{});
+    const compile_metrics_step = b.step("compile-metrics", "Build the compiler frontend metrics harness");
+    compile_metrics_step.dependOn(&compile_metrics_install.step);
+    const check_compile_metrics_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/compile-metrics-check.py",
+        "--check",
+    });
+    check_compile_metrics_cmd.step.dependOn(&compile_metrics_install.step);
+    const check_compile_metrics_step = b.step("check-compile-metrics", "Check compiler frontend metrics against the deterministic baseline");
+    check_compile_metrics_step.dependOn(&check_compile_metrics_cmd.step);
+
     const evm_tests_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",

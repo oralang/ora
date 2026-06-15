@@ -276,59 +276,72 @@ Stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-l
 
 ### Testing
 
-`zig build gate` is the single bar — it runs the full pre-push suite, and the
-pre-push hook runs it on your committed state. Everything else below is a subset
-you can run directly for faster feedback. Append `-Dskip-mlir=true` to any command
-to reuse the prebuilt MLIR libraries and skip the slow MLIR rebuild.
+`zig build gate` is the single bar — it runs the full pre-push suite in dependency
+order, and the pre-push hook runs it on your committed state. The tables below show
+what it's made of, the order to run things by hand, and how to regenerate the
+golden/baseline files.
 
-**Core commands**
+#### Test frameworks in use
+
+| Framework | Used for | Requirement |
+|---|---|---|
+| **Zig test runner** (`zig build test*`) | Unit tests, compiler core, LSP suites, `lib/evm` | Zig 0.15.2 |
+| **Zig check binaries** (`zig build check-*`) | Static invariant tripwires (no-width-defaults, op-null fallbacks, coverage, etc.) | Zig |
+| **In-process `lib/evm`** (`test-conformance`) | Executing emitted bytecode against `.spec.toml` oracles | bundled (no external EVM) |
+| **LLVM `FileCheck`** (`check-mlir-*`, `check-sir-text`) | Golden MLIR/SIR snapshots | `FileCheck` on PATH or `FILECHECK=/path/to/FileCheck` |
+| **Python 3** (`scripts/*.py`) | Golden generation, coverage/ledger/corpus checks, metrics diff, differential | `python3` |
+| **Foundry** (`scripts/anvil-diff-corpus.sh`) | Anvil/revm differential (optional, nightly) | `anvil` + `cast` |
+
+> Append `-Dskip-mlir=true` to reuse prebuilt MLIR libs and skip the slow rebuild —
+> safe unless you changed `src/mlir/**` (`.cpp`/`.td`), which needs a full `zig build`.
+
+#### Run order (fast → comprehensive)
+
+Run top-to-bottom; stop at the first failure. `zig build gate` does all of this for you.
+
+| # | Step | Command | Framework |
+|---|---|---|---|
+| 1 | Build | `zig build -Dskip-mlir=true` (or full `zig build` if `src/mlir/**` changed) | Zig |
+| 2 | Format + lint | `zig fmt --check src/` · `zig build check-verifier-introspection check-refinement-registry-sync check-lock-guarding` | Zig |
+| 3 | Unit tests + static tripwires | `zig build test` | Zig |
+| 4 | Execution conformance + EVM | `zig build test-conformance test-evm` | Zig + `lib/evm` |
+| 5 | Golden snapshots | `zig build check-mlir-ora check-mlir-sir check-sir-text` | Zig + **FileCheck** |
+| 6 | Invariant corpora | `zig build check-negative-corpus check-findings-ledger check-verifier-mutations check-smt-modifies-corpus` | Zig + Python |
+| 7 | LSP smoke | `zig build lsp-smoke` | Zig |
+| 8 | **Everything (the bar)** | `zig build gate` | all of the above |
+
+#### Generating / updating check & baseline files
+
+Regenerate after an **intentional** change, and review the diff before committing.
+
+| Artifact | Regenerate with | Framework |
+|---|---|---|
+| Ora MLIR goldens (`tests/mlir/*.check`) | `python3 scripts/generate-mlir-auto-checks.py` | Python (+ ora binary) |
+| SIR MLIR goldens (`tests/mlir_sir/*.check`) | `python3 scripts/generate-sir-auto-checks.py --refresh` | Python (+ ora binary) |
+| Gas + bytecode-size baseline | `zig build metrics-snapshot` then `python3 scripts/metrics-check.py --update` | Zig + Python |
+| Compiler-speed baseline (frontend→HIR) | `zig build compile-metrics` then `python3 scripts/compile-metrics-check.py --update` | Zig + Python |
+
+#### Targeted / fast subsets
 
 | Command | What it runs |
 |---|---|
-| `zig build gate` | The full pre-push bar: unit tests + OraToSIR gate + Ora/SIR FileCheck snapshots + bytecode conformance + negative corpus + verifier-mutation soundness + SMT corpus + LSP smoke. |
-| `zig build test` | All Zig unit tests (compiler core, types, MLIR, LSP). |
-| `zig build test-conformance` | Executes emitted **bytecode** on the in-process `lib/evm` against every `.ora` + `.spec.toml` pair. The primary correctness oracle. |
-| `zig build test-evm` | `lib/evm` (the EVM implementation) unit tests. |
+| `zig build test-compiler -Dcompiler-test-filter="<substr>"` | Compiler core tests matching a name substring |
+| `zig build test-lexer` / `test-types` / `test-lsp` | Individual subsystem suites (lexer & lsp need no MLIR/Z3) |
+| `zig build conformance-one` then `./zig-out/bin/conformance-one <file.ora> <spec.toml>` | A single conformance spec on `lib/evm` |
+| `ora emit --metrics <file.ora>` | Per-phase compile-time metrics for one file |
 
-**Targeted / fast subsets**
-
-| Command | What it runs |
-|---|---|
-| `zig build test-compiler -Dcompiler-test-filter="<substr>"` | Compiler core tests matching a name substring. |
-| `zig build test-lexer` / `test-types` / `test-mlir` / `test-lsp` | Individual subsystem suites (lexer & lsp need no MLIR/Z3). |
-| `zig build conformance-one` then `./zig-out/bin/conformance-one <file.ora> <spec.toml>` | Run a single conformance spec on `lib/evm`. |
-
-**Snapshots & invariant tripwires**
-
-| Command | What it checks |
-|---|---|
-| `zig build check-mlir-ora` / `check-mlir-sir` / `check-sir-text` | FileCheck snapshots of Ora MLIR, SIR MLIR, and SIR text. Needs the `FileCheck` binary (set `FILECHECK=/path/to/FileCheck` to override). |
-| `zig build check-negative-corpus` | The negative corpus still yields the expected diagnostics and **no bytecode**. |
-| `zig build check-findings-ledger` | Validates `tests/conformance/FINDINGS.md` and reports masked known defects. |
-| `zig build check-verifier-mutations` | Bounded verifier-soundness mutation set. |
-| `zig build check-feature-execution-coverage` | Every tracked feature has an executing test. |
-
-**Gas / size metrics & differential**
+#### Metrics & differential (regression signals)
 
 | Command | What it does |
 |---|---|
-| `zig build metrics-snapshot` then `python3 scripts/metrics-check.py` | Gas + bytecode-size benchmark over the corpus; diffs against the committed baseline with a per-category better/worse verdict. |
-| `python3 scripts/metrics-check.py --update` | Rewrite the baseline after an intentional codegen change (review the diff first). |
-| `bash scripts/anvil-diff-corpus.sh` | Cross-check `lib/evm` against Anvil/revm over the whole corpus; fails only on a real divergence. Requires Foundry (`anvil`/`cast`). |
+| `python3 scripts/metrics-check.py` | Gas/size diff vs baseline (per-category better/worse); `--check` exits 1 on drift |
+| `python3 scripts/compile-metrics-check.py` | Compiler-speed diff vs baseline (deterministic Tier-A); `--check` exits 1 on drift |
+| `bash scripts/anvil-diff-corpus.sh` | Cross-check `lib/evm` vs Anvil/revm over the corpus; fails only on a real divergence (needs Foundry) |
 
 ### Other checks
 
-Validate examples:
 ```bash
-./scripts/validate-examples.sh
-```
-
-End-to-end CLI checks:
-```bash
-./scripts/run-cli-command-checks.sh
-```
-
-Generate Ora-to-SIR coverage report:
-```bash
-python3 scripts/generate_ora_to_sir_coverage.py
+./scripts/validate-examples.sh              # validate example programs
+./scripts/run-cli-command-checks.sh         # end-to-end CLI checks
+python3 scripts/generate_ora_to_sir_coverage.py   # Ora-to-SIR coverage report
 ```

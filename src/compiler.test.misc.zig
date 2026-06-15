@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const Metrics = ora_root.metrics.Metrics;
 
 const h = @import("compiler.test.helpers.zig");
 const compileText = h.compileText;
@@ -2952,6 +2953,81 @@ test "stale flagship probes remain non-degraded" {
             try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
         }
     }
+}
+
+test "compilePackageWithOptions records frontend metrics by phase" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract MetricsSmoke {
+        \\    pub fn get() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var counting_allocator = ora_root.lsp.allocation_stats.CountingAllocator.init(testing.allocator);
+    var metrics = Metrics.init(true);
+    metrics.setAllocationStats(&counting_allocator.stats);
+    var compilation = try compiler.compilePackageWithOptions(counting_allocator.allocator(), root_path, .{
+        .compile_options = .{ .instrumentation = &metrics },
+    });
+    defer compilation.deinit();
+
+    try testing.expect(compilation.isArtifactEmittable());
+
+    const expected_phases = [_][]const u8{
+        "syntax",
+        "ast-lower",
+        "module-graph",
+        "item-index",
+        "resolve",
+        "typecheck",
+        "const-eval",
+        "verify-facts",
+        "hir-lower",
+    };
+    try testing.expectEqual(expected_phases.len, metrics.count);
+    for (expected_phases, 0..) |phase_name, index| {
+        try testing.expectEqualStrings(phase_name, metrics.phases[index].name);
+        try testing.expect(metrics.phases[index].invocations > 0);
+    }
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_tree = try compilation.db.syntaxTree(module.file_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const module_graph = try compilation.db.moduleGraph(compilation.package_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const resolution = try compilation.db.resolveNames(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    const verification_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
+    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    try testing.expectEqual(@as(u64, @intCast(syntax_tree.tokens.len)), metrics.phases[0].work_count);
+    try testing.expectEqual(@as(u64, @intCast(ast_file.expressions.len)), metrics.phases[1].work_count);
+    try testing.expectEqual(@as(u64, @intCast(module_graph.modules.len)), metrics.phases[2].work_count);
+    try testing.expectEqual(@as(u64, @intCast(item_index.entries.len)), metrics.phases[3].work_count);
+    try testing.expectEqual(@as(u64, @intCast(resolution.expr_bindings.len)), metrics.phases[4].work_count);
+    try testing.expectEqual(@as(u64, @intCast(typecheck.expr_types.len)), metrics.phases[5].work_count);
+    try testing.expectEqual(@as(u64, @intCast(const_eval.values.len)), metrics.phases[6].work_count);
+    try testing.expectEqual(@as(u64, @intCast(verification_facts.facts.len)), metrics.phases[7].work_count);
+    try testing.expectEqual(@as(u64, @intCast(lowering.items.len)), metrics.phases[8].work_count);
+
+    var total_alloc_calls: u64 = 0;
+    var total_bytes_allocated: u64 = 0;
+    for (metrics.phases[0..metrics.count]) |phase| {
+        total_alloc_calls += phase.alloc_calls;
+        total_bytes_allocated += phase.bytes_allocated;
+    }
+    try testing.expect(total_alloc_calls > 0);
+    try testing.expect(total_bytes_allocated > 0);
 }
 
 test "SMT degradation probes fail closed in sequential and parallel verification" {

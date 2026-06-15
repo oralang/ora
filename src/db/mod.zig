@@ -169,8 +169,9 @@ pub const CompilerDb = struct {
     }
 
     pub fn setCompileOptions(self: *CompilerDb, options: compile_options.CompileOptions) void {
-        if (self.options.chain_id == options.chain_id) return;
+        const chain_id_changed = self.options.chain_id != options.chain_id;
         self.options = options;
+        if (!chain_id_changed) return;
         for (self.consteval_slots.items) |*slot| {
             clearPtrSlot(self.allocator, ConstEvalResult, slot);
         }
