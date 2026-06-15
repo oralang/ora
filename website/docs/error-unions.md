@@ -62,11 +62,11 @@ contract Payments {
 
 ```ora
 contract Wallet {
-    error Fail();
+    error Fail;
 
     fn mayFail(x: u256) -> !u256 | Fail {
-        if (x == 0) return Err(Fail());
-        return Ok(x + 1);
+        if (x == 0) return Fail;
+        return x + 1;
     }
 
     fn run(x: u256) -> !u256 | Fail {
@@ -82,14 +82,14 @@ Use `try { ... } catch { ... }` to handle errors explicitly.
 
 ```ora
 contract Transfers {
-    error InsufficientBalance();
+    error InsufficientBalance;
 
     log Sent(to: address, amount: u256);
     log Failed(to: address, amount: u256);
 
     fn move(to: NonZeroAddress, amount: u256) -> !u256 | InsufficientBalance {
-        if (amount == 0) return Err(InsufficientBalance());
-        return Ok(amount);
+        if (amount == 0) return InsufficientBalance;
+        return amount;
     }
 
     pub fn send(to: NonZeroAddress, amount: u256) {

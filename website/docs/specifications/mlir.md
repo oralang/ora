@@ -364,27 +364,26 @@ The Ora compiler uses a modern, streamlined command interface:
 
 **Compile and emit bytecode:**
 ```bash
-ora contract.ora
-ora --emit-bytecode contract.ora
+ora build contract.ora
 ```
 
 **View MLIR IR:**
 ```bash
-ora --emit-mlir contract.ora
+ora emit --emit=mlir:ora contract.ora
 ```
 
 **View Sensei-IR (SIR) intermediate code:**
 ```bash
-ora --emit-sir contract.ora
+ora emit --emit=mlir:sir,sir-text contract.ora
 ```
 
 **Advanced options:**
 ```bash
-# Disable automatic MLIR validation (not recommended)
-ora --no-validate-mlir contract.ora
+# Inspect Ora and SIR MLIR in one run
+ora emit --emit=mlir:both contract.ora
 
-# Use custom MLIR optimization passes
-ora --mlir-passes="canonicalize,cse,mem2reg" contract.ora
+# Emit CFG DOT for SIR
+ora emit --emit=cfg:sir contract.ora
 ```
 
 ### Automatic MLIR Validation

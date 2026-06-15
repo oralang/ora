@@ -1895,7 +1895,7 @@ fn printUsage() !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
-    try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
+    try stdout.print("Ora Compiler v0.2 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
     try stdout.print("       ora build [options]\n", .{});
     try stdout.print("       ora build [options] <file.ora>\n", .{});
@@ -4591,7 +4591,7 @@ fn printVersion() !void {
         \\                                       %@@@             %@@@
     ;
     try stdout.print("{s}\n", .{logo});
-    try stdout.print("Ora Compiler v0.1 - Asuka\n", .{});
+    try stdout.print("Ora Compiler v0.2 - Asuka\n", .{});
     try stdout.flush();
 }
 

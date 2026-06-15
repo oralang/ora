@@ -61,14 +61,14 @@ contract MiniToken {
         let from = std.msg.sender();
 
         let available = balances[from];
-        if (available < amount) return Err(InsufficientBalance(amount, available));
+        if (available < amount) return InsufficientBalance(amount, available);
 
         // Checked arithmetic by default:
         balances[from] = available - amount;
         balances[to]   = balances[to] + amount;
 
         log Transfer(from, to, amount);
-        return Ok(true);
+        return true;
     }
 }
 ```
@@ -104,8 +104,8 @@ Ora uses a Solidity-familiar surface so you don’t relearn the basics. The *des
 | `function f() public` | `pub fn f()` | `pub` = ABI entrypoint. |
 | `function g() internal` | `fn g()` | No `pub` = internal. |
 | `event E(...)` / `emit E(...)` | `log E(...);` / `log E(...);` | `log` declares or emits based on context. |
-| `error E()` / `revert E()` | `error E;` / `return Err(E())` | Errors are values. |
-| `require(cond)` | `if (!cond) return Err(E())`, `guard`, or `requires` | Explicit failure path or declared precondition. |
+| `error E()` / `revert E()` | `error E;` / `return E;` | Errors are values. |
+| `require(cond)` | `if (!cond) return E;`, `guard`, or `requires` | Explicit failure path or declared precondition. |
 | `msg.sender` | `std.msg.sender()` | Explicit namespace. |
 
 ---
@@ -381,9 +381,12 @@ Ora supports path-scoped lock/unlock for reentrancy-sensitive flows using a tran
 
 - `@lock(expr)` — lock the slot identified by `expr` for the transaction.
 - `@unlock(expr)` — unlock it.
+- `@lock(expr)` and `@unlock(expr)` do not mutate the value stored at `expr`; the storage path is the lock identity.
 - The compiler emits guards so writes to lock-participating paths revert if they target a currently locked slot.
 
 This gives an auditable pattern for “lock this slot during this critical section”.
+
+Executable path-locking examples live in `ora-example/locks/` and `tests/conformance/lock_guard_revert.ora`.
 
 ---
 
