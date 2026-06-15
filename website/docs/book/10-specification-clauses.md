@@ -21,7 +21,10 @@ pub fn withdraw(amount: u256)
 }
 ```
 
-Multiple `requires` clauses are conjunctive — all must hold. If a caller violates a precondition, the compiler inserts a runtime guard or reports a verification error.
+Multiple `requires` clauses are conjunctive — all must hold. In v0.2,
+`requires` clauses constrain the verified body and are enforced at public/call
+boundaries. A direct caller must prove the callee precondition or the build
+fails; a public ABI caller hits the emitted boundary check.
 
 ## Postconditions: ensures
 
@@ -87,7 +90,7 @@ pub fn transfer(to: address, amount: u256) -> bool {
 
 | Clause | Who is responsible | Runtime behavior | SMT role |
 |---|---|---|---|
-| `requires(x > 0)` | **Caller** — must prove the condition before calling | No runtime check (proven statically, or caller gets verification error) | Assumption — the verifier assumes it holds |
+| `requires(x > 0)` | **Caller / public boundary** — callers must satisfy it | Public/call boundary enforcement; internal callers must prove it or fail verification | Tracked assumption for the verified body; callee precondition at call sites |
 | `guard(x > 0)` | **Function** — checks the condition itself | Runtime revert if false | Assumption after the check — the verifier knows it holds for everything after |
 
 Use `requires` when the caller should guarantee the condition. Use `guard` when the function should enforce it.
@@ -106,7 +109,10 @@ pub fn withdraw(amount: u256)
 }
 ```
 
-The verifier checks the `ensures` clause under the combined context of both the `requires` assumption and the `guard` assumption.
+The verifier checks the `ensures` clause under the combined context of both the
+`requires` assumption and the `guard` assumption. If the assumptions are
+contradictory, the report marks the proof as vacuous-risk instead of full
+verification.
 
 ## Assert and assume
 

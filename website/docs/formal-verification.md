@@ -3,14 +3,15 @@
 Formal verification is a primary Ora feature: correctness properties are
 explicit, mechanically checked, and traceable through the compiler pipeline.
 
-Research intent and current front-end integration.
-No guarantee of end-to-end proofs for all programs.
+v0.2 verification is build-integrated: a full build runs the verifier, reports
+counterexamples and proof trust, and refuses verified artifacts when required
+proof obligations fail, degrade, or return `UNKNOWN`.
 
 ## Model
 
 Verification is expressed with specification clauses that live alongside code:
 
-- `requires` — preconditions the caller must satisfy (verified statically at call sites)
+- `requires` — preconditions that constrain the verified body and are enforced at public/call boundaries
 - `guard` — runtime-enforced preconditions the function checks itself (reverts if false, informs the verifier)
 - `ensures` — postconditions the function must satisfy on all return paths
 - `invariant` — contract-level or loop-level properties that must hold across all state transitions
@@ -40,40 +41,37 @@ pub fn transfer(to: address, amount: u256) -> bool
 flowchart TB
   classDef core fill:#f6f1e7,stroke:#0e6b6a,color:#0b2a2c;
   classDef accent fill:#f4b86a,stroke:#0b5656,color:#0b2a2c;
-  A[requires/ensures/invariant] --> B[Ora MLIR verification ops]
+  A[requires/ensures/assert/invariant] --> B[Ora MLIR verification ops]
   B --> C[SMT encoding]
   C --> D[Z3 solver]
-  D -->|proof| E[No runtime guard]
-  D -->|counterexample| F[Report failure / keep guard]
+  D -->|proof| E[Discharge obligation / remove proved guard]
+  D -->|counterexample or UNKNOWN| F[Report failure / no verified artifact]
   class A,B,C core;
   class D,E,F accent;
 ```
 
 ## Implemented today
 
-- Specification clauses are recognized by the parser and type resolver.
-- Constraints are carried into Ora MLIR using verification ops.
-- Refinement constraints that cannot refine types become SMT-only assumptions
-  rather than being dropped.
-- SMT counterexamples are surfaced when proofs fail.
-
-## Next focus
-
-- Default SMT discharge for refinement guards.
-- Stronger propagation across control-flow joins.
-- End-to-end proof reporting in the backend pipeline.
-
-## Open questions
-
-- Which constraints should refine types vs remain SMT-only?
-- How should refinement propagation behave across control-flow joins?
-- How should error unions and region effects integrate with proof obligations?
+- Specification clauses are parsed, type-checked, and carried into Ora MLIR.
+- Checked arithmetic, division, `assert`, `ensures`, loop invariants, callee
+  preconditions, and active refinement guards become proof obligations.
+- `requires` clauses become tracked assumptions for the verified body and are
+  enforced at ABI/call boundaries.
+- `ensures_ok` and `ensures_err` constrain success and error exits of
+  Result/error-union functions.
+- `old(expr)` denotes function-entry state for storage/frame reasoning.
+- `modifies` clauses frame current-contract storage paths for callers.
+- Z3 counterexamples are surfaced when obligations fail.
+- Explain-mode reports expose assumption cores and vacuity risk.
+- Encoding degradation, soundness losses, and `UNKNOWN` fail closed instead of
+  being counted as verified.
 
 ## Status
 
-Formal verification is active. The pipeline focuses on front-end correctness and
-faithful constraint extraction, with backend proof integration evolving
-alongside the compiler.
+Formal verification is active in the v0.2 build pipeline. It is not a formal
+EVM-bytecode equivalence proof; the verifier trusts the MLIR-to-SMT encoder and
+the lowering pipeline, and bytecode conformance tests cover representative
+runtime behavior.
 
 ## Evidence
 

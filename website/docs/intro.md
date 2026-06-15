@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Introduction to Ora
 
-> **Asuka v0.1** | **Research-driven** | **Contributors Welcome**
+> **Asuka v0.2** | **Proof-carrying contracts** | **Contributors Welcome**
 
 Ora is a smart contract language and compiler focused on precise semantics,
 explicit memory regions, and verification-friendly design. The compiler is
@@ -18,17 +18,23 @@ This site has two complementary tracks:
 
 ## What Ora is
 
-Ora is not a Solidity clone. It is a language for contracts where the
-compiler is a first-class research artifact. The design favors explicitness:
-regions, effects, and refinement constraints are surfaced and checked early.
+Ora is not a Solidity clone. It is a language for contracts where the compiler
+is part of the trust story. The design favors explicitness: regions, effects,
+ADT shapes, ABI layouts, and refinement constraints are surfaced and checked
+early.
 
 ## Current status
 
-Ora has reached **Asuka v0.1** — the first release milestone. The front-end
-pipeline (lexing, parsing, type resolution, and Ora MLIR emission) is stable.
-Backend lowering to Sensei-IR (SIR) and EVM is active.
+Ora has reached **Asuka v0.2**. This release expands the language and compiler
+around proof-carrying contracts: first-class `Result<T, E>` / error-union
+values, unified ADTs, Z3 verification reports with vacuity/degradation
+surfacing, runtime ABI encode/decode support, dynamic public returns, hardened
+extern traits, source-level debugging, LSP production work, compiler metrics,
+and CFG tooling.
 
-Breaking changes are still possible as the language evolves.
+The Asuka track is still where Ora's language surface evolves, but v0.2 is a
+release milestone: valid examples should compile, unsupported features should
+fail closed, and the docs should describe compiler reality.
 
 ## Research focus
 

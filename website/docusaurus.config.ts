@@ -6,7 +6,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 
 const config: Config = {
   title: 'Ora Development Notebook',
-  tagline: 'Pre-ASUKA Alpha - Smart Contract Language for EVM',
+  tagline: 'Asuka v0.2 - Proof-carrying Smart Contracts for EVM',
   favicon: 'img/favicon-32.png',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
@@ -218,7 +218,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright © 2025 Ora Language Project.`,
+      copyright: `Copyright © 2025-2026 Ora Language Project.`,
     },
     colorMode: {
       defaultMode: 'dark',

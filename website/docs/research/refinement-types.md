@@ -17,18 +17,20 @@ auditor-friendly codebases.
 
 ## Implemented today
 
-Refinements currently supported in the front end:
+The closed guard lexicon in Asuka v0.2:
 
 - `MinValue<T, N>`
 - `MaxValue<T, N>`
 - `InRange<T, Min, Max>`
-- `Scaled<T, D>`
-- `Exact<T>`
+- `BasisPoints<T>`
+- `NonZero<T>`
 - `NonZeroAddress`
 
-Guards are inserted at parameters, assignments, returns, and storage writes.
-Guards are skipped when the type resolver can prove the refinement or when a
-trusted source is used (for example, `std.msg.sender()` for `NonZeroAddress`).
+Other numeric intent types are type-system or representation facts unless a
+construct emits an active guard or SMT obligation. Guards are inserted at
+parameters, assignments, returns, and storage writes. Guards are skipped when the
+type resolver can prove the refinement or when a trusted source is used (for
+example, `std.msg.sender()` for `NonZeroAddress`).
 
 ## Example
 
@@ -86,22 +88,6 @@ fn charge_fee(
     var fee: u256 = (amount * fee_bps) / 10_000;
     var next: InRange<u256, 0, 1_000_000> = balance - amount + fee;
     return next; // SMT proves bounds, guard eliminated
-}
-```
-
-### Exact division
-
-```ora
-fn split_evenly(total: Exact<u256>, parts: MinValue<u256, 1>) -> u256 {
-    return total / parts; // guard preserves exactness
-}
-```
-
-### Scaled values
-
-```ora
-fn add_scaled(x: Scaled<u256, 18>, y: Scaled<u256, 18>) -> Scaled<u256, 18> {
-    return x + y;
 }
 ```
 

@@ -10,7 +10,7 @@ Ora’s examples live in the **`ora-example/`** directory in the repo. They show
 
 - **Full contracts** — ERC20-style tokens, DeFi-style lending pools, counters, and storage-heavy apps with maps, structs, and enums.
 - **Formal verification** — `requires`/`ensures`/`invariant`, ghost state, loop invariants, and SMT-backed verification on real contracts.
-- **Refinement types** — MinValue, MaxValue, InRange, BasisPoints, NonZero, Scaled, Exact, and NonZeroAddress in production-style token logic.
+- **Refinement types** — MinValue, MaxValue, InRange, BasisPoints, NonZero, and NonZeroAddress in production-style token logic.
 - **Comptime and generics** — Constant folding, `comptime T: type`, generic functions and structs, and contracts that combine bitfields with generics.
 - **Signed arithmetic, bitfields, errors** — Signed ints with overflow handling, packed bitfields, and error unions with `try`/`catch`-style handling.
 - **Verification and SMT** — Loop invariants, function contracts, state invariants, ghost functions, and multi-constraint proofs.
@@ -24,7 +24,7 @@ Ora’s examples live in the **`ora-example/`** directory in the repo. They show
 | **ERC20 + bitfields + generics** | `ora-example/apps/erc20_bitfield_comptime_generics.ora` | Token with bitfield config/flags, generic `TransferBook(T)`, comptime helpers, maps, logs. |
 | **DeFi lending pool** | `ora-example/apps/defi_lending_pool.ora` | Large contract: enums, storage, interest/reserve logic, liquidation, multiple entrypoints. |
 | **ERC20 with formal verification** | `ora-example/apps/erc20_verified.ora` | Invariants, ghost `sumOfBalances`, `requires`/`ensures` on init and transfer. |
-| **ERC20 with refinements** | `ora-example/refinements/erc20_token.ora` | MinValue, MaxValue, InRange, BasisPoints, NonZero, Scaled, Exact, NonZeroAddress in token logic. |
+| **ERC20 with refinements** | `ora-example/refinements/erc20_token.ora` | MinValue, MaxValue, InRange, BasisPoints, NonZero, and NonZeroAddress in token logic. |
 | **DeFi pool + verification** | `ora-example/apps/defi_lending_pool_fv.ora` | Lending pool with formal verification annotations. |
 | **Counter** | `ora-example/apps/counter.ora` | Minimal contract: storage, public functions. |
 | **Basic ERC20** | `ora-example/apps/erc20.ora` | Straightforward ERC20-style token. |
@@ -150,10 +150,10 @@ From the repo root after `zig build`:
 ./scripts/validate-examples.sh
 
 # Compile and emit MLIR (with verification)
-./zig-out/bin/ora --emit-mlir ora-example/apps/counter.ora
+./zig-out/bin/ora emit --emit=mlir:both ora-example/apps/counter.ora
 
 # Emit SMT report for a contract
-./zig-out/bin/ora --emit-smt-report ora-example/apps/erc20_verified.ora
+./zig-out/bin/ora build ora-example/apps/erc20_verified.ora --explain --emit=smt-report
 ```
 
 See [Getting Started](/docs/getting-started) and the [README](https://github.com/oralang/Ora) for install and more commands.

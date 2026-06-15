@@ -8,7 +8,7 @@ description: Source-level EVM debugger with optimization-aware statement steppin
 
 Ora ships with a source-level EVM debugger that survives compiler optimizations. Set breakpoints on Ora source lines, step through statements, inspect bindings and machine state, and see exactly how your code lowers to SIR and EVM bytecode — even when the optimizer has reordered, hoisted, duplicated, or folded your code.
 
-> The debugger shipped with Asuka v0.1. Some features are intentionally
+> The debugger is part of the Asuka v0.2 toolchain. Some views are intentionally
 > conservative about what they expose.
 
 ## Quick start
@@ -515,7 +515,7 @@ pub fn apply(amount: u256) -> u256
 - Session files do not yet enforce artifact hash validation
 - Mutation is limited to rooted bindings and raw machine locations
 - Multi-contract calls enter unmapped bytecode (shown as `[external call]`)
-- Comptime trace viewer (showing the evaluation tree, not just folded values) is planned but not yet shipped
+- Comptime trace viewer (showing the evaluation tree, not just folded values) is a future enhancement
 
 ## Example contracts
 

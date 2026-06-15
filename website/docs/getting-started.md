@@ -6,8 +6,9 @@ sidebar_position: 2
 
 Set up the Ora development environment and run the current compiler.
 
-> Ora Asuka v0.1 is the first release. Syntax and features may still change
-> as the language evolves.
+> Ora Asuka v0.2 is the current release milestone. It includes the end-to-end
+> compiler pipeline, SMT verification reports, ABI artifacts, source-level
+> debugging, LSP tooling, compiler metrics, and CFG output.
 
 ## Prerequisites
 
@@ -41,13 +42,13 @@ zig build test
 ./zig-out/bin/ora --help
 
 # Compile an example contract
-./zig-out/bin/ora ora-example/smoke.ora
+./zig-out/bin/ora build ora-example/counter.ora
 
 # Format Ora source code
 ./zig-out/bin/ora fmt contract.ora
 
-# Emit Ora MLIR
-./zig-out/bin/ora --emit-mlir ora-example/smoke.ora
+# Emit Ora/SIR MLIR
+./zig-out/bin/ora emit --emit=mlir:both ora-example/counter.ora
 ```
 
 ## Start a new project
@@ -102,6 +103,20 @@ Build it:
 
 See [Code Formatter](./code-formatter.md) for details.
 
+## Verification report
+
+Ora runs full SMT verification in build mode. To inspect the report and
+explain-mode cores:
+
+```bash
+./zig-out/bin/ora build ora-example/corpus/patterns/verified_vault.ora \
+  --explain \
+  --emit=smt-report
+```
+
+The JSON and markdown reports show proof status, counterexamples, vacuity
+information, degradation/soundness-loss labels, and solver query fragments.
+
 ## Multi-file projects
 
 Ora supports namespace-qualified imports for splitting code across files:
@@ -134,6 +149,19 @@ Use `s` to step in, `n` to step over, `:print value` to inspect bindings, and
 `:break 12` to set breakpoints. See [Interactive Debugger](./debugger.md) for
 the full guide.
 
+## Inspect CFG and metrics
+
+```bash
+# SIR block control-flow graph
+./zig-out/bin/ora emit --emit=cfg:sir ora-example/counter.ora
+
+# Structural diff before/after SIR optimization
+./zig-out/bin/ora emit --emit=cfg:sir-diff ora-example/counter.ora
+
+# Frontend/HIR compile phase timings, work counts, and allocations
+./zig-out/bin/ora build ora-example/corpus/patterns/verified_vault.ora --metrics
+```
+
 ## Exploring the repo
 
 - `ora-example/` contains runnable samples.
@@ -145,4 +173,4 @@ the full guide.
 ## Status
 
 - Examples in `ora-example/` are aligned with the current compiler behavior.
-- Asuka v0.1 is the first release. Breaking changes are still possible.
+- Asuka v0.2 is the current release milestone.

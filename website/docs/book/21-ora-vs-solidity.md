@@ -25,7 +25,7 @@ Every Ora feature exists because of a specific failure mode in smart contracts. 
 | Storage collision | Inheritance determines slot layout | No inheritance — traits add behavior without affecting storage |
 | Hidden external call semantics | CALL vs STATICCALL invisible at call site | Extern traits: `call fn`/`staticcall fn` explicit, mandatory gas, error unions |
 | Fragile code reuse | Inheritance conflates behavior, storage, and interface | Traits: composition via `impl`, no slot changes, no virtual dispatch |
-| Precision loss | No fixed-point semantics | `Scaled<T, D>` tracks decimal places in the type system |
+| Precision loss | No proof-carrying numeric intent | Refinement types make numeric constraints explicit in the type system |
 | Runtime attack surface | Values computed at runtime that could be known statically | Comptime: freeze configuration into bytecode at compile time |
 
 Every row follows the same pattern: a class of bugs exists because the language lacks a mechanism to prevent it. Ora adds that mechanism. The sections below explain each one.
@@ -56,11 +56,11 @@ fn withdraw(amount: u256) -> !bool | InsufficientBalance | ExternalCallFailed {
     let sender: address = std.msg.sender();
     let current: u256 = balances[sender];
     if (current < amount) {
-        return InsufficientBalance(amount, current);   // returns an error VALUE
+        return Err(InsufficientBalance(amount, current));   // returns an error VALUE
     }
     balances[sender] = current - amount;
     let ok: bool = try external<IToken>(token, gas: 100000).transfer(sender, amount);
-    return ok;
+    return Ok(ok);
 }
 ```
 
@@ -105,7 +105,9 @@ fn processDeposit(amount: MinValue<u256, 1>) {
 **Why this matters:**
 
 - **Constraints flow with values.** `MinValue<u256, 1>` is a subtype of `u256`. Once a value is proven to satisfy the constraint, it carries that proof through the program. No redundant re-checks, no "should I validate again?" decisions.
-- **SMT-backed, not runtime-backed.** The compiler must prove, at every call site, that the constraint holds *before the function is called*. If it can prove it statically, no runtime check is emitted at all. If it can't, it emits a guard — but the guard is a fallback, not the primary mechanism.
+- **SMT-backed with runtime boundaries.** The compiler proves refined arguments
+  at internal call sites when possible. Values entering through public ABI
+  boundaries get emitted checks when the proof cannot be discharged statically.
 - **Subtype lattice.** `InRange<u256, 1, 100>` is a subtype of both `MinValue<u256, 1>` and `MaxValue<u256, 100>`. Refined values compose. The compiler can derive downstream properties from upstream constraints without re-checking.
 
 ---
@@ -134,7 +136,9 @@ The compiler enforces region coercion rules at the type level. You can copy from
 
 The region isn't just a codegen hint — it determines what can go wrong with a value. When the compiler knows `balance: u256 @ storage`, it knows this value is part of the reentrancy surface, part of the persistence model, and subject to cross-transaction invariants. When it knows `temp: u256 @ memory`, it knows this value is isolated and safe.
 
-> **Asuka v0.1 note:** The current compiler allows implicit coercions across regions (calldata → memory → storage) without requiring a guard (`if`, `requires`, or explicit check). Future releases will require explicit checks or coercion annotations at region boundaries where safety properties change.
+> **Asuka v0.2 note:** Region transitions are explicit compiler operations.
+> Unsupported or unsafe coercions are expected to fail closed rather than lower
+> as best effort.
 
 ---
 
@@ -234,11 +238,11 @@ pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
     let current: u256 = balances[sender];
     if (current < amount) {
         @unlock(reentrancyGuard);
-        return InsufficientBalance(amount, current);
+        return Err(InsufficientBalance(amount, current));
     }
     balances[sender] = current - amount;
     @unlock(reentrancyGuard);
-    return true;
+    return Ok(true);
 }
 ```
 

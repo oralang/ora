@@ -15,8 +15,12 @@ let fee: BasisPoints<u256> = 250;      // 0..10000
 let min: MinValue<u256, 1> = 1;
 let cap: MaxValue<u256, 1_000_000> = 500_000;
 let rate: InRange<u256, 0, 10000> = 150;
-let scaled: Scaled<u256, 18> = 1_000_000_000_000_000_000;
 ```
+
+The closed guard lexicon in Asuka v0.2 is `MinValue`, `MaxValue`, `InRange`,
+`BasisPoints`, `NonZero`, and `NonZeroAddress`. Other numeric intent types are
+tracked separately as type-system or representation facts unless a construct
+emits an active guard or proof obligation.
 
 ## Storage safety
 

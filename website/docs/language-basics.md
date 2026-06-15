@@ -4,15 +4,13 @@ sidebar_position: 3
 
 # Language Basics
 
-Core language features and syntax in the current implementation.
-
-> Ora Asuka v0.1. Some behavior may change in future releases.
+Core language features and syntax in Ora Asuka v0.2.
 
 ## Overview
 
-Ora is a contract language with explicit regions, error unions, and
-verification-friendly constructs. The compiler focuses on correctness and
-transparent semantics rather than implicit magic.
+Ora is a contract language with explicit regions, first-class Result/error
+unions, ADTs, and verification-friendly constructs. The compiler focuses on
+correctness and transparent semantics rather than implicit magic.
 
 Note: the current compiler requires explicit type annotations for local
 variables (`var x: u256 = ...`).
@@ -83,19 +81,27 @@ contract Math {
 }
 ```
 
-### Error unions
+### Result and error unions
 
-Ora uses explicit error unions:
+Ora uses explicit `Result<T, E>` values and error-union return types:
 
 ```ora
-error InsufficientBalance;
+error InsufficientBalance(required: u256, available: u256);
 error InvalidAddress;
 
-fn transfer(to: address, amount: u256) -> !u256 | InsufficientBalance | InvalidAddress {
-    if (amount == 0) return InvalidAddress;
-    if (balance < amount) return InsufficientBalance;
+fn transfer(to: address, amount: u256) -> Result<u256, InsufficientBalance> {
+    if (balance < amount) {
+        return Err(InsufficientBalance(amount, balance));
+    }
     balance -= amount;
-    return balance;
+    return Ok(balance);
+}
+
+fn inspect(value: Result<u256, InsufficientBalance>) -> u256 {
+    return match (value) {
+        Ok(inner) => inner,
+        Err(err) => err.available,
+    };
 }
 ```
 
@@ -140,7 +146,7 @@ verification pipeline.
 
 ## Specification clauses
 
-Ora parses and type-checks specification clauses:
+Ora parses, type-checks, lowers, and verifies specification clauses:
 
 ```ora
 pub fn transfer(to: address, amount: u256) -> bool
@@ -153,6 +159,10 @@ pub fn transfer(to: address, amount: u256) -> bool
 
 `assume` is verification-only; `assert` is runtime-visible and verification-
 visible.
+
+`requires` clauses constrain the verified body and are enforced at public/call
+boundaries. `ensures`, `assert`, loop invariants, checked arithmetic, and active
+refinement guards become proof obligations.
 
 ## Where to go next
 

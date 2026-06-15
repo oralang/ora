@@ -15,20 +15,20 @@ function HomepageHeader() {
         <div className={styles.heroLeft}
         >
           <div className={styles.statusBadge}>
-            <span className={styles.badge}>Pre-ASUKA Alpha</span>
-            <span className={styles.badge}>Research-Driven</span>
+            <span className={styles.badge}>Asuka v0.2</span>
+            <span className={styles.badge}>Proof-Carrying Contracts</span>
             <span className={styles.badge}>Contributors Welcome</span>
           </div>
 
           <Heading as="h1" className={styles.heroTitle}>
-            <span className={styles.oraGradient}>Ora</span> Development Notebook
+            <span className={styles.oraGradient}>Ora</span> Asuka v0.2
           </Heading>
           <p className={styles.heroSubtitle}>{siteConfig.tagline}</p>
 
           <p className={styles.heroDescription}>
             Smart contract language and compiler with explicit regions,
-            refinement types, and a verification-first pipeline that lowers
-            through Ora MLIR to Sensei-IR (SIR).
+            first-class Result values, SMT verification reports, and an
+            inspectable Ora MLIR to Sensei-IR pipeline.
           </p>
 
           <div className={styles.buttons}>
@@ -63,7 +63,8 @@ function HomepageHeader() {
             <div className={styles.heroCardList}>
               <div>Regions and effects are explicit</div>
               <div>Refinements become guards or proofs</div>
-              <div>SMT acts as proof engine</div>
+              <div>Result and ADT carriers stay explicit</div>
+              <div>SMT reports explain proof trust</div>
             </div>
             <div className={styles.heroCardLinks}>
               <Link to="/docs/specifications/mlir">MLIR Spec</Link>
@@ -83,8 +84,8 @@ function FocusAreas() {
       title: 'Language',
       items: [
         'Region-aware types and effects',
-        'Refinement types and error unions',
-        'Explicit specs: requires, ensures, invariant',
+        'Refinement types and Result/error unions',
+        'Unified ADTs and exhaustive matching',
       ],
       link: '/docs/language-basics',
       linkLabel: 'Language Basics',
@@ -94,7 +95,7 @@ function FocusAreas() {
       items: [
         'Ora MLIR lowering and verification ops',
         'Sensei-IR backend integration',
-        'Z3-based SMT verification pass',
+        'MLIR optimization, CFG, metrics, and Z3',
       ],
       link: '/docs/compiler/field-guide',
       linkLabel: 'Field Guide',
@@ -103,7 +104,7 @@ function FocusAreas() {
       title: 'Research',
       items: [
         'Type system spec v0.11 PDF',
-        'Comptime + SMT policy and gaps',
+        'Comptime, SMT, and proof trust boundaries',
         'Refinement strategy and guard semantics',
       ],
       link: '/docs/research/research-snapshot',
@@ -144,25 +145,27 @@ function CodeExample() {
       <div className="container">
         <div className={styles.sectionHeader}>
           <h2>Ora in Practice</h2>
-          <p>Explicit types, verification clauses, and predictable behavior.</p>
+          <p>Explicit errors, verification clauses, and predictable behavior.</p>
         </div>
         <div className={styles.codeContainer}>
           <pre className={styles.codeBlock}>
-            <code className="language-ora">{`contract Vault {
+            <code className="language-ora">{`error InsufficientBalance(required: u256, available: u256);
+
+contract Vault {
     storage var balances: map<NonZeroAddress, u256>;
 
-    log Transfer(sender: address, recipient: address, amount: u256);
-
-    pub fn transfer(to: address, amount: MinValue<u256, 1>) -> bool
+    pub fn withdraw(amount: MinValue<u256, 1>)
+        -> Result<u256, InsufficientBalance>
         requires balances[std.msg.sender()] >= amount
-        requires to != std.constants.ZERO_ADDRESS
-        ensures balances[to] == old(balances[to]) + amount
+        ensures_ok(balances[std.msg.sender()] == old(balances[std.msg.sender()]) - amount)
     {
-        var sender: NonZeroAddress = std.msg.sender();
+        let sender: NonZeroAddress = std.msg.sender();
+        let current: u256 = balances[sender];
+        if (current < amount) {
+            return Err(InsufficientBalance(amount, current));
+        }
         balances[sender] -= amount;
-        balances[to] += amount;
-        log Transfer(sender, to, amount);
-        return true;
+        return Ok(balances[sender]);
     }
 }`}</code>
           </pre>
@@ -188,8 +191,8 @@ function ResearchStrip() {
           <div>
             <h2>Research Backbone</h2>
             <p>
-              Formal specs, implementation baselines, and open gaps are linked
-              directly to source artifacts.
+              Formal specs, implementation baselines, and proof-boundary docs
+              are linked directly to source artifacts.
             </p>
           </div>
           <div className={styles.researchLinks}>

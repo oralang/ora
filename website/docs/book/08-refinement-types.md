@@ -1,6 +1,6 @@
 ---
 title: "Chapter 8: Refinement Types"
-description: Types that carry constraints — NonZero, MinValue, InRange, and more.
+description: Types that carry constraints — NonZero, MinValue, InRange, BasisPoints, and more.
 sidebar_position: 8
 ---
 
@@ -42,13 +42,10 @@ let rate: BasisPoints<u256> = 250;                 // 0 <= value <= 10000
 
 `BasisPoints` is a shorthand for `InRange<u256, 0, 10000>` — common in DeFi for fee rates where 10000 = 100%.
 
-### Scaled
-
-```ora
-let amount: Scaled<u256, 18> = 1_000_000_000_000_000_000;
-```
-
-`Scaled<T, D>` annotates that the value represents a fixed-point number with `D` decimal places. This is primarily for documentation and verification — it helps the compiler and auditors understand the intended precision.
+The closed guard lexicon in Asuka v0.2 is `NonZero`, `NonZeroAddress`,
+`MinValue`, `MaxValue`, `InRange`, and `BasisPoints`. Other numeric intent
+types are type-system or representation facts unless a construct emits an
+active runtime guard or SMT obligation.
 
 ## Refinements on function parameters
 
@@ -120,11 +117,11 @@ contract Vault {
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
         let sender: NonZeroAddress = std.msg.sender();
         let current: u256 = balances[sender];
-        if (current < amount) { return InsufficientBalance(amount, current); }
+        if (current < amount) { return Err(InsufficientBalance(amount, current)); }
         balances[sender] = current - amount;
         totalDeposits -= amount;
         log Withdrawal(sender, amount);
-        return true;
+        return Ok(true);
     }
 
     pub fn balanceOf(account: address) -> u256 {

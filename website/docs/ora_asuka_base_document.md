@@ -1,7 +1,7 @@
 ---
 sidebar_position: 2.5
-title: "Ora Asuka — Feature reference"
-description: "Community-facing, end-to-end reference for Ora's feature set (Asuka v0.1)."
+title: "Ora Asuka v0.2 — Feature reference"
+description: "Community-facing, end-to-end reference for Ora's feature set (Asuka v0.2)."
 ---
 
 # Ora: A New Take on Smart Contracts
@@ -10,7 +10,9 @@ description: "Community-facing, end-to-end reference for Ora's feature set (Asuk
 
 Ora is a smart contract language and compiler for the EVM with two design pillars: **comptime over runtime**—decide as much as possible at compile time (constant folding, refinement discharge, SMT proofs), so runtime is the fallback—and **formal verification and the solver in the normal dev workflow**, the way Foundry put serious testing into the Solidity workflow. FV and Z3 aren’t a separate research step; they’re in the loop: specs next to code, SMT reports in artifacts, counterexamples when a proof fails.
 
-This is the community-facing, end-to-end reference for Ora’s feature set (Asuka v0.1). It’s meant to be readable top-to-bottom and precise enough for technical evaluation.
+This is the community-facing, end-to-end reference for Ora's feature set
+(Asuka v0.2). It is meant to be readable top-to-bottom and precise enough for
+technical evaluation.
 
 ---
 
@@ -28,7 +30,9 @@ We use a Solidity-familiar surface (contracts, state, mappings, events, errors) 
 
 ## 1. Hello Ora (small example, big ideas)
 
-This tiny contract demonstrates: Solidity-familiar structure, **refinement types**, typed error unions, specs (`requires`/`ensures`), logs, and explicit state transitions.
+This tiny contract demonstrates: Solidity-familiar structure, **refinement
+types**, typed Result/error-union values, specs (`requires`/`ensures`), logs,
+and explicit state transitions.
 
 ```ora
 contract MiniToken {
@@ -57,21 +61,22 @@ contract MiniToken {
         let from = std.msg.sender();
 
         let available = balances[from];
-        if (available < amount) return error.InsufficientBalance(amount, available);
+        if (available < amount) return Err(InsufficientBalance(amount, available));
 
         // Checked arithmetic by default:
         balances[from] = available - amount;
         balances[to]   = balances[to] + amount;
 
         log Transfer(from, to, amount);
-        return true;
+        return Ok(true);
     }
 }
 ```
 
 Key takeaways:
 - **Refinements are real types**: `NonZeroAddress`, `NonZero<u256>` communicate invariants directly in the signature.
-- **Errors are values**: `return error.X` is explicit and type-checked by the return type.
+- **Errors are values**: `Err(...)` is explicit and type-checked by the return
+  type.
 - **Specs are adjacent to code**: they drive verification and can remove runtime guards when proven.
 
 ---
@@ -99,8 +104,8 @@ Ora uses a Solidity-familiar surface so you don’t relearn the basics. The *des
 | `function f() public` | `pub fn f()` | `pub` = ABI entrypoint. |
 | `function g() internal` | `fn g()` | No `pub` = internal. |
 | `event E(...)` / `emit E(...)` | `log E(...);` / `log E(...);` | `log` declares or emits based on context. |
-| `error E()` / `revert E()` | `error E;` / `return error.E;` | Errors are values. |
-| `require(cond)` | `if (!cond) return error.X;` or `requires` | No hidden `require` path. |
+| `error E()` / `revert E()` | `error E;` / `return Err(E())` | Errors are values. |
+| `require(cond)` | `if (!cond) return Err(E())`, `guard`, or `requires` | Explicit failure path or declared precondition. |
 | `msg.sender` | `std.msg.sender()` | Explicit namespace. |
 
 ---
@@ -221,11 +226,15 @@ return res.value;
 
 ## 7. Formal verification
 
-Verification is a first-class feature: specs live next to the code.
+Verification is a first-class feature: specs live next to the code, the solver
+runs as part of the build, and the report explains what was proved, what stayed
+as a runtime check, and why.
 
 ### 7.1 Specification clauses
-- `requires` — preconditions (caller guarantees)
-- `ensures` — postconditions (function guarantees)
+- `requires` — preconditions that constrain the verified body and are enforced
+  at public/call boundaries
+- `ensures` — postconditions for successful completion
+- `ensures_ok` / `ensures_err` — postconditions for typed success/error paths
 - `invariant` — contract or loop invariants
 - `assume` — verification-only assumption (no runtime code)
 - `assert` — checked at runtime and in verification
@@ -244,11 +253,19 @@ pub fn transfer(to: address, amount: u256) -> bool
 ```
 
 ### 7.2 SMT (Z3) behavior
-- If a proof succeeds, the compiler can **remove** the corresponding runtime guard.
-- If a proof fails, the guard stays and you get a **counterexample** to debug.
+- If a proof succeeds, the compiler can **remove** the corresponding runtime
+  guard.
+- If a precondition cannot be proved at a call site, compilation fails or a
+  public boundary check is emitted, depending on where the value enters.
+- If an obligation fails, degrades, or returns `UNKNOWN`, the verified artifact
+  is not accepted and the report includes a counterexample or reason.
+- Reports include proof status, discharged checks, retained guards, trust
+  labels, and vacuity risk.
 
 ### 7.3 Verification flow
-Source → Typed AST → Ora MLIR (with verification metadata) → SMT encoding → Z3 → prove or counterexample → guard placement/refinement discharge.
+Source → typed AST → Ora MLIR with verification metadata → SMT encoding → Z3
+→ proof, counterexample, or degradation report → guard placement/refinement
+discharge.
 
 ---
 
@@ -257,7 +274,7 @@ Source → Typed AST → Ora MLIR (with verification metadata) → SMT encoding 
 ### 8.1 Conditionals and loops
 Standard `if`/`else` and loops. Loops can carry:
 - invariants (`invariant`)
-- termination measures (`decreases`) for verification
+- explicit conditions and invariants that the SMT report checks per step
 
 ### 8.2 Switch
 Switch is both statement and expression:
@@ -294,17 +311,19 @@ error InvalidAmount;
 error InsufficientBalance(required: u256, available: u256);
 ```
 
-### 9.2 Error unions
-Return types can be error unions: `!T | E1 | E2`.
+### 9.2 Result values and error unions
+Return types can be explicit `Result<T, E>` values or error unions such as
+`!T | E1 | E2`. Success and failure are ordinary typed values.
 
 ```ora
 fn withdraw(to: NonZeroAddress, amount: u256)
-    -> !u256 | InvalidAmount | InsufficientBalance
+    -> Result<u256, InsufficientBalance>
 {
-    if (amount == 0) return error.InvalidAmount;
-    if (balances[to] < amount) return error.InsufficientBalance(amount, balances[to]);
+    if (balances[to] < amount) {
+        return Err(InsufficientBalance(amount, balances[to]));
+    }
     // ...
-    return balances[to];
+    return Ok(balances[to]);
 }
 ```
 
@@ -312,7 +331,8 @@ fn withdraw(to: NonZeroAddress, amount: u256)
 - `try expr` unwraps success or propagates the error
 - `try { ... } catch (e) { ... }` handles errors locally
 
-Errors are values: they’re part of the ABI/tooling so UIs can decode them reliably.
+Errors are values: they are matched, stored where supported, encoded in the ABI,
+and decoded by tooling with the same type information as success values.
 
 ---
 
@@ -398,19 +418,22 @@ Typical outputs:
 
 ### 14.3 Demo checklist (5 minutes)
 1. Compile: `ora ora-example/counter.ora`
-2. Emit IR: `ora emit --emit-mlir=both --emit-sir-text ora-example/counter.ora`
-3. Emit verification report: `ora emit --emit-smt-report ora-example/erc20.ora`
+2. Emit IR: `ora emit --emit=mlir:both,sir-text ora-example/counter.ora`
+3. Emit verification report: `ora build ora-example/erc20.ora --explain --emit=smt-report`
 4. Inspect artifacts under `artifacts/<contract>/`
 
 ---
 
 ## 15. ABI and interop
 
-Ora ABI v0.1 follows a **manifest + wire profiles** model:
+Ora ABI follows a **manifest + wire profiles** model:
 - manifest defines types/callables/errors/events once (stable identities)
 - wire profiles describe encoding for calls/returns/errors/events (e.g. EVM ABI)
 
-The compiler emits Solidity-compatible JSON ABI plus an extras file for richer tooling.
+The compiler emits Solidity-compatible JSON ABI plus an extras file for richer
+tooling. Asuka v0.2 includes runtime `@abiEncode`, dynamic return encoding,
+custom-error selector reverts, dispatcher decode coverage, and unified ABI
+layout lowering for supported public shapes.
 
 ---
 
@@ -418,11 +441,14 @@ The compiler emits Solidity-compatible JSON ABI plus an extras file for richer t
 
 - Frontend (Zig): lexer, parser, typed AST, semantics (regions/effects/refinements/locks), Ora MLIR emission
 - Ora MLIR: contract-level IR with verification metadata and explicit regions
+- MLIR optimization: canonicalization, CSE, CFG inspection, and metrics before
+  bytecode emission
 - Lowering: Ora MLIR → SIR MLIR / SIR text
 - Backend: SIR → EVM bytecode
 - Verification: Z3 pass over Ora MLIR, counterexamples + guard placement feedback
 
-The pipeline is designed for visibility: you can inspect IR and reports at each stage.
+The pipeline is designed for visibility: you can inspect IR, CFG DOT graphs,
+metrics, and reports at each stage.
 
 ---
 
@@ -431,22 +457,28 @@ The pipeline is designed for visibility: you can inspect IR and reports at each 
 - Not a Solidity clone.
 - Not “auto-proves everything” without invariants/specs for complex control flow.
 - Not hiding EVM behavior behind abstraction layers.
-- Not promising full stability yet: breaking changes are possible as the language evolves.
+- Not treating unsupported shapes as best effort: unsupported code must fail
+  closed instead of emitting plausible bytecode.
 
 ---
 
-## 18. Status and roadmap (Asuka v0.1)
+## 18. Status (Asuka v0.2)
 
-Shipped in Asuka v0.1:
+Asuka v0.2 is a release milestone with:
 - end-to-end compilation (Ora → SIR → EVM)
-- regions, refinements, specs, Z3 verification, counterexamples
+- first-class Result/error-union values, payloaded errors, and ABI-facing
+  custom-error reverts
+- unified product/sum ADTs and sema-authoritative matching/exhaustiveness
+- regions, refinements, specs, Z3 verification, counterexamples, vacuity
+  reporting, and fail-closed degradation handling
 - checked arithmetic + wrapping + overflow-reporting builtins
-- error unions, logs, switch/ranges, bitfields, formatter, emit/debug artifacts
-- traits with `self` receivers, bounded generics, ghost specs
-- source-level EVM debugger with optimization-aware stepping
-
-Next:
-- stronger diagnostics, deeper verification (loops/quantifiers/interprocedural), parity coverage, tooling stabilization
+- logs/events, switch/ranges, bitfields, formatter, emit/debug artifacts
+- traits with `self` receivers, bounded generics, extern-call rules, and ghost
+  specs
+- runtime ABI encoding, dynamic return ABI lowering, dispatcher decode coverage,
+  and ABI layout unification
+- source-level EVM debugger, LSP production upgrades, compile metrics, and CFG
+  tooling
 
 ---
 
@@ -455,7 +487,7 @@ Next:
 - prerequisites: Zig 0.15.x, CMake, Git, Z3, MLIR
 - build: `git clone https://github.com/oralang/Ora.git && cd Ora && ./setup.sh && zig build`
 - test: `zig build test`
-- run: `./zig-out/bin/ora ora-example/smoke.ora`
+- run: `./zig-out/bin/ora ora-example/counter.ora`
 
 ---
 
@@ -467,14 +499,14 @@ Next:
 | Refinements | `NonZero`, `InRange`, `MinValue`, `MaxValue`, `BasisPoints`, `NonZeroAddress`; SMT + guard discharge |
 | Regions | `storage`, `memory`, `calldata`, `transient` |
 | Safety | checked arithmetic default; wrapping operators; overflow-reporting builtins |
-| Verification | `requires`, `ensures`, `invariant`, `assume`, `assert`; Z3 SMT; counterexamples; guard removal |
-| Control flow | if/else, loops with invariants/termination, switch expression with ranges/exhaustiveness, labels |
+| Verification | `requires`, `ensures`, `ensures_ok`, `ensures_err`, `invariant`, `assume`, `assert`; Z3 SMT; counterexamples; vacuity/degradation reports; guard removal |
+| Control flow | if/else, loops with invariants, switch expression with ranges/exhaustiveness, labels |
 | Bitfields | explicit layout; storage batching; utilities |
-| Errors | declarations, error unions, `try`, `catch` |
+| Errors | `Result<T,E>`, error unions, `Ok`, `Err`, `match`, `try`, `catch` |
 | Logs | declare + emit, indexed fields |
 | Locks | transaction-scoped lock/unlock with guards |
 | Comptime | constant folding; generic functions/structs; monomorphization |
-| Tooling | build/emit/fmt; MLIR/SIR/CFG/SMT reports; reproducible artifacts |
+| Tooling | build/emit/fmt; debugger; LSP; metrics; MLIR/SIR/CFG/SMT reports; reproducible artifacts |
 | ABI | manifest + wire profiles; Solidity-compatible output + extras |
 | Compiler | Zig frontend → Ora MLIR → SIR → EVM; Z3 verification |
 

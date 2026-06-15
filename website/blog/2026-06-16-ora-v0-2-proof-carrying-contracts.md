@@ -21,15 +21,15 @@ pipeline.
 
 ---
 
-## Naming: Asuka stays the track
+## Naming: Asuka stays the release line
 
-Asuka was v0.1 because v0.1 was the first coherent pre-release milestone.
-For v0.2, I would keep **Asuka** as the release track, not mint a new codename
-for every point release.
+Asuka was v0.1 because v0.1 was the first coherent release milestone.
+For v0.2, Ora keeps **Asuka** as the release track instead of minting a new
+codename for every point release.
 
 So the naming model is:
 
-- **Asuka**: the pre-release track
+- **Asuka**: the release line
 - **v0.1**: the first Asuka release
 - **v0.2**: the proof-carrying-contracts release on the Asuka track
 

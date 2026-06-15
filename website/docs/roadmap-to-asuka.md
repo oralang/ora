@@ -2,33 +2,41 @@
 sidebar_position: 5
 ---
 
-# Asuka v0.1 — Release Notes
+# Asuka v0.2 — Release Notes
 
-Asuka v0.1 is Ora's first release milestone: a coherent front-end pipeline with
-clear language semantics and a working backend path to EVM bytecode.
+Asuka v0.2 is Ora's proof-carrying contracts release: a compiler pipeline that
+keeps Result values, ADTs, SMT verification, ABI lowering, metrics, and CFG
+inspection in the normal developer workflow.
 
 ## What shipped
 
-- **Front-end pipeline**: lexer, parser, type resolution, Ora MLIR emission.
-- **Regions**: storage, memory, calldata, transient — with compiler-enforced transition rules.
-- **Type system**: refinement types, error unions, structs, enums, tuples, bitfields, generics.
-- **Traits**: declaration, `impl` blocks with `self` receivers, bounded generics, ghost specs, comptime methods.
-- **Verification**: `requires`/`ensures`/`invariant`/`guard`/`assume`/`assert`, ghost state, Z3 SMT integration, counterexamples.
-- **Arithmetic**: checked by default, wrapping operators, overflow-reporting builtins, signed integers.
-- **Backend**: Ora MLIR → Sensei-IR (SIR) → EVM bytecode, end-to-end compilation.
-- **Tooling**: `ora fmt` (canonical formatter), `ora init` (project scaffolding), `ora debug` (source-level EVM debugger).
-- **Imports**: `comptime const` imports, `ora.toml` project configuration, cycle detection.
-
-## What's next
-
-- Stronger diagnostics and error messages
-- Deeper verification: loops, quantifiers, interprocedural analysis
-- Backend parity coverage for all supported constructs
-- Tooling stabilization and editor integration
+- **First-class Result and error-union values**: `Ok`/`Err`
+  constructors, `match`, `try`, payloaded errors, multi-error support, public
+  ABI reverts, and SMT encoding.
+- **Unified ADT model**: product and sum ADTs, enums, error unions,
+  source-level constructors, comptime parity, and sema-authoritative
+  exhaustiveness.
+- **SMT verification in the build**: Z3-backed obligations, counterexamples,
+  explain-mode reports, proof capture hooks, vacuity checks, and fail-closed
+  degradation handling.
+- **Runtime and ABI improvements**: runtime `@abiEncode`, dynamic return ABI
+  encoding, dispatcher decode coverage, custom-error selector reverts, and ABI
+  layout unification.
+- **Comptime expansion**: selector/reflection/encoder builtins, deterministic
+  partial folding, and bounded loop unrolling.
+- **Trait hardening**: duplicate visible impl detection, extern-call modifier
+  rules, extern ABI layouts, and trusted extern summary verification.
+- **Debugger, LSP, metrics, and CFG tooling**: source-level EVM debugging,
+  production LSP features, `--metrics`/`--time-report`, Graphviz CFG output,
+  and `cfg:sir-diff`.
+- **Hardening and gates**: fail-closed type resolution, runtime ABI encode
+  fixes, dispatcher error-union fixes, MLIR optimization through framework
+  passes, conformance tests, SIR snapshots, and property gates.
 
 ## Contributing priorities
 
-- Backend lowering and legalization
-- Error handling and diagnostics
-- Tests for refinements, effects, and regions
+- More conformance coverage for ABI edge cases, verification examples, and
+  multi-contract execution.
+- Diagnostics and docs for unsupported shapes that intentionally fail closed.
+- Performance profiling for SMT-heavy projects and compiler metrics baselines.
 - Documentation updates

@@ -5,15 +5,20 @@ sidebar_position: 5
 # SMT Verification
 
 SMT verification is the enforcement engine for Ora’s specs and refinements.
-It turns `requires`, `ensures`, `invariant`, and refinement guards into proof
-obligations and eliminates runtime checks when proofs succeed.
+It uses Z3 to prove obligations from `ensures`, `assert`, loop invariants,
+checked arithmetic, division safety, callee preconditions, and active refinement
+guards. `requires` clauses are tracked assumptions for the verified body and
+are enforced at public/call boundaries.
 
 ## Implemented today
 
-- Z3 verification pass runs after Ora MLIR emission.
-- `requires`, `ensures`, and `invariant` clauses are encoded and checked.
-- Counterexamples are surfaced when constraints fail.
-- SMT-only assumptions are preserved when refinements cannot be inferred.
+- Z3 verification runs after Ora MLIR emission.
+- Full build mode gates verified artifacts on proof success.
+- Counterexamples are surfaced when obligations fail.
+- Explain mode exposes unsat cores and vacuity risk.
+- Degradation, soundness losses, and `UNKNOWN` fail closed.
+- Proved refinement guards can be removed; unproved guards remain runtime
+  checks.
 
 ## Syntax
 
@@ -30,13 +35,13 @@ pub fn transfer(to: address, amount: u256) -> bool
 }
 ```
 
-- `requires` — caller obligation, verified statically at call sites by the SMT solver
+- `requires` — caller/public-boundary precondition and tracked assumption for the verified body
 - `guard` — runtime-enforced check: the function reverts if the condition is false, and the SMT solver assumes the condition holds after the check
 - `ensures` — postcondition checked by the SMT solver across all return paths
 
-When SMT proves a refinement guard or `requires` clause is always satisfied,
-the compiler can elide the corresponding runtime check. If it cannot prove it,
-the check remains in bytecode.
+When SMT proves a refinement guard is always satisfied, the compiler can elide
+the corresponding runtime check. If it cannot prove the guard, the check remains
+in bytecode.
 
 ### Where to put the code
 
@@ -98,11 +103,18 @@ flowchart LR
 - Encoding is defined in `src/z3/encoder.zig` for Ora ops and types.
 - Solver integration and models live in `src/z3/solver.zig`.
 
-## Research direction
+## Reports
 
-- Make refinement guards first-class SMT obligations by default.
-- Provide a consistent “prove or keep runtime” policy.
-- Expand SMT-driven pruning of unreachable branches.
+Use:
+
+```bash
+ora build path/to/contract.ora --explain --emit=smt-report
+```
+
+The report records proof success, verification trust, query fragments, failed
+obligations, counterexamples, degradation/soundness-loss labels, and vacuity
+information. A proof that depends on contradictory assumptions is reported as a
+vacuous-risk result, not as full verification.
 
 ## Evidence
 
