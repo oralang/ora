@@ -153,6 +153,182 @@ fn expectOrderedNeedles(haystack: []const u8, needles: []const []const u8) !void
     }
 }
 
+const SirDotNode = struct {
+    id: []const u8,
+    term: []const u8,
+    entry: bool = false,
+    is_unreachable: bool = false,
+    revert: bool = false,
+};
+
+const SirDotEdge = struct {
+    src: []const u8,
+    dst: []const u8,
+    label: ?[]const u8 = null,
+    backedge: bool = false,
+};
+
+const SirDotGraph = struct {
+    nodes: []SirDotNode,
+    edges: []SirDotEdge,
+
+    fn deinit(self: SirDotGraph, allocator: std.mem.Allocator) void {
+        allocator.free(self.nodes);
+        allocator.free(self.edges);
+    }
+
+    fn nodeIndex(self: SirDotGraph, id: []const u8) ?usize {
+        for (self.nodes, 0..) |node, index| {
+            if (std.mem.eql(u8, node.id, id)) return index;
+        }
+        return null;
+    }
+
+    fn countTerm(self: SirDotGraph, term: []const u8) usize {
+        var count: usize = 0;
+        for (self.nodes) |node| {
+            if (std.mem.eql(u8, node.term, term)) count += 1;
+        }
+        return count;
+    }
+
+    fn countEntryNodes(self: SirDotGraph) usize {
+        var count: usize = 0;
+        for (self.nodes) |node| {
+            if (node.entry) count += 1;
+        }
+        return count;
+    }
+
+    fn countUnreachableNodes(self: SirDotGraph) usize {
+        var count: usize = 0;
+        for (self.nodes) |node| {
+            if (node.is_unreachable) count += 1;
+        }
+        return count;
+    }
+
+    fn countRevertNodes(self: SirDotGraph) usize {
+        var count: usize = 0;
+        for (self.nodes) |node| {
+            if (node.revert) count += 1;
+        }
+        return count;
+    }
+
+    fn countBackedges(self: SirDotGraph) usize {
+        var count: usize = 0;
+        for (self.edges) |edge| {
+            if (edge.backedge) count += 1;
+        }
+        return count;
+    }
+
+    fn expectAllEdgesReferToKnownNodes(self: SirDotGraph) !void {
+        for (self.edges) |edge| {
+            try testing.expect(self.nodeIndex(edge.src) != null);
+            try testing.expect(self.nodeIndex(edge.dst) != null);
+        }
+    }
+
+    fn expectRevertNodesHaveNoSuccessors(self: SirDotGraph) !void {
+        for (self.nodes) |node| {
+            if (!node.revert) continue;
+            for (self.edges) |edge| {
+                try testing.expect(!std.mem.eql(u8, edge.src, node.id));
+            }
+        }
+    }
+
+    fn expectEveryCondBrHasTrueFalseEdges(self: SirDotGraph) !void {
+        for (self.nodes) |node| {
+            if (!std.mem.eql(u8, node.term, "sir.cond_br")) continue;
+            var outgoing: usize = 0;
+            var true_edges: usize = 0;
+            var false_edges: usize = 0;
+            for (self.edges) |edge| {
+                if (!std.mem.eql(u8, edge.src, node.id)) continue;
+                outgoing += 1;
+                if (edge.label) |label| {
+                    if (std.mem.eql(u8, label, "true")) true_edges += 1;
+                    if (std.mem.eql(u8, label, "false")) false_edges += 1;
+                }
+            }
+            try testing.expectEqual(@as(usize, 2), outgoing);
+            try testing.expectEqual(@as(usize, 1), true_edges);
+            try testing.expectEqual(@as(usize, 1), false_edges);
+        }
+    }
+};
+
+fn quotedDotAttr(line: []const u8, name: []const u8) ?[]const u8 {
+    const attr_start = std.mem.indexOf(u8, line, name) orelse return null;
+    var cursor = attr_start + name.len;
+    if (cursor >= line.len or line[cursor] != '=') return null;
+    cursor += 1;
+    if (cursor >= line.len or line[cursor] != '"') return null;
+    cursor += 1;
+    const value_start = cursor;
+    while (cursor < line.len) : (cursor += 1) {
+        if (line[cursor] == '"' and (cursor == value_start or line[cursor - 1] != '\\')) {
+            return line[value_start..cursor];
+        }
+    }
+    return null;
+}
+
+fn nodeTermFromLine(line: []const u8) []const u8 {
+    const term_start = std.mem.indexOf(u8, line, "term=") orelse return "";
+    const value_start = term_start + "term=".len;
+    const rest = line[value_start..];
+    if (std.mem.indexOfScalar(u8, rest, '\\')) |end| return rest[0..end];
+    if (std.mem.indexOfScalar(u8, rest, '"')) |end| return rest[0..end];
+    return rest;
+}
+
+fn parseSirDotGraph(allocator: std.mem.Allocator, dot: []const u8) !SirDotGraph {
+    var nodes: std.ArrayList(SirDotNode) = .empty;
+    errdefer nodes.deinit(allocator);
+    var edges: std.ArrayList(SirDotEdge) = .empty;
+    errdefer edges.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, dot, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (!std.mem.startsWith(u8, line, "f") or std.mem.indexOf(u8, line, "_bb") == null)
+            continue;
+
+        if (std.mem.indexOf(u8, line, " -> ")) |arrow| {
+            const src = std.mem.trim(u8, line[0..arrow], " \t");
+            const after_arrow = line[arrow + " -> ".len ..];
+            const bracket = std.mem.indexOf(u8, after_arrow, " [") orelse return error.TestUnexpectedResult;
+            const dst = std.mem.trim(u8, after_arrow[0..bracket], " \t");
+            try edges.append(allocator, .{
+                .src = src,
+                .dst = dst,
+                .label = quotedDotAttr(line, "label"),
+                .backedge = std.mem.containsAtLeast(u8, line, 1, "backedge=\"true\""),
+            });
+            continue;
+        }
+
+        const bracket = std.mem.indexOf(u8, line, " [") orelse continue;
+        const id = std.mem.trim(u8, line[0..bracket], " \t");
+        try nodes.append(allocator, .{
+            .id = id,
+            .term = nodeTermFromLine(line),
+            .entry = std.mem.containsAtLeast(u8, line, 1, "entry=\"true\""),
+            .is_unreachable = std.mem.containsAtLeast(u8, line, 1, "unreachable=\"true\""),
+            .revert = std.mem.containsAtLeast(u8, line, 1, "revert=\"true\""),
+        });
+    }
+
+    return .{
+        .nodes = try nodes.toOwnedSlice(allocator),
+        .edges = try edges.toOwnedSlice(allocator),
+    };
+}
+
 test "compiler generates deterministic true SIR branch CFG" {
     const source_text =
         \\pub fn choose(x: u256) -> u256 {
@@ -181,11 +357,14 @@ test "compiler generates deterministic true SIR branch CFG" {
 
     try testing.expectEqualStrings(dot_a, dot_b);
     try testing.expectEqualStrings(module_before, module_after);
-    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "digraph \"ora_sir_cfg\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "term=sir.cond_br"));
-    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "label=\"true\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "label=\"false\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "entry=\"true\""));
+    const graph = try parseSirDotGraph(testing.allocator, dot_a);
+    defer graph.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), graph.countEntryNodes());
+    try testing.expectEqual(@as(usize, 0), graph.countUnreachableNodes());
+    try testing.expectEqual(@as(usize, 1), graph.countTerm("sir.cond_br"));
+    try graph.expectAllEdgesReferToKnownNodes();
+    try graph.expectEveryCondBrHasTrueFalseEdges();
+    try graph.expectRevertNodesHaveNoSuccessors();
 }
 
 test "compiler generates stable per-function SIR CFGs" {
@@ -218,11 +397,18 @@ test "compiler generates stable per-function SIR CFGs" {
     try testing.expectEqual(@as(usize, 2), graphs.len);
     try testing.expectEqualStrings("first", graphs[0].name);
     try testing.expectEqualStrings("second", graphs[1].name);
-    try testing.expect(std.mem.containsAtLeast(u8, graphs[0].dot, 1, "SIR block CFG: first"));
-    try testing.expect(std.mem.containsAtLeast(u8, graphs[0].dot, 1, "term=sir.cond_br"));
-    try testing.expect(!std.mem.containsAtLeast(u8, graphs[0].dot, 1, "SIR block CFG: second"));
-    try testing.expect(std.mem.containsAtLeast(u8, graphs[1].dot, 1, "SIR block CFG: second"));
-    try testing.expect(!std.mem.containsAtLeast(u8, graphs[1].dot, 1, "SIR block CFG: first"));
+    const first_graph = try parseSirDotGraph(testing.allocator, graphs[0].dot);
+    defer first_graph.deinit(testing.allocator);
+    const second_graph = try parseSirDotGraph(testing.allocator, graphs[1].dot);
+    defer second_graph.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), first_graph.countEntryNodes());
+    try testing.expectEqual(@as(usize, 1), second_graph.countEntryNodes());
+    try testing.expectEqual(@as(usize, 1), first_graph.countTerm("sir.cond_br"));
+    try testing.expectEqual(@as(usize, 0), second_graph.countTerm("sir.cond_br"));
+    try testing.expectEqual(@as(usize, 0), second_graph.edges.len);
+    try first_graph.expectAllEdgesReferToKnownNodes();
+    try first_graph.expectEveryCondBrHasTrueFalseEdges();
+    try second_graph.expectAllEdgesReferToKnownNodes();
 }
 
 test "compiler marks loop backedges in SIR CFG" {
@@ -246,9 +432,15 @@ test "compiler marks loop backedges in SIR CFG" {
     const dot = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{ .mode = .sir });
     defer testing.allocator.free(dot);
 
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "digraph \"ora_sir_cfg\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "backedge=\"true\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "term=sir.cond_br"));
+    const graph = try parseSirDotGraph(testing.allocator, dot);
+    defer graph.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), graph.countEntryNodes());
+    try testing.expect(graph.nodes.len >= 3);
+    try testing.expect(graph.edges.len >= 2);
+    try testing.expect(graph.countBackedges() >= 1);
+    try testing.expect(graph.countTerm("sir.cond_br") >= 1);
+    try graph.expectAllEdgesReferToKnownNodes();
+    try graph.expectEveryCondBrHasTrueFalseEdges();
 }
 
 test "compiler SIR CFG marks revert and unreachable blocks without mutating module" {
@@ -283,13 +475,18 @@ test "compiler SIR CFG marks revert and unreachable blocks without mutating modu
     defer testing.allocator.free(module_after);
 
     try testing.expectEqualStrings(module_before, module_after);
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "term=sir.revert"));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "revert=\"true\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "f0_bb3"));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "unreachable=\"true\""));
-    try testing.expect(!std.mem.containsAtLeast(u8, dot, 1, "f0_bb1 ->"));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"true\""));
-    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"false\""));
+    const graph = try parseSirDotGraph(testing.allocator, dot);
+    defer graph.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 4), graph.nodes.len);
+    try testing.expectEqual(@as(usize, 2), graph.edges.len);
+    try testing.expectEqual(@as(usize, 1), graph.countEntryNodes());
+    try testing.expectEqual(@as(usize, 1), graph.countUnreachableNodes());
+    try testing.expectEqual(@as(usize, 1), graph.countRevertNodes());
+    try testing.expectEqual(@as(usize, 1), graph.countTerm("sir.revert"));
+    try testing.expectEqual(@as(usize, 1), graph.countTerm("sir.cond_br"));
+    try graph.expectAllEdgesReferToKnownNodes();
+    try graph.expectEveryCondBrHasTrueFalseEdges();
+    try graph.expectRevertNodesHaveNoSuccessors();
 }
 
 test "compiler generates SIR CFG optimization diff without mutating module" {
@@ -320,13 +517,22 @@ test "compiler generates SIR CFG optimization diff without mutating module" {
     defer testing.allocator.free(module_after);
 
     try testing.expectEqualStrings(module_before, module_after);
-    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "term=sir.cond_br"));
-    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "label=\"true\""));
-    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "label=\"false\""));
-    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "term=sir.invalid"));
-    try testing.expect(!std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.cond_br"));
-    try testing.expect(!std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.invalid"));
-    try testing.expect(std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.iret"));
+    const before_graph = try parseSirDotGraph(testing.allocator, diff.before);
+    defer before_graph.deinit(testing.allocator);
+    const after_graph = try parseSirDotGraph(testing.allocator, diff.after);
+    defer after_graph.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), before_graph.nodes.len);
+    try testing.expectEqual(@as(usize, 2), before_graph.edges.len);
+    try testing.expectEqual(@as(usize, 1), before_graph.countTerm("sir.cond_br"));
+    try testing.expectEqual(@as(usize, 1), before_graph.countTerm("sir.invalid"));
+    try before_graph.expectEveryCondBrHasTrueFalseEdges();
+    try testing.expect(after_graph.nodes.len < before_graph.nodes.len);
+    try testing.expect(after_graph.edges.len < before_graph.edges.len);
+    try testing.expectEqual(@as(usize, 0), after_graph.countTerm("sir.cond_br"));
+    try testing.expectEqual(@as(usize, 0), after_graph.countTerm("sir.invalid"));
+    try testing.expectEqual(@as(usize, 1), after_graph.countTerm("sir.iret"));
+    try before_graph.expectAllEdgesReferToKnownNodes();
+    try after_graph.expectAllEdgesReferToKnownNodes();
 }
 
 test "compiler marks proven refinement guards in Ora CFG overlay" {
