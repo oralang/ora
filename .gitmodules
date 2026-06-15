@@ -4,3 +4,6 @@
 [submodule "vendor/sensei"]
 	path = vendor/sensei
 	url = https://github.com/oralang/sensei-monorepo.git
+[submodule "vendor/voltaire"]
+	path = vendor/voltaire
+	url = https://github.com/evmts/voltaire.git

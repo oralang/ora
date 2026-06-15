@@ -233,7 +233,7 @@ pub fn build(b: *std.Build) void {
         "cargo",
         "build",
         "--manifest-path",
-        b.pathJoin(&.{ "../voltaire", "Cargo.toml" }),
+        b.pathJoin(&.{ "vendor/voltaire", "Cargo.toml" }),
         "--release",
     });
     bootstrap_voltaire_crypto.setName("bootstrap-voltaire-crypto");

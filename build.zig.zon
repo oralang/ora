@@ -41,7 +41,7 @@
             .hash = "lsp_kit-0.1.0-bi_PL5wxCgB1_jRIZtcodh-x-_nteVzuOrul2ken-ZLE",
         },
         .voltaire = .{
-            .path = "../voltaire",
+            .path = "vendor/voltaire",
         },
     },
     .paths = .{
