@@ -17,13 +17,12 @@ namespace mlir
         /// Create a pass to convert Ora dialect operations to SIR dialect
         std::unique_ptr<Pass> createOraToSIRPass();
 
-        /// Create a cleanup pass to remove dead operations (unused allocas, etc.)
-        std::unique_ptr<Pass> createMemRefEliminationPass();
+        /// Create a narrow deterministic SIR cleanup pass for release hygiene.
         std::unique_ptr<Pass> createSIRCleanupPass();
 
         /// Create an optimization pass for SIR operations
         std::unique_ptr<Pass> createSIROptimizationPass();
-        std::unique_ptr<Pass> createSimpleDCEPass();
+        std::unique_ptr<Pass> createSIRFrameworkCanonicalizerPass();
 
         /// Create a legalizer pass to validate SIR MLIR for text emission
         std::unique_ptr<Pass> createSIRTextLegalizerPass();
@@ -31,20 +30,17 @@ namespace mlir
         /// Create a pass to build a Solidity-style dispatcher for public functions
         std::unique_ptr<Pass> createSIRDispatcherPass();
 
-        /// Create a pass to optimize Ora operations (constant deduplication, constant folding)
-        std::unique_ptr<Pass> createOraOptimizationPass();
-
-        /// Create a pass to clean up unused Ora operations
-        std::unique_ptr<Pass> createOraCleanupPass();
-
-        /// Create a pass to run canonicalization and DCE on Ora MLIR functions
-        std::unique_ptr<Pass> createSimpleOraOptimizationPass();
-
         /// Create a pass to inline functions marked with ora.inline attribute
         std::unique_ptr<Pass> createOraInliningPass();
 
-        /// Legacy alias for backward compatibility
-        std::unique_ptr<Pass> createOraCanonicalizationPass();
+        /// Create a pass to run canonicalization on nested Ora MLIR functions
+        std::unique_ptr<Pass> createOraFunctionCanonicalizerPass();
+
+        /// Create a pass to run MLIR CSE on nested Ora MLIR functions
+        std::unique_ptr<Pass> createOraFunctionCSEPass();
+
+        /// Create a storage-aware pass to reuse repeated Ora storage loads
+        std::unique_ptr<Pass> createOraStorageReadCSEPass();
 
     } // namespace ora
 } // namespace mlir

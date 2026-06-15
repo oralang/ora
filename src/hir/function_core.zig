@@ -1154,9 +1154,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             defer self.parent.current_statement_id = previous_statement_id;
             switch (self.parent.file.statement(statement_id).*) {
                 .VariableDecl => |decl| {
-                    const value = if (decl.value) |expr_id|
-                        try self.lowerExpr(expr_id, locals)
-                    else if (decl.type_expr) |type_expr| blk: {
+                    const value = if (decl.value) |expr_id| blk: {
+                        const pattern_type = self.parent.typecheck.pattern_types[decl.pattern.index()].type;
+                        if (pattern_type.kind() == .unknown) {
+                            break :blk try self.lowerExpr(expr_id, locals);
+                        }
+                        const target_type = self.parent.lowerSemaType(pattern_type, decl.range);
+                        break :blk try self.lowerExprForFlowTarget(expr_id, target_type, locals);
+                    } else if (decl.type_expr) |type_expr| blk: {
                         const lowered_type = self.parent.lowerTypeExpr(type_expr);
                         if (decl.storage_class == .memory and mlir.oraTypeIsAMemRef(lowered_type)) {
                             const alloc = mlir.oraMemrefAllocaOpCreate(
@@ -2146,7 +2151,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return @This().convertValueForFlowWithSignedness(self, value, target_type, null, range);
         }
 
-        fn convertValueForFlowWithSignedness(
+        pub fn convertValueForFlowWithSignedness(
             self: *FunctionLowerer,
             value: mlir.MlirValue,
             target_type: mlir.MlirType,
@@ -2255,7 +2260,19 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return appendValueOp(self.block, op);
             }
 
-            const op = if (source_is_signed orelse false)
+            const resolved_source_is_signed = source_is_signed orelse if (mlir.oraTypeIsIntegerType(value_type))
+                mlir.oraIntegerTypeIsSigned(value_type)
+            else {
+                try self.parent.emitLoweringError(
+                    range,
+                    "cannot determine signedness for integer widening conversion",
+                    .{},
+                );
+                const placeholder = try self.createAggregatePlaceholder("ora.lowering_error", range, &.{}, target_type);
+                return appendValueOp(self.block, placeholder);
+            };
+
+            const op = if (resolved_source_is_signed)
                 mlir.oraArithExtSIOpCreate(self.parent.context, loc, value, target_type)
             else
                 mlir.oraArithExtUIOpCreate(self.parent.context, loc, value, target_type);

@@ -2921,6 +2921,73 @@ test "verification does not vacuously prove branch-local Result unwrap and get_e
     try testing.expect(!result.degraded);
 }
 
+test "verification uses scf while body condition for callee preconditions" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract Sample {
+        \\    fn needs_positive(amount: u256) -> !bool | Rejected
+        \\        requires(amount > 0)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn batch(amounts: [u256; 5]) -> u256
+        \\        requires(amounts[0] > 0)
+        \\        requires(amounts[1] > 0)
+        \\        requires(amounts[2] > 0)
+        \\        requires(amounts[3] > 0)
+        \\        requires(amounts[4] > 0)
+        \\    {
+        \\        var success_count: u256 = 0;
+        \\        var i: u256 = 0;
+        \\        while (i < 5)
+        \\            invariant i <= 5
+        \\            invariant success_count <= i
+        \\        {
+        \\            try {
+        \\                var ok: bool = try needs_positive(amounts[i]);
+        \\                if (ok) {
+        \\                    success_count += 1;
+        \\                }
+        \\            } catch (err) {
+        \\                let _ignored = err;
+        \\            }
+        \\            i = i +% 1;
+        \\        }
+        \\        return success_count;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "batch");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects concrete signed min negation overflow" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn negate_min() -> i8 {
+        \\        let x: i8 = std.constants.I8_MIN;
+        \\        return -x;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "negate_min");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
 test "verification rejects requires-only unreachable branch obligations" {
     const source_text =
         \\comptime const std = @import("std");
@@ -2949,6 +3016,68 @@ test "verification rejects requires-only unreachable branch obligations" {
     try testing.expect(result.errors_len > 0);
     try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
     try testing.expect(!result.degraded);
+}
+
+test "verification rejects reachable obligations in catch switch and fallthrough paths" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract Sample {
+        \\    fn maybe(flag: bool) -> !u256 | Rejected {
+        \\        if (flag) {
+        \\            return Rejected;
+        \\        }
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn catch_path(flag: bool) -> u256 {
+        \\        try {
+        \\            return try maybe(flag);
+        \\        } catch {
+        \\            assert(false);
+        \\            return 0;
+        \\        }
+        \\    }
+        \\
+        \\    pub fn switch_path(tag: u256) -> u256 {
+        \\        switch (tag) {
+        \\            0 => {
+        \\                assert(false);
+        \\                return 0;
+        \\            }
+        \\            else => {
+        \\                return 1;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn fallthrough_path(flag: bool) -> u256 {
+        \\        if (flag) {
+        \\            return 1;
+        \\        }
+        \\        assert(false);
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var catch_result = try verifyTextWithoutDegradation(source_text, "catch_path");
+    defer catch_result.deinit(testing.allocator);
+    try testing.expect(!catch_result.success);
+    try testing.expectEqualStrings("InvariantViolation", catch_result.error_kinds);
+    try testing.expect(!catch_result.degraded);
+
+    var switch_result = try verifyTextWithoutDegradation(source_text, "switch_path");
+    defer switch_result.deinit(testing.allocator);
+    try testing.expect(!switch_result.success);
+    try testing.expectEqualStrings("InvariantViolation", switch_result.error_kinds);
+    try testing.expect(!switch_result.degraded);
+
+    var fallthrough_result = try verifyTextWithoutDegradation(source_text, "fallthrough_path");
+    defer fallthrough_result.deinit(testing.allocator);
+    try testing.expect(!fallthrough_result.success);
+    try testing.expectEqualStrings("InvariantViolation", fallthrough_result.error_kinds);
+    try testing.expect(!fallthrough_result.degraded);
 }
 
 test "verification treats msg.sender as nonzero address" {

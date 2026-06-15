@@ -705,6 +705,8 @@ pub const VerificationPass = struct {
                     try self.walkTryStmtRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.switch")) {
                     try self.walkOraSwitchRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "scf.while")) {
+                    try self.walkScfWhileRegions(current_op);
                 } else {
                     // walk nested regions (for functions, loops, etc.)
                     const num_regions = mlir.oraOperationGetNumRegions(current_op);
@@ -1361,6 +1363,42 @@ pub const VerificationPass = struct {
                 .initialized = fallback_init,
             });
         }
+    }
+
+    fn walkScfWhileRegions(self: *VerificationPass, while_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(while_op);
+        if (num_regions == 0) return;
+
+        const before_region = mlir.oraOperationGetRegion(while_op, 0);
+        try self.walkMLIRRegion(before_region);
+
+        if (num_regions < 2) return;
+
+        self.encoder.invalidateValueCaches();
+        const continue_condition = (try self.encodeScfWhileContinueCondition(while_op, false)) orelse {
+            const after_region = mlir.oraOperationGetRegion(while_op, 1);
+            try self.walkMLIRRegion(after_region);
+            return;
+        };
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(while_op);
+        const condition_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        defer if (condition_constraints.len > 0) self.allocator.free(condition_constraints);
+        const condition_obligations = try self.encoder.takeObligationRecords(self.allocator);
+        defer if (condition_obligations.len > 0) self.allocator.free(condition_obligations);
+        try self.preserveControlConditionObligations(while_op, condition_obligations);
+
+        const saved_len = self.active_path_assumptions.items.len;
+        const scoped_constraints = try self.cloneConstraintsWithObligations(condition_constraints, condition_obligations);
+        defer self.releaseActivePathAssumptionsFrom(saved_len);
+        try self.active_path_assumptions.append(.{
+            .condition = self.encoder.coerceBoolean(continue_condition),
+            .extra_constraints = scoped_constraints,
+            .owned_extra_constraints = true,
+        });
+
+        const after_region = mlir.oraOperationGetRegion(while_op, 1);
+        try self.walkMLIRRegion(after_region);
     }
 
     fn walkScfIfRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
@@ -2235,7 +2273,9 @@ pub const VerificationPass = struct {
             op;
         var base_encoder_state = try self.captureEncoderBranchState();
         defer base_encoder_state.deinit(self.allocator);
-        defer self.restoreEncoderBranchState(&base_encoder_state) catch {};
+        defer self.restoreEncoderBranchState(&base_encoder_state) catch {
+            self.encoder.noteSoundnessLoss(.internal_encoding_failure, "failed to restore annotation encoder branch state");
+        };
 
         const encoded = blk: {
             if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
@@ -2600,6 +2640,57 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    fn encodeScfWhileContinueCondition(
+        self: *VerificationPass,
+        loop_op: mlir.MlirOperation,
+        rebind_before_args_to_after_args: bool,
+    ) !?z3.Z3_ast {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
+        if (mlir.oraBlockIsNull(before_block)) return null;
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
+
+        var rebound_before_args: usize = 0;
+        if (rebind_before_args_to_after_args and !mlir.oraBlockIsNull(after_block)) {
+            const bind_count = @min(
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
+            );
+            var i: usize = 0;
+            while (i < bind_count) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+                try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
+                rebound_before_args += 1;
+            }
+        }
+        defer {
+            var i: usize = 0;
+            while (i < rebound_before_args) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
+            }
+        }
+
+        var op = mlir.oraBlockGetFirstOperation(before_block);
+        while (!mlir.oraOperationIsNull(op)) {
+            const op_name_ref = mlir.oraOperationGetName(op);
+            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                ""
+            else
+                op_name_ref.data[0..op_name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "scf.condition")) {
+                const num_operands = mlir.oraOperationGetNumOperands(op);
+                if (num_operands < 1) return null;
+                const continue_value = mlir.oraOperationGetOperand(op, 0);
+                return try self.encoder.encodeValue(continue_value);
+            }
+            op = mlir.oraOperationGetNextInBlock(op);
+        }
+        return null;
+    }
+
     fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return &[_]z3.Z3_ast{};
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
@@ -2842,50 +2933,11 @@ pub const VerificationPass = struct {
             loop_name_ref.data[0..loop_name_ref.length];
 
         if (std.mem.eql(u8, loop_name, "scf.while")) {
-            const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
-            if (mlir.oraBlockIsNull(before_block)) return null;
             const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
-
-            var rebound_before_args: usize = 0;
-            if (!mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr) {
-                const bind_count = @min(
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
-                );
-                var i: usize = 0;
-                while (i < bind_count) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
-                    try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
-                    rebound_before_args += 1;
-                }
-            }
-            defer {
-                var i: usize = 0;
-                while (i < rebound_before_args) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
-                }
-            }
-
-            var op = mlir.oraBlockGetFirstOperation(before_block);
-            while (!mlir.oraOperationIsNull(op)) {
-                const op_name_ref = mlir.oraOperationGetName(op);
-                defer @import("mlir_c_api").freeStringRef(op_name_ref);
-                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
-                    ""
-                else
-                    op_name_ref.data[0..op_name_ref.length];
-
-                if (std.mem.eql(u8, op_name, "scf.condition")) {
-                    const num_operands = mlir.oraOperationGetNumOperands(op);
-                    if (num_operands < 1) return null;
-                    const continue_value = mlir.oraOperationGetOperand(op, 0);
-                    return try self.encoder.encodeValue(continue_value);
-                }
-                op = mlir.oraOperationGetNextInBlock(op);
-            }
-            return null;
+            return try self.encodeScfWhileContinueCondition(
+                loop_op,
+                !mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr,
+            );
         }
 
         if (std.mem.eql(u8, loop_name, "scf.for")) {
@@ -2903,7 +2955,10 @@ pub const VerificationPass = struct {
             const iv_ast = try self.encoder.encodeValue(induction_var);
             const ub_ast = try self.encoder.encodeValue(upper_bound);
 
-            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op) catch {
+                self.encoder.noteSoundnessLossAtOp(.missing_control_flow_summary, loop_op, "scf.for missing unsignedCmp metadata");
+                return error.UnsupportedOperation;
+            };
 
             return self.buildNumericLt(iv_ast, ub_ast, unsigned_cmp);
         }
@@ -7253,67 +7308,6 @@ fn collectFunctionNamesInRegion(
         }
         current_block = mlir.oraBlockGetNextInRegion(current_block);
     }
-}
-
-fn mergeVerificationResults(
-    allocator: std.mem.Allocator,
-    dest: *errors.VerificationResult,
-    src: *errors.VerificationResult,
-) !void {
-    if (!src.success) {
-        dest.success = false;
-    }
-
-    for (src.errors.items) |err| {
-        const cloned = try cloneVerificationError(allocator, err);
-        try dest.addError(cloned);
-    }
-
-    var it = src.proven_guard_ids.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        if (!dest.proven_guard_ids.contains(key)) {
-            const key_copy = try allocator.dupe(u8, key);
-            try dest.proven_guard_ids.put(key_copy, {});
-        }
-    }
-
-    for (src.z3_proofs.items) |proof| {
-        try dest.z3_proofs.append(allocator, .{
-            .file = try allocator.dupe(u8, proof.file),
-            .line = proof.line,
-            .column = proof.column,
-            .query = try allocator.dupe(u8, proof.query),
-            .proof = try allocator.dupe(u8, proof.proof),
-        });
-    }
-}
-
-fn cloneVerificationError(allocator: std.mem.Allocator, err: errors.VerificationError) !errors.VerificationError {
-    const message = try allocator.dupe(u8, err.message);
-    errdefer allocator.free(message);
-    const file = try allocator.dupe(u8, err.file);
-    errdefer allocator.free(file);
-    const counterexample = if (err.counterexample) |ce| try cloneCounterexample(allocator, ce) else null;
-
-    return errors.VerificationError{
-        .error_type = err.error_type,
-        .message = message,
-        .file = file,
-        .line = err.line,
-        .column = err.column,
-        .counterexample = counterexample,
-        .allocator = allocator,
-    };
-}
-
-fn cloneCounterexample(allocator: std.mem.Allocator, ce: errors.Counterexample) !errors.Counterexample {
-    var copy = errors.Counterexample.init(allocator);
-    var it = ce.variables.iterator();
-    while (it.next()) |entry| {
-        try copy.addVariable(entry.key_ptr.*, entry.value_ptr.*);
-    }
-    return copy;
 }
 
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {

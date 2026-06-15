@@ -999,7 +999,7 @@ LogicalResult ConvertHexConstantOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Lower ora.addr.to.i160 → sir.bitcast
+// Lower ora.addr.to.i160 → masked u256 carrier
 // -----------------------------------------------------------------------------
 LogicalResult ConvertAddrToI160Op::matchAndRewrite(
     ora::AddrToI160Op op,
@@ -1007,9 +1007,8 @@ LogicalResult ConvertAddrToI160Op::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     Value input = adaptor.getAddr();
-    Type outType = op.getType();
 
-    rewriter.replaceOpWithNewOp<sir::BitcastOp>(op, outType, input);
+    rewriter.replaceOp(op, maskAddressTo160(rewriter, op.getLoc(), input));
     return success();
 }
 
@@ -1783,93 +1782,5 @@ LogicalResult ConvertArithTruncIOp::matchAndRewrite(
     if (!isU256IntegerCarrierType(resultType))
         masked = rewriter.create<sir::BitcastOp>(loc, resultType, masked);
     rewriter.replaceOp(op, masked);
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold redundant sir.bitcast chains
-// -----------------------------------------------------------------------------
-LogicalResult FoldRedundantBitcastOp::matchAndRewrite(
-    sir::BitcastOp op,
-    PatternRewriter &rewriter) const
-{
-    auto in = op.getInput();
-    if (in.getType() == op.getType())
-    {
-        rewriter.replaceOp(op, in);
-        return success();
-    }
-
-    if (auto inner = in.getDefiningOp<sir::BitcastOp>())
-    {
-        if (inner.getInput().getType() == op.getType())
-        {
-            rewriter.replaceOp(op, inner.getInput());
-            return success();
-        }
-    }
-
-    return failure();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.eq with identical operands -> const 1
-// -----------------------------------------------------------------------------
-LogicalResult FoldEqSameOp::matchAndRewrite(
-    sir::EqOp op,
-    PatternRewriter &rewriter) const
-{
-    if (op.getLhs() != op.getRhs())
-        return failure();
-
-    Value one = constU256(rewriter, op.getLoc(), 1);
-    rewriter.replaceOp(op, one);
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.eq with constant operands -> const 0/1
-// -----------------------------------------------------------------------------
-LogicalResult FoldEqConstOp::matchAndRewrite(
-    sir::EqOp op,
-    PatternRewriter &rewriter) const
-{
-    auto lhsConst = op.getLhs().getDefiningOp<sir::ConstOp>();
-    auto rhsConst = op.getRhs().getDefiningOp<sir::ConstOp>();
-    if (!lhsConst || !rhsConst)
-        return failure();
-
-    auto lhsAttr = llvm::dyn_cast<IntegerAttr>(lhsConst.getValueAttr());
-    auto rhsAttr = llvm::dyn_cast<IntegerAttr>(rhsConst.getValueAttr());
-    if (!lhsAttr || !rhsAttr)
-        return failure();
-
-    // Zero-extend both to 256 bits to avoid APInt assertion on mismatched widths.
-    APInt lhs = lhsAttr.getValue().zextOrTrunc(256);
-    APInt rhs = rhsAttr.getValue().zextOrTrunc(256);
-    uint64_t isEqual = lhs == rhs ? 1 : 0;
-    Value result = constU256(rewriter, op.getLoc(), isEqual);
-    rewriter.replaceOp(op, result);
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.iszero of constant -> const 0/1
-// -----------------------------------------------------------------------------
-LogicalResult FoldIsZeroConstOp::matchAndRewrite(
-    sir::IsZeroOp op,
-    PatternRewriter &rewriter) const
-{
-    auto constOp = op.getX().getDefiningOp<sir::ConstOp>();
-    if (!constOp)
-        return failure();
-
-    auto intAttr = llvm::dyn_cast<IntegerAttr>(constOp.getValueAttr());
-    if (!intAttr)
-        return failure();
-
-    uint64_t isZero = intAttr.getValue().isZero() ? 1 : 0;
-    Value result = constU256(rewriter, op.getLoc(), isZero);
-    rewriter.replaceOp(op, result);
     return success();
 }

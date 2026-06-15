@@ -599,16 +599,6 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        class FoldCondBrSameDestOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
         class NormalizeCondBrOperandsOp : public OpRewritePattern<sir::CondBrOp>
         {
         public:
@@ -616,36 +606,6 @@ namespace mlir
 
             LogicalResult matchAndRewrite(
                 sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldCondBrDoubleIsZeroOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldCondBrConstOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldBrToBrOp : public OpRewritePattern<sir::BrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::BrOp op,
                 PatternRewriter &rewriter) const override;
         };
 

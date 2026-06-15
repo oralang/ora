@@ -26,6 +26,14 @@ value = 0
 args = ["0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 1]
 reverts = {}
 
+# Constant-like operands must keep the checked-add revert after canonicalization.
+[[call]]
+fn = "constant_add_overflow()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = {}
+
 # Violated requires reverts before EVM div-by-zero semantics.
 [[call]]
 fn = "div(uint256,uint256)"

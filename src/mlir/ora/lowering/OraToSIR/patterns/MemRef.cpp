@@ -1049,17 +1049,7 @@ LogicalResult NormalizeNarrowErrorUnionMemRefLoadOp::matchAndRewrite(
     auto memrefType = op.getMemRefType();
     if (!memrefType)
         return failure();
-    bool narrowCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
-    bool scalarCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
-    if (!narrowCarrier && !scalarCarrier)
-        return failure();
-    if (euh::valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
-        return failure();
-    if (!narrowCarrier && euh::hasForceWideErrorUnionAttr(op) && !scalarCarrier)
-        return failure();
-    if (!euh::isScalarErrorUnionMemRefCarrier(op.getType()) && !scalarCarrier)
-        return failure();
-    if (euh::hasForceWideErrorUnionAttr(op) && !scalarCarrier)
+    if (!euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType()))
         return failure();
 
     auto loc = op.getLoc();
@@ -1101,15 +1091,7 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     auto memrefType = op.getMemRefType();
     if (!memrefType)
         return failure();
-    bool narrowCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
-    bool scalarCarrier = euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType());
-    if (!narrowCarrier && !scalarCarrier)
-        return failure();
-    if (euh::valueHasForceWideErrorUnion(op.getMemref()) && !scalarCarrier)
-        return failure();
-    if (!euh::isScalarErrorUnionMemRefCarrier(op.getValue().getType()) && !scalarCarrier)
-        return failure();
-    if (euh::valueHasForceWideErrorUnion(op.getValue()) && !scalarCarrier)
+    if (!euh::isScalarErrorUnionMemRefCarrier(memrefType.getElementType()))
         return failure();
 
     auto loc = op.getLoc();
@@ -1193,8 +1175,6 @@ LogicalResult NormalizeNarrowErrorUnionMemRefStoreOp::matchAndRewrite(
     {
         if (cast.getNumOperands() == 2)
         {
-            if (!narrowCarrier && !hasMaterializationKind(cast, mat_kind::kNormalizedErrorUnion))
-                return failure();
             consumedCast = cast;
             parts.tag = ensureTagI256(cast.getOperand(0));
             parts.payload = ensurePayloadI256(cast.getOperand(1));

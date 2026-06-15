@@ -44,6 +44,7 @@ const MlirOptions = struct {
     explain_cores: bool = false,
     z3_proofs: bool = false,
     minimize_cores: bool = false,
+    keep_proved_checks: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -545,6 +546,7 @@ pub fn main() !void {
     const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
+    const keep_proved_checks: bool = parsed.keep_proved_checks;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -678,6 +680,7 @@ pub fn main() !void {
         .explain_cores = explain_cores,
         .z3_proofs = z3_proofs,
         .minimize_cores = minimize_cores,
+        .keep_proved_checks = keep_proved_checks,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -1909,6 +1912,7 @@ fn printUsage() !void {
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
+    try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
@@ -4138,11 +4142,15 @@ fn runMlirEmitAdvanced(
     if (mlir_options.emit_mlir_sir) {
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
-            refinement_guards.cleanupRefinementGuards(ctx, final_module, &vr.proven_guard_ids);
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
         } else {
             var empty_guards = std.StringHashMap(void).init(mlir_allocator);
             defer empty_guards.deinit();
-            refinement_guards.cleanupRefinementGuards(ctx, final_module, &empty_guards);
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
         }
     }
 

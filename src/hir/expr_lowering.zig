@@ -562,7 +562,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk try self.lowerExpr(expr_id, locals);
                 },
-                else => try self.lowerExpr(expr_id, locals),
+                else => blk: {
+                    const raw_value = try self.lowerExpr(expr_id, locals);
+                    const value_type = mlir.oraValueGetType(raw_value);
+                    const source_is_signed = if (mlir.oraTypeIsAInteger(value_type) and
+                        mlir.oraTypeIsAInteger(target_type) and
+                        mlir.oraIntegerTypeGetWidth(value_type) < mlir.oraIntegerTypeGetWidth(target_type))
+                        try @This().integerExprSignedness(self, expr_id)
+                    else
+                        null;
+                    break :blk try self.convertValueForFlowWithSignedness(raw_value, target_type, source_is_signed, exprRange(self.parent.file, expr_id));
+                },
             };
         }
 
@@ -1277,7 +1287,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 &.{};
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
+                var arg_value: mlir.MlirValue = undefined;
                 if (index < runtime_parameters.len) {
                     const parameter = runtime_parameters[index];
                     if (callee_function != null) {
@@ -1289,8 +1299,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         else
                             try self.parent.resolvedRuntimeParameterTypeForCall(callee_function.?, parameter, call);
                         const target_type = self.parent.lowerSemaType(target_sema_type, parameter.range);
-                        arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                        arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
+                    } else {
+                        arg_value = try self.lowerExpr(arg, locals);
                     }
+                } else {
+                    arg_value = try self.lowerExpr(arg, locals);
                 }
                 try args.append(self.parent.allocator, arg_value);
             }
@@ -2339,10 +2353,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             try args.append(self.parent.allocator, receiver_value);
 
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
                 const parameter = runtime_parameters[index + 1];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
-                arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                const arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
                 try args.append(self.parent.allocator, arg_value);
             }
 
@@ -2475,10 +2488,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             var args: std.ArrayList(mlir.MlirValue) = .{};
             for (runtime_args, 0..) |arg, index| {
-                var arg_value = try self.lowerExpr(arg, locals);
                 const parameter = runtime_parameters[index];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
-                arg_value = try self.convertValueForFlow(arg_value, target_type, exprRange(self.parent.file, arg));
+                const arg_value = try self.lowerExprForFlowTarget(arg, target_type, locals);
                 try args.append(self.parent.allocator, arg_value);
             }
 
@@ -3584,12 +3596,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (item == .Bitfield) {
                 const bitfield_type = self.parent.typecheck.exprType(expr_id);
                 const word_type = self.parent.lowerExprType(expr_id);
+                const bitfield_name = bitfield_type.name() orelse concrete_name;
                 var packed_word = appendValueOp(
                     self.block,
                     createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
                 );
                 for (struct_literal.fields) |init| {
-                    const field_value = try @This().lowerExprForFlowTarget(self, init.value, word_type, locals);
+                    const resolved = (try self.parent.resolveBitfieldField(bitfield_name, init.name)) orelse
+                        return error.MlirOperationCreationFailed;
+                    const field_value = if (resolved.field_type) |field_sema_type|
+                        try @This().lowerExprForSemaFlowTarget(self, init.value, field_sema_type, init.range, locals)
+                    else blk: {
+                        const field_type = self.parent.lowerTypeExpr(resolved.field.type_expr);
+                        break :blk try self.lowerExprForFlowTarget(init.value, field_type, locals);
+                    };
                     packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
                 }
                 return packed_word;

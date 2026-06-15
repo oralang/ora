@@ -55,17 +55,30 @@ pub const PropertyRuntime = struct {
 };
 
 pub fn runOraEmit(allocator: std.mem.Allocator, source_path: []const u8, output_dir: []const u8) !void {
+    try runOraEmitWithExtraArgs(allocator, source_path, output_dir, &.{"--no-verify"});
+}
+
+pub fn runOraEmitWithExtraArgs(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    output_dir: []const u8,
+    extra_args: []const []const u8,
+) !void {
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{
+        types.ORA_BINARY_REL,
+        "emit",
+        "--emit=abi,bytecode",
+        "--output-dir",
+        output_dir,
+    });
+    try argv.appendSlice(allocator, extra_args);
+    try argv.append(allocator, source_path);
+
     const result = try std.process.Child.run(.{
         .allocator = allocator,
-        .argv = &.{
-            types.ORA_BINARY_REL,
-            "emit",
-            "--no-verify",
-            "--emit=abi,bytecode",
-            "--output-dir",
-            output_dir,
-            source_path,
-        },
+        .argv = argv.items,
         .max_output_bytes = 8 * 1024 * 1024,
     });
     defer allocator.free(result.stdout);
@@ -185,17 +198,41 @@ fn readArtifacts(allocator: std.mem.Allocator, output_dir: []const u8, stem: []c
 }
 
 pub fn runConformanceSpec(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8) !void {
-    return runConformanceSpecImpl(allocator, source_path, spec_path, null);
+    return runConformanceSpecImpl(allocator, source_path, spec_path, null, &.{"--no-verify"});
+}
+
+pub fn runConformanceSpecWithExtraArgs(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+    extra_args: []const []const u8,
+) !void {
+    return runConformanceSpecImpl(allocator, source_path, spec_path, null, extra_args);
+}
+
+pub fn runConformanceSpecDifferential(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+) !void {
+    try runConformanceSpecWithExtraArgs(allocator, source_path, spec_path, &.{});
+    try runConformanceSpecWithExtraArgs(allocator, source_path, spec_path, &.{"--keep-proved-checks"});
 }
 
 /// Like runConformanceSpec but records numeric metrics (per-call gas + per-contract
 /// bytecode size) into `metrics`. Still asserts all spec outcomes, so it only
 /// measures on a green corpus.
 pub fn runConformanceSpecMetrics(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: MetricSink) !void {
-    return runConformanceSpecImpl(allocator, source_path, spec_path, metrics);
+    return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, &.{"--no-verify"});
 }
 
-fn runConformanceSpecImpl(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: ?MetricSink) !void {
+fn runConformanceSpecImpl(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+    metrics: ?MetricSink,
+    extra_args: []const []const u8,
+) !void {
     var run_arena = std.heap.ArenaAllocator.init(allocator);
     defer run_arena.deinit();
     const arena = run_arena.allocator();
@@ -222,7 +259,7 @@ fn runConformanceSpecImpl(allocator: std.mem.Allocator, source_path: []const u8,
     // Compile the primary contract, then every [[contract]] secondary. Each
     // .ora has a distinct stem so all artifacts coexist in one out dir.
     var compiled = std.ArrayList(CompiledContract){};
-    const primary = try compileOne(arena, effective_source, out_path);
+    const primary = try compileOne(arena, effective_source, out_path, extra_args);
     try testing.expectError(error.UnknownFunction, primary.doc.findFunction("missing()"));
     if (metrics) |sink| try sink.record("__bytecode_bytes", primary.bytecode.len);
     try compiled.append(arena, .{
@@ -239,7 +276,7 @@ fn runConformanceSpecImpl(allocator: std.mem.Allocator, source_path: []const u8,
             std.debug.print("secondary contract source not found: {s}\n", .{c.source});
             return error.DeclaredSourceMissing;
         };
-        const built = try compileOne(arena, c.source, out_path);
+        const built = try compileOne(arena, c.source, out_path, extra_args);
         try compiled.append(arena, .{
             .name = c.name,
             .caller = c.caller,
@@ -262,11 +299,16 @@ const CompiledContract = struct {
     doc: abi_doc.AbiDoc,
 };
 
-fn compileOne(arena: std.mem.Allocator, source_path: []const u8, out_path: []const u8) !struct {
+fn compileOne(
+    arena: std.mem.Allocator,
+    source_path: []const u8,
+    out_path: []const u8,
+    extra_args: []const []const u8,
+) !struct {
     bytecode: []const u8,
     doc: abi_doc.AbiDoc,
 } {
-    try runOraEmit(arena, source_path, out_path);
+    try runOraEmitWithExtraArgs(arena, source_path, out_path, extra_args);
     const stem = sourceStem(source_path) orelse return error.InvalidSourcePath;
     const artifacts = try readArtifacts(arena, out_path, stem);
     const doc = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
@@ -319,6 +361,32 @@ pub const MetricSink = struct {
 
     fn record(self: MetricSink, key: []const u8, value: u64) !void {
         try self.list.append(self.allocator, .{ .key = try self.allocator.dupe(u8, key), .value = value });
+    }
+};
+
+pub const PropertyRuntimeBundle = struct {
+    allocator: std.mem.Allocator,
+    host: *HarnessHost,
+    evm: *types.Evm,
+    doc: *abi_doc.AbiDoc,
+    contract_address: types.Address,
+    caller: types.Address,
+
+    pub fn deinit(self: *PropertyRuntimeBundle) void {
+        self.evm.deinit();
+        self.host.deinit();
+        self.doc.deinit();
+    }
+
+    pub fn runtime(self: *PropertyRuntimeBundle) PropertyRuntime {
+        return .{
+            .allocator = self.allocator,
+            .host = self.host,
+            .evm = self.evm,
+            .abi = self.doc,
+            .contract_address = self.contract_address,
+            .caller = self.caller,
+        };
     }
 };
 
@@ -625,21 +693,75 @@ pub fn compileAndRunPropertySource(
     const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
     const out_path = try pathFromTmpAlloc(arena, tmp, "out");
 
-    try runOraEmit(arena, source_path, out_path);
+    var bundle = try compileAndDeployPropertySource(arena, stem, source_path, out_path, &.{"--no-verify"});
+    defer bundle.deinit();
+    var runtime = bundle.runtime();
+    try run(&runtime);
+}
+
+pub fn compileAndRunPropertySourceDifferential(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    source: []const u8,
+    lhs_args: []const []const u8,
+    rhs_args: []const []const u8,
+    comptime run: fn (*PropertyRuntime, *PropertyRuntime) anyerror!void,
+) !void {
+    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var run_arena = std.heap.ArenaAllocator.init(allocator);
+    defer run_arena.deinit();
+    const arena = run_arena.allocator();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.makeDir("lhs");
+    try tmp.dir.makeDir("rhs");
+
+    const source_name = try std.fmt.allocPrint(arena, "{s}.ora", .{stem});
+    try tmp.dir.writeFile(.{ .sub_path = source_name, .data = source });
+
+    const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
+    const lhs_out = try pathFromTmpAlloc(arena, tmp, "lhs");
+    const rhs_out = try pathFromTmpAlloc(arena, tmp, "rhs");
+
+    var lhs = try compileAndDeployPropertySource(arena, stem, source_path, lhs_out, lhs_args);
+    defer lhs.deinit();
+    var rhs = try compileAndDeployPropertySource(arena, stem, source_path, rhs_out, rhs_args);
+    defer rhs.deinit();
+
+    var lhs_runtime = lhs.runtime();
+    var rhs_runtime = rhs.runtime();
+    try run(&lhs_runtime, &rhs_runtime);
+}
+
+fn compileAndDeployPropertySource(
+    arena: std.mem.Allocator,
+    stem: []const u8,
+    source_path: []const u8,
+    out_path: []const u8,
+    extra_args: []const []const u8,
+) !PropertyRuntimeBundle {
+    try runOraEmitWithExtraArgs(arena, source_path, out_path, extra_args);
 
     const artifacts = try readArtifacts(arena, out_path, stem);
-    var doc = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
-    defer doc.deinit();
+    const doc = try arena.create(abi_doc.AbiDoc);
+    doc.* = try abi_doc.AbiDoc.load(arena, artifacts.abi_path);
+    errdefer doc.deinit();
 
     const caller = try types.Address.fromHex("0x1000000000000000000000000000000000000000");
-    var host = HarnessHost.init(arena);
-    defer host.deinit();
+    const host = try arena.create(HarnessHost);
+    host.* = HarnessHost.init(arena);
+    errdefer host.deinit();
     try host.setBalance(caller, std.math.maxInt(u256));
     try host.setNonce(caller, 1);
 
-    var evm: types.Evm = undefined;
+    const evm = try arena.create(types.Evm);
     try evm.init(arena, host.hostInterface(), .OSAKA, evm_mod.deterministicBlockContext(), caller, 0, null);
-    defer evm.deinit();
+    errdefer evm.deinit();
 
     try evm.initTransactionState(null);
     try evm.preWarmTransaction(caller);
@@ -658,13 +780,12 @@ pub fn compileAndRunPropertySource(
     try testing.expect(create_result.success);
     try testing.expect(host.getCodeForAddress(create_result.address).len > 0);
 
-    var runtime = PropertyRuntime{
+    return .{
         .allocator = arena,
-        .host = &host,
-        .evm = &evm,
-        .abi = &doc,
+        .host = host,
+        .evm = evm,
+        .doc = doc,
         .contract_address = create_result.address,
         .caller = caller,
     };
-    try run(&runtime);
 }

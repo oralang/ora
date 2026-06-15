@@ -994,6 +994,40 @@ test "compiler lowers contextual aggregate integer literals without type fallbac
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
+test "compiler contextualizes typed dot bitfield integer literals without type fallback" {
+    const source_text =
+        \\bitfield TokenConfig : u256 {
+        \\    paused: bool;
+        \\    mintable: bool;
+        \\    burnable: bool;
+        \\    decimals: u8;
+        \\    version: u8;
+        \\}
+        \\
+        \\contract TokenWithBitfield {
+        \\    storage var config: TokenConfig;
+        \\
+        \\    pub fn init() {
+        \\        let cfg: TokenConfig = .{
+        \\            .paused = false,
+        \\            .mintable = true,
+        \\            .burnable = true,
+        \\            .decimals = 18,
+        \\            .version = 1,
+        \\        };
+        \\        config = cfg;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
 test "compiler lowers function-valued bindings without function fallback" {
     const source_text =
         \\fn helper(value: u256) -> u256 {
@@ -1872,6 +1906,63 @@ test "compiler resolves generic compound shift signedness before lowering" {
     try testing.expect(hir_result.diagnostics.isEmpty());
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrsi"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shrui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
+}
+
+test "compiler preserves source signedness for contextual integer widening" {
+    const source_text =
+        \\pub fn widen_signed(input: i8) -> i256 {
+        \\    return input;
+        \\}
+        \\
+        \\pub fn widen_unsigned(input: u8) -> u256 {
+        \\    return input;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.extsi"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.extui"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
+}
+
+test "compiler preserves source signedness for local and call integer widening" {
+    const source_text =
+        \\fn accept_u256(input: u256) {
+        \\}
+        \\
+        \\fn accept_i256(input: i256) {
+        \\}
+        \\
+        \\pub fn widen_unsigned_local_and_call() {
+        \\    let small: u8 = 42;
+        \\    let medium: u16 = small;
+        \\    accept_u256(medium);
+        \\}
+        \\
+        \\pub fn widen_signed_local_and_call(input: i8) {
+        \\    let medium: i16 = input;
+        \\    accept_i256(medium);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.extui"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "arith.extsi"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "cannot determine signedness"));
 }
 

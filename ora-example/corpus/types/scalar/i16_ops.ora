@@ -1,8 +1,12 @@
+comptime const std = @import("std");
+
 contract I16Ops {
     storage var a: i16;
     storage var b: i16;
 
-    pub fn arithmetic(x: i16, y: i16) -> i16 {
+    pub fn arithmetic(x: i16, y: i16) -> i16
+        requires(x != std.constants.I16_MIN)
+    {
         let add: i16 = x +% y;
         let sub: i16 = x -% y;
         let mul: i16 = x *% y;

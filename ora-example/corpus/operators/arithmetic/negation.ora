@@ -1,35 +1,51 @@
+comptime const std = @import("std");
+
 contract Negation {
-    pub fn negate_i8(x: i8) -> i8 {
+    pub fn negate_i8(x: i8) -> i8
+        requires(x != std.constants.I8_MIN)
+    {
         let res: i8 = -x;
         return res;
     }
 
-    pub fn negate_i16(x: i16) -> i16 {
+    pub fn negate_i16(x: i16) -> i16
+        requires(x != std.constants.I16_MIN)
+    {
         let res: i16 = -x;
         return res;
     }
 
-    pub fn negate_i32(x: i32) -> i32 {
+    pub fn negate_i32(x: i32) -> i32
+        requires(x != std.constants.I32_MIN)
+    {
         let res: i32 = -x;
         return res;
     }
 
-    pub fn negate_i64(x: i64) -> i64 {
+    pub fn negate_i64(x: i64) -> i64
+        requires(x != std.constants.I64_MIN)
+    {
         let res: i64 = -x;
         return res;
     }
 
-    pub fn negate_i128(x: i128) -> i128 {
+    pub fn negate_i128(x: i128) -> i128
+        requires(x != std.constants.I128_MIN)
+    {
         let res: i128 = -x;
         return res;
     }
 
-    pub fn negate_i256(x: i256) -> i256 {
+    pub fn negate_i256(x: i256) -> i256
+        requires(x != std.constants.I256_MIN)
+    {
         let res: i256 = -x;
         return res;
     }
 
-    pub fn double_negate_i256(x: i256) -> i256 {
+    pub fn double_negate_i256(x: i256) -> i256
+        requires(x != std.constants.I256_MIN)
+    {
         let res: i256 = -(-x);
         return res;
     }
