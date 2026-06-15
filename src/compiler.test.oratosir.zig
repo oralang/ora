@@ -188,6 +188,43 @@ test "compiler generates deterministic true SIR branch CFG" {
     try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "entry=\"true\""));
 }
 
+test "compiler generates stable per-function SIR CFGs" {
+    const source_text =
+        \\pub fn first(x: u256) -> u256 {
+        \\    if (x != 0) {
+        \\        return x;
+        \\    }
+        \\    return 1;
+        \\}
+        \\
+        \\pub fn second() -> u256 {
+        \\    return 2;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const graphs = try mlir_cfg.generateFunctionCFGs(hir_result.context, hir_result.module.raw_module, testing.allocator, .{ .mode = .sir });
+    defer {
+        for (graphs) |graph| graph.deinit(testing.allocator);
+        testing.allocator.free(graphs);
+    }
+
+    try testing.expectEqual(@as(usize, 2), graphs.len);
+    try testing.expectEqualStrings("first", graphs[0].name);
+    try testing.expectEqualStrings("second", graphs[1].name);
+    try testing.expect(std.mem.containsAtLeast(u8, graphs[0].dot, 1, "SIR block CFG: first"));
+    try testing.expect(std.mem.containsAtLeast(u8, graphs[0].dot, 1, "term=sir.cond_br"));
+    try testing.expect(!std.mem.containsAtLeast(u8, graphs[0].dot, 1, "SIR block CFG: second"));
+    try testing.expect(std.mem.containsAtLeast(u8, graphs[1].dot, 1, "SIR block CFG: second"));
+    try testing.expect(!std.mem.containsAtLeast(u8, graphs[1].dot, 1, "SIR block CFG: first"));
+}
+
 test "compiler marks loop backedges in SIR CFG" {
     const source_text =
         \\pub fn count(n: u256) -> u256 {
@@ -253,6 +290,43 @@ test "compiler SIR CFG marks revert and unreachable blocks without mutating modu
     try testing.expect(!std.mem.containsAtLeast(u8, dot, 1, "f0_bb1 ->"));
     try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"true\""));
     try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"false\""));
+}
+
+test "compiler generates SIR CFG optimization diff without mutating module" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @const_false() {
+        \\    %c0 = sir.const 0 : !sir.u256
+        \\    sir.cond_br %c0 : !sir.u256, ^bb1, ^bb2
+        \\  ^bb1:
+        \\    sir.invalid
+        \\  ^bb2:
+        \\    sir.iret
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    const module_before = try printModuleTextForTest(module);
+    defer testing.allocator.free(module_before);
+    const diff = try mlir_cfg.generateSirOptimizationDiff(ctx, module, testing.allocator, false);
+    defer diff.deinit(testing.allocator);
+    const module_after = try printModuleTextForTest(module);
+    defer testing.allocator.free(module_after);
+
+    try testing.expectEqualStrings(module_before, module_after);
+    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "term=sir.cond_br"));
+    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "label=\"true\""));
+    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "label=\"false\""));
+    try testing.expect(std.mem.containsAtLeast(u8, diff.before, 1, "term=sir.invalid"));
+    try testing.expect(!std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.cond_br"));
+    try testing.expect(!std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.invalid"));
+    try testing.expect(std.mem.containsAtLeast(u8, diff.after, 1, "term=sir.iret"));
 }
 
 test "compiler marks proven refinement guards in Ora CFG overlay" {

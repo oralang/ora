@@ -711,6 +711,7 @@ pub fn main() !void {
         debug_mlir_options.emit_mlir_sir = true;
         debug_mlir_options.emit_sir_text = true;
         debug_mlir_options.emit_bytecode = true;
+        debug_mlir_options.emit_cfg_mode = "sir";
         debug_mlir_options.debug_info = true;
         if (!parsed.verify_requested) {
             debug_mlir_options.verify_z3 = false;
@@ -1888,7 +1889,7 @@ fn printUsage() !void {
     try stdout.print("  emit                   - Debug emission mode (use --emit=<list>)\n", .{});
     try stdout.print("  debug                  - Compile debugger artifacts and launch the Ora EVM debugger\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --emit=<list>          - Comma list: tokens, ast[:json|tree], typed-ast[:json|tree], mlir[:ora|sir|both], sir-text, bytecode, cfg[:ora|sir], abi[:solidity|extras], smt-report\n", .{});
+    try stdout.print("  --emit=<list>          - Comma list: tokens, ast[:json|tree], typed-ast[:json|tree], mlir[:ora|sir|both], sir-text, bytecode, cfg[:ora|sir|sir-diff], abi[:solidity|extras], smt-report\n", .{});
     try stdout.print("  --chain-id <id>        - Chain id exposed to @chainId() (default: 31337; overrides ora.toml)\n", .{});
     try stdout.print("  -h, --help             - Show this help text\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
@@ -4028,8 +4029,79 @@ fn emitCfgDot(
         var dot_file = try std.fs.cwd().createFile(output_file, .{});
         defer dot_file.close();
         try dot_file.writeAll(dot);
+
+        if (mode == .sir) {
+            const graphs = try mlir_cfg.generateFunctionCFGs(ctx, module, allocator, .{ .mode = .sir });
+            defer {
+                for (graphs) |graph| graph.deinit(allocator);
+                allocator.free(graphs);
+            }
+
+            for (graphs) |graph| {
+                const safe_name = try safePathComponent(allocator, graph.name);
+                defer allocator.free(safe_name);
+                const per_function_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".", safe_name, ".sir.dot" });
+                defer allocator.free(per_function_filename);
+                const per_function_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, per_function_filename });
+                defer allocator.free(per_function_output);
+                var per_function_file = try std.fs.cwd().createFile(per_function_output, .{});
+                defer per_function_file.close();
+                try per_function_file.writeAll(graph.dot);
+            }
+        }
     } else {
         try stdout.print("{s}", .{dot});
+    }
+}
+
+fn safePathComponent(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var result = try allocator.alloc(u8, value.len);
+    errdefer allocator.free(result);
+    for (value, 0..) |ch, index| {
+        result[index] = if (std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch == '.') ch else '_';
+    }
+    return result;
+}
+
+fn emitSirCfgOptimizationDiff(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    ctx: @import("mlir_c_api").c.MlirContext,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    debug_info: bool,
+) !void {
+    const mlir_cfg = @import("mlir/cfg.zig");
+    const diff = try mlir_cfg.generateSirOptimizationDiff(ctx, module, allocator, debug_info);
+    defer diff.deinit(allocator);
+
+    if (output_dir) |dir| {
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.stem(file_path);
+        const before_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.pre-opt.dot" });
+        defer allocator.free(before_filename);
+        const after_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.post-opt.dot" });
+        defer allocator.free(after_filename);
+
+        const before_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, before_filename });
+        defer allocator.free(before_output);
+        var before_file = try std.fs.cwd().createFile(before_output, .{});
+        defer before_file.close();
+        try before_file.writeAll(diff.before);
+
+        const after_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, after_filename });
+        defer allocator.free(after_output);
+        var after_file = try std.fs.cwd().createFile(after_output, .{});
+        defer after_file.close();
+        try after_file.writeAll(diff.after);
+    } else {
+        try stdout.print("// SIR CFG before framework canonicalizer\n{s}\n", .{diff.before});
+        try stdout.print("// SIR CFG after framework canonicalizer\n{s}", .{diff.after});
     }
 }
 
@@ -4073,10 +4145,12 @@ fn runMlirEmitAdvanced(
     const ctx = lowering.context;
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
     const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
+    const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
     const needs_sir_conversion = mlir_options.emit_mlir_sir or
         mlir_options.emit_sir_text or
         mlir_options.emit_bytecode or
         cfg_mode_is_sir;
+    const needs_refinement_cleanup = needs_sir_conversion or cfg_mode_is_sir_diff;
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
@@ -4235,7 +4309,7 @@ fn runMlirEmitAdvanced(
         );
     }
 
-    if (needs_sir_conversion) {
+    if (needs_refinement_cleanup) {
         const refinement_guards = compiler.refinement_guards;
         if (verification_result_opt) |*vr| {
             refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
@@ -4248,7 +4322,21 @@ fn runMlirEmitAdvanced(
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
         }
+    }
 
+    if (cfg_mode_is_sir_diff) {
+        try emitSirCfgOptimizationDiff(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            mlir_options.debug_info,
+        );
+    }
+
+    if (needs_sir_conversion) {
         if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();

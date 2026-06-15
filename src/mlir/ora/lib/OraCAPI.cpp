@@ -7288,118 +7288,150 @@ static std::string functionAttributeSummary(func::FuncOp func)
     return text;
 }
 
-static void emitSirBlockCFG(ModuleOp moduleOp, llvm::raw_ostream &os)
+static void emitSirGraphHeader(llvm::raw_ostream &os, llvm::StringRef label)
 {
     os << "digraph \"ora_sir_cfg\" {\n";
-    os << "  graph [label=\"SIR block CFG\", labelloc=t, fontname=\"Menlo\"];\n";
+    os << "  graph [label=";
+    printDotQuoted(os, label);
+    os << ", labelloc=t, fontname=\"Menlo\"];\n";
     os << "  rankdir=TB;\n";
     os << "  node [shape=box, fontname=\"Menlo\", style=\"rounded,filled\", fillcolor=\"#ffffff\"];\n";
     os << "  edge [fontname=\"Menlo\"];\n";
+}
 
-    unsigned funcIndex = 0;
+static void emitSirFunctionCFG(func::FuncOp func, unsigned funcIndex, llvm::raw_ostream &os)
+{
+    Region &body = func.getBody();
+    if (body.empty())
+        return;
+
+    SmallVector<Block *, 16> blocks;
+    llvm::DenseMap<Block *, unsigned> blockIndex;
+    for (Block &block : body.getBlocks())
+    {
+        blockIndex[&block] = blocks.size();
+        blocks.push_back(&block);
+    }
+
+    llvm::DenseSet<Block *> reachable;
+    collectReachableBlocks(blocks, reachable);
+    llvm::DenseSet<uint64_t> backedgeKeys;
+    collectBackedgeKeys(blocks, blockIndex, reachable, backedgeKeys);
+
+    SmallVector<SirCfgEdge, 32> edges;
+    for (unsigned i = 0, e = blocks.size(); i < e; ++i)
+    {
+        Operation *terminator = blocks[i]->getTerminator();
+        if (!terminator)
+            continue;
+        for (unsigned succ = 0, succEnd = terminator->getNumSuccessors(); succ < succEnd; ++succ)
+        {
+            Block *successor = terminator->getSuccessor(succ);
+            auto it = blockIndex.find(successor);
+            if (it == blockIndex.end())
+                continue;
+            SirCfgEdge edge;
+            edge.srcIndex = i;
+            edge.dstIndex = it->second;
+            edge.label = sirEdgeLabel(terminator, succ);
+            edge.backedge = backedgeKeys.contains(cfgEdgeKey(edge.srcIndex, edge.dstIndex));
+            edges.push_back(std::move(edge));
+        }
+    }
+
+    std::string clusterLabel;
+    llvm::raw_string_ostream clusterOs(clusterLabel);
+    clusterOs << "function " << func.getSymName();
+    std::string attrSummary = functionAttributeSummary(func);
+    if (!attrSummary.empty())
+        clusterOs << "\\n" << attrSummary;
+    clusterOs.flush();
+
+    os << "  subgraph cluster_f" << funcIndex << " {\n";
+    os << "    label=";
+    printDotQuoted(os, clusterLabel);
+    os << ";\n";
+
+    for (unsigned i = 0, e = blocks.size(); i < e; ++i)
+    {
+        Block *block = blocks[i];
+        Operation *terminator = block->getTerminator();
+        std::string label;
+        llvm::raw_string_ostream labelOs(label);
+        labelOs << func.getSymName() << "\\nbb" << i;
+        labelOs << "\\nargs=" << block->getNumArguments();
+        labelOs << "\\nops=" << std::distance(block->begin(), block->end());
+        labelOs << "\\nterm=" << operationName(terminator);
+        std::string effects = sirBlockEffects(block);
+        if (!effects.empty())
+            labelOs << "\\neffects=" << effects;
+        if (terminator)
+            labelOs << "\\nloc=" << locationToString(terminator->getLoc());
+        labelOs.flush();
+
+        os << "    f" << funcIndex << "_bb" << i << " [label=";
+        printDotQuoted(os, label);
+        if (!reachable.contains(block))
+            os << ", fillcolor=\"#eeeeee\", unreachable=\"true\"";
+        else if (isSirRevertLikeTerminator(terminator))
+            os << ", fillcolor=\"#ffe5e5\", revert=\"true\"";
+        else if (i == 0)
+            os << ", fillcolor=\"#e7f0ff\", entry=\"true\"";
+        os << "];\n";
+    }
+
+    for (const SirCfgEdge &edge : edges)
+    {
+        os << "    f" << funcIndex << "_bb" << edge.srcIndex << " -> f" << funcIndex << "_bb" << edge.dstIndex << " [";
+        bool wrote = false;
+        if (!edge.label.empty())
+        {
+            os << "label=";
+            printDotQuoted(os, edge.label);
+            wrote = true;
+        }
+        if (edge.backedge)
+        {
+            if (wrote)
+                os << ", ";
+            os << "color=\"#1f77b4\", penwidth=2, backedge=\"true\"";
+        }
+        os << "];\n";
+    }
+
+    os << "  }\n";
+}
+
+static SmallVector<func::FuncOp, 16> collectCfgFunctions(ModuleOp moduleOp)
+{
+    SmallVector<func::FuncOp, 16> functions;
     moduleOp.walk([&](func::FuncOp func)
                   {
-        Region &body = func.getBody();
-        if (body.empty())
-            return;
+        if (!func.getBody().empty())
+            functions.push_back(func); });
+    return functions;
+}
 
-        SmallVector<Block *, 16> blocks;
-        llvm::DenseMap<Block *, unsigned> blockIndex;
-        for (Block &block : body.getBlocks())
-        {
-            blockIndex[&block] = blocks.size();
-            blocks.push_back(&block);
-        }
+static void emitSirBlockCFG(ModuleOp moduleOp, llvm::raw_ostream &os)
+{
+    emitSirGraphHeader(os, "SIR block CFG");
 
-        llvm::DenseSet<Block *> reachable;
-        collectReachableBlocks(blocks, reachable);
-        llvm::DenseSet<uint64_t> backedgeKeys;
-        collectBackedgeKeys(blocks, blockIndex, reachable, backedgeKeys);
+    SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+    for (auto [index, func] : llvm::enumerate(functions))
+        emitSirFunctionCFG(func, static_cast<unsigned>(index), os);
 
-        SmallVector<SirCfgEdge, 32> edges;
-        for (unsigned i = 0, e = blocks.size(); i < e; ++i)
-        {
-            Operation *terminator = blocks[i]->getTerminator();
-            if (!terminator)
-                continue;
-            for (unsigned succ = 0, succEnd = terminator->getNumSuccessors(); succ < succEnd; ++succ)
-            {
-                Block *successor = terminator->getSuccessor(succ);
-                auto it = blockIndex.find(successor);
-                if (it == blockIndex.end())
-                    continue;
-                SirCfgEdge edge;
-                edge.srcIndex = i;
-                edge.dstIndex = it->second;
-                edge.label = sirEdgeLabel(terminator, succ);
-                edge.backedge = backedgeKeys.contains(cfgEdgeKey(edge.srcIndex, edge.dstIndex));
-                edges.push_back(std::move(edge));
-            }
-        }
+    os << "}\n";
+}
 
-        std::string clusterLabel;
-        llvm::raw_string_ostream clusterOs(clusterLabel);
-        clusterOs << "function " << func.getSymName();
-        std::string attrSummary = functionAttributeSummary(func);
-        if (!attrSummary.empty())
-            clusterOs << "\\n" << attrSummary;
-        clusterOs.flush();
+static void emitSirSingleFunctionCFG(func::FuncOp func, unsigned funcIndex, llvm::raw_ostream &os)
+{
+    std::string label;
+    llvm::raw_string_ostream labelOs(label);
+    labelOs << "SIR block CFG: " << func.getSymName();
+    labelOs.flush();
 
-        os << "  subgraph cluster_f" << funcIndex << " {\n";
-        os << "    label=";
-        printDotQuoted(os, clusterLabel);
-        os << ";\n";
-
-        for (unsigned i = 0, e = blocks.size(); i < e; ++i)
-        {
-            Block *block = blocks[i];
-            Operation *terminator = block->getTerminator();
-            std::string label;
-            llvm::raw_string_ostream labelOs(label);
-            labelOs << func.getSymName() << "\\nbb" << i;
-            labelOs << "\\nargs=" << block->getNumArguments();
-            labelOs << "\\nops=" << std::distance(block->begin(), block->end());
-            labelOs << "\\nterm=" << operationName(terminator);
-            std::string effects = sirBlockEffects(block);
-            if (!effects.empty())
-                labelOs << "\\neffects=" << effects;
-            if (terminator)
-                labelOs << "\\nloc=" << locationToString(terminator->getLoc());
-            labelOs.flush();
-
-            os << "    f" << funcIndex << "_bb" << i << " [label=";
-            printDotQuoted(os, label);
-            if (!reachable.contains(block))
-                os << ", fillcolor=\"#eeeeee\", unreachable=\"true\"";
-            else if (isSirRevertLikeTerminator(terminator))
-                os << ", fillcolor=\"#ffe5e5\", revert=\"true\"";
-            else if (i == 0)
-                os << ", fillcolor=\"#e7f0ff\", entry=\"true\"";
-            os << "];\n";
-        }
-
-        for (const SirCfgEdge &edge : edges)
-        {
-            os << "    f" << funcIndex << "_bb" << edge.srcIndex << " -> f" << funcIndex << "_bb" << edge.dstIndex << " [";
-            bool wrote = false;
-            if (!edge.label.empty())
-            {
-                os << "label=";
-                printDotQuoted(os, edge.label);
-                wrote = true;
-            }
-            if (edge.backedge)
-            {
-                if (wrote)
-                    os << ", ";
-                os << "color=\"#1f77b4\", penwidth=2, backedge=\"true\"";
-            }
-            os << "];\n";
-        }
-
-        os << "  }\n";
-        ++funcIndex; });
-
+    emitSirGraphHeader(os, label);
+    emitSirFunctionCFG(func, funcIndex, os);
     os << "}\n";
 }
 
@@ -7530,6 +7562,72 @@ MlirStringRef oraGenerateCFGWithOptions(
             return {nullptr, 0};
         dotStream.flush();
 
+        if (dotContent.empty())
+            return {nullptr, 0};
+        return allocateStringRef(dotContent);
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+size_t oraCFGFunctionCount(MlirModule module)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        return collectCfgFunctions(moduleOp).size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirStringRef oraCFGFunctionName(MlirModule module, size_t functionIndex)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+        if (functionIndex >= functions.size())
+            return {nullptr, 0};
+        return allocateStringRef(functions[functionIndex].getSymName().str());
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+MlirStringRef oraGenerateCFGForFunctionWithOptions(
+    MlirContext ctx,
+    MlirModule module,
+    MlirStringRef mode,
+    size_t functionIndex)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        ModuleOp moduleOp = unwrap(module);
+
+        if (!oraDialectRegister(ctx))
+            return {nullptr, 0};
+        context->getOrLoadDialect<sir::SIRDialect>();
+
+        llvm::StringRef modeRef(mode.data ? mode.data : "", mode.length);
+        if (modeRef != "sir")
+            return {nullptr, 0};
+
+        SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+        if (functionIndex >= functions.size())
+            return {nullptr, 0};
+
+        std::string dotContent;
+        llvm::raw_string_ostream dotStream(dotContent);
+        emitSirSingleFunctionCFG(functions[functionIndex], static_cast<unsigned>(functionIndex), dotStream);
+        dotStream.flush();
         if (dotContent.empty())
             return {nullptr, 0};
         return allocateStringRef(dotContent);

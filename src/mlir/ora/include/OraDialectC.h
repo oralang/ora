@@ -1789,6 +1789,25 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         const MlirStringRef *provenGuardIds,
         size_t provenGuardIdCount);
 
+    /// Return the number of function CFGs available in stable module walk order.
+    MLIR_CAPI_EXPORTED size_t oraCFGFunctionCount(
+        MlirModule module);
+
+    /// Return the function name for a stable CFG function index.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraCFGFunctionName(
+        MlirModule module,
+        size_t functionIndex);
+
+    /// Generate a mode-specific single-function CFG by stable function index.
+    /// Currently only mode "sir" is supported.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFGForFunctionWithOptions(
+        MlirContext ctx,
+        MlirModule module,
+        MlirStringRef mode,
+        size_t functionIndex);
+
     //===----------------------------------------------------------------------===//
     // MLIR Printing with Custom Assembly Formats
     //===----------------------------------------------------------------------===//
