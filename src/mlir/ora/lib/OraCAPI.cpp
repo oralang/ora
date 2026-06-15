@@ -763,16 +763,6 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
                 return {nullptr, 0};
             }
 
-            // Check if DCE left the IR in an invalid state
-            if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(operation))
-            {
-                if (moduleOp->hasAttr("ora.dce_invalid"))
-                {
-                    ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
-                    return {nullptr, 0};
-                }
-            }
-
             ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
 
             // Register the Ora dialect to ensure custom printers are available
@@ -7187,23 +7177,24 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-canonicalize");
 
+        auto addOraFunctionOptimizationPipeline = [&]()
+        {
+            pm.addPass(mlir::ora::createOraFunctionCanonicalizerPass());
+            pm.addPass(mlir::ora::createOraFunctionCSEPass());
+            pm.addPass(mlir::ora::createOraStorageReadCSEPass());
+        };
+
         // Run Ora optimizations in order:
-        // 1. Constant deduplication and constant folding (fallback)
-        pm.addPass(mlir::ora::createOraOptimizationPass());
+        // 1. Canonicalize/CSE Ora functions and storage reads.
+        addOraFunctionOptimizationPipeline();
 
-        // 2. Canonicalization on Ora MLIR functions
-        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-
-        // 3. Cleanup unused Ora operations
-        pm.addPass(mlir::ora::createOraCleanupPass());
-
-        // 4. Inline functions marked with ora.inline attribute
+        // 2. Inline functions marked with ora.inline attribute.
         pm.addPass(mlir::ora::createOraInliningPass());
 
-        // 5. Re-run simple Ora optimization after inlining so constant control
+        // 3. Re-run Ora optimization after inlining so constant control
         // flow introduced or preserved across earlier passes is folded before
         // Ora emission / Ora->SIR conversion.
-        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
+        addOraFunctionOptimizationPipeline();
 
         LogicalResult result = pm.run(moduleOp);
 
@@ -7231,8 +7222,8 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
         const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
-        const bool enablePhase0SIRFrameworkCleanup =
-            moduleOp->hasAttr("ora.phase0.run_sir_framework_cleanup");
+        const bool enablePhase0SIRFrameworkCanonicalizer =
+            moduleOp->hasAttr("ora.phase0.run_sir_framework_canonicalizer");
         if (debugInfo && !hadDebugInfoAttr)
         {
             moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
@@ -7263,30 +7254,22 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         pm.addPass(mlir::ora::createOraInliningPass());
         ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
 
-        // Add the Ora to SIR conversion pass
-        // Use addPass instead of addNestedPass since this is a ModuleOp pass
-        const bool enable_ora_to_sir = true;
-        if (enable_ora_to_sir)
+        // Add the Ora to SIR conversion pass. Use addPass instead of
+        // addNestedPass since this is a ModuleOp pass.
+        pm.addPass(createOraToSIRPass());
+        // Run narrow deterministic SIR hygiene in every mode. The pass set is
+        // deliberately limited to location-preserving, production-accepted
+        // canonicalization so debug/source-map artifacts share release behavior.
+        pm.addPass(createSIROptimizationPass());
+        // Cleanup removes dead pure ops after the deterministic hygiene pass.
+        pm.addPass(createSIRCleanupPass());
+        if (enablePhase0SIRFrameworkCanonicalizer)
         {
-            pm.addPass(createOraToSIRPass());
-        }
-        const bool enable_post_sir_passes = !debugInfo;
-        if (enable_post_sir_passes)
-        {
-            // Add optimization pass (for SIR-specific optimizations like constant folding)
-            pm.addPass(createSIROptimizationPass());
-            // Add cleanup pass to remove unused memref operations
-            // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
-            pm.addPass(createSIRCleanupPass());
-
-        }
-        if (enablePhase0SIRFrameworkCleanup)
-        {
-            // Phase 0 framework-first spike: let MLIR canonicalization/DCE
-            // exercise dialect folders on SIR after conversion. This is opt-in
+            // Phase 0 framework-first spike: let MLIR canonicalization exercise
+            // dialect folders on SIR after conversion. This is opt-in
             // so normal builds remain byte-identical while the spike measures
             // framework behavior against the existing manual cleanup baseline.
-            pm.addPass(createSimpleDCEPass());
+            pm.addPass(createSIRFrameworkCanonicalizerPass());
         }
 
         // Run the pass

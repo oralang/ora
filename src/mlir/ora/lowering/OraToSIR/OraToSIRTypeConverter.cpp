@@ -69,6 +69,39 @@ static Value makeMaskValue(OpBuilder &builder, Location loc, unsigned width)
     return lowering::constU256(builder, loc, llvm::APInt::getLowBitsSet(256, width));
 }
 
+static std::optional<llvm::APInt> getConstU256(Value value)
+{
+    if (auto constOp = value.getDefiningOp<sir::ConstOp>())
+        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+            return intAttr.getValue().zextOrTrunc(256);
+    return std::nullopt;
+}
+
+static bool isLowBitsMask(Value value, unsigned width)
+{
+    if (width == 0 || width > 256)
+        return false;
+    auto mask = getConstU256(value);
+    return mask && *mask == llvm::APInt::getLowBitsSet(256, width);
+}
+
+static bool isAlreadyMaskedToWidth(Value value, unsigned width)
+{
+    if (width >= 256)
+        return true;
+    auto andOp = value.getDefiningOp<sir::AndOp>();
+    return andOp && (isLowBitsMask(andOp.getLhs(), width) || isLowBitsMask(andOp.getRhs(), width));
+}
+
+static Value maskToWidth(OpBuilder &builder, Location loc, Value value, unsigned width)
+{
+    if (width >= 256 || isAlreadyMaskedToWidth(value, width))
+        return value;
+    if (Value mask = makeMaskValue(builder, loc, width))
+        return builder.create<sir::AndOp>(loc, sir::U256Type::get(builder.getContext()), value, mask);
+    return Value();
+}
+
 namespace mlir
 {
     namespace ora
@@ -573,10 +606,6 @@ namespace mlir
                                                  return *materialized;
                                          }
 
-                                         auto makeMask = [&](unsigned width) -> Value {
-                                             return makeMaskValue(builder, loc, width);
-                                         };
-
                                         // Convert ora.error_union<T> -> sir.u256 (narrow-only) when defined by ok/err ops.
                                         if (llvm::isa<sir::U256Type>(type))
                                         {
@@ -638,10 +667,8 @@ namespace mlir
                                                         Value bConst = constU256(builder, loc, intType.getWidth() / 8);
                                                         return builder.create<sir::SignExtendOp>(loc, u256, bConst, value);
                                                     }
-                                                    if (Value mask = makeMask(intType.getWidth()))
-                                                    {
-                                                        return builder.create<sir::AndOp>(loc, type, value, mask);
-                                                    }
+                                                    if (Value masked = maskToWidth(builder, loc, value, intType.getWidth()))
+                                                        return masked;
                                                 }
                                                 return value;
                                             }
@@ -662,10 +689,8 @@ namespace mlir
                                                  Value bConst = constU256(builder, loc, width / 8);
                                                  return builder.create<sir::SignExtendOp>(loc, u256, bConst, input);
                                              }
-                                             if (Value mask = makeMask(width))
-                                             {
-                                                 return builder.create<sir::AndOp>(loc, type, input, mask);
-                                             }
+                                             if (Value masked = maskToWidth(builder, loc, input, width))
+                                                 return masked;
                                              return Value();
                                          };
 
@@ -698,10 +723,8 @@ namespace mlir
                                                      {
                                                          if (reprInt.getWidth() < 256)
                                                          {
-                                                            if (Value mask = makeMask(reprInt.getWidth()))
-                                                            {
-                                                                return builder.create<sir::AndOp>(loc, type, value, mask);
-                                                            }
+                                                            if (Value masked = maskToWidth(builder, loc, value, reprInt.getWidth()))
+                                                                return masked;
                                                          }
                                                      }
                                                  }
@@ -767,10 +790,8 @@ namespace mlir
                                                              if (adjusted)
                                                                  return adjusted;
                                                          }
-                                                         if (Value mask = makeMask(width))
-                                                         {
-                                                             return builder.create<sir::AndOp>(loc, type, value, mask);
-                                                         }
+                                                         if (Value masked = maskToWidth(builder, loc, value, width))
+                                                             return masked;
                                                      }
                                                  }
                                                  return value;
@@ -792,12 +813,8 @@ namespace mlir
                                                  Value value = builder.create<sir::BitcastOp>(loc, type, input);
                                                  if (intType.getWidth() < 256)
                                                  {
-                                                     if (Value mask = makeMask(intType.getWidth()))
-                                                     {
-                                                         auto u256 = sir::U256Type::get(builder.getContext());
-                                                         Value masked = builder.create<sir::AndOp>(loc, u256, input, mask);
+                                                     if (Value masked = maskToWidth(builder, loc, input, intType.getWidth()))
                                                          return builder.create<sir::BitcastOp>(loc, type, masked);
-                                                     }
                                                  }
                                                  return value;
                                              }
@@ -936,10 +953,6 @@ namespace mlir
             // Return nullptr to indicate we can't materialize (will cause conversion to fail)
             addSourceMaterialization([this](OpBuilder &builder, Type type, ValueRange inputs, Location loc) -> Value
                                      {
-                                         auto makeMask = [&](unsigned width) -> Value {
-                                             return makeMaskValue(builder, loc, width);
-                                         };
-
                                          if (inputs.size() != 1)
                                              return Value();
                                          Value input = inputs[0];
@@ -961,12 +974,8 @@ namespace mlir
                                                  }
                                                  if (intType.getWidth() < 256)
                                                  {
-                                                     if (Value mask = makeMask(intType.getWidth()))
-                                                     {
-                                                         auto u256 = sir::U256Type::get(builder.getContext());
-                                                         Value masked = builder.create<sir::AndOp>(loc, u256, input, mask);
+                                                     if (Value masked = maskToWidth(builder, loc, input, intType.getWidth()))
                                                          return materializeInteger(masked);
-                                                     }
                                                  }
                                                  return materializeInteger(input);
                                              }

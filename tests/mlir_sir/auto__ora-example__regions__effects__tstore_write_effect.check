@@ -11,12 +11,11 @@
 // CHECK-NEXT:   func.func @testMultipleTStoreWrites() attributes {ora.effect = "writes", ora.selector = "0x376ac4ef", ora.visibility = "pub", ora.write_slots = ["transient:temp_counter", "transient:temp_flag"]} {
 // CHECK-NEXT:     %c10 = sir.const 10 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":19:24)))
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:21)))
-// CHECK-NEXT:     %0 = sir.and %c1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:21)))
-// CHECK-NEXT:     %1 = sir.bitcast %0 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:21)))
-// CHECK-NEXT:     %2 = sir.bitcast %1 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:9)))
-// CHECK-NEXT:     %3 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":19:9)))
-// CHECK-NEXT:     sir.tstore %3 : !sir.u256, %c10 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":19:9)))
-// CHECK-NEXT:     sir.tstore %c1 : !sir.u256, %2 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:9)))
+// CHECK-NEXT:     %0 = sir.bitcast %c1 : !sir.u256 : i1 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:21)))
+// CHECK-NEXT:     %1 = sir.bitcast %0 : i1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:9)))
+// CHECK-NEXT:     %2 = sir.const 0 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":19:9)))
+// CHECK-NEXT:     sir.tstore %2 : !sir.u256, %c10 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":19:9)))
+// CHECK-NEXT:     sir.tstore %c1 : !sir.u256, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":20:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":18:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":18:5)
 // CHECK-NEXT:   func.func @testTStoreWriteInConditional(%arg0: !sir.u256 loc("{{.*}}/ora-example/regions/effects/tstore_write_effect.ora":24:41)) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.effect = "writes", ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x79687580", ora.visibility = "pub", ora.write_slots = ["transient:temp_counter"]} {

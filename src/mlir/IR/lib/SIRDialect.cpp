@@ -8,7 +8,6 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
-#include "mlir/IR/Matchers.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/TypeSwitch.h"
 
@@ -16,6 +15,8 @@
 
 using namespace mlir;
 using namespace sir;
+
+static constexpr llvm::StringLiteral kSIRResultNameAttr = "sir.result_name_0";
 
 // Include the generated type definitions
 #define GET_TYPEDEF_CLASSES
@@ -34,8 +35,8 @@ using namespace sir;
 ::mlir::ParseResult ConstOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
     // Parse format: value attr-dict : type
-    ::mlir::IntegerAttr valueAttr;
-    if (parser.parseAttribute(valueAttr, "value", result.attributes))
+    llvm::APInt value;
+    if (parser.parseInteger(value))
         return ::mlir::failure();
 
     // Parse optional attributes (including sir.result_name_0)
@@ -48,9 +49,9 @@ using namespace sir;
         return ::mlir::failure();
     result.addTypes(resultType);
 
-    // Remove "value" from attributes dict - it's a property, not a regular attribute
-    // The generated code will convert it to a property, but we don't want it printed
-    result.attributes.erase("value");
+    llvm::APInt value256 = value.isNegative() ? value.sextOrTrunc(256) : value.zextOrTrunc(256);
+    auto intType = ::mlir::IntegerType::get(parser.getContext(), 256);
+    result.addAttribute("value", ::mlir::IntegerAttr::get(intType, value256));
 
     return ::mlir::success();
 }
@@ -61,26 +62,102 @@ void ConstOp::print(::mlir::OpAsmPrinter &p)
     p.printAttributeWithoutType(getValueAttr());
 
     // Print attributes, but elide "value" (property) and internal result name attribute
-    SmallVector<StringRef> elidedAttrs = {"value", "sir.result_name_0"};
+    SmallVector<StringRef> elidedAttrs = {"value", kSIRResultNameAttr};
     p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
 
     p << " : ";
     p << getResult().getType();
 }
 
-//===----------------------------------------------------------------------===//
-// ConstOp Result Naming (via OpAsmOpInterface)
-//===----------------------------------------------------------------------===//
-
-void ConstOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
+static void printAttrsElidingResultName(::mlir::OpAsmPrinter &p, Operation *op)
 {
-    // Check if we have a stored result name attribute
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
-    }
+    SmallVector<StringRef> elidedAttrs = {kSIRResultNameAttr};
+    p.printOptionalAttrDict(op->getAttrs(), elidedAttrs);
 }
+
+static void setNamedResult(Operation *op, Value result,
+                           ::mlir::OpAsmSetValueNameFn setNameFn)
+{
+    if (auto nameAttr = op->getAttrOfType<::mlir::StringAttr>(kSIRResultNameAttr))
+        setNameFn(result, nameAttr.getValue());
+}
+
+static ::mlir::ParseResult parseUnaryResultOp(::mlir::OpAsmParser &parser,
+                                              ::mlir::OperationState &result)
+{
+    ::mlir::OpAsmParser::UnresolvedOperand operand;
+    Type operandType, resultType;
+    if (parser.parseOperand(operand) || parser.parseColonType(operandType) ||
+        parser.parseOptionalAttrDict(result.attributes) ||
+        parser.parseColonType(resultType))
+        return ::mlir::failure();
+
+    result.addTypes(resultType);
+    return parser.resolveOperand(operand, operandType, result.operands);
+}
+
+static ::mlir::ParseResult parseBinaryResultOp(::mlir::OpAsmParser &parser,
+                                               ::mlir::OperationState &result)
+{
+    ::mlir::OpAsmParser::UnresolvedOperand lhs, rhs;
+    Type lhsType, rhsType, resultType;
+    if (parser.parseOperand(lhs) || parser.parseColonType(lhsType) ||
+        parser.parseComma() || parser.parseOperand(rhs) ||
+        parser.parseColonType(rhsType) ||
+        parser.parseOptionalAttrDict(result.attributes) ||
+        parser.parseColonType(resultType))
+        return ::mlir::failure();
+
+    result.addTypes(resultType);
+    if (parser.resolveOperand(lhs, lhsType, result.operands) ||
+        parser.resolveOperand(rhs, rhsType, result.operands))
+        return ::mlir::failure();
+    return ::mlir::success();
+}
+
+static void printUnaryResultOp(::mlir::OpAsmPrinter &p, Operation *op, Value operand,
+                               Type resultType)
+{
+    p << " ";
+    p << operand;
+    p << " : ";
+    p << operand.getType();
+    printAttrsElidingResultName(p, op);
+    p << " : ";
+    p << resultType;
+}
+
+static void printBinaryResultOp(::mlir::OpAsmPrinter &p, Operation *op, Value lhs,
+                                Value rhs, Type resultType)
+{
+    p << " ";
+    p << lhs;
+    p << " : ";
+    p << lhs.getType();
+    p << ", ";
+    p << rhs;
+    p << " : ";
+    p << rhs.getType();
+    printAttrsElidingResultName(p, op);
+    p << " : ";
+    p << resultType;
+}
+
+#define DEFINE_SIR_SINGLE_RESULT_NAME(OpT)                                           \
+    void OpT::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)               \
+    {                                                                                \
+        setNamedResult(*this, getResult(), setNameFn);                               \
+    }
+
+DEFINE_SIR_SINGLE_RESULT_NAME(ConstOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(AddOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(MulOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(MallocOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(AddPtrOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(KeccakOp)
+DEFINE_SIR_SINGLE_RESULT_NAME(SLoadOp)
+
+#undef DEFINE_SIR_SINGLE_RESULT_NAME
 
 //===----------------------------------------------------------------------===//
 // ConstOp Folding
@@ -90,6 +167,173 @@ void ConstOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
 {
     // Just return the constant attribute; this makes the op foldable and DCE-able
     return getValueAttr();
+}
+
+static std::optional<llvm::APInt> getSIRConstantAPInt(Value value)
+{
+    if (auto constOp = value.getDefiningOp<ConstOp>())
+    {
+        if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+            return intAttr.getValue();
+    }
+    return std::nullopt;
+}
+
+static ::mlir::Attribute getSIRConstAttr(MLIRContext *ctx, const llvm::APInt &value)
+{
+    auto intType = ::mlir::IntegerType::get(ctx, 256);
+    return ::mlir::IntegerAttr::get(intType, value.zextOrTrunc(256));
+}
+
+enum class BinaryConstFoldKind
+{
+    Add,
+    Sub,
+    Mul,
+    Eq,
+    Lt,
+    Gt,
+    SLt,
+    SGt,
+    And,
+    Or,
+    Xor,
+};
+
+enum class ShiftConstFoldKind
+{
+    Byte,
+    Shl,
+    Shr,
+    Sar,
+};
+
+enum class UnaryConstFoldKind
+{
+    Not,
+    IsZero,
+};
+
+static llvm::APInt foldSIRBinaryAPInts(BinaryConstFoldKind kind,
+                                       const llvm::APInt &lhs,
+                                       const llvm::APInt &rhs)
+{
+    llvm::APInt lhs256 = lhs.zextOrTrunc(256);
+    llvm::APInt rhs256 = rhs.zextOrTrunc(256);
+
+    switch (kind)
+    {
+    case BinaryConstFoldKind::Add:
+        return lhs256 + rhs256;
+    case BinaryConstFoldKind::Sub:
+        return lhs256 - rhs256;
+    case BinaryConstFoldKind::Mul:
+        return lhs256 * rhs256;
+    case BinaryConstFoldKind::Eq:
+        return llvm::APInt(256, lhs256 == rhs256 ? 1 : 0);
+    case BinaryConstFoldKind::Lt:
+        return llvm::APInt(256, lhs256.ult(rhs256) ? 1 : 0);
+    case BinaryConstFoldKind::Gt:
+        return llvm::APInt(256, lhs256.ugt(rhs256) ? 1 : 0);
+    case BinaryConstFoldKind::SLt:
+        return llvm::APInt(256, lhs256.slt(rhs256) ? 1 : 0);
+    case BinaryConstFoldKind::SGt:
+        return llvm::APInt(256, lhs256.sgt(rhs256) ? 1 : 0);
+    case BinaryConstFoldKind::And:
+        return lhs256 & rhs256;
+    case BinaryConstFoldKind::Or:
+        return lhs256 | rhs256;
+    case BinaryConstFoldKind::Xor:
+        return lhs256 ^ rhs256;
+    }
+
+    llvm_unreachable("unknown SIR binary constant fold kind");
+}
+
+static llvm::APInt foldSIRShiftAPInts(ShiftConstFoldKind kind,
+                                      const llvm::APInt &shift,
+                                      const llvm::APInt &value)
+{
+    llvm::APInt shift256 = shift.zextOrTrunc(256);
+    llvm::APInt value256 = value.zextOrTrunc(256);
+
+    switch (kind)
+    {
+    case ShiftConstFoldKind::Byte:
+        if (shift256.uge(llvm::APInt(256, 32)))
+            return llvm::APInt(256, 0);
+        return value256.lshr((31 - shift256.getZExtValue()) * 8)
+            .zextOrTrunc(8)
+            .zext(256);
+    case ShiftConstFoldKind::Shl:
+        if (shift256.uge(llvm::APInt(256, 256)))
+            return llvm::APInt(256, 0);
+        return value256.shl(shift256.getZExtValue());
+    case ShiftConstFoldKind::Shr:
+        if (shift256.uge(llvm::APInt(256, 256)))
+            return llvm::APInt(256, 0);
+        return value256.lshr(shift256.getZExtValue());
+    case ShiftConstFoldKind::Sar:
+        if (shift256.uge(llvm::APInt(256, 256)))
+            return value256.isNegative()
+                       ? llvm::APInt::getAllOnes(256)
+                       : llvm::APInt(256, 0);
+        return value256.ashr(shift256.getZExtValue());
+    }
+
+    llvm_unreachable("unknown SIR shift constant fold kind");
+}
+
+static llvm::APInt foldSIRUnaryAPInt(UnaryConstFoldKind kind,
+                                     const llvm::APInt &value)
+{
+    llvm::APInt value256 = value.zextOrTrunc(256);
+
+    switch (kind)
+    {
+    case UnaryConstFoldKind::Not:
+        return ~value256;
+    case UnaryConstFoldKind::IsZero:
+        return llvm::APInt(256, value256.isZero() ? 1 : 0);
+    }
+
+    llvm_unreachable("unknown SIR unary constant fold kind");
+}
+
+static ::mlir::OpFoldResult foldSIRBinaryConstants(Value lhs, Value rhs,
+                                                   MLIRContext *ctx,
+                                                   BinaryConstFoldKind kind)
+{
+    auto lhsVal = getSIRConstantAPInt(lhs);
+    auto rhsVal = getSIRConstantAPInt(rhs);
+    if (!lhsVal || !rhsVal)
+        return {};
+
+    return getSIRConstAttr(ctx, foldSIRBinaryAPInts(kind, *lhsVal, *rhsVal));
+}
+
+static ::mlir::OpFoldResult foldSIRUnaryConstant(Value value, MLIRContext *ctx,
+                                                 UnaryConstFoldKind kind)
+{
+    auto constant = getSIRConstantAPInt(value);
+    if (!constant)
+        return {};
+
+    return getSIRConstAttr(ctx, foldSIRUnaryAPInt(kind, *constant));
+}
+
+static ::mlir::OpFoldResult foldSIRShiftConstants(Value shift, Value value,
+                                                  MLIRContext *ctx,
+                                                  ShiftConstFoldKind kind)
+{
+    auto shiftValue = getSIRConstantAPInt(shift);
+    auto inputValue = getSIRConstantAPInt(value);
+    if (!shiftValue || !inputValue)
+        return {};
+
+    return getSIRConstAttr(
+        ctx,
+        foldSIRShiftAPInts(kind, *shiftValue, *inputValue));
 }
 
 //===----------------------------------------------------------------------===//
@@ -145,83 +389,47 @@ static bool hasFoldBlockingAttrs(Operation *op)
     return {};
 }
 
-//===----------------------------------------------------------------------===//
-// AddOp Result Naming
-//===----------------------------------------------------------------------===//
-
-void AddOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
+#define DEFINE_SIR_BINARY_CONST_FOLD(OpT, Kind)                                      \
+    ::mlir::OpFoldResult OpT::fold(FoldAdaptor adaptor)                              \
+    {                                                                                \
+        return foldSIRBinaryConstants(getLhs(), getRhs(), getContext(),              \
+                                      BinaryConstFoldKind::Kind);                    \
     }
-}
 
-//===----------------------------------------------------------------------===//
-// MulOp Result Naming
-//===----------------------------------------------------------------------===//
-
-void MulOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
+#define DEFINE_SIR_UNARY_CONST_FOLD(OpT, Operand, Kind)                              \
+    ::mlir::OpFoldResult OpT::fold(FoldAdaptor adaptor)                              \
+    {                                                                                \
+        return foldSIRUnaryConstant(Operand(), getContext(),                         \
+                                    UnaryConstFoldKind::Kind);                       \
     }
-}
 
-//===----------------------------------------------------------------------===//
-// MallocOp Result Naming
-//===----------------------------------------------------------------------===//
-
-void MallocOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
+#define DEFINE_SIR_SHIFT_CONST_FOLD(OpT, ShiftOperand, ValueOperand, Kind)            \
+    ::mlir::OpFoldResult OpT::fold(FoldAdaptor adaptor)                              \
+    {                                                                                \
+        return foldSIRShiftConstants(ShiftOperand(), ValueOperand(), getContext(),    \
+                                     ShiftConstFoldKind::Kind);                      \
     }
-}
 
-//===----------------------------------------------------------------------===//
-// AddPtrOp Result Naming
-//===----------------------------------------------------------------------===//
+DEFINE_SIR_BINARY_CONST_FOLD(AddOp, Add)
+DEFINE_SIR_BINARY_CONST_FOLD(SubOp, Sub)
+DEFINE_SIR_BINARY_CONST_FOLD(MulOp, Mul)
+DEFINE_SIR_BINARY_CONST_FOLD(LtOp, Lt)
+DEFINE_SIR_BINARY_CONST_FOLD(GtOp, Gt)
+DEFINE_SIR_BINARY_CONST_FOLD(SLtOp, SLt)
+DEFINE_SIR_BINARY_CONST_FOLD(SGtOp, SGt)
+DEFINE_SIR_BINARY_CONST_FOLD(AndOp, And)
+DEFINE_SIR_BINARY_CONST_FOLD(OrOp, Or)
+DEFINE_SIR_BINARY_CONST_FOLD(XorOp, Xor)
+DEFINE_SIR_UNARY_CONST_FOLD(NotOp, getX, Not)
+DEFINE_SIR_UNARY_CONST_FOLD(IsZeroOp, getX, IsZero)
+DEFINE_SIR_SHIFT_CONST_FOLD(ByteOp, getI, getX, Byte)
+DEFINE_SIR_SHIFT_CONST_FOLD(ShlOp, getShift, getX, Shl)
+DEFINE_SIR_SHIFT_CONST_FOLD(ShrOp, getShift, getX, Shr)
+DEFINE_SIR_SHIFT_CONST_FOLD(SarOp, getShift, getX, Sar)
 
-void AddPtrOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
-    }
-}
-
-//===----------------------------------------------------------------------===//
-// KeccakOp Result Naming
-//===----------------------------------------------------------------------===//
-
-void KeccakOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
-    }
-}
-
-//===----------------------------------------------------------------------===//
-// SLoadOp Result Naming
-//===----------------------------------------------------------------------===//
-
-void SLoadOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
-{
-    auto nameAttr = (*this)->getAttrOfType<::mlir::StringAttr>("sir.result_name_0");
-    if (nameAttr)
-    {
-        setNameFn(getResult(), nameAttr.getValue());
-    }
-}
+#undef DEFINE_SIR_BINARY_CONST_FOLD
+#undef DEFINE_SIR_UNARY_CONST_FOLD
+#undef DEFINE_SIR_SHIFT_CONST_FOLD
 
 //===----------------------------------------------------------------------===//
 // Custom Print/Parse Methods to Elide sir.result_name_0 Attribute
@@ -229,186 +437,71 @@ void SLoadOp::getAsmResultNames(::mlir::OpAsmSetValueNameFn setNameFn)
 
 ::mlir::ParseResult AddOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand lhs, rhs;
-    Type lhsType, rhsType, resType;
-    if (parser.parseOperand(lhs) || parser.parseColonType(lhsType) ||
-        parser.parseComma() || parser.parseOperand(rhs) ||
-        parser.parseColonType(rhsType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(lhs, lhsType, result.operands) ||
-        parser.resolveOperand(rhs, rhsType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseBinaryResultOp(parser, result);
 }
 
 void AddOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getLhs();
-    p << " : ";
-    p << getLhs().getType();
-    p << ", ";
-    p << getRhs();
-    p << " : ";
-    p << getRhs().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printBinaryResultOp(p, *this, getLhs(), getRhs(), getResult().getType());
 }
 
 ::mlir::ParseResult MulOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand lhs, rhs;
-    Type lhsType, rhsType, resType;
-    if (parser.parseOperand(lhs) || parser.parseColonType(lhsType) ||
-        parser.parseComma() || parser.parseOperand(rhs) ||
-        parser.parseColonType(rhsType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(lhs, lhsType, result.operands) ||
-        parser.resolveOperand(rhs, rhsType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseBinaryResultOp(parser, result);
 }
 
 void MulOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getLhs();
-    p << " : ";
-    p << getLhs().getType();
-    p << ", ";
-    p << getRhs();
-    p << " : ";
-    p << getRhs().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printBinaryResultOp(p, *this, getLhs(), getRhs(), getResult().getType());
 }
 
 ::mlir::ParseResult MallocOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand size;
-    Type sizeType, resType;
-    if (parser.parseOperand(size) || parser.parseColonType(sizeType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(size, sizeType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseUnaryResultOp(parser, result);
 }
 
 void MallocOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getSize();
-    p << " : ";
-    p << getSize().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printUnaryResultOp(p, *this, getSize(), getResult().getType());
 }
 
 ::mlir::ParseResult AddPtrOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand base, offset;
-    Type baseType, offsetType, resType;
-    if (parser.parseOperand(base) || parser.parseColonType(baseType) ||
-        parser.parseComma() || parser.parseOperand(offset) ||
-        parser.parseColonType(offsetType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(base, baseType, result.operands) ||
-        parser.resolveOperand(offset, offsetType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseBinaryResultOp(parser, result);
 }
 
 void AddPtrOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getBase();
-    p << " : ";
-    p << getBase().getType();
-    p << ", ";
-    p << getOffset();
-    p << " : ";
-    p << getOffset().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printBinaryResultOp(p, *this, getBase(), getOffset(), getResult().getType());
 }
 
 ::mlir::ParseResult KeccakOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand ptr, len;
-    Type ptrType, lenType, resType;
-    if (parser.parseOperand(ptr) || parser.parseColonType(ptrType) ||
-        parser.parseComma() || parser.parseOperand(len) ||
-        parser.parseColonType(lenType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(ptr, ptrType, result.operands) ||
-        parser.resolveOperand(len, lenType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseBinaryResultOp(parser, result);
 }
 
 void KeccakOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getPtr();
-    p << " : ";
-    p << getPtr().getType();
-    p << ", ";
-    p << getLen();
-    p << " : ";
-    p << getLen().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printBinaryResultOp(p, *this, getPtr(), getLen(), getResult().getType());
 }
 
 ::mlir::ParseResult SLoadOp::parse(::mlir::OpAsmParser &parser, ::mlir::OperationState &result)
 {
-    ::mlir::OpAsmParser::UnresolvedOperand slot;
-    Type slotType, resType;
-    if (parser.parseOperand(slot) || parser.parseColonType(slotType) ||
-        parser.parseOptionalAttrDict(result.attributes) ||
-        parser.parseColonType(resType))
-        return ::mlir::failure();
-    result.addTypes(resType);
-    if (parser.resolveOperand(slot, slotType, result.operands))
-        return ::mlir::failure();
-    return ::mlir::success();
+    return parseUnaryResultOp(parser, result);
 }
 
 void SLoadOp::print(::mlir::OpAsmPrinter &p)
 {
-    p << " ";
-    p << getSlot();
-    p << " : ";
-    p << getSlot().getType();
-    SmallVector<StringRef> elidedAttrs = {"sir.result_name_0"};
-    p.printOptionalAttrDict((*this)->getAttrs(), elidedAttrs);
-    p << " : ";
-    p << getResult().getType();
+    printUnaryResultOp(p, *this, getSlot(), getResult().getType());
+}
+
+::mlir::OpFoldResult EqOp::fold(FoldAdaptor adaptor)
+{
+    if (getLhs() == getRhs())
+        return getSIRConstAttr(getContext(), llvm::APInt(256, 1));
+
+    return foldSIRBinaryConstants(getLhs(), getRhs(), getContext(),
+                                  BinaryConstFoldKind::Eq);
 }
 
 void SIRDialect::initialize()
@@ -429,71 +522,148 @@ void SIRDialect::initialize()
 
 namespace
 {
-    // Extract APInt from a sir.const value.
-    static std::optional<llvm::APInt> getConstantAPInt(Value val)
+    template <typename OpT, BinaryConstFoldKind Kind>
+    struct FoldBinaryConstants : public OpRewritePattern<OpT>
     {
-        if (auto constOp = val.getDefiningOp<ConstOp>())
+        using OpRewritePattern<OpT>::OpRewritePattern;
+
+        LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
         {
-            if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
-                return intAttr.getValue();
+            auto lhsVal = getSIRConstantAPInt(op.getLhs());
+            auto rhsVal = getSIRConstantAPInt(op.getRhs());
+            if (!lhsVal || !rhsVal)
+                return failure();
+
+            llvm::APInt result = foldSIRBinaryAPInts(Kind, *lhsVal, *rhsVal);
+            rewriter.replaceOpWithNewOp<ConstOp>(op, result);
+            return success();
         }
-        return std::nullopt;
+    };
+
+    struct FoldCondBrSameDest : public OpRewritePattern<CondBrOp>
+    {
+        using OpRewritePattern<CondBrOp>::OpRewritePattern;
+
+        LogicalResult matchAndRewrite(CondBrOp op, PatternRewriter &rewriter) const override
+        {
+            if (op.getTrueDest() != op.getFalseDest())
+                return failure();
+            if (!llvm::equal(op.getTrueOperands(), op.getFalseOperands()))
+                return failure();
+
+            rewriter.replaceOpWithNewOp<BrOp>(op, op.getTrueOperands(), op.getTrueDest());
+            return success();
+        }
+    };
+
+    struct FoldCondBrConstant : public OpRewritePattern<CondBrOp>
+    {
+        using OpRewritePattern<CondBrOp>::OpRewritePattern;
+
+        LogicalResult matchAndRewrite(CondBrOp op, PatternRewriter &rewriter) const override
+        {
+            auto cond = getSIRConstantAPInt(op.getCond());
+            if (!cond)
+                return failure();
+
+            if (cond->isZero())
+                rewriter.replaceOpWithNewOp<BrOp>(op, op.getFalseOperands(), op.getFalseDest());
+            else
+                rewriter.replaceOpWithNewOp<BrOp>(op, op.getTrueOperands(), op.getTrueDest());
+            return success();
+        }
+    };
+
+    struct FoldCondBrDoubleIsZero : public OpRewritePattern<CondBrOp>
+    {
+        using OpRewritePattern<CondBrOp>::OpRewritePattern;
+
+        LogicalResult matchAndRewrite(CondBrOp op, PatternRewriter &rewriter) const override
+        {
+            auto outer = op.getCond().getDefiningOp<IsZeroOp>();
+            if (!outer)
+                return failure();
+            auto inner = outer.getX().getDefiningOp<IsZeroOp>();
+            if (!inner)
+                return failure();
+
+            rewriter.replaceOpWithNewOp<CondBrOp>(
+                op,
+                inner.getX(),
+                op.getTrueOperands(),
+                op.getFalseOperands(),
+                op.getTrueDest(),
+                op.getFalseDest());
+            return success();
+        }
+    };
+
+    struct FoldBrToForwardingBr : public OpRewritePattern<BrOp>
+    {
+        using OpRewritePattern<BrOp>::OpRewritePattern;
+
+        LogicalResult matchAndRewrite(BrOp op, PatternRewriter &rewriter) const override
+        {
+            Block *dest = op.getDest();
+            if (!dest || dest->getOperations().size() != 1)
+                return failure();
+
+            auto nextBr = llvm::dyn_cast<BrOp>(dest->front());
+            if (!nextBr)
+                return failure();
+            if (nextBr.getDestOperands().size() != dest->getNumArguments())
+                return failure();
+
+            SmallVector<Value, 4> forwardedOperands;
+            forwardedOperands.reserve(nextBr.getDestOperands().size());
+            for (Value incoming : nextBr.getDestOperands())
+            {
+                if (auto blockArg = llvm::dyn_cast<BlockArgument>(incoming))
+                {
+                    if (blockArg.getOwner() != dest)
+                        return failure();
+                    unsigned idx = blockArg.getArgNumber();
+                    if (idx >= op.getDestOperands().size())
+                        return failure();
+                    forwardedOperands.push_back(op.getDestOperands()[idx]);
+                    continue;
+                }
+                forwardedOperands.push_back(incoming);
+            }
+
+            rewriter.replaceOpWithNewOp<BrOp>(op, forwardedOperands, nextBr.getDest());
+            return success();
+        }
+    };
+}
+
+#define DEFINE_SIR_BINARY_CONST_CANONICALIZER(OpT, Kind)                                 \
+    void OpT::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context) \
+    {                                                                                    \
+        results.add<FoldBinaryConstants<OpT, BinaryConstFoldKind::Kind>>(context);       \
     }
 
-    // Pattern to fold constant addition: add(const, const) -> const
-    struct FoldAddConstants : public OpRewritePattern<AddOp>
-    {
-        using OpRewritePattern<AddOp>::OpRewritePattern;
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(AddOp, Add)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(SubOp, Sub)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(MulOp, Mul)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(LtOp, Lt)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(GtOp, Gt)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(SLtOp, SLt)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(SGtOp, SGt)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(AndOp, And)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(OrOp, Or)
+DEFINE_SIR_BINARY_CONST_CANONICALIZER(XorOp, Xor)
 
-        LogicalResult matchAndRewrite(AddOp op, PatternRewriter &rewriter) const override
-        {
-            auto lhsVal = getConstantAPInt(op.getLhs());
-            auto rhsVal = getConstantAPInt(op.getRhs());
-            if (!lhsVal || !rhsVal)
-                return failure();
+#undef DEFINE_SIR_BINARY_CONST_CANONICALIZER
 
-            // Normalize to 256 bits before computing.
-            llvm::APInt lhs = lhsVal->getBitWidth() == 256 ? *lhsVal : lhsVal->zextOrTrunc(256);
-            llvm::APInt rhs = rhsVal->getBitWidth() == 256 ? *rhsVal : rhsVal->zextOrTrunc(256);
-            llvm::APInt result = lhs + rhs;
-
-            auto newConst = rewriter.create<ConstOp>(op.getLoc(), result);
-            rewriter.replaceOp(op, newConst.getResult());
-            return success();
-        }
-    };
-
-    // Pattern to fold constant multiplication: mul(const, const) -> const
-    struct FoldMulConstants : public OpRewritePattern<MulOp>
-    {
-        using OpRewritePattern<MulOp>::OpRewritePattern;
-
-        LogicalResult matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
-        {
-            auto lhsVal = getConstantAPInt(op.getLhs());
-            auto rhsVal = getConstantAPInt(op.getRhs());
-            if (!lhsVal || !rhsVal)
-                return failure();
-
-            llvm::APInt lhs = lhsVal->getBitWidth() == 256 ? *lhsVal : lhsVal->zextOrTrunc(256);
-            llvm::APInt rhs = rhsVal->getBitWidth() == 256 ? *rhsVal : rhsVal->zextOrTrunc(256);
-            llvm::APInt result = lhs * rhs;
-
-            auto newConst = rewriter.create<ConstOp>(op.getLoc(), result);
-            rewriter.replaceOp(op, newConst.getResult());
-            return success();
-        }
-    };
+void BrOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
+{
+    results.add<FoldBrToForwardingBr>(context);
 }
 
-void AddOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
+void CondBrOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
 {
-    results.add<FoldAddConstants>(context);
-}
-
-void MulOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
-{
-    results.add<FoldMulConstants>(context);
+    results.add<FoldCondBrSameDest, FoldCondBrConstant, FoldCondBrDoubleIsZero>(context);
 }
 
 // Attribute parsing/printing - use default implementations

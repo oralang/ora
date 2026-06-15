@@ -829,42 +829,6 @@ static LogicalResult appendConvertedCallArgument(
     return success();
 }
 
-static std::optional<llvm::APInt> getConstValue(Value value)
-{
-    if (auto constOp = value.getDefiningOp<sir::ConstOp>())
-    {
-        if (auto intAttr = llvm::dyn_cast<IntegerAttr>(constOp.getValueAttr()))
-            return intAttr.getValue();
-        return std::nullopt;
-    }
-
-    if (auto arg = llvm::dyn_cast<BlockArgument>(value))
-    {
-        Block *block = arg.getOwner();
-        Block *pred = block->getSinglePredecessor();
-        if (!pred)
-            return std::nullopt;
-
-        auto *term = pred->getTerminator();
-        auto br = llvm::dyn_cast<sir::BrOp>(term);
-        if (!br)
-            return std::nullopt;
-
-        unsigned idx = arg.getArgNumber();
-        if (idx >= br.getNumOperands())
-            return std::nullopt;
-
-        Value incoming = br.getOperand(idx);
-        if (incoming == value)
-            return std::nullopt;
-
-        return getConstValue(incoming);
-    }
-
-    return std::nullopt;
-}
-
-
 static LogicalResult materializeWideErrorUnion(
     PatternRewriter &rewriter,
     Location loc,
@@ -1899,23 +1863,6 @@ LogicalResult ConvertErrorErrOp::matchAndRewrite(
 }
 
 // -----------------------------------------------------------------------------
-// Fold sir.cond_br with identical destinations/operands into sir.br
-// -----------------------------------------------------------------------------
-LogicalResult FoldCondBrSameDestOp::matchAndRewrite(
-    sir::CondBrOp op,
-    PatternRewriter &rewriter) const
-{
-    if (op.getTrueDest() != op.getFalseDest())
-        return failure();
-
-    if (!llvm::equal(op.getTrueOperands(), op.getFalseOperands()))
-        return failure();
-
-    rewriter.replaceOpWithNewOp<sir::BrOp>(op, op.getTrueOperands(), op.getTrueDest());
-    return success();
-}
-
-// -----------------------------------------------------------------------------
 // Normalize sir.cond_br with differing operands by inserting relay blocks.
 // -----------------------------------------------------------------------------
 LogicalResult NormalizeCondBrOperandsOp::matchAndRewrite(
@@ -1950,104 +1897,6 @@ LogicalResult NormalizeCondBrOperandsOp::matchAndRewrite(
         ValueRange{},
         trueRelay,
         falseRelay);
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.cond_br with iszero(iszero(x)) condition to use x directly
-// -----------------------------------------------------------------------------
-LogicalResult FoldCondBrDoubleIsZeroOp::matchAndRewrite(
-    sir::CondBrOp op,
-    PatternRewriter &rewriter) const
-{
-    auto outer = op.getCond().getDefiningOp<sir::IsZeroOp>();
-    if (!outer)
-        return failure();
-    auto inner = outer.getX().getDefiningOp<sir::IsZeroOp>();
-    if (!inner)
-        return failure();
-
-    Value newCond = inner.getX();
-    rewriter.replaceOpWithNewOp<sir::CondBrOp>(
-        op,
-        newCond,
-        op.getTrueOperands(),
-        op.getFalseOperands(),
-        op.getTrueDest(),
-        op.getFalseDest());
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.cond_br with constant condition to sir.br
-// -----------------------------------------------------------------------------
-LogicalResult FoldCondBrConstOp::matchAndRewrite(
-    sir::CondBrOp op,
-    PatternRewriter &rewriter) const
-{
-    auto constValue = getConstValue(op.getCond());
-    if (!constValue)
-        return failure();
-
-    bool condTrue = !constValue->isZero();
-    if (condTrue)
-    {
-        rewriter.replaceOpWithNewOp<sir::BrOp>(op, op.getTrueOperands(), op.getTrueDest());
-    }
-    else
-    {
-        rewriter.replaceOpWithNewOp<sir::BrOp>(op, op.getFalseOperands(), op.getFalseDest());
-    }
-    return success();
-}
-
-// -----------------------------------------------------------------------------
-// Fold sir.br to a destination that only forwards to another sir.br
-// -----------------------------------------------------------------------------
-LogicalResult FoldBrToBrOp::matchAndRewrite(
-    sir::BrOp op,
-    PatternRewriter &rewriter) const
-{
-    Block *dest = op.getDest();
-    if (!dest || dest->getOperations().size() != 1)
-        return failure();
-
-    auto nextBr = llvm::dyn_cast<sir::BrOp>(dest->front());
-    if (!nextBr)
-        return failure();
-
-    if (nextBr.getNumOperands() != dest->getNumArguments())
-        return failure();
-
-    SmallVector<Value, 4> forwardedOperands;
-    forwardedOperands.reserve(nextBr.getNumOperands());
-    for (auto [arg, incoming] : llvm::zip(dest->getArguments(), nextBr.getOperands()))
-    {
-        if (auto blockArg = llvm::dyn_cast<BlockArgument>(incoming))
-        {
-            if (blockArg.getOwner() != dest)
-            {
-                forwardedOperands.clear();
-                break;
-            }
-            unsigned idx = blockArg.getArgNumber();
-            if (idx >= op.getNumOperands())
-            {
-                forwardedOperands.clear();
-                break;
-            }
-            forwardedOperands.push_back(op.getOperand(idx));
-        }
-        else
-        {
-            forwardedOperands.push_back(incoming);
-        }
-    }
-
-    if (forwardedOperands.empty() && nextBr.getNumOperands() != 0)
-        return failure();
-
-    rewriter.replaceOpWithNewOp<sir::BrOp>(op, forwardedOperands, nextBr.getDest());
     return success();
 }
 
@@ -3765,21 +3614,6 @@ LogicalResult NormalizeErrorIsErrorOp::matchAndRewrite(
     PatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    auto i1Type = mlir::IntegerType::get(rewriter.getContext(), 1);
-
-    // Spec/runtime helper: constructor forms are decisive even for wide unions.
-    if (op.getValue().getDefiningOp<ora::ErrorOkOp>())
-    {
-        auto cFalse = rewriter.create<arith::ConstantOp>(loc, i1Type, rewriter.getBoolAttr(false));
-        rewriter.replaceOp(op, cFalse.getResult());
-        return success();
-    }
-    if (op.getValue().getDefiningOp<ora::ErrorErrOp>())
-    {
-        auto cTrue = rewriter.create<arith::ConstantOp>(loc, i1Type, rewriter.getBoolAttr(true));
-        rewriter.replaceOp(op, cTrue.getResult());
-        return success();
-    }
 
     // If the value was already split into (tag, payload), use tag directly.
     if (auto cast = op.getValue().getDefiningOp<mlir::UnrealizedConversionCastOp>())

@@ -6,18 +6,19 @@
 // CHECK: arr_base = malloc alloc_size
 // CHECK: mstore256 elem0_ptr
 // CHECK: mstore256 elem1_ptr
-// CHECK: const 0xFF7E9F57
+// CHECK: [[ERR_SELECTOR:[a-zA-Z0-9_]+]] = const 0xFF7E9F57
 // CHECK: mstore256 elem2_ptr
-// CHECK: mstore256 elem3_ptr
+// CHECK: mstore256 elem3_ptr [[ERR_SELECTOR]]
 
 // CHECK-LABEL:     bb0 {
 // CHECK: mstore256 elem4_ptr
 // CHECK: mstore256 elem5_ptr v1
 
 // CHECK-LABEL:     bb1 {
-// CHECK: const 0xFF7E9F57
+// CHECK-NOT: const 0xFF7E9F57
 // CHECK: mstore256 elem10_ptr
-// CHECK: mstore256 elem11_ptr
+// CHECK-NOT: const 0xFF7E9F57
+// CHECK: mstore256 elem11_ptr [[ERR_SELECTOR]]
 
 // CHECK-LABEL:     bb2 {
 // CHECK: elem7 = mload256

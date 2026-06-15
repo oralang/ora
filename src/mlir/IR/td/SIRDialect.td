@@ -29,4 +29,3 @@ def SIR_Dialect : Dialect {
 }
 
 #endif // SIR_DIALECT
-
