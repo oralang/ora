@@ -430,6 +430,17 @@ pub fn build(b: *std.Build) void {
     const ora_dialect_step = if (skip_mlir_build) null else buildOraDialectLibrary(b, mlir_step.?, sir_dialect_step.?, target, optimize, native_sanitize);
     linkMlirLibraries(b, exe, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
 
+    // The LSP executables cImport mlir-c headers from vendor/mlir/include but do
+    // not link the MLIR libraries, so nothing orders their compile after the MLIR
+    // build. In from-source builds (e.g. the CI mlir-build job on a cache miss)
+    // that lets ora-lsp compile before the headers are installed -> "mlir-c/IR.h
+    // not found". Order them after the MLIR build step. skip-mlir builds use the
+    // prebuilt artifact (mlir_step == null) and need no ordering.
+    if (mlir_step) |ms| {
+        lsp_exe.step.dependOn(ms);
+        lsp_release_exe.step.dependOn(ms);
+    }
+
     // build and link Z3 (for formal verification) - only for executable
     const z3_step = buildZ3Libraries(b, target, optimize);
     linkZ3Libraries(b, exe, z3_step, target);
