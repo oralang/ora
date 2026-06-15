@@ -2793,10 +2793,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const word_type = mlir.oraValueGetType(base_value);
             const offset = resolved.offset;
             const width = resolved.width;
-            const field_type = if (resolved.field_type) |field_type|
-                self.parent.lowerSemaType(field_type, range)
-            else
-                self.parent.lowerTypeExpr(resolved.field.type_expr);
+            const field_type = self.parent.lowerResolvedBitfieldFieldType(resolved, range);
             const is_signed = resolved.sign == 's';
 
             var field_value = try @This().convertValueForFlow(self, new_value, field_type, range);

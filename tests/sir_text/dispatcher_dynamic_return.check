@@ -2,12 +2,13 @@
 // CHECK-NOT: builtin.unrealized_conversion_cast
 
 // CHECK-LABEL: fn name:
-// CHECK: v0 = const 0x3
-// CHECK: v1 = const 0x20
-// CHECK: v3 = malloc
-// CHECK: mstore256 v3 v0
-// CHECK: large_const 0x6F72610000000000000000000000000000000000000000000000000000000000
-// CHECK: mstore256 v5 v4
+// CHECK: [[NAME_BYTES:[A-Za-z_][A-Za-z0-9_]*]] = large_const 0x6F72610000000000000000000000000000000000000000000000000000000000
+// CHECK: [[NAME_LEN:[A-Za-z_][A-Za-z0-9_]*]] = const 0x3
+// CHECK: [[HEAD_WORD:[A-Za-z_][A-Za-z0-9_]*]] = const 0x20
+// CHECK: [[RET_BUF:[A-Za-z_][A-Za-z0-9_]*]] = malloc
+// CHECK: mstore256 [[RET_BUF]] [[NAME_LEN]]
+// CHECK: [[DATA_PTR:[A-Za-z_][A-Za-z0-9_]*]] = add [[RET_BUF]] [[HEAD_WORD]]
+// CHECK: mstore256 [[DATA_PTR]] [[NAME_BYTES]]
 // CHECK: iret
 
 // CHECK-LABEL: fn main:

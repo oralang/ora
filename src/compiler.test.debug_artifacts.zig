@@ -205,6 +205,34 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fs.cwd().readFileAlloc(allocator, path, 16 * 1024 * 1024);
 }
 
+fn expectDebugCfgArtifacts(allocator: std.mem.Allocator, output_dir: []const u8, stem: []const u8) !void {
+    const combined_name = try std.fmt.allocPrint(allocator, "{s}.sir.dot", .{stem});
+    defer allocator.free(combined_name);
+    const combined_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ output_dir, combined_name });
+    defer allocator.free(combined_path);
+
+    const combined = try readFile(allocator, combined_path);
+    defer allocator.free(combined);
+    try testing.expect(std.mem.containsAtLeast(u8, combined, 1, "SIR block CFG"));
+    try testing.expect(std.mem.containsAtLeast(u8, combined, 1, "cluster_f"));
+
+    const per_function_prefix = try std.fmt.allocPrint(allocator, "{s}.", .{stem});
+    defer allocator.free(per_function_prefix);
+
+    var dir = try std.fs.cwd().openDir(output_dir, .{ .iterate = true });
+    defer dir.close();
+    var iter = dir.iterate();
+    var per_function_count: usize = 0;
+    while (try iter.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, per_function_prefix)) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".sir.dot")) continue;
+        if (std.mem.eql(u8, entry.name, combined_name)) continue;
+        per_function_count += 1;
+    }
+    try testing.expect(per_function_count > 0);
+}
+
 fn assertEqualOrDescribeDiff(
     allocator: std.mem.Allocator,
     fixture: Fixture,
@@ -300,6 +328,7 @@ test "debug-artifacts regression corpus matches goldens" {
 
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "sourcemap.json", actual_sourcemap, golden_sourcemap);
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "debug.json", actual_debug, golden_debug);
+        try expectDebugCfgArtifacts(allocator, out_dir, stem);
     }
 }
 

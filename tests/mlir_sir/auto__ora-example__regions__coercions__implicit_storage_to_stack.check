@@ -12,9 +12,9 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":23:5)
 // CHECK-NEXT:   func.func @testImplicitStorageInReturn() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.effect = "reads", ora.read_slots = ["counter"], ora.selector = "0xfcf6356b", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     %slot_counter = sir.const 0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":8:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_counter : !sir.u256 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":8:5)))
-// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %value : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/implicit_storage_to_stack.ora":31:9)))

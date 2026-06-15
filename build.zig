@@ -463,6 +463,15 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
+    const cfg_cmd = b.addRunArtifact(exe);
+    cfg_cmd.step.dependOn(b.getInstallStep());
+    cfg_cmd.addArgs(&[_][]const u8{ "emit", "--emit=cfg:sir" });
+    if (b.args) |args| {
+        cfg_cmd.addArgs(args);
+    }
+    const cfg_step = b.step("cfg", "Emit SIR CFG DOT for an Ora source file");
+    cfg_step.dependOn(&cfg_cmd.step);
+
     const lsp_build_step = b.step("ora-lsp", "Build the Ora LSP server");
     lsp_build_step.dependOn(&lsp_exe.step);
 

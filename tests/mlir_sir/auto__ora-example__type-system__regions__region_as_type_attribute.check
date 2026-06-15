@@ -12,8 +12,8 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":29:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":29:5)
 // CHECK-NEXT:   func.func @testRegionDistinction() attributes {ora.effect = "writes", ora.selector = "0x3e222c4a", ora.visibility = "pub", ora.write_slots = ["storage_counter"]} {
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":37:27)))
 // CHECK-NEXT:     %slot_storage_counter = sir.const 0 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":37:9)))
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":37:27)))
 // CHECK-NEXT:     sir.sstore %slot_storage_counter : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":37:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":36:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_as_type_attribute.ora":36:5)

@@ -21,15 +21,15 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/refinements/validation_test.ora":33:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":33:5)
 // CHECK-NEXT:   func.func @testValidReturn() -> !sir.u256 attributes {ora.visibility = "private"} {
-// CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:16)))
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
+// CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c2000 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/refinements/validation_test.ora":39:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/validation_test.ora":38:5)
 // CHECK-NEXT:   func.func @testInvalidReturn() -> !sir.u256 attributes {ora.visibility = "private"} {
-// CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:16)))
 // CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))
+// CHECK-NEXT:     %c2000 = sir.const 2000 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:16)))
 // CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))
 // CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c2000 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))
 // CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.7"("ora.origin_stmt.7"("{{.*}}/ora-example/refinements/validation_test.ora":45:9)))

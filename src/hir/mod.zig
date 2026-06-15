@@ -1055,6 +1055,25 @@ const Lowerer = struct {
         };
     }
 
+    pub fn lowerResolvedBitfieldFieldType(self: *Lowerer, resolved: ResolvedBitfieldField, range: source.TextRange) mlir.MlirType {
+        if (resolved.field_type) |field_type| {
+            if (field_type.kind() != .comptime_integer) {
+                return self.lowerSemaType(field_type, range);
+            }
+        }
+        switch (self.file.typeExpr(resolved.field.type_expr).*) {
+            .Path => |path| {
+                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                if (std.mem.eql(u8, trimmed, "bool")) return support.boolType(self.context);
+                if (support.parseBitfieldIntegerType(trimmed) != null) {
+                    return mlir.oraIntegerTypeCreate(self.context, @intCast(resolved.width));
+                }
+            },
+            else => {},
+        }
+        return self.lowerTypeExpr(resolved.field.type_expr);
+    }
+
     pub fn isGenericTypeParameter(self: *const Lowerer, parameter: ast.Parameter) bool {
         if (!parameter.is_comptime) return false;
         return switch (self.file.typeExpr(parameter.type_expr).*) {
