@@ -224,7 +224,7 @@
       "sir_goldens": [
         "tests/sir_text/abi_decode_wide_result_sink.check#fn roundtrip:",
         "tests/sir_text/abi_decode_wide_result_sink.check#v[[RT_OK_TAG]] = or",
-        "tests/sir_text/abi_decode_wide_result_sink.check#v[[BAD_ERR_TAG]] = const 0x1",
+        "tests/sir_text/abi_decode_wide_result_sink.check#bb0 -> [[BAD_ONE]] [[BAD_ZERO]]",
         "tests/sir_text/abi_decode_wide_result_sink.check#fn malformed:"
       ]
     },
@@ -240,7 +240,7 @@
       "sir_goldens": [
         "tests/sir_text/storage_result_scalar.check#fn set_ok:",
         "tests/sir_text/storage_result_scalar.check#const 0xFF7E9F57",
-        "tests/sir_text/storage_result_scalar.check#v1 = sload c0"
+        "tests/sir_text/storage_result_scalar.check#[[TAG:[A-Za-z_][A-Za-z0-9_]*]] = sload [[SAVED]]"
       ]
     },
     {

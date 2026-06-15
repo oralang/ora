@@ -11,6 +11,7 @@ test "emit list sets cfg and preserves following input file" {
     const parsed = try cli.parseArgs(&args);
 
     try testing.expect(parsed.emit_cfg);
+    try testing.expectEqualStrings("ora", parsed.emit_cfg_mode.?);
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 

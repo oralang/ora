@@ -3,10 +3,10 @@
 
 // CHECK-LABEL: fn run:
 // CHECK: alloc_size = const 0x80
+// CHECK: [[ERR_SELECTOR:[a-zA-Z0-9_]+]] = const 0xFF7E9F57
 // CHECK: arr_base = malloc alloc_size
 // CHECK: mstore256 elem0_ptr
 // CHECK: mstore256 elem1_ptr
-// CHECK: [[ERR_SELECTOR:[a-zA-Z0-9_]+]] = const 0xFF7E9F57
 // CHECK: mstore256 elem2_ptr
 // CHECK: mstore256 elem3_ptr [[ERR_SELECTOR]]
 

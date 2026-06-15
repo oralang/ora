@@ -1771,15 +1771,23 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     // CFG Generation with Registered Dialect
     //===----------------------------------------------------------------------===//
 
-    /// Generate Control Flow Graph (DOT format) from MLIR module
-    /// Registers the Ora dialect, runs view-op-graph pass with control flow edges, and returns DOT content
-    /// Returns null string ref on failure
-    /// The caller must free the returned string using mlirStringRefFree
-    /// @param includeControlFlow - If true, includes control flow edges (dashed lines showing dominance)
+    /// Generate Control Flow Graph (DOT format) from MLIR module.
+    /// Compatibility wrapper for oraGenerateCFGWithOptions.
     MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFG(
         MlirContext ctx,
         MlirModule module,
         bool includeControlFlow);
+
+    /// Generate a mode-specific control-flow graph (DOT format) from an MLIR module.
+    /// mode must be "ora" for the structured Ora view or "sir" for the true SIR block CFG.
+    /// provenGuardIds is optional and is used by the Ora view to mark proven refinement guards.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFGWithOptions(
+        MlirContext ctx,
+        MlirModule module,
+        MlirStringRef mode,
+        const MlirStringRef *provenGuardIds,
+        size_t provenGuardIdCount);
 
     //===----------------------------------------------------------------------===//
     // MLIR Printing with Custom Assembly Formats

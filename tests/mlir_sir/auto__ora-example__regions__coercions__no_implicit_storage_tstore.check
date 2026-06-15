@@ -9,16 +9,16 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":19:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":19:5)
 // CHECK-NEXT:   func.func @testValidStorageToTStoreViaStack() attributes {ora.effect = "readwrites", ora.read_slots = ["stored_value"], ora.selector = "0x7bd00908", ora.visibility = "pub", ora.write_slots = ["transient:temp_value"]} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":27:9)))
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("ora.stmt.0"("ora.origin_stmt.0"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":9:5)))
-// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":27:9)))
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %value : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":27:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":25:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":25:5)
 // CHECK-NEXT:   func.func @testValidStorageToTStoreViaMemory() attributes {ora.effect = "readwrites", ora.read_slots = ["stored_value"], ora.selector = "0x1e93c128", ora.visibility = "pub", ora.write_slots = ["transient:temp_value"]} {
+// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":33:9)))
 // CHECK-NEXT:     %slot_stored_value = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":9:5)))
 // CHECK-NEXT:     %value = sir.sload %slot_stored_value : !sir.u256 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":9:5)))
-// CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":33:9)))
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %value : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":33:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":31:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/coercions/no_implicit_storage_tstore.ora":31:5)

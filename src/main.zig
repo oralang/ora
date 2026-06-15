@@ -655,7 +655,7 @@ pub fn main() !void {
         if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
             emit_mlir = true; // Default: emit MLIR
         }
-        if ((emit_sir_text or emit_bytecode or (emit_cfg and emit_cfg_mode != null and std.ascii.eqlIgnoreCase(emit_cfg_mode.?, "sir"))) and !emit_mlir_sir) {
+        if ((emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
             emit_mlir_sir = true;
         }
     }
@@ -3992,6 +3992,47 @@ fn runCompilerTokenEmit(
     try stdout.flush();
 }
 
+fn emitCfgDot(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    ctx: @import("mlir_c_api").c.MlirContext,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    mode: @import("mlir/cfg.zig").Mode,
+    proven_guard_ids: ?*const std.StringHashMap(void),
+) !void {
+    const mlir_cfg = @import("mlir/cfg.zig");
+    const dot = try mlir_cfg.generateCFG(ctx, module, allocator, .{
+        .mode = mode,
+        .proven_guard_ids = proven_guard_ids,
+    });
+    defer allocator.free(dot);
+
+    if (output_dir) |dir| {
+        const basename = std.fs.path.stem(file_path);
+        const suffix = switch (mode) {
+            .ora => ".ora.dot",
+            .sir => ".sir.dot",
+        };
+
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
+        defer allocator.free(filename);
+        const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        defer allocator.free(output_file);
+        var dot_file = try std.fs.cwd().createFile(output_file, .{});
+        defer dot_file.close();
+        try dot_file.writeAll(dot);
+    } else {
+        try stdout.print("{s}", .{dot});
+    }
+}
+
 fn runMlirEmitAdvanced(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -4030,6 +4071,12 @@ fn runMlirEmitAdvanced(
     try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
+    const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
+    const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
+    const needs_sir_conversion = mlir_options.emit_mlir_sir or
+        mlir_options.emit_sir_text or
+        mlir_options.emit_bytecode or
+        cfg_mode_is_sir;
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
@@ -4129,7 +4176,7 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
 
-    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+    if (mlir_options.canonicalize and (mlir_options.emit_mlir or needs_sir_conversion)) {
         m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
@@ -4137,21 +4184,6 @@ fn runMlirEmitAdvanced(
             return error.OraMlirCanonicalizationFailed;
         }
         m.end();
-    }
-
-    if (mlir_options.emit_mlir_sir) {
-        const refinement_guards = compiler.refinement_guards;
-        if (verification_result_opt) |*vr| {
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
-                .keep_proved_checks = mlir_options.keep_proved_checks,
-            });
-        } else {
-            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
-            defer empty_guards.deinit();
-            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
-                .keep_proved_checks = mlir_options.keep_proved_checks,
-            });
-        }
     }
 
     if (mlir_options.emit_mlir or mlir_options.persist_ora_mlir) {
@@ -4190,7 +4222,33 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (mlir_options.emit_mlir_sir) {
+    if (cfg_mode_is_ora) {
+        try emitCfgDot(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            .ora,
+            if (verification_result_opt) |*vr| &vr.proven_guard_ids else null,
+        );
+    }
+
+    if (needs_sir_conversion) {
+        const refinement_guards = compiler.refinement_guards;
+        if (verification_result_opt) |*vr| {
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
+        } else {
+            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
+            defer empty_guards.deinit();
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
+        }
+
         if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
@@ -4251,30 +4309,17 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (mlir_options.emit_cfg_mode) |cfg_mode| {
-        const mlir_cfg = @import("mlir/cfg.zig");
-        const dot = try mlir_cfg.generateCFG(ctx, final_module, allocator);
-        defer allocator.free(dot);
-
-        if (mlir_options.output_dir) |output_dir| {
-            const basename = std.fs.path.stem(file_path);
-            const suffix = if (std.ascii.eqlIgnoreCase(cfg_mode, "sir")) ".sir.dot" else ".ora.dot";
-
-            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
-
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
-            defer allocator.free(filename);
-            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
-            defer allocator.free(output_file);
-            var dot_file = try std.fs.cwd().createFile(output_file, .{});
-            defer dot_file.close();
-            try dot_file.writeAll(dot);
-        } else {
-            try stdout.print("{s}", .{dot});
-        }
+    if (cfg_mode_is_sir) {
+        try emitCfgDot(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            .sir,
+            null,
+        );
     }
 
     if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {

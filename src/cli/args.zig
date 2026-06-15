@@ -107,7 +107,7 @@ fn parseEmitList(opts: *CliOptions, spec: []const u8) ParseError!void {
             opts.emit_bytecode = true;
         } else if (std.mem.eql(u8, item, "cfg") or std.mem.eql(u8, item, "cfg:ora")) {
             opts.emit_cfg = true;
-            opts.emit_cfg_mode = if (std.mem.eql(u8, item, "cfg:ora")) "ora" else opts.emit_cfg_mode;
+            opts.emit_cfg_mode = "ora";
         } else if (std.mem.eql(u8, item, "cfg:sir")) {
             opts.emit_cfg = true;
             opts.emit_cfg_mode = "sir";

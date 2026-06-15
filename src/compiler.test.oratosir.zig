@@ -3,6 +3,7 @@ const testing = std.testing;
 const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
+const mlir_cfg = @import("mlir/cfg.zig");
 const z3_verification = @import("ora_z3_verification");
 
 const h = @import("compiler.test.helpers.zig");
@@ -63,6 +64,13 @@ fn parseOraModule(ctx: mlir.MlirContext, text: []const u8) !mlir.MlirModule {
     const module = mlir.oraModuleCreateParse(ctx, mlir.oraStringRefCreate(text.ptr, text.len));
     if (mlir.oraModuleIsNull(module)) return error.TestUnexpectedResult;
     return module;
+}
+
+fn printModuleTextForTest(module: mlir.MlirModule) ![]u8 {
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    if (module_text_ref.data == null or module_text_ref.length == 0) return error.TestUnexpectedResult;
+    return testing.allocator.dupe(u8, module_text_ref.data[0..module_text_ref.length]);
 }
 
 fn setModuleBoolAttr(ctx: mlir.MlirContext, module: mlir.MlirModule, name: []const u8) void {
@@ -145,6 +153,179 @@ fn expectOrderedNeedles(haystack: []const u8, needles: []const []const u8) !void
     }
 }
 
+test "compiler generates deterministic true SIR branch CFG" {
+    const source_text =
+        \\pub fn choose(x: u256) -> u256 {
+        \\    if (x != 0) {
+        \\        return x;
+        \\    }
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    const module_before = try printModuleTextForTest(hir_result.module.raw_module);
+    defer testing.allocator.free(module_before);
+
+    const dot_a = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{ .mode = .sir });
+    defer testing.allocator.free(dot_a);
+    const dot_b = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{ .mode = .sir });
+    defer testing.allocator.free(dot_b);
+    const module_after = try printModuleTextForTest(hir_result.module.raw_module);
+    defer testing.allocator.free(module_after);
+
+    try testing.expectEqualStrings(dot_a, dot_b);
+    try testing.expectEqualStrings(module_before, module_after);
+    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "digraph \"ora_sir_cfg\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "term=sir.cond_br"));
+    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "label=\"true\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "label=\"false\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot_a, 1, "entry=\"true\""));
+}
+
+test "compiler marks loop backedges in SIR CFG" {
+    const source_text =
+        \\pub fn count(n: u256) -> u256 {
+        \\    var i: u256 = 0;
+        \\    while (i < n) {
+        \\        i = i + 1;
+        \\    }
+        \\    return i;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const dot = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{ .mode = .sir });
+    defer testing.allocator.free(dot);
+
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "digraph \"ora_sir_cfg\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "backedge=\"true\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "term=sir.cond_br"));
+}
+
+test "compiler SIR CFG marks revert and unreachable blocks without mutating module" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @control(%arg0: !sir.u256) {
+        \\    %zero = sir.const 0 : !sir.u256
+        \\    %word = sir.const 32 : !sir.u256
+        \\    %buf = sir.malloc %word : !sir.u256 : !sir.ptr<1>
+        \\    sir.cond_br %arg0 : !sir.u256, ^bb1, ^bb2
+        \\  ^bb1:
+        \\    sir.revert %buf : !sir.ptr<1>, %zero : !sir.u256
+        \\  ^bb2:
+        \\    sir.iret
+        \\  ^bb3:
+        \\    sir.iret
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    const module_before = try printModuleTextForTest(module);
+    defer testing.allocator.free(module_before);
+    const dot = try mlir_cfg.generateCFG(ctx, module, testing.allocator, .{ .mode = .sir });
+    defer testing.allocator.free(dot);
+    const module_after = try printModuleTextForTest(module);
+    defer testing.allocator.free(module_after);
+
+    try testing.expectEqualStrings(module_before, module_after);
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "term=sir.revert"));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "revert=\"true\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "f0_bb3"));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "unreachable=\"true\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, dot, 1, "f0_bb1 ->"));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"true\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "label=\"false\""));
+}
+
+test "compiler marks proven refinement guards in Ora CFG overlay" {
+    const source_text =
+        \\pub fn safe_add(amount: u256) -> bool
+        \\    requires amount < 10;
+        \\    guard amount < 10;
+        \\{
+        \\    return true;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer verifier.deinit();
+    var vr = try verifier.runVerificationPass(hir_result.module.raw_module);
+    defer vr.deinit();
+
+    try testing.expect(vr.success);
+    try testing.expect(vr.proven_guard_ids.count() > 0);
+    const module_before = try printModuleTextForTest(hir_result.module.raw_module);
+    defer testing.allocator.free(module_before);
+
+    const dot = try mlir_cfg.generateCFG(hir_result.context, hir_result.module.raw_module, testing.allocator, .{
+        .mode = .ora,
+        .proven_guard_ids = &vr.proven_guard_ids,
+    });
+    defer testing.allocator.free(dot);
+    const module_after = try printModuleTextForTest(hir_result.module.raw_module);
+    defer testing.allocator.free(module_after);
+
+    try testing.expectEqualStrings(module_before, module_after);
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "digraph \"ora_structured_cfg\""));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "proven_guard_count="));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, dot, 1, "proof=\"proven-erased\""));
+    try testing.expectEqual(vr.proven_guard_ids.count(), std.mem.count(u8, dot, "proof=\"proven-erased\""));
+}
+
+test "compiler Ora CFG overlay distinguishes runtime refinement guards" {
+    const runtime_source =
+        \\pub fn runtime_guard(amount: NonZero<u256>) -> u256 {
+        \\    return amount;
+        \\}
+    ;
+
+    var runtime_compilation = try compileText(runtime_source);
+    defer runtime_compilation.deinit();
+    const runtime_hir = try runtime_compilation.db.lowerToHir(runtime_compilation.root_module_id);
+    try testing.expect(runtime_hir.diagnostics.isEmpty());
+
+    var runtime_verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    defer runtime_verifier.deinit();
+    var runtime_vr = try runtime_verifier.runVerificationPass(runtime_hir.module.raw_module);
+    defer runtime_vr.deinit();
+    try testing.expect(runtime_vr.success);
+    try testing.expectEqual(@as(usize, 0), runtime_vr.proven_guard_ids.count());
+
+    const runtime_dot = try mlir_cfg.generateCFG(runtime_hir.context, runtime_hir.module.raw_module, testing.allocator, .{
+        .mode = .ora,
+        .proven_guard_ids = &runtime_vr.proven_guard_ids,
+    });
+    defer testing.allocator.free(runtime_dot);
+    try testing.expect(std.mem.containsAtLeast(u8, runtime_dot, 1, "ora.refinement_guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, runtime_dot, 1, "proof=\"runtime\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, runtime_dot, 1, "proof=\"proven-erased\""));
+}
+
 // Runtime abiDecode structural helpers pin the guard shape for each decoded
 // category: static head-only values, dynamic byte-padded values (string/bytes
 // and the current mixed tuple), and dynamic word-only arrays such as slice[u256].
@@ -174,11 +355,10 @@ fn expectDynamicAbiDecodeWordGuardChain(fn_text: []const u8) !void {
 }
 
 fn expectMixedDynamicTupleCarrierShape(fn_text: []const u8) !void {
-    const first_malloc = std.mem.indexOf(u8, fn_text, "malloc") orelse return error.TestUnexpectedResult;
-    const after_malloc = fn_text[first_malloc..];
     // The dedicated mixed dynamic tuple branch allocates a 2-slot tuple carrier,
     // stores the static u256, then stores the string/bytes tail pointer.
-    try expectOrderedNeedles(after_malloc, &.{ "malloc", "mstore256", "const 0x20", "add", "mstore256" });
+    try expectOrderedNeedles(fn_text, &.{ "const 0x40", "mload256", "malloc", "mstore256", "add", "mstore256" });
+    try testing.expect(std.mem.containsAtLeast(u8, fn_text, 1, "const 0x20"));
     try testing.expect(std.mem.containsAtLeast(u8, fn_text, 2, "malloc"));
 }
 
@@ -583,7 +763,7 @@ test "Phase0 framework canonicalizer folds sir.eq and sir.iszero" {
         try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.sgt"));
         try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "sir.const 1 : !sir.u256"));
         try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sir.const 0 : !sir.u256"));
-        try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sir.const 3 : !sir.u256"));
+        try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 3 : !sir.u256"));
         try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 5 : !sir.u256"));
         try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 6 : !sir.u256"));
         try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 255 : !sir.u256"));
@@ -662,7 +842,7 @@ test "Phase0 framework canonicalizer folds SIR branch peepholes" {
     }
 }
 
-test "Phase3 release SIR optimization keeps framework canonicalization opt-in" {
+test "Phase3 release SIR optimization materializes framework folds" {
     const ctx = createOraMlirContext();
     defer mlir.oraContextDestroy(ctx);
 
@@ -707,7 +887,7 @@ test "Phase3 release SIR optimization keeps framework canonicalization opt-in" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.and"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.or"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.xor"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.eq"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.eq"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 1 : !sir.u256"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 2 : !sir.u256"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.const 3 : !sir.u256"));
@@ -4144,11 +4324,11 @@ test "compiler converts aggregate ADT payload matches through compiler-managed p
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn sum:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "entry v0 v1"));
     // Both Pair and Named payloads are 2-tuples dereferenced through the handle:
-    // mload256 v1 (lhs/code) plus mload256 (v1+0x20) (rhs/amount). With both
-    // variants taking that path, expect at least four mload256 reads and at
-    // least two const 0x20 offsets.
+    // mload256 v1 (lhs/code) plus mload256 (v1+0x20) (rhs/amount). With CSE
+    // enabled, the 0x20 offset can be shared across both variants.
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 4, "mload256"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "const 0x20"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "const 0x20"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "= add v1 "));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
@@ -4308,8 +4488,9 @@ test "compiler converts nested ADT fields through compiler-managed handle storag
     // Event has 3 variants and aggregate payloads, so narrow packing is
     // invalid (the Named arm becomes unreachable).
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn read_pair:"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "v1 = mload256 v0"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "v2 = mload256 v1"));
+    const read_pair = try functionSlice(rendered, "read_pair");
+    try expectOrderedNeedles(read_pair, &.{ "mload256 v0", "mload256", "add", "mload256" });
+    try testing.expect(std.mem.containsAtLeast(u8, read_pair, 1, "const 0x20"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "= and v1 "));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "= shr v1 "));
     try expectNoResidualOraRuntimeOps(rendered);
@@ -4410,10 +4591,11 @@ test "compiler converts wide explicit enum constants through OraToSIR" {
     const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
     defer testing.allocator.free(rendered);
 
-    const has_max_literal =
+    try testing.expect(
         std.mem.containsAtLeast(u8, rendered, 1, "large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF") or
-        std.mem.containsAtLeast(u8, rendered, 1, "sir.const -1");
-    try testing.expect(has_max_literal);
+            std.mem.containsAtLeast(u8, rendered, 1, "sir.const 115792089237316195423570985008687907853269984665640564039457584007913129639935"),
+    );
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.const -1"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.const 0"));
     try expectNoResidualOraRuntimeOps(rendered);
 }
@@ -5112,24 +5294,24 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
     try expectOrderedNeedles(touch_history, &.{
         "mstore256",
         "keccak256",
-        lock_prefix,
         "add",
         "tload",
         "revert",
         "tstore",
     });
+    try testing.expect(std.mem.containsAtLeast(u8, touch_history, 1, lock_prefix));
 
     const write_history = try functionSlice(rendered, "write_history");
     try expectOrderedNeedles(write_history, &.{
         "slot_history = const 0x1",
         "mstore256",
         "keccak256",
-        lock_prefix,
         "add",
         "tload",
         "revert",
         "sstore",
     });
+    try testing.expect(std.mem.containsAtLeast(u8, write_history, 1, lock_prefix));
 
     try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "tstore"));
     try testing.expectEqual(@as(usize, 4), std.mem.count(u8, rendered, "tload"));
