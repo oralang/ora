@@ -162,6 +162,10 @@ pub fn generateFunctionCFGs(
 /// Generate SIR CFG snapshots before and after the opt-in MLIR framework
 /// canonicalizer. This is a viewer/debugging helper: it lowers cloned modules
 /// and never mutates the input module.
+///
+/// This intentionally returns two independently-rendered DOT graphs. It is not
+/// a graph-isomorphism diff: canonicalization can merge, split, or renumber
+/// blocks, so node IDs are only stable within each snapshot.
 pub fn generateSirOptimizationDiff(
     ctx: c.MlirContext,
     module: c.MlirModule,
