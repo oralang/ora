@@ -23,6 +23,7 @@ pub const abi_comptime_encoder = @import("abi/comptime_encoder.zig");
 pub const abi_comptime_decoder_test_support = @import("abi/comptime_decoder_test_support.zig");
 pub const builtins = @import("builtins.zig");
 pub const lsp = @import("lsp/mod.zig");
+pub const metrics = @import("metrics.zig");
 pub const compiler = @import("compiler.zig");
 pub const compiler_query = @import("compiler_query.zig");
 pub const embedded_stdlib = @import("ora_imports").embedded_stdlib;

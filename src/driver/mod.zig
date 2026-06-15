@@ -8,6 +8,7 @@ const sema = @import("../sema/mod.zig");
 const source = @import("../source/mod.zig");
 const embedded_stdlib = import_graph.embedded_stdlib;
 const compile_options = @import("../compile_options.zig");
+const Metrics = @import("../metrics.zig").Metrics;
 
 fn compilerPhaseDebugEnabled() bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
@@ -25,6 +26,22 @@ fn diagnosticsHaveErrors(list: *const diagnostics.DiagnosticList) bool {
         if (diag.severity == .Error) return true;
     }
     return false;
+}
+
+fn beginMetric(instrumentation: ?*Metrics, name: []const u8) void {
+    if (instrumentation) |metrics| metrics.begin(name);
+}
+
+fn endMetric(instrumentation: ?*Metrics, work_count: usize) void {
+    if (instrumentation) |metrics| metrics.endWith(metricCount(work_count));
+}
+
+fn cancelMetric(instrumentation: ?*Metrics) void {
+    if (instrumentation) |metrics| metrics.cancel();
+}
+
+fn metricCount(value: usize) u64 {
+    return std.math.cast(u64, value) orelse std.math.maxInt(u64);
 }
 
 pub const Compilation = struct {
@@ -74,39 +91,96 @@ pub fn compilePackageWithResolverOptions(
 
 fn finishCompilation(compilation: *Compilation) !void {
     compilerPhaseLog("load-package done modules={d}", .{compilation.db.sources.modules.items.len});
+    const instrumentation = compilation.db.options.instrumentation;
+    const package = compilation.db.sources.package(compilation.package_id);
+
+    for (package.modules.items) |module_id| {
+        const module = compilation.db.sources.module(module_id);
+        compilerPhaseLog("module {s} syntax begin", .{module.name});
+        beginMetric(instrumentation, "syntax");
+        const tree = compilation.db.syntaxTree(module.file_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, tree.tokens.len);
+        compilerPhaseLog("module {s} syntax", .{module.name});
+    }
+
+    for (package.modules.items) |module_id| {
+        const module = compilation.db.sources.module(module_id);
+        compilerPhaseLog("module {s} ast begin", .{module.name});
+        beginMetric(instrumentation, "ast-lower");
+        const ast_file = compilation.db.astFile(module.file_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, ast_file.expressions.len);
+        compilerPhaseLog("module {s} ast", .{module.name});
+    }
+
     compilerPhaseLog("module-graph begin", .{});
-    const module_graph = try compilation.db.moduleGraph(compilation.package_id);
+    beginMetric(instrumentation, "module-graph");
+    const module_graph = compilation.db.moduleGraph(compilation.package_id) catch |err| {
+        cancelMetric(instrumentation);
+        return err;
+    };
+    endMetric(instrumentation, module_graph.modules.len);
     compilerPhaseLog("module-graph done has-cycles={any}", .{module_graph.has_cycles});
     if (module_graph.has_cycles) {
         const package_name = compilation.db.sources.package(compilation.package_id).name;
         std.log.warn("Compiler package '{s}' contains import cycles; cross-module queries may be incomplete.", .{package_name});
     }
 
-    const package = compilation.db.sources.package(compilation.package_id);
     for (package.modules.items) |module_id| {
         const module = compilation.db.sources.module(module_id);
         compilerPhaseLog("module {s} begin", .{module.name});
-        _ = try compilation.db.syntaxTree(module.file_id);
-        compilerPhaseLog("module {s} syntax", .{module.name});
-        _ = try compilation.db.astFile(module.file_id);
-        compilerPhaseLog("module {s} ast", .{module.name});
-        _ = try compilation.db.itemIndex(module_id);
+        beginMetric(instrumentation, "item-index");
+        const item_index = compilation.db.itemIndex(module_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, item_index.entries.len);
         compilerPhaseLog("module {s} item-index", .{module.name});
-        _ = try compilation.db.resolveNames(module_id);
+        beginMetric(instrumentation, "resolve");
+        const resolution = compilation.db.resolveNames(module_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, resolution.expr_bindings.len);
         compilerPhaseLog("module {s} resolve", .{module.name});
-        const typecheck = try compilation.db.moduleTypeCheck(module_id);
+        beginMetric(instrumentation, "typecheck");
+        const typecheck = compilation.db.moduleTypeCheck(module_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, typecheck.expr_types.len);
         compilerPhaseLog("module {s} typecheck", .{module.name});
         if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
             compilation.artifact_blocked = true;
             return;
         }
-        _ = try compilation.db.constEval(module_id);
+        beginMetric(instrumentation, "const-eval");
+        const const_eval = compilation.db.constEval(module_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, const_eval.values.len);
         compilerPhaseLog("module {s} consteval", .{module.name});
-        _ = try compilation.db.moduleVerificationFacts(module_id);
+        beginMetric(instrumentation, "verify-facts");
+        const verification_facts = compilation.db.moduleVerificationFacts(module_id) catch |err| {
+            cancelMetric(instrumentation);
+            return err;
+        };
+        endMetric(instrumentation, verification_facts.facts.len);
         compilerPhaseLog("module {s} verification-facts", .{module.name});
     }
     compilerPhaseLog("root lower-to-hir begin", .{});
-    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    beginMetric(instrumentation, "hir-lower");
+    const lowering = compilation.db.lowerToHir(compilation.root_module_id) catch |err| {
+        cancelMetric(instrumentation);
+        return err;
+    };
+    endMetric(instrumentation, lowering.items.len);
     compilerPhaseLog("root lower-to-hir done", .{});
     if (diagnosticsHaveErrors(&lowering.diagnostics)) {
         compilation.artifact_blocked = true;

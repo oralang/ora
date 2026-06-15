@@ -21,7 +21,8 @@ const refinements = ora_types.refinement_semantics;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
-const Metrics = @import("metrics.zig").Metrics;
+const Metrics = lib.metrics.Metrics;
+const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
 
 /// MLIR-related command line options
@@ -93,7 +94,23 @@ const CompileContext = struct {
 };
 
 fn compileOptionsForChain(chain_id: u64) compiler.compile_options.CompileOptions {
-    return .{ .chain_id = chain_id };
+    return compileOptionsForChainWithMetrics(chain_id, null);
+}
+
+fn compileOptionsForChainWithMetrics(chain_id: u64, instrumentation: ?*Metrics) compiler.compile_options.CompileOptions {
+    return .{ .chain_id = chain_id, .instrumentation = instrumentation };
+}
+
+fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
+    var iterator = try std.process.argsWithAllocator(allocator);
+    defer iterator.deinit();
+
+    while (iterator.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--metrics") or std.mem.eql(u8, arg, "--time-report")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 const OptimizationLevel = enum {
@@ -431,7 +448,10 @@ fn runInitCommand(target_dir: []const u8) !void {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const backing_allocator = gpa.allocator();
+    const metrics_requested = try rawArgsRequestMetrics(backing_allocator);
+    var counting_allocator = allocation_stats.CountingAllocator.init(backing_allocator);
+    const allocator = if (metrics_requested) counting_allocator.allocator() else backing_allocator;
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -577,6 +597,9 @@ pub fn main() !void {
     const chain_ids = ChainIdSelection{ .cli_chain_id = cli_chain_id };
 
     var metrics = Metrics.init(metrics_enabled);
+    if (metrics_enabled and metrics_requested) {
+        metrics.setAllocationStats(&counting_allocator.stats);
+    }
 
     log.setDebugEnabled(debug_enabled);
 
@@ -924,7 +947,7 @@ pub fn main() !void {
     emit_mlir_options.chain_id = compile_context.chain_id;
 
     if (emit_abi or emit_abi_solidity or emit_abi_extras) {
-        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, debug_enabled, false) catch |err| switch (err) {
+        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
             error.MissingContract => std.process.exit(2),
             else => return err,
         };
@@ -1046,7 +1069,7 @@ fn runBuildArtifacts(
     try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
     // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.debug_enabled, true);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -1173,7 +1196,7 @@ fn runDebugArtifacts(
     defer allocator.free(abi_dir);
     try std.fs.cwd().makePath(abi_dir);
 
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.debug_enabled, true);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     var debug_mlir_options = base_options;
     debug_mlir_options.output_dir = artifact_root;
@@ -3880,17 +3903,14 @@ fn runCompilerAstEmit(
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
         .resolver_options = resolver_options,
-        .compile_options = compileOptionsForChain(chain_id),
+        .compile_options = compileOptionsForChainWithMetrics(chain_id, m),
     }) catch |err| {
-        m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     const module = compilation.db.sources.module(compilation.root_module_id);
@@ -3924,17 +3944,14 @@ fn runCompilerMlirEmit(
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
-    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
         .resolver_options = resolver_options,
-        .compile_options = compileOptionsForChain(mlir_options.chain_id),
+        .compile_options = compileOptionsForChainWithMetrics(mlir_options.chain_id, m),
     }) catch |err| {
-        m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
@@ -4010,17 +4027,14 @@ fn runMlirEmitAdvanced(
     defer mlir_arena.deinit();
     const mlir_allocator = mlir_arena.allocator();
 
-    m.begin("compiler");
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
         .resolver_options = resolver_options,
-        .compile_options = compileOptionsForChain(mlir_options.chain_id),
+        .compile_options = compileOptionsForChainWithMetrics(mlir_options.chain_id, m),
     }) catch |err| {
-        m.end();
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
@@ -4044,7 +4058,6 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.verify_z3) {
-        m.begin("z3 verification");
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
@@ -4085,11 +4098,9 @@ fn runMlirEmitAdvanced(
         }
 
         verification_result_opt = verification_result;
-        m.end();
     }
 
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
-        m.begin("smt report");
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
@@ -4105,7 +4116,6 @@ fn runMlirEmitAdvanced(
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
-        m.end();
     }
 
     // Write the FV proof sidecar before the canonicalize / cleanup
@@ -4130,13 +4140,11 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
-        m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
             return error.OraMlirCanonicalizationFailed;
         }
-        m.end();
     }
 
     if (mlir_options.emit_mlir_sir) {
@@ -4289,18 +4297,15 @@ fn runMlirEmitAdvanced(
             return error.SirTextLegalizerFailed;
         }
 
-        m.begin("sir text emission");
         const sir_text_ref = c.oraEmitSIRText(ctx, final_module);
         defer if (sir_text_ref.data != null) {
             const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(sir_text_ref);
         };
         if (sir_text_ref.data == null or sir_text_ref.length == 0) {
-            m.end();
             try stdout.print("Failed to emit SIR text\n", .{});
             return error.SirTextEmissionFailed;
         }
-        m.end();
 
         // Extract source locations from SIR MLIR (sidecar to SIR text).
         // Op indices match the SIR text op ordering for later correlation
@@ -4382,9 +4387,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            m.begin("bytecode generation");
             try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
-            m.end();
         }
     }
 
@@ -4639,6 +4642,7 @@ fn runAbiEmit(
     emit_abi_extras: bool,
     resolver_options: import_graph.ResolverOptions,
     chain_id: u64,
+    m: ?*Metrics,
     debug_enabled: bool,
     allow_missing_contract: bool,
 ) !void {
@@ -4648,7 +4652,7 @@ fn runAbiEmit(
 
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
         .resolver_options = resolver_options,
-        .compile_options = compileOptionsForChain(chain_id),
+        .compile_options = compileOptionsForChainWithMetrics(chain_id, m),
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
