@@ -1,0 +1,22 @@
+// Result<T, E> with a payload-carrying error constructor.
+// Covers Err(InsufficientBalance(...)) specifically, not only bare error-union
+// returns or payload Result examples with generic Failure errors.
+
+error InsufficientBalance(required: u256, available: u256);
+
+pub contract ResultPayloadError {
+    pub fn withdraw(current: u256, amount: u256) -> Result<u256, InsufficientBalance> {
+        if (current < amount) {
+            return Err(InsufficientBalance(amount, current));
+        }
+        return Ok(current - amount);
+    }
+
+    pub fn inspect(current: u256, amount: u256) -> u256 {
+        let maybe = withdraw(current, amount);
+        return match (maybe) {
+            Ok(remaining) => remaining,
+            Err(err) => err.required,
+        };
+    }
+}
