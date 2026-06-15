@@ -12,8 +12,8 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":23:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":23:5)
 // CHECK-NEXT:   func.func @testMemoryToStorage() attributes {ora.effect = "writes", ora.selector = "0x459a14ef", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
-// CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":30:39)))
 // CHECK-NEXT:     %slot_storage_val = sir.const 0 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":31:9)))
+// CHECK-NEXT:     %c200 = sir.const 200 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":30:39)))
 // CHECK-NEXT:     sir.sstore %slot_storage_val : !sir.u256, %c200 : !sir.u256 loc("ora.stmt.6"("ora.origin_stmt.6"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":31:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":29:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":29:5)
@@ -24,14 +24,14 @@
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":40:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":40:5)
 // CHECK-NEXT:   func.func @testStackToStorage() attributes {ora.effect = "writes", ora.selector = "0x1d175868", ora.visibility = "pub", ora.write_slots = ["storage_val"]} {
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":46:31)))
 // CHECK-NEXT:     %slot_storage_val = sir.const 0 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":47:9)))
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.9"("ora.origin_stmt.9"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":46:31)))
 // CHECK-NEXT:     sir.sstore %slot_storage_val : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":47:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":45:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":45:5)
 // CHECK-NEXT:   func.func @testStackToTStore() attributes {ora.effect = "writes", ora.selector = "0xd635e3c0", ora.visibility = "pub", ora.write_slots = ["transient:tstore_val"]} {
-// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":52:31)))
 // CHECK-NEXT:     %0 = sir.const 1 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":53:9)))
+// CHECK-NEXT:     %c100 = sir.const 100 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":52:31)))
 // CHECK-NEXT:     sir.tstore %0 : !sir.u256, %c100 : !sir.u256 loc("ora.stmt.12"("ora.origin_stmt.12"("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":53:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":51:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/regions/region_type_checking.ora":51:5)

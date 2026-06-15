@@ -280,7 +280,10 @@ class SIR_NoResultFormattedOp<string mnemonic, string summaryText,
 // ==========================================================================
 // Constants
 // ==========================================================================
-def ConstOp : SIR_PureOp<"const", [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
+def ConstOp : SIR_PureOp<"const", [
+    ConstantLike,
+    DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>
+]> {
   let summary = "Constant 256-bit value";
   let arguments = (ins APIntAttr:$value);
   let results   = (outs SIR_U256:$res);

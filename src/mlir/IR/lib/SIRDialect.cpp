@@ -9,6 +9,7 @@
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/TypeSwitch.h"
 
 #include <optional>
@@ -59,7 +60,9 @@ static constexpr llvm::StringLiteral kSIRResultNameAttr = "sir.result_name_0";
 void ConstOp::print(::mlir::OpAsmPrinter &p)
 {
     p << " ";
-    p.printAttributeWithoutType(getValueAttr());
+    llvm::SmallString<80> text;
+    getValueAttr().getValue().zextOrTrunc(256).toString(text, 10, false);
+    p << text;
 
     // Print attributes, but elide "value" (property) and internal result name attribute
     SmallVector<StringRef> elidedAttrs = {"value", kSIRResultNameAttr};
@@ -675,6 +678,23 @@ Attribute SIRDialect::parseAttribute(DialectAsmParser &parser, Type type) const
 void SIRDialect::printAttribute(Attribute attr, DialectAsmPrinter &printer) const
 {
     Dialect::printAttribute(attr, printer);
+}
+
+Operation *SIRDialect::materializeConstant(OpBuilder &builder,
+                                           Attribute value,
+                                           Type type,
+                                           Location loc)
+{
+    if (!llvm::isa<U256Type>(type))
+        return nullptr;
+
+    auto intAttr = llvm::dyn_cast<IntegerAttr>(value);
+    if (!intAttr)
+        return nullptr;
+
+    APInt normalized = intAttr.getValue().zextOrTrunc(256);
+    auto attr = IntegerAttr::get(IntegerType::get(builder.getContext(), 256), normalized);
+    return builder.create<ConstOp>(loc, attr);
 }
 
 // Include the generated dialect definition (TypeID, vtable, constructor, etc.)

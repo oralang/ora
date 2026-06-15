@@ -1771,15 +1771,42 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     // CFG Generation with Registered Dialect
     //===----------------------------------------------------------------------===//
 
-    /// Generate Control Flow Graph (DOT format) from MLIR module
-    /// Registers the Ora dialect, runs view-op-graph pass with control flow edges, and returns DOT content
-    /// Returns null string ref on failure
-    /// The caller must free the returned string using mlirStringRefFree
-    /// @param includeControlFlow - If true, includes control flow edges (dashed lines showing dominance)
+    /// Generate Control Flow Graph (DOT format) from MLIR module.
+    /// Compatibility wrapper for oraGenerateCFGWithOptions.
     MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFG(
         MlirContext ctx,
         MlirModule module,
         bool includeControlFlow);
+
+    /// Generate a mode-specific control-flow graph (DOT format) from an MLIR module.
+    /// mode must be "ora" for the structured Ora view or "sir" for the true SIR block CFG.
+    /// provenGuardIds is optional and is used by the Ora view to mark proven refinement guards.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFGWithOptions(
+        MlirContext ctx,
+        MlirModule module,
+        MlirStringRef mode,
+        const MlirStringRef *provenGuardIds,
+        size_t provenGuardIdCount);
+
+    /// Return the number of function CFGs available in stable module walk order.
+    MLIR_CAPI_EXPORTED size_t oraCFGFunctionCount(
+        MlirModule module);
+
+    /// Return the function name for a stable CFG function index.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraCFGFunctionName(
+        MlirModule module,
+        size_t functionIndex);
+
+    /// Generate a mode-specific single-function CFG by stable function index.
+    /// Currently only mode "sir" is supported.
+    /// Returns null string ref on failure. The caller must free the returned string using oraStringRefFree.
+    MLIR_CAPI_EXPORTED MlirStringRef oraGenerateCFGForFunctionWithOptions(
+        MlirContext ctx,
+        MlirModule module,
+        MlirStringRef mode,
+        size_t functionIndex);
 
     //===----------------------------------------------------------------------===//
     // MLIR Printing with Custom Assembly Formats

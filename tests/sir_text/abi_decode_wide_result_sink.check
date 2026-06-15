@@ -2,12 +2,13 @@
 // CHECK-NOT: builtin.unrealized_conversion_cast
 
 // CHECK-LABEL: fn roundtrip:
+// CHECK: v[[RT_ERR_TAG:[0-9]+]] = const 0x1
+// CHECK: v[[RT_ERR_PAYLOAD:[0-9]+]] = const 0x0
 // CHECK: mstore256 {{.*}} v0
 // CHECK: {{v[0-9]+}} = mload256
 // CHECK: {{v[0-9]+}} = lt {{v[0-9]+}} {{v[0-9]+}}
-// CHECK: bb0 -> v[[RT_ERR_TAG:[0-9]+]] v[[RT_ERR_PAYLOAD:[0-9]+]] {
-// CHECK-NEXT: v[[RT_ERR_PAYLOAD]] = const 0x0
-// CHECK-NEXT: v[[RT_ERR_TAG]] = const 0x1
+// CHECK: bb0 -> v[[RT_ERR_TAG]] v[[RT_ERR_PAYLOAD]] {
+// CHECK-NEXT: => @bb2
 // CHECK: bb1 -> v[[RT_OK_TAG:[0-9]+]] v[[RT_OK_PAYLOAD:[0-9]+]] {
 // CHECK: v[[RT_OK_TAG]] = or
 // CHECK: v[[RT_OK_PAYLOAD]] = or
@@ -20,11 +21,11 @@
 
 // CHECK-LABEL: fn malformed:
 // CHECK: [[BAD_ONE:[A-Za-z_][A-Za-z0-9_]*]] = const 0x1
+// CHECK: [[BAD_ZERO:[A-Za-z_][A-Za-z0-9_]*]] = const 0x0
 // CHECK: {{v[0-9]+}} = mload256 v0
 // CHECK: {{v[0-9]+}} = lt {{v[0-9]+}} {{v[0-9]+}}
-// CHECK: bb0 -> v[[BAD_ERR_TAG:[0-9]+]] v[[BAD_ERR_PAYLOAD:[0-9]+]] {
-// CHECK-NEXT: v[[BAD_ERR_PAYLOAD]] = const 0x0
-// CHECK-NEXT: v[[BAD_ERR_TAG]] = const 0x1
+// CHECK: bb0 -> [[BAD_ONE]] [[BAD_ZERO]] {
+// CHECK-NEXT: => @bb2
 // CHECK: bb1 -> v[[BAD_OK_TAG:[0-9]+]] v[[BAD_OK_PAYLOAD:[0-9]+]] {
 // CHECK: v[[BAD_OK_TAG]] = or
 // CHECK: v[[BAD_OK_PAYLOAD]] = or

@@ -11,6 +11,7 @@ test "emit list sets cfg and preserves following input file" {
     const parsed = try cli.parseArgs(&args);
 
     try testing.expect(parsed.emit_cfg);
+    try testing.expectEqualStrings("ora", parsed.emit_cfg_mode.?);
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 
@@ -30,6 +31,16 @@ test "emit list cfg:ora sets cfg mode" {
     try testing.expect(parsed.emit_cfg);
     try testing.expect(parsed.emit_cfg_mode != null);
     try testing.expectEqualStrings("ora", parsed.emit_cfg_mode.?);
+}
+
+test "emit list cfg:sir-diff sets cfg diff mode" {
+    const args = [_][]const u8{ "--emit=cfg:sir-diff", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.emit_cfg);
+    try testing.expect(parsed.emit_cfg_mode != null);
+    try testing.expectEqualStrings("sir-diff", parsed.emit_cfg_mode.?);
+    try testing.expect(!parsed.emit_mlir_sir);
 }
 
 test "emit list mlir:sir sets emit_mlir_sir" {
