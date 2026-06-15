@@ -3,9 +3,15 @@ const ast = @import("../ast/mod.zig");
 const comptime_eval = @import("../comptime/mod.zig").compiler_ast_eval;
 const diagnostics = @import("../diagnostics/mod.zig");
 const hir = @import("../hir/mod.zig");
+const ora_types = @import("ora_types");
 const sema = @import("../sema/mod.zig");
+const compiler_query = @import("../compiler_query.zig");
 const source = @import("../source/mod.zig");
 const syntax = @import("../syntax/mod.zig");
+const compile_options = @import("../compile_options.zig");
+
+const ConstEvalResult = sema.ConstEvalResult;
+const ConstValue = ora_types.ConstValue;
 
 fn compilerPhaseDebugEnabled() bool {
     const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
@@ -91,6 +97,7 @@ const VerificationCache = struct {
 
 pub const CompilerDb = struct {
     allocator: std.mem.Allocator,
+    options: compile_options.CompileOptions,
     sources: source.SourceStore,
     syntax_slots: std.ArrayList(?*syntax.ParseResult),
     ast_slots: std.ArrayList(?*ast.LowerResult),
@@ -98,10 +105,10 @@ pub const CompilerDb = struct {
     item_index_slots: std.ArrayList(?*sema.ItemIndexResult),
     resolution_slots: std.ArrayList(?*sema.NameResolutionResult),
     typecheck_slots: std.ArrayList(TypeCheckCache),
-    consteval_slots: std.ArrayList(?*sema.ConstEvalResult),
+    consteval_slots: std.ArrayList(?*ConstEvalResult),
     consteval_tainted_slots: std.ArrayList(bool),
     consteval_in_progress: std.ArrayList(bool),
-    consteval_sentinel_slots: std.ArrayList(?*sema.ConstEvalResult),
+    consteval_sentinel_slots: std.ArrayList(?*ConstEvalResult),
     verification_slots: std.ArrayList(VerificationCache),
     module_verification_slots: std.ArrayList(?*sema.ModuleVerificationFactsResult),
     hir_slots: std.ArrayList(?*hir.LoweringResult),
@@ -109,6 +116,7 @@ pub const CompilerDb = struct {
     pub fn init(allocator: std.mem.Allocator) CompilerDb {
         return .{
             .allocator = allocator,
+            .options = .{},
             .sources = source.SourceStore.init(allocator),
             .syntax_slots = .{},
             .ast_slots = .{},
@@ -143,6 +151,38 @@ pub const CompilerDb = struct {
         self.sources.deinit();
     }
 
+    pub fn deinitFrontendOnly(self: *CompilerDb) void {
+        deinitSlots(self.allocator, &self.syntax_slots);
+        deinitSlots(self.allocator, &self.ast_slots);
+        deinitSlots(self.allocator, &self.module_graph_slots);
+        deinitSlots(self.allocator, &self.item_index_slots);
+        deinitSlots(self.allocator, &self.resolution_slots);
+        deinitCacheSlots(self.allocator, &self.typecheck_slots);
+        deinitSlots(self.allocator, &self.consteval_slots);
+        self.consteval_tainted_slots.deinit(self.allocator);
+        deinitSlots(self.allocator, &self.consteval_sentinel_slots);
+        self.consteval_in_progress.deinit(self.allocator);
+        deinitCacheSlots(self.allocator, &self.verification_slots);
+        deinitSlots(self.allocator, &self.module_verification_slots);
+        self.hir_slots.deinit(self.allocator);
+        self.sources.deinit();
+    }
+
+    pub fn setCompileOptions(self: *CompilerDb, options: compile_options.CompileOptions) void {
+        const chain_id_changed = self.options.chain_id != options.chain_id;
+        self.options = options;
+        if (!chain_id_changed) return;
+        for (self.consteval_slots.items) |*slot| {
+            clearPtrSlot(self.allocator, ConstEvalResult, slot);
+        }
+        for (self.consteval_tainted_slots.items) |*tainted| {
+            tainted.* = false;
+        }
+        for (self.hir_slots.items) |*slot| {
+            clearPtrSlot(self.allocator, hir.LoweringResult, slot);
+        }
+    }
+
     pub fn addSourceFile(self: *CompilerDb, path: []const u8, text: []const u8) !source.FileId {
         const file_id = try self.sources.addFile(path, text);
         try ensureSlots(self.allocator, &self.syntax_slots, file_id.index() + 1);
@@ -157,6 +197,7 @@ pub const CompilerDb = struct {
     }
 
     pub fn addModule(self: *CompilerDb, package_id: source.PackageId, file_id: source.FileId, name: []const u8) !source.ModuleId {
+        const package_graph_was_built = self.module_graph_slots.items[package_id.index()] != null;
         const module_id = try self.sources.addModule(package_id, file_id, name);
         const required = module_id.index() + 1;
         try ensureSlots(self.allocator, &self.item_index_slots, required);
@@ -169,6 +210,7 @@ pub const CompilerDb = struct {
         try self.verification_slots.append(self.allocator, VerificationCache.init(self.allocator));
         try ensureSlots(self.allocator, &self.module_verification_slots, required);
         try ensureSlots(self.allocator, &self.hir_slots, required);
+        if (package_graph_was_built) self.invalidatePackageModulesFrontendOnly(package_id);
         return module_id;
     }
 
@@ -177,8 +219,50 @@ pub const CompilerDb = struct {
         self.invalidateFile(file_id);
     }
 
+    pub fn updateSourceFileFrontendOnly(self: *CompilerDb, file_id: source.FileId, text: []const u8) !void {
+        try self.sources.updateFile(file_id, text);
+        self.invalidateFileFrontendOnly(file_id);
+    }
+
+    pub fn releaseSourceFileFrontendOnly(self: *CompilerDb, file_id: source.FileId) void {
+        self.invalidateFileFrontendOnly(file_id);
+        self.sources.releaseFileText(file_id);
+    }
+
     pub fn sourceText(self: *const CompilerDb, file_id: source.FileId) []const u8 {
         return self.sources.sourceText(file_id);
+    }
+
+    pub fn hasSyntaxResult(self: *const CompilerDb, file_id: source.FileId) bool {
+        const index = file_id.index();
+        return index < self.syntax_slots.items.len and self.syntax_slots.items[index] != null;
+    }
+
+    pub fn hasAstResult(self: *const CompilerDb, file_id: source.FileId) bool {
+        const index = file_id.index();
+        return index < self.ast_slots.items.len and self.ast_slots.items[index] != null;
+    }
+
+    pub fn hasItemIndexResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.item_index_slots.items.len and self.item_index_slots.items[index] != null;
+    }
+
+    pub fn hasResolutionResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.resolution_slots.items.len and self.resolution_slots.items[index] != null;
+    }
+
+    pub fn hasConstEvalResult(self: *const CompilerDb, module_id: source.ModuleId) bool {
+        const index = module_id.index();
+        return index < self.consteval_slots.items.len and
+            self.consteval_slots.items[index] != null and
+            !self.consteval_tainted_slots.items[index];
+    }
+
+    pub fn hasTypeCheckResult(self: *const CompilerDb, module_id: source.ModuleId, key: sema.TypeCheckKey) bool {
+        const index = module_id.index();
+        return index < self.typecheck_slots.items.len and self.typecheck_slots.items[index].lookup(key) != null;
     }
 
     pub fn syntaxTree(self: *CompilerDb, file_id: source.FileId) !*const syntax.SyntaxTree {
@@ -279,18 +363,11 @@ pub const CompilerDb = struct {
             try self.resolveNames(module_id),
             try self.constEval(module_id),
             key,
-            .{
-                .context = self,
-                .ast_file = astFileForComptime,
-                .item_index = itemIndexForComptime,
-                .module_typecheck = moduleTypeCheckForComptime,
-                .lookup_item = lookupItemForComptime,
-                .resolve_import_alias = resolveImportAliasForComptime,
-            },
+            self.semaQueryView(),
         );
         errdefer result.deinit();
         if (self.consteval_tainted_slots.items[module_id.index()]) {
-            clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+            clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
             self.consteval_tainted_slots.items[module_id.index()] = false;
         }
         try cache.entries.put(typeCheckCacheKey(key), result);
@@ -319,12 +396,12 @@ pub const CompilerDb = struct {
         return primary.?;
     }
 
-    pub fn constEval(self: *CompilerDb, module_id: source.ModuleId) !*const sema.ConstEvalResult {
+    pub fn constEval(self: *CompilerDb, module_id: source.ModuleId) !*const ConstEvalResult {
         const slot = &self.consteval_slots.items[module_id.index()];
         const tainted_slot = &self.consteval_tainted_slots.items[module_id.index()];
         if (slot.* != null) {
             if (tainted_slot.* and self.typecheck_slots.items[module_id.index()].in_progress.count() == 0) {
-                clearPtrSlot(self.allocator, sema.ConstEvalResult, slot);
+                clearPtrSlot(self.allocator, ConstEvalResult, slot);
                 tainted_slot.* = false;
             } else if (!tainted_slot.*) {
                 return slot.*.?;
@@ -339,18 +416,11 @@ pub const CompilerDb = struct {
         const module = self.sources.module(module_id);
         const ast_file = try self.astFile(module.file_id);
         const tainted = self.typecheck_slots.items[module_id.index()].in_progress.count() != 0;
-        const result = try self.allocator.create(sema.ConstEvalResult);
+        const result = try self.allocator.create(ConstEvalResult);
         result.* = try comptime_eval.constEval(self.allocator, ast_file, .{
             .module_id = module_id,
-            .type_query = .{
-                .context = self,
-                .ensure_typecheck = ensureTypeCheckedForComptime,
-                .module_typecheck = moduleTypeCheckForComptime,
-                .const_eval = constEvalForComptime,
-                .ast_file = astFileForComptime,
-                .lookup_item = lookupItemForComptime,
-                .resolve_import_alias = resolveImportAliasForComptime,
-            },
+            .chain_id = self.options.chain_id,
+            .type_query = self.comptimeQueryView(),
         });
         slot.* = result;
         tainted_slot.* = tainted;
@@ -400,9 +470,10 @@ pub const CompilerDb = struct {
                 const root = try self.verificationFacts(module_id, .{ .body = ast.BodyId.fromIndex(0) });
                 try facts.appendSlice(arena, root.facts);
             } else {
+                const visited_items = try arena.alloc(bool, ast_file.items.len);
+                @memset(visited_items, false);
                 for (ast_file.root_items) |item_id| {
-                    const item_facts = try self.verificationFacts(module_id, .{ .item = item_id });
-                    try facts.appendSlice(arena, item_facts.facts);
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, item_id, visited_items, arena, &facts);
                 }
             }
 
@@ -410,6 +481,48 @@ pub const CompilerDb = struct {
             slot.* = result;
         }
         return slot.*.?;
+    }
+
+    fn appendVerificationFactsForItemTree(
+        self: *CompilerDb,
+        module_id: source.ModuleId,
+        ast_file: *const ast.AstFile,
+        item_id: ast.ItemId,
+        visited_items: []bool,
+        allocator: std.mem.Allocator,
+        facts: *std.ArrayList(sema.VerificationFact),
+    ) !void {
+        const item_index = item_id.index();
+        if (item_index >= visited_items.len or visited_items[item_index]) return;
+        visited_items[item_index] = true;
+
+        const item_facts = try self.verificationFacts(module_id, .{ .item = item_id });
+        try facts.appendSlice(allocator, item_facts.facts);
+
+        switch (ast_file.item(item_id).*) {
+            .Contract => |contract| {
+                for (contract.members) |member_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, member_id, visited_items, allocator, facts);
+                }
+            },
+            .Impl => |impl_item| {
+                for (impl_item.methods) |method_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, method_id, visited_items, allocator, facts);
+                }
+            },
+            .Trait => {},
+            .Struct => |struct_item| {
+                for (struct_item.metadata) |metadata_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                }
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.metadata) |metadata_id| {
+                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                }
+            },
+            else => {},
+        }
     }
 
     pub fn lowerToHir(self: *CompilerDb, module_id: source.ModuleId) !*const hir.LoweringResult {
@@ -425,22 +538,13 @@ pub const CompilerDb = struct {
             compilerPhaseLog("lower-to-hir {s} resolve", .{module.name});
             const typecheck = try self.moduleTypeCheck(module_id);
             compilerPhaseLog("lower-to-hir {s} typecheck", .{module.name});
-            _ = try self.moduleVerificationFacts(module_id);
+            const verification_facts = try self.moduleVerificationFacts(module_id);
             compilerPhaseLog("lower-to-hir {s} verification-facts", .{module.name});
             const const_eval = try self.constEval(module_id);
             compilerPhaseLog("lower-to-hir {s} consteval", .{module.name});
             const result = try self.allocator.create(hir.LoweringResult);
             errdefer self.allocator.destroy(result);
-            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck, .{
-                .context = self,
-                .ast_file = astFileForComptime,
-                .item_index = itemIndexForComptime,
-                .resolution = resolveNamesForComptime,
-                .module_typecheck = moduleTypeCheckForComptime,
-                .const_eval = constEvalForComptime,
-                .lookup_item = lookupItemForComptime,
-                .resolve_import_alias = resolveImportAliasForComptime,
-            });
+            result.* = try hir.lowerModule(self.allocator, &self.sources, module_id, ast_file, item_index, resolution, const_eval, typecheck, verification_facts, self.hirQueryView());
             compilerPhaseLog("lower-to-hir {s} done", .{module.name});
             slot.* = result;
         }
@@ -500,21 +604,70 @@ pub const CompilerDb = struct {
         }
     }
 
+    fn invalidateFileFrontendOnly(self: *CompilerDb, file_id: source.FileId) void {
+        clearPtrSlot(self.allocator, syntax.ParseResult, &self.syntax_slots.items[file_id.index()]);
+        clearPtrSlot(self.allocator, ast.LowerResult, &self.ast_slots.items[file_id.index()]);
+
+        var invalidated_modules: std.AutoHashMap(source.ModuleId, void) = .init(self.allocator);
+        defer invalidated_modules.deinit();
+        var invalidated_packages: std.AutoHashMap(source.PackageId, void) = .init(self.allocator);
+        defer invalidated_packages.deinit();
+
+        for (self.sources.modules.items) |module_record| {
+            if (module_record.file_id == file_id) {
+                if (self.module_graph_slots.items[module_record.package_id.index()]) |graph| {
+                    self.invalidateModuleDependentsFrontendOnly(graph, module_record.id, &invalidated_modules) catch {
+                        self.invalidateModuleFrontendOnly(module_record.id);
+                    };
+                } else {
+                    self.invalidateModuleFrontendOnly(module_record.id);
+                    invalidated_modules.put(module_record.id, {}) catch {};
+                }
+                invalidated_packages.put(module_record.package_id, {}) catch {};
+            }
+        }
+
+        var package_iterator = invalidated_packages.keyIterator();
+        while (package_iterator.next()) |package_id| {
+            self.invalidatePackage(package_id.*);
+        }
+    }
+
     fn invalidatePackage(self: *CompilerDb, package_id: source.PackageId) void {
         clearPtrSlot(self.allocator, sema.ModuleGraphResult, &self.module_graph_slots.items[package_id.index()]);
+    }
+
+    fn invalidatePackageModulesFrontendOnly(self: *CompilerDb, package_id: source.PackageId) void {
+        self.invalidatePackage(package_id);
+        const package = self.sources.package(package_id);
+        for (package.modules.items) |module_id| {
+            self.invalidateModuleFrontendOnly(module_id);
+        }
     }
 
     fn invalidateModule(self: *CompilerDb, module_id: source.ModuleId) void {
         clearPtrSlot(self.allocator, sema.ItemIndexResult, &self.item_index_slots.items[module_id.index()]);
         clearPtrSlot(self.allocator, sema.NameResolutionResult, &self.resolution_slots.items[module_id.index()]);
         self.typecheck_slots.items[module_id.index()].clear(self.allocator);
-        clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
         self.consteval_tainted_slots.items[module_id.index()] = false;
         self.consteval_in_progress.items[module_id.index()] = false;
-        clearPtrSlot(self.allocator, sema.ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
         self.verification_slots.items[module_id.index()].clear(self.allocator);
         clearPtrSlot(self.allocator, sema.ModuleVerificationFactsResult, &self.module_verification_slots.items[module_id.index()]);
         clearPtrSlot(self.allocator, hir.LoweringResult, &self.hir_slots.items[module_id.index()]);
+    }
+
+    fn invalidateModuleFrontendOnly(self: *CompilerDb, module_id: source.ModuleId) void {
+        clearPtrSlot(self.allocator, sema.ItemIndexResult, &self.item_index_slots.items[module_id.index()]);
+        clearPtrSlot(self.allocator, sema.NameResolutionResult, &self.resolution_slots.items[module_id.index()]);
+        self.typecheck_slots.items[module_id.index()].clear(self.allocator);
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_slots.items[module_id.index()]);
+        self.consteval_tainted_slots.items[module_id.index()] = false;
+        self.consteval_in_progress.items[module_id.index()] = false;
+        clearPtrSlot(self.allocator, ConstEvalResult, &self.consteval_sentinel_slots.items[module_id.index()]);
+        self.verification_slots.items[module_id.index()].clear(self.allocator);
+        clearPtrSlot(self.allocator, sema.ModuleVerificationFactsResult, &self.module_verification_slots.items[module_id.index()]);
     }
 
     fn invalidateModuleDependents(
@@ -530,6 +683,22 @@ pub const CompilerDb = struct {
         for (graph.modules) |module_summary| {
             if (!moduleDependsOn(module_summary, module_id)) continue;
             try self.invalidateModuleDependents(graph, module_summary.module_id, visited);
+        }
+    }
+
+    fn invalidateModuleDependentsFrontendOnly(
+        self: *CompilerDb,
+        graph: *const sema.ModuleGraphResult,
+        module_id: source.ModuleId,
+        visited: *std.AutoHashMap(source.ModuleId, void),
+    ) !void {
+        if (visited.contains(module_id)) return;
+        try visited.put(module_id, {});
+        self.invalidateModuleFrontendOnly(module_id);
+
+        for (graph.modules) |module_summary| {
+            if (!moduleDependsOn(module_summary, module_id)) continue;
+            try self.invalidateModuleDependentsFrontendOnly(graph, module_summary.module_id, visited);
         }
     }
 
@@ -551,7 +720,10 @@ pub const CompilerDb = struct {
         const item_types = try arena_allocator.alloc(sema.Type, ast_file.items.len);
         const item_regions = try arena_allocator.alloc(sema.Region, ast_file.items.len);
         const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
+        const item_modifies = try arena_allocator.alloc(?[]sema.EffectSlot, ast_file.items.len);
         const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
+        const pattern_initializers = try arena_allocator.alloc(?ast.ExprId, ast_file.patterns.len);
+        const pattern_binding_kinds = try arena_allocator.alloc(?ast.BindingKind, ast_file.patterns.len);
         const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
         const call_resolutions = try arena_allocator.alloc(?sema.ResolvedCall, ast_file.expressions.len);
         const expr_effects = try arena_allocator.alloc(sema.Effect, ast_file.expressions.len);
@@ -560,7 +732,10 @@ pub const CompilerDb = struct {
         for (item_types) |*item_type| item_type.* = .{ .unknown = {} };
         for (item_regions) |*region| region.* = .none;
         for (item_effects) |*effect| effect.* = .pure;
+        @memset(item_modifies, null);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
+        @memset(pattern_initializers, null);
+        @memset(pattern_binding_kinds, null);
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
         @memset(call_resolutions, null);
         for (expr_effects) |*effect| effect.* = .pure;
@@ -572,16 +747,24 @@ pub const CompilerDb = struct {
             .item_types = item_types,
             .item_regions = item_regions,
             .item_effects = item_effects,
+            .item_modifies = item_modifies,
             .pattern_types = pattern_types,
+            .pattern_initializers = pattern_initializers,
+            .pattern_binding_kinds = pattern_binding_kinds,
             .expr_types = expr_types,
             .call_resolutions = call_resolutions,
             .expr_effects = expr_effects,
             .body_types = body_types,
             .instantiated_structs = &.{},
+            .instantiated_struct_lookup = &.{},
             .instantiated_enums = &.{},
+            .instantiated_enum_lookup = &.{},
             .instantiated_bitfields = &.{},
+            .instantiated_bitfield_lookup = &.{},
             .trait_interfaces = &.{},
+            .trait_interface_lookup = &.{},
             .impl_interfaces = &.{},
+            .impl_interface_lookup = &.{},
             .diagnostics = diagnostics.DiagnosticList.init(self.allocator),
         };
 
@@ -589,7 +772,45 @@ pub const CompilerDb = struct {
         return result;
     }
 
-    fn unknownConstEvalResult(self: *CompilerDb, module_id: source.ModuleId) !*const sema.ConstEvalResult {
+    fn semaQueryView(self: *CompilerDb) compiler_query.SemaView {
+        return .{
+            .context = self,
+            .ast_file = astFileForComptime,
+            .item_index = itemIndexForComptime,
+            .module_typecheck = moduleTypeCheckForComptime,
+            .lookup_item = lookupItemForComptime,
+            .resolve_import_alias = resolveImportAliasForComptime,
+        };
+    }
+
+    fn comptimeQueryView(self: *CompilerDb) compiler_query.ComptimeView {
+        return .{
+            .context = self,
+            .ensure_typecheck = ensureTypeCheckedForComptime,
+            .module_typecheck = moduleTypeCheckForComptime,
+            .item_index = itemIndexForComptime,
+            .const_eval = constEvalForComptime,
+            .ast_file = astFileForComptime,
+            .lookup_item = lookupItemForComptime,
+            .resolve_import_alias = resolveImportAliasForComptime,
+        };
+    }
+
+    fn hirQueryView(self: *CompilerDb) compiler_query.HirView {
+        return .{
+            .context = self,
+            .ast_file = astFileForComptime,
+            .item_index = itemIndexForComptime,
+            .resolution = resolveNamesForComptime,
+            .module_typecheck = moduleTypeCheckForComptime,
+            .module_verification_facts = moduleVerificationFactsForComptime,
+            .const_eval = constEvalForComptime,
+            .lookup_item = lookupItemForComptime,
+            .resolve_import_alias = resolveImportAliasForComptime,
+        };
+    }
+
+    fn unknownConstEvalResult(self: *CompilerDb, module_id: source.ModuleId) !*const ConstEvalResult {
         const slot = &self.consteval_sentinel_slots.items[module_id.index()];
         if (slot.*) |cached| {
             return cached;
@@ -597,13 +818,13 @@ pub const CompilerDb = struct {
 
         const module = self.sources.module(module_id);
         const ast_file = try self.astFile(module.file_id);
-        const result = try self.allocator.create(sema.ConstEvalResult);
+        const result = try self.allocator.create(ConstEvalResult);
         errdefer self.allocator.destroy(result);
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer arena.deinit();
         const arena_allocator = arena.allocator();
-        const values = try arena_allocator.alloc(?sema.ConstValue, ast_file.expressions.len);
+        const values = try arena_allocator.alloc(?ConstValue, ast_file.expressions.len);
         @memset(values, null);
 
         result.* = .{
@@ -626,7 +847,12 @@ fn moduleTypeCheckForComptime(context: *anyopaque, module_id: source.ModuleId) a
     return self.moduleTypeCheck(module_id);
 }
 
-fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult {
+fn moduleVerificationFactsForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ModuleVerificationFactsResult {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.moduleVerificationFacts(module_id);
+}
+
+fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ConstEvalResult {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.constEval(module_id);
 }
@@ -708,6 +934,20 @@ fn verificationCacheKey(key: sema.VerificationFactsKey) u64 {
     return switch (key) {
         .item => |item_id| (@as(u64, 0) << 32) | @intFromEnum(item_id),
         .body => |body_id| (@as(u64, 1) << 32) | @intFromEnum(body_id),
+        .trait_method => |owner| blk: {
+            const trait_index: u64 = @intFromEnum(owner.trait_item);
+            const method_index: u64 = @intCast(owner.method_index);
+            std.debug.assert(trait_index <= 0x7fff_ffff);
+            std.debug.assert(method_index <= 0x7fff_ffff);
+            break :blk (@as(u64, 2) << 62) | (trait_index << 31) | method_index;
+        },
+        .statement => |owner| blk: {
+            const item_index: u64 = @intFromEnum(owner.item);
+            const stmt_index: u64 = @intFromEnum(owner.stmt);
+            std.debug.assert(item_index <= 0x7fff_ffff);
+            std.debug.assert(stmt_index <= 0x7fff_ffff);
+            break :blk (@as(u64, 3) << 62) | (item_index << 31) | stmt_index;
+        },
     };
 }
 

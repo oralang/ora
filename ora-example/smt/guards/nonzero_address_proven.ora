@@ -4,7 +4,7 @@
 // Tests that SMT can prove NonZeroAddress constraints when requires clauses
 // provide sufficient information. Guards should be removed (no runtime cost).
 //
-// Run with: --verify --emit-mlir-sir
+// Run with: --verify --emit=mlir:sir
 // Expected: Guards removed in MLIR output (SMT discharge successful)
 // ============================================================================
 
@@ -55,4 +55,3 @@ contract NonZeroAddressProven {
         }
     }
 }
-

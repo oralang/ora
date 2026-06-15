@@ -61,7 +61,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
         \\        else => {
         \\            return value;
         \\        }
-        \\    }
+        \\    };
         \\}
     ;
 
@@ -71,6 +71,7 @@ test "compiler syntax parses match statements as match syntax nodes" {
     const module = compilation.db.sources.module(compilation.root_module_id);
     const tree = try compilation.db.syntaxTree(module.file_id);
     const root = compiler.syntax.rootNode(tree);
+
     const function = firstChildNodeOfKind(root, .FunctionItem);
     try testing.expect(function != null);
 
@@ -81,6 +82,36 @@ test "compiler syntax parses match statements as match syntax nodes" {
     try testing.expect(nthChildNodeOfKind(body.?, .SwitchStmt, 0) == null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 0) != null);
     try testing.expect(nthChildNodeOfKind(match_stmt.?, .SwitchArm, 1) != null);
+}
+
+test "compiler syntax accepts trailing semicolon after match statements" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    var out: u256 = 0;
+        \\    match (value) {
+        \\        Ok(inner) => {
+        \\            out = inner;
+        \\        }
+        \\        Err(_) => {
+        \\            out = 1;
+        \\        }
+        \\    };
+        \\    return out;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const diagnostics = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expect(diagnostics.isEmpty());
+
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    try testing.expect(!containsNodeOfKind(root, .Error));
+    try testing.expect(nthDescendantNodeOfKind(root, .MatchStmt, 0) != null);
 }
 
 test "compiler lowers match expressions through existing switch expression path" {
@@ -190,6 +221,50 @@ test "compiler lowers error-union match statements with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch") == null);
 }
 
+test "compiler corpus accepts exhaustive Result match statement returns" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/result_bytes_flow.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects Result match statement fallthrough" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/match/fail_result_match_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler corpus accepts labeled switch with return-or-continue arms" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/switch_labeled.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler corpus rejects labeled switch fallthrough in non-void function" {
+    var compilation = try compilePackage("ora-example/corpus/control-flow/switch/fail_switch_labeled_fallthrough.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "missing return value for function with non-void return type"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
 test "compiler lowers error-union match expressions with ok and err bindings" {
     const source_text =
         \\error Failure(code: u256);
@@ -208,6 +283,25 @@ test "compiler lowers error-union match expressions with ok and err bindings" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.unwrap") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.get_error") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.switch_expr") == null);
+}
+
+test "compiler lowers exhaustive Result match expressions without placeholder fallback" {
+    const source_text =
+        \\error Failure;
+        \\pub fn run(value: Result<u256, Failure>) -> u256 {
+        \\    return match (value) {
+        \\        Ok(inner) => inner,
+        \\        Err(_) => 0,
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.placeholder_count);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
 test "compiler rejects non-exhaustive error-union match expressions without else" {
@@ -693,6 +787,56 @@ test "compiler lowers Result constructors in match expression arms" {
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.error.return") != null);
 }
 
+test "compiler rejects mixed payload and Result constructor match arms" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => value,
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const message = "match expression arms have incompatible types 'u256' and '!u256 | Overflow'; wrap success values with Ok(...) or use try";
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "match expression arms have incompatible types 'u256' and '!u256 | Overflow'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, message));
+}
+
+test "compiler allows explicit Result constructors in every match arm" {
+    const source_text =
+        \\error Overflow;
+        \\
+        \\fn checked_add_result(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    return Ok(a + b);
+        \\}
+        \\
+        \\pub fn checked_add(a: u256, b: u256) -> Result<u256, Overflow> {
+        \\    let maybe: Result<u256, Overflow> = checked_add_result(a, b);
+        \\    return match (maybe) {
+        \\        Ok(value) => Ok(value),
+        \\        Err(_) => Err(Overflow()),
+        \\    };
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler emits error-union ABI attrs for public Result returns" {
     const source_text =
         \\error Failure();
@@ -955,6 +1099,47 @@ test "compiler rejects public Result parameters when one-word success would requ
     try testing.expect(found);
 }
 
+test "compiler rejects public Result dynamic arrays outside committed calldata element set" {
+    const source_text =
+        \\enum Status: u8 { Active, Paused }
+        \\error Failure(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn consume_small(value: Result<slice[u8], Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\
+        \\    pub fn consume_enum(value: Result<slice[Status], Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.code,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    try testing.expect(diags.items.items.len != 0);
+    var found = false;
+    for (diags.items.items) |diag| {
+        if (std.mem.indexOf(u8, diag.message, "unsupported Result ABI type") != null and
+            std.mem.indexOf(u8, diag.message, "carrier-compatible payload and a single error") != null)
+        {
+            found = true;
+            break;
+        }
+    }
+    try testing.expect(found);
+}
+
 test "compiler keeps plain match expressions on booleans on the switch path" {
     const source_text =
         \\pub fn run(flag: bool) -> u256 {
@@ -1158,7 +1343,7 @@ test "compiler source loader injects embedded std result module" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -1170,7 +1355,7 @@ test "compiler source loader injects embedded std result module" {
     const std_summary = for (graph.modules) |summary| {
         if (summary.module_id == std_module_id) break summary;
     } else return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
+    try testing.expectEqual(@as(usize, 4), std_summary.imports.len);
 }
 
 test "compiler lowers try expressions through real error helper ops" {
@@ -1232,7 +1417,7 @@ test "compiler marks payload-bearing narrow error unions for wide lowering in HI
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }
 
-test "compiler infers operator result types from operand compatibility" {
+test "compiler infers operator result types from strict operand compatibility" {
     const source_text =
         \\error Failure(code: u256);
         \\
@@ -1266,14 +1451,17 @@ test "compiler infers operator result types from operand compatibility" {
     const unwrapped_stmt = ast_file.statement(body.statements[6]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[7]).Return;
 
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
-    try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[sum_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[bits_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[cmp_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.pattern_types[logic_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[negated_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.unknown, typecheck.pattern_types[failed_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.pattern_types[unwrapped_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.integer, typecheck.exprType(ret_stmt.value.?).kind());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '+' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '&' for types 'u256' and 'u8'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "invalid binary operator '<' for types 'u256' and 'u8'"));
 }
 
 test "compiler emits user diagnostics for generic arity mismatches" {
@@ -1375,16 +1563,18 @@ test "compiler reports sema diagnostics for declaration assignment and return mi
     try testing.expectEqualStrings("field 'total' expects type 'u256', found 'bool'", type_diags.items.items[0].message);
     try testing.expectEqualStrings("constant 'LIMIT' expects type 'u256', found 'bool'", type_diags.items.items[1].message);
     try testing.expectEqualStrings("declaration expects type 'u256', found 'bool'", type_diags.items.items[2].message);
-    try testing.expectEqualStrings("assignment expects type 'integer', found 'bool'", type_diags.items.items[3].message);
+    try testing.expectEqualStrings("ambiguous integer type; annotate or suffix the integer literal", type_diags.items.items[3].message);
     try testing.expectEqualStrings("return expects type 'u256', found 'bool'", type_diags.items.items[4].message);
 
     const function = ast_file.item(ast_file.root_items[2]).Function;
     const full_typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
     const body = ast_file.body(function.body);
     const a_stmt = ast_file.statement(body.statements[0]).VariableDecl;
+    const b_stmt = ast_file.statement(body.statements[1]).VariableDecl;
     const ret_stmt = ast_file.statement(body.statements[3]).Return;
 
     try testing.expectEqual(compiler.sema.TypeKind.integer, full_typecheck.pattern_types[a_stmt.pattern.index()].kind());
+    try testing.expectEqual(compiler.sema.TypeKind.unknown, full_typecheck.pattern_types[b_stmt.pattern.index()].kind());
     try testing.expectEqual(compiler.sema.TypeKind.bool, full_typecheck.exprType(ret_stmt.value.?).kind());
 }
 
@@ -1392,7 +1582,7 @@ test "compiler reports sema diagnostics for control flow conditions and switch b
     const source_text =
         \\pub fn broken(flag: u256) -> u256 {
         \\    if (1) {
-        \\        let a = 1;
+        \\        let a: u256 = 1;
         \\    }
         \\    while (2) {
         \\        break;
@@ -2142,7 +2332,7 @@ test "compiler lowers dynamic bytes public Result inputs through OraToSIR dispat
         \\contract Probe {
         \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
         \\        return match (value) {
-        \\            Ok(inner) => 1,
+        \\            Ok(inner) => inner.len,
         \\            Err(err) => 0,
         \\        };
         \\    }
@@ -2162,6 +2352,7 @@ test "compiler lowers dynamic bytes public Result inputs through OraToSIR dispat
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
 }
 
 test "compiler lowers dynamic bytes public Result inputs with payload errors through OraToSIR dispatcher path" {
@@ -2171,7 +2362,7 @@ test "compiler lowers dynamic bytes public Result inputs with payload errors thr
         \\contract Probe {
         \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
         \\        return match (value) {
-        \\            Ok(inner) => 1,
+        \\            Ok(inner) => inner.len,
         \\            Err(err) => err.code,
         \\        };
         \\    }
@@ -2191,6 +2382,7 @@ test "compiler lowers dynamic bytes public Result inputs with payload errors thr
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
 }
 
 test "compiler emits dispatcher metadata for dynamic slice public Result inputs with payload errors" {
@@ -2257,6 +2449,96 @@ test "compiler lowers dynamic slice public Result inputs with payload errors thr
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+}
+
+test "compiler lowers dynamic error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
+}
+
+test "compiler lowers multi-field dynamic error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(code: u256, data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<u256, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner,
+        \\            Err(err) => err.code + err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "shr"));
+}
+
+test "compiler lowers dynamic ok and error payload public Result inputs through OraToSIR dispatcher path" {
+    const source_text =
+        \\error Failure(data: bytes);
+        \\
+        \\contract Probe {
+        \\    pub fn consume(value: Result<bytes, Failure>) -> u256 {
+        \\        return match (value) {
+        \\            Ok(inner) => inner.len,
+        \\            Err(err) => err.data.len,
+        \\        };
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn consume:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "calldatacopy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "shr"));
 }
 
 test "compiler lowers payload-bearing narrow success error unions through OraToSIR" {
@@ -2704,6 +2986,9 @@ test "SMT release matrix probes match between sequential and parallel verificati
         .{ .path = "ora-example/smt/guards/exact_proven.ora", .function_name = "provenExactDivisionReturn" },
         .{ .path = "ora-example/smt/verification/function_contracts_basic.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/function_contracts_old.ora", .function_name = "incrementAndReturn" },
+        .{ .path = "ora-example/smt/verification/guard_runtime_clause.ora", .function_name = "accept" },
+        .{ .path = "ora-example/smt/verification/ensures_ok_error_union.ora", .function_name = "choose" },
+        .{ .path = "ora-example/smt/verification/ensures_err_error_union.ora", .function_name = "choose" },
         .{ .path = "ora-example/smt/verification/ghost_variables.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/ghost_combined.ora", .function_name = "deposit" },
         .{ .path = "ora-example/smt/verification/loop_invariants.ora", .function_name = "accumulateToStorage" },

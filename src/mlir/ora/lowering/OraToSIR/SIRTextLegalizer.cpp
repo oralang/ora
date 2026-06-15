@@ -6,6 +6,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "OraToSIR.h"
+#include "patterns/LoweringHelpers.h"
 
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
@@ -19,6 +20,7 @@
 #include "llvm/Support/Casting.h"
 
 using namespace mlir;
+using mlir::ora::lowering::constU256;
 
 namespace mlir
 {
@@ -87,6 +89,12 @@ namespace mlir
                 return loc;
             }
 
+            static bool isPtrWordResultRepair(Type from, Type to)
+            {
+                return (isa<sir::PtrType>(from) && isa<sir::U256Type>(to)) ||
+                       (isa<sir::U256Type>(from) && isa<sir::PtrType>(to));
+            }
+
             static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
             {
                 MLIRContext *ctx = loc.getContext();
@@ -102,35 +110,28 @@ namespace mlir
 
             struct SIRTextLegalizerPass : public PassWrapper<SIRTextLegalizerPass, OperationPass<ModuleOp>>
             {
-                // Insert trampoline blocks for cond_br with non-uniform operands.
-            // SIR text requires a single set of block outputs for all edges.
-            void normalizeBranches(ModuleOp module)
+                // Insert trampoline blocks for cond_br with operands. Sensei's
+                // text form carries values through block outputs rather than
+                // edge-specific conditional branch operands. The backend stores
+                // locals in function-wide static slots, so trampoline block
+                // outputs may reference dominated values defined in predecessor
+                // blocks without executable scratch memory.
+            LogicalResult normalizeBranches(ModuleOp module)
             {
-                SmallVector<sir::CondBrOp, 16> toFix;
+                SmallVector<sir::CondBrOp, 16> condBranchesToFix;
                 module.walk([&](sir::CondBrOp br) {
                     auto trueOps = br.getTrueOperands();
                     auto falseOps = br.getFalseOperands();
-                    bool same = trueOps.size() == falseOps.size();
-                    if (same)
-                    {
-                        for (size_t i = 0; i < trueOps.size(); ++i)
-                        {
-                            if (trueOps[i] != falseOps[i])
-                            {
-                                same = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (!same)
-                        toFix.push_back(br);
+                    if (!trueOps.empty() || !falseOps.empty())
+                        condBranchesToFix.push_back(br);
                 });
 
-                for (auto br : toFix)
+                for (auto br : condBranchesToFix)
                 {
                     OpBuilder b(br);
                     Block *parentBlock = br.getOperation()->getBlock();
                     Region *region = parentBlock->getParent();
+
                     // Create trampoline blocks after the parent block.
                     Block *trampTrue = new Block();
                     Block *trampFalse = new Block();
@@ -141,31 +142,37 @@ namespace mlir
                     {
                         OpBuilder tb(br.getContext());
                         tb.setInsertionPointToEnd(trampTrue);
-                        tb.create<sir::BrOp>(makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_true"), br.getTrueOperands(), br.getTrueDest());
+                        Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_true");
+                        tb.create<sir::BrOp>(trampLoc, br.getTrueOperands(), br.getTrueDest());
                     }
                     // trampoline_false: br ^false_dest(false_operands)
                     {
                         OpBuilder fb(br.getContext());
                         fb.setInsertionPointToEnd(trampFalse);
-                        fb.create<sir::BrOp>(makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_false"), br.getFalseOperands(), br.getFalseDest());
+                        Location trampLoc = makeSyntheticOriginOnlyLoc(br.getLoc(), "branch_trampoline_false");
+                        fb.create<sir::BrOp>(trampLoc, br.getFalseOperands(), br.getFalseDest());
                     }
 
                     // Replace cond_br with: cond_br %c, ^trampTrue, ^trampFalse (no operands)
-                    // build signature: (cond, trueOperands, falseOperands, trueDest, falseDest)
                     b.setInsertionPoint(br);
                     b.create<sir::CondBrOp>(br.getLoc(), br.getCond(),
                                             ValueRange{}, ValueRange{},
                                             trampTrue, trampFalse);
                     br.erase();
                 }
+
+                return success();
             }
 
             void runOnOperation() override
                 {
                     ModuleOp module = getOperation();
 
-                    // Phase 0: normalize asymmetric cond_br operands.
-                    normalizeBranches(module);
+                    if (failed(normalizeBranches(module)))
+                    {
+                        signalPassFailure();
+                        return;
+                    }
 
                     bool failed_any = false;
 
@@ -574,9 +581,7 @@ namespace mlir
                             {
                                 OpBuilder b(op);
                                 auto u256 = sir::U256Type::get(op.getContext());
-                                auto ui256 = mlir::IntegerType::get(op.getContext(), 256, mlir::IntegerType::Unsigned);
-                                auto idConst = b.create<sir::ConstOp>(
-                                    op.getLoc(), u256, IntegerAttr::get(ui256, it->second));
+                                Value idConst = constU256(b, op.getLoc(), static_cast<uint64_t>(it->second));
                                 for (unsigned i = 0; i < op.getNumResults(); ++i)
                                 {
                                     Value oldRes = op.getResult(i);
@@ -601,8 +606,27 @@ namespace mlir
                         auto funcType = func.getFunctionType();
                         if (funcType.getNumInputs() != op.getArgs().size())
                             report(op.getOperation(), "icall argument count does not match callee function inputs");
+                        if (funcType.getNumResults() == op.getResults().size())
+                        {
+                            for (unsigned i = 0; i < funcType.getNumResults(); ++i)
+                            {
+                                Type expected = funcType.getResult(i);
+                                Type actual = op.getResult(i).getType();
+                                if (isPtrWordResultRepair(actual, expected))
+                                {
+                                    report(op.getOperation(), "icall ptr/u256 result mismatch requires explicit lowering");
+                                    break;
+                                }
+                            }
+                        }
                         if (funcType.getNumResults() != op.getResults().size())
                         {
+                            if (op.getNumResults() > funcType.getNumResults())
+                            {
+                                report(op.getOperation(), "icall result count exceeds callee function results");
+                                continue;
+                            }
+
                             OpBuilder b(op);
                             auto u256 = sir::U256Type::get(op.getContext());
                             SmallVector<Type, 4> newResults;
@@ -616,27 +640,16 @@ namespace mlir
                                 Value newRes = newCall.getResult(i);
                                 if (oldRes.getType() != newRes.getType())
                                 {
+                                    if (isPtrWordResultRepair(oldRes.getType(), newRes.getType()))
+                                    {
+                                        report(op.getOperation(), "icall ptr/u256 result mismatch requires explicit lowering");
+                                        continue;
+                                    }
                                     auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), newRes);
                                     oldRes.replaceAllUsesWith(bc.getResult());
                                 }
                                 else
                                     oldRes.replaceAllUsesWith(newRes);
-                            }
-                            if (op.getNumResults() > newCall.getNumResults())
-                            {
-                                auto zero = b.create<sir::ConstOp>(op.getLoc(), u256,
-                                                                   IntegerAttr::get(b.getI64Type(), 0));
-                                for (unsigned i = common; i < op.getNumResults(); ++i)
-                                {
-                                    Value oldRes = op.getResult(i);
-                                    if (isa<sir::PtrType>(oldRes.getType()))
-                                    {
-                                        auto bc = b.create<sir::BitcastOp>(op.getLoc(), oldRes.getType(), zero);
-                                        oldRes.replaceAllUsesWith(bc.getResult());
-                                    }
-                                    else
-                                        oldRes.replaceAllUsesWith(zero);
-                                }
                             }
                             op.erase();
                         }

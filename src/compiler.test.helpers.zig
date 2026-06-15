@@ -9,6 +9,10 @@ pub fn compileText(source_text: []const u8) !compiler.driver.Compilation {
     return compiler.compileSource(testing.allocator, "test.ora", source_text);
 }
 
+pub fn compileTextWithChainId(source_text: []const u8, chain_id: u64) !compiler.driver.Compilation {
+    return compiler.compileSourceWithOptions(testing.allocator, "test.ora", source_text, .{ .chain_id = chain_id });
+}
+
 pub fn renderHirTextForSource(source_text: []const u8) ![]u8 {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -35,7 +39,35 @@ pub fn renderSirTextForModule(context: mlir.MlirContext, module: mlir.MlirModule
 }
 
 pub fn compilePackage(root_path: []const u8) !compiler.driver.Compilation {
-    return compiler.compilePackage(testing.allocator, root_path);
+    const resolved_path = try resolvePackageFixturePath(root_path);
+    defer testing.allocator.free(resolved_path);
+    return compiler.compilePackage(testing.allocator, resolved_path);
+}
+
+fn resolvePackageFixturePath(root_path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(root_path)) {
+        return testing.allocator.dupe(u8, root_path);
+    }
+
+    if (pathExists(root_path)) {
+        return testing.allocator.dupe(u8, root_path);
+    }
+
+    const parent_prefixes = [_][]const u8{ "..", "../..", "../../..", "../../../..", "../../../../.." };
+    for (parent_prefixes) |prefix| {
+        const candidate = try std.fs.path.join(testing.allocator, &.{ prefix, root_path });
+        if (pathExists(candidate)) {
+            return candidate;
+        }
+        testing.allocator.free(candidate);
+    }
+
+    return testing.allocator.dupe(u8, root_path);
+}
+
+fn pathExists(path: []const u8) bool {
+    std.fs.cwd().access(path, .{}) catch return false;
+    return true;
 }
 
 pub fn expectOraToSirConverts(path: []const u8) !void {
@@ -76,11 +108,14 @@ pub fn expectNoResidualOraRuntimeOps(rendered: []const u8) !void {
         "ora.tuple_create",
         "ora.tuple_extract",
         "ora.abi_encode",
+        "ora.abi_encode_with_selector",
         "ora.external_call",
         "ora.abi_decode",
         "ora.assert",
         "ora.length",
         "ora.byte_at",
+        "ora.concat",
+        "ora.slice",
         "ora.log",
         "ora.lock",
         "ora.unlock",
@@ -106,10 +141,12 @@ pub const VerificationProbeSummary = struct {
     degraded: bool,
     error_kinds: []u8,
     soundness_losses: []u8,
+    precision_notes: []u8,
 
     pub fn deinit(self: *VerificationProbeSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.error_kinds);
         allocator.free(self.soundness_losses);
+        allocator.free(self.precision_notes);
     }
 };
 
@@ -119,6 +156,7 @@ pub fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, r
     try testing.expectEqual(lhs.diagnostics_len, rhs.diagnostics_len);
     try testing.expectEqualStrings(lhs.error_kinds, rhs.error_kinds);
     try testing.expectEqualStrings(lhs.soundness_losses, rhs.soundness_losses);
+    try testing.expectEqualStrings(lhs.precision_notes, rhs.precision_notes);
     try testing.expectEqual(lhs.degraded, rhs.degraded);
 }
 
@@ -166,6 +204,19 @@ fn collectSoundnessLossCsv(verifier: *const z3_verification.VerificationPass) ![
     return try builder.toOwnedSlice(testing.allocator);
 }
 
+fn collectPrecisionNoteCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
+    var labels = std.ArrayList([]const u8){};
+    defer labels.deinit(testing.allocator);
+    for (verifier.encoder.precisionNotes()) |note| {
+        try labels.append(testing.allocator, @tagName(note));
+    }
+
+    var builder = std.ArrayList(u8){};
+    errdefer builder.deinit(testing.allocator);
+    try appendSortedLabelsCsv(&builder, labels.items);
+    return try builder.toOwnedSlice(testing.allocator);
+}
+
 pub fn verifyExampleWithoutDegradation(
     path: []const u8,
     function_name: ?[]const u8,
@@ -189,6 +240,8 @@ pub fn verifyExampleWithoutDegradation(
     errdefer testing.allocator.free(error_kinds);
     const soundness_losses = try collectSoundnessLossCsv(&verifier);
     errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
 
     defer result.deinit();
     verifier.deinit();
@@ -199,6 +252,7 @@ pub fn verifyExampleWithoutDegradation(
         .degraded = degraded,
         .error_kinds = error_kinds,
         .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
     };
 }
 
@@ -227,6 +281,8 @@ pub fn verifyTextWithoutDegradationWithTimeout(
     errdefer testing.allocator.free(error_kinds);
     const soundness_losses = try collectSoundnessLossCsv(&verifier);
     errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
 
     defer result.deinit();
     verifier.deinit();
@@ -237,6 +293,88 @@ pub fn verifyTextWithoutDegradationWithTimeout(
         .degraded = degraded,
         .error_kinds = error_kinds,
         .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
+    };
+}
+
+pub fn verifyTextWithoutDegradationWithSummaryInlineDepth(
+    source_text: []const u8,
+    function_name: ?[]const u8,
+    max_summary_inline_depth: u32,
+) !VerificationProbeSummary {
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.filter_function_name = function_name;
+    verifier.setMaxSummaryInlineDepth(max_summary_inline_depth);
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
+
+    defer result.deinit();
+    verifier.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
+    };
+}
+
+pub fn verifyPackageWithoutDegradation(
+    root_path: []const u8,
+    function_name: ?[]const u8,
+) !VerificationProbeSummary {
+    return verifyPackageWithoutDegradationWithImportedSummaryMode(root_path, function_name, null);
+}
+
+pub fn verifyPackageWithoutDegradationWithImportedSummaryMode(
+    root_path: []const u8,
+    function_name: ?[]const u8,
+    summary_only_imported_calls: ?bool,
+) !VerificationProbeSummary {
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var verifier = try z3_verification.VerificationPass.init(testing.allocator);
+    errdefer verifier.deinit();
+    verifier.filter_function_name = function_name;
+    if (summary_only_imported_calls) |enabled| verifier.setSummaryOnlyImportedCalls(enabled);
+
+    var result = try verifier.runVerificationPassPreparedSequential(hir_result.module.raw_module);
+    errdefer result.deinit();
+    const degraded = verifier.encoder.isDegraded();
+    const error_kinds = try collectErrorKindCsv(&result);
+    errdefer testing.allocator.free(error_kinds);
+    const soundness_losses = try collectSoundnessLossCsv(&verifier);
+    errdefer testing.allocator.free(soundness_losses);
+    const precision_notes = try collectPrecisionNoteCsv(&verifier);
+    errdefer testing.allocator.free(precision_notes);
+
+    defer result.deinit();
+    verifier.deinit();
+    return .{
+        .success = result.success,
+        .errors_len = result.errors.items.len,
+        .diagnostics_len = result.diagnostics.items.len,
+        .degraded = degraded,
+        .error_kinds = error_kinds,
+        .soundness_losses = soundness_losses,
+        .precision_notes = precision_notes,
     };
 }
 
@@ -337,6 +475,24 @@ pub fn expectDiagnosticProbeContains(source_text: []const u8, phase: DiagnosticP
 pub fn containsEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region) bool {
     for (items) |item| {
         if (item.region == region and std.mem.eql(u8, item.name, needle)) return true;
+    }
+    return false;
+}
+
+pub fn containsFieldEffectSlot(items: []const compiler.sema.EffectSlot, needle: []const u8, region: compiler.sema.Region, field_path: []const []const u8) bool {
+    for (items) |item| {
+        if (item.region != region) continue;
+        if (!std.mem.eql(u8, item.name, needle)) continue;
+        const item_path = item.field_path orelse continue;
+        if (item_path.len != field_path.len) continue;
+        var all_match = true;
+        for (item_path, field_path) |lhs, rhs| {
+            if (!std.mem.eql(u8, lhs, rhs)) {
+                all_match = false;
+                break;
+            }
+        }
+        if (all_match) return true;
     }
     return false;
 }

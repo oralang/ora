@@ -4,6 +4,7 @@ const diagnostics = @import("../diagnostics/mod.zig");
 const source = @import("../source/mod.zig");
 const green = @import("green.zig");
 const SyntaxKind = @import("kinds.zig").SyntaxKind;
+const units = @import("../units.zig");
 
 pub const ParseResult = struct {
     tree: green.SyntaxTree,
@@ -22,10 +23,7 @@ pub fn parse(allocator: std.mem.Allocator, file_id: source.FileId, source_text: 
     };
     errdefer result.diagnostics.deinit();
 
-    var lexer_config = lexer.LexerConfig.development();
-    lexer_config.minimum_diagnostic_severity = .Hint;
-
-    var lex = try lexer.Lexer.initWithConfig(allocator, source_text, lexer_config);
+    var lex = lexer.Lexer.initWithRecovery(allocator, source_text);
     defer lex.deinit();
 
     const token_slice = try lex.scanTokens();
@@ -134,6 +132,9 @@ const Parser = struct {
     }
 
     fn parseTopLevelItem(self: *Parser) anyerror!green.GreenNodeId {
+        if (self.startsDecodePermissiveFunction()) {
+            return self.parseFunctionItem();
+        }
         if (self.at(.Comptime) and self.peekKind(1) == .Const) {
             return self.parseConstOrImportItem();
         }
@@ -226,6 +227,10 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        while (self.looksLikeDecodePermissiveMarker()) {
+            try children.append(self.allocator, .{ .node = try self.parseDecodePermissiveMarkerNode() });
+        }
+
         if (self.at(.Pub)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
@@ -250,6 +255,15 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.FunctionItem, children.items);
+    }
+
+    fn parseDecodePermissiveMarkerNode(self: *Parser) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.allocator, .{ .token = self.bump() });
+        return self.finishNode(SyntaxKind.BuiltinExpr, children.items);
     }
 
     fn parseTraitMethodSignature(self: *Parser) anyerror!green.GreenNodeId {
@@ -410,11 +424,11 @@ const Parser = struct {
             try self.reportHere("expected parameter list in " ++ context);
         }
 
-        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures)) {
+        while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies)) {
             if (self.at(.Semicolon)) break;
             if (self.at(.Arrow)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Errors, .Requires, .Guard, .Ensures, .Semicolon }) });
+                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Errors, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .Semicolon }) });
                 continue;
             }
             try children.append(self.allocator, try self.parseElement(null));
@@ -422,7 +436,7 @@ const Parser = struct {
 
         if (self.at(.Where)) {
             try children.append(self.allocator, .{ .token = self.bump() });
-            while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.Semicolon)) {
+            while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies) and !self.at(.Semicolon)) {
                 try children.append(self.allocator, .{ .node = try self.parseTraitBoundClauseNode() });
                 if (!self.at(.Comma)) break;
                 try children.append(self.allocator, .{ .token = self.bump() });
@@ -433,7 +447,7 @@ const Parser = struct {
             try children.append(self.allocator, .{ .node = try self.parseErrorsClauseNode() });
         }
 
-        while (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures)) {
+        while (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) {
             try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
         }
     }
@@ -491,7 +505,7 @@ const Parser = struct {
             try self.reportHere("expected ':' in trait bound");
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Requires, .Guard, .Ensures, .LeftBrace, .Semicolon }) });
+        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .LeftBrace, .Semicolon }) });
         return self.finishNode(SyntaxKind.TraitBoundClause, children.items);
     }
 
@@ -565,15 +579,20 @@ const Parser = struct {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
-        if (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures)) {
+        if (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportHere("expected specification clause");
             return self.finishNode(SyntaxKind.SpecClause, children.items);
         }
 
-        if (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures }) });
+        if (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies)) {
+            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
+            while (self.at(.Comma)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+                if (self.at(.Eof) or self.at(.Semicolon) or self.at(.LeftBrace) or self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) break;
+                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
+            }
         }
 
         if (self.at(.Semicolon)) {
@@ -682,9 +701,16 @@ const Parser = struct {
     }
 
     fn parseConstantItem(self: *Parser, allow_comptime_prefix: bool) anyerror!green.GreenNodeId {
+        return self.parseConstantItemWithOptions(allow_comptime_prefix, false);
+    }
+
+    fn parseConstantItemWithOptions(self: *Parser, allow_comptime_prefix: bool, allow_pub_prefix: bool) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
 
+        if (allow_pub_prefix and self.at(.Pub)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
         if (allow_comptime_prefix and self.at(.Comptime)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         }
@@ -771,10 +797,24 @@ const Parser = struct {
         } else {
             try self.reportHere("expected ')' after log fields");
         }
-        if (self.at(.Semicolon)) {
+        if (self.at(.LeftBrace)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightBrace)) {
+                if ((self.at(.Pub) and self.peekKind(1) == .Const) or self.at(.Const)) {
+                    try children.append(self.allocator, .{ .node = try self.parseConstantItemWithOptions(false, true) });
+                } else {
+                    try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+                }
+            }
+            if (self.at(.RightBrace)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportUnterminated("unterminated log metadata body", children.items);
+            }
+        } else if (self.at(.Semicolon)) {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
-            try self.reportHere("expected ';' after log declaration");
+            try self.reportHere("expected ';' or metadata body after log declaration");
         }
         return self.finishNode(SyntaxKind.LogDeclItem, children.items);
     }
@@ -822,22 +862,6 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.ErrorDeclItem, children.items);
     }
 
-    fn parseBracedItem(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseDelimited(SyntaxKind.GroupBrace, .RightBrace) });
-        } else {
-            try self.reportHere("expected braced body");
-        }
-        return self.finishNode(kind, children.items);
-    }
-
     fn parseStructItem(self: *Parser) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
@@ -864,6 +888,10 @@ const Parser = struct {
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
                 try children.append(self.allocator, .{ .token = self.bump() });
+                continue;
+            }
+            if ((self.at(.Pub) and self.peekKind(1) == .Const) or self.at(.Const)) {
+                try children.append(self.allocator, .{ .node = try self.parseConstantItemWithOptions(false, true) });
                 continue;
             }
             try children.append(self.allocator, .{ .node = try self.parseStructFieldNode() });
@@ -1017,46 +1045,6 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
     }
 
-    fn parseMemberItem(self: *Parser, item_kind: SyntaxKind, member_kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
-        }
-
-        while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-
-        if (!self.at(.LeftBrace)) {
-            try self.reportHere("expected braced body");
-            return self.finishNode(item_kind, children.items);
-        }
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                continue;
-            }
-            try children.append(self.allocator, .{ .node = try self.parseMemberNode(member_kind, message) });
-        }
-
-        if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportUnterminated("unterminated braced item body", children.items);
-        }
-
-        return self.finishNode(item_kind, children.items);
-    }
-
     fn parseMemberNode(self: *Parser, kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
         var children: std.ArrayList(ChildRef) = .{};
         defer children.deinit(self.allocator);
@@ -1174,39 +1162,6 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.BitfieldField, children.items);
-    }
-
-    fn parseSemicolonOrBracedItem(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        try children.append(self.allocator, .{ .token = self.bump() });
-        while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseDelimited(SyntaxKind.GroupBrace, .RightBrace) });
-        } else if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportHere("expected ';' or braced body");
-        }
-        return self.finishNode(kind, children.items);
-    }
-
-    fn parseDelimitedItem(self: *Parser, kind: SyntaxKind, terminator: green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
-
-        while (!self.at(.Eof) and !self.at(terminator)) {
-            try children.append(self.allocator, try self.parseElement(null));
-        }
-        if (self.at(terminator)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-        } else {
-            try self.reportUnterminated("unterminated item", children.items);
-        }
-        return self.finishNode(kind, children.items);
     }
 
     fn parseDelimitedLike(
@@ -1494,6 +1449,9 @@ const Parser = struct {
             try children.append(self.allocator, .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated switch body", children.items);
+        }
+        if (self.at(.Semicolon)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
         }
 
         return self.finishNode(node_kind, children.items);
@@ -1986,18 +1944,27 @@ const Parser = struct {
     }
 
     fn parsePrimaryExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        if (kind == .Error) {
+            return self.parseErrorReturnExprNode(terminators);
+        }
+        if (tokenStartsPrimaryNameExpr(kind)) {
+            if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less) {
+                return self.parseExternalProxyExprNode();
+            }
+            if (self.looksLikeGenericTypeValueExpr(terminators)) {
+                return self.parsePathOrGenericTypeNode(terminators);
+            }
+            return self.parseSingleTokenExprNode(SyntaxKind.NameExpr);
+        }
+
+        return switch (kind) {
             .Dot => if (self.peekKind(1) == .LeftBrace)
                 self.parseAnonymousStructLiteralExprNode(terminators)
             else
                 self.parseExpressionErrorNode("expected expression"),
-            .Identifier, .Result, .From, .To, .Error, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => if (self.currentTokenTextEql("external") and self.peekKind(1) == .Less)
-                self.parseExternalProxyExprNode()
-            else if (self.looksLikeGenericTypeValueExpr(terminators))
-                self.parsePathOrGenericTypeNode(terminators)
-            else
-                self.parseSingleTokenExprNode(SyntaxKind.NameExpr),
-            .IntegerLiteral, .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
+            .IntegerLiteral => self.parseIntegerLiteralExprNode(),
+            .BinaryLiteral, .HexLiteral, .AddressLiteral, .BytesLiteral, .StringLiteral, .RawStringLiteral, .CharacterLiteral, .True, .False => self.parseSingleTokenExprNode(SyntaxKind.Literal),
             .LeftParen => self.parseParenLikeExprNode(),
             .LeftBracket => self.parseArrayLiteralExprNode(),
             .Comptime => self.parseComptimeExprNode(),
@@ -2007,6 +1974,42 @@ const Parser = struct {
             .Switch, .Match => self.parseSwitchExprNode(),
             else => self.parseExpressionErrorNode("expected expression"),
         };
+    }
+
+    fn parseErrorReturnExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .token = self.bump() });
+        if (self.at(.Dot)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected error name after 'error'");
+            return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try children.append(self.allocator, .{ .token = self.bump() });
+            while (!self.at(.Eof) and !self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
+                if (!self.at(.Comma)) break;
+                try children.append(self.allocator, .{ .token = self.bump() });
+            }
+            if (self.at(.RightParen)) {
+                try children.append(self.allocator, .{ .token = self.bump() });
+            } else {
+                try self.reportHere("expected ')' after error arguments");
+            }
+        } else {
+            try self.reportHere("expected '(' after error name");
+        }
+
+        _ = terminators;
+        return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
     }
 
     fn parseAnonymousStructLiteralExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
@@ -2137,40 +2140,41 @@ const Parser = struct {
             }
             return self.finishNode(SyntaxKind.ErrorUnionType, children.items);
         }
-        return self.parseTypePrimaryNode(stops);
+        const primary = try self.parseTypePrimaryNode(stops);
+        if (self.at(.Pipe)) {
+            return self.parseBarePipeTypeErrorNode(primary, stops);
+        }
+        return primary;
+    }
+
+    fn parseBarePipeTypeErrorNode(
+        self: *Parser,
+        primary: green.GreenNodeId,
+        stops: []const green.TokenKind,
+    ) anyerror!green.GreenNodeId {
+        try self.reportHere("error-union types must start with '!'");
+
+        var children: std.ArrayList(ChildRef) = .{};
+        defer children.deinit(self.allocator);
+
+        try children.append(self.allocator, .{ .node = primary });
+        while (!self.at(.Eof) and !self.atAny(stops) and !self.typeAtGreaterToken()) {
+            try children.append(self.allocator, try self.parseElement(null));
+        }
+        return self.finishNode(SyntaxKind.Error, children.items);
     }
 
     fn parseTypePrimaryNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
-        return switch (self.current().kind) {
+        const kind = self.current().kind;
+        return switch (kind) {
             .LeftParen => self.parseTupleTypeNode(),
             .LeftBracket => self.parseArrayTypeNode(),
             .Slice => self.parseSliceTypeNode(),
             .Struct => self.parseAnonymousStructTypeNode(),
-            .Map,
-            .Identifier,
-            .Error,
-            .Result,
-            .From,
-            .To,
-            .U8,
-            .U16,
-            .U32,
-            .U64,
-            .U128,
-            .U256,
-            .I8,
-            .I16,
-            .I32,
-            .I64,
-            .I128,
-            .I256,
-            .Bool,
-            .Address,
-            .String,
-            .Bytes,
-            .Void,
-            => self.parsePathOrGenericTypeNode(stops),
-            else => self.parseTypeErrorNode("expected type expression"),
+            else => if (tokenStartsTypePath(kind))
+                self.parsePathOrGenericTypeNode(stops)
+            else
+                self.parseTypeErrorNode("expected type expression"),
         };
     }
 
@@ -2294,7 +2298,10 @@ const Parser = struct {
         if (self.at(.Less)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.typeAtGreaterToken()) {
-                if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+                if (self.atSignedIntegerTypeArg()) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                } else if (self.atIntegerTypeArg()) {
                     try children.append(self.allocator, .{ .token = self.bump() });
                 } else {
                     try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .GreaterGreater }) });
@@ -2312,7 +2319,10 @@ const Parser = struct {
         if (!std.mem.containsAtLeast(green.TokenKind, stops, 1, &.{.LeftParen}) and self.at(.LeftParen)) {
             try children.append(self.allocator, .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightParen)) {
-                if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
+                if (self.atSignedIntegerTypeArg()) {
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.allocator, .{ .token = self.bump() });
+                } else if (self.atIntegerTypeArg()) {
                     try children.append(self.allocator, .{ .token = self.bump() });
                 } else {
                     try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
@@ -2330,6 +2340,17 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.PathType, children.items);
     }
 
+    fn atIntegerTypeArg(self: *const Parser) bool {
+        return self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral);
+    }
+
+    // Token-level face for signed integer generic type args. Keep in sync
+    // with nodeCouldBeSignedIntegerCallStyleTypeArg below.
+    fn atSignedIntegerTypeArg(self: *const Parser) bool {
+        return self.at(.Minus) and
+            (self.peekKind(1) == .IntegerLiteral or self.peekKind(1) == .BinaryLiteral or self.peekKind(1) == .HexLiteral);
+    }
+
     fn parseTypeErrorNode(self: *Parser, message: []const u8) anyerror!green.GreenNodeId {
         try self.reportHere(message);
         var children: std.ArrayList(ChildRef) = .{};
@@ -2343,6 +2364,19 @@ const Parser = struct {
     fn parseSingleTokenExprNode(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
         const expr_children = [_]ChildRef{.{ .token = self.bump() }};
         return self.finishNode(kind, &expr_children);
+    }
+
+    fn parseIntegerLiteralExprNode(self: *Parser) anyerror!green.GreenNodeId {
+        const literal = self.bump();
+        if (self.currentTokenIsEtherUnit()) {
+            const expr_children = [_]ChildRef{
+                .{ .token = literal },
+                .{ .token = self.bump() },
+            };
+            return self.finishNode(SyntaxKind.Literal, &expr_children);
+        }
+        const expr_children = [_]ChildRef{.{ .token = literal }};
+        return self.finishNode(SyntaxKind.Literal, &expr_children);
     }
 
     fn parseParenLikeExprNode(self: *Parser) anyerror!green.GreenNodeId {
@@ -2451,7 +2485,9 @@ const Parser = struct {
                     std.mem.eql(u8, builtin_name.?, "bitCast") or
                     std.mem.eql(u8, builtin_name.?, "truncate") or
                     std.mem.eql(u8, builtin_name.?, "sizeOf") or
-                    std.mem.eql(u8, builtin_name.?, "typeName")) and
+                    std.mem.eql(u8, builtin_name.?, "typeName") or
+                    std.mem.eql(u8, builtin_name.?, "abiDecode") or
+                    std.mem.eql(u8, builtin_name.?, "abiDecodePermissive")) and
                 !self.at(.RightParen))
             {
                 try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
@@ -2766,6 +2802,7 @@ const Parser = struct {
     }
 
     fn startsTopLevelItem(self: *const Parser) bool {
+        if (self.startsDecodePermissiveFunction()) return true;
         const kind = self.current().kind;
         return switch (kind) {
             .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
@@ -2773,6 +2810,20 @@ const Parser = struct {
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
+    }
+
+    fn startsDecodePermissiveFunction(self: *const Parser) bool {
+        if (!self.looksLikeDecodePermissiveMarker()) return false;
+        var cursor = self.index + 2;
+        if (self.peekTokenKindAt(cursor) == .Pub) cursor += 1;
+        if (self.peekTokenKindAt(cursor) == .Comptime) cursor += 1;
+        return self.peekTokenKindAt(cursor) == .Fn;
+    }
+
+    fn looksLikeDecodePermissiveMarker(self: *const Parser) bool {
+        if (!self.at(.At) or self.peekKind(1) != .Identifier) return false;
+        const token = self.tokens.items[self.index + 1];
+        return std.mem.eql(u8, self.source_text[token.range.start..token.range.end], "decodePermissive");
     }
 
     fn startsTypeAliasItem(self: *const Parser) bool {
@@ -2836,9 +2887,30 @@ const Parser = struct {
         return std.mem.eql(u8, self.source_text[token.range.start..token.range.end], text);
     }
 
-    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+    fn currentTokenIsEtherUnit(self: *const Parser) bool {
+        if (!tokenIsIdentifierLike(self.current().kind)) return false;
+        const token = self.current();
+        return units.isEtherUnit(self.source_text[token.range.start..token.range.end]);
+    }
+
+    fn tokenStartsPrimaryNameExpr(kind: green.TokenKind) bool {
         return switch (kind) {
-            .Identifier, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+            .Identifier, .Result, .From, .To, .Error => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenStartsTypePath(kind: green.TokenKind) bool {
+        return switch (kind) {
+            .Map, .Identifier, .Error, .Result, .From, .To => true,
+            else => lexer.isBuiltinTypeKeyword(kind),
+        };
+    }
+
+    fn tokenIsIdentifierLike(kind: green.TokenKind) bool {
+        if (lexer.isBuiltinTypeKeyword(kind)) return true;
+        return switch (kind) {
+            .Identifier, .From, .To, .Error, .Result, .Map, .Slice => true,
             else => false,
         };
     }
@@ -2987,21 +3059,8 @@ const Parser = struct {
     fn nodeCouldBeCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
         return switch (self.nodes.items[node_id.index()].kind) {
             .NameExpr, .PathType, .GenericType => true,
-            .Literal => blk: {
-                const node = self.nodes.items[node_id.index()];
-                var i: usize = 0;
-                while (i < node.children_len) : (i += 1) {
-                    const child = self.children.items[node.children_start + i];
-                    switch (child) {
-                        .token => |token_id| switch (self.tokens.items[token_id.index()].kind) {
-                            .IntegerLiteral, .BinaryLiteral, .HexLiteral => break :blk true,
-                            else => {},
-                        },
-                        .node => {},
-                    }
-                }
-                break :blk false;
-            },
+            .Literal => self.nodeCouldBeIntegerCallStyleTypeArg(node_id),
+            .UnaryExpr => self.nodeCouldBeSignedIntegerCallStyleTypeArg(node_id),
             .GroupExpr => blk: {
                 const node = self.nodes.items[node_id.index()];
                 var i: usize = 0;
@@ -3010,6 +3069,64 @@ const Parser = struct {
                     switch (child) {
                         .token => {},
                         .node => |child_id| break :blk self.nodeCouldBeCallStyleTypeArg(child_id),
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn nodeCouldBeIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        const node = self.nodes.items[node_id.index()];
+        var i: usize = 0;
+        while (i < node.children_len) : (i += 1) {
+            const child = self.children.items[node.children_start + i];
+            switch (child) {
+                .token => |token_id| switch (self.tokens.items[token_id.index()].kind) {
+                    .IntegerLiteral, .BinaryLiteral, .HexLiteral => return true,
+                    else => {},
+                },
+                .node => {},
+            }
+        }
+        return false;
+    }
+
+    fn nodeCouldBeSignedIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        // Node-level face for signed integer call-style type args. Keep in sync
+        // with atSignedIntegerTypeArg above for the token-level generic parser.
+        const node = self.nodes.items[node_id.index()];
+        var saw_minus = false;
+        var i: usize = 0;
+        while (i < node.children_len) : (i += 1) {
+            const child = self.children.items[node.children_start + i];
+            switch (child) {
+                .token => |token_id| {
+                    if (self.tokens.items[token_id.index()].kind == .Minus) saw_minus = true;
+                },
+                .node => |child_id| if (saw_minus) {
+                    return self.nodeCouldBeGroupedIntegerCallStyleTypeArg(child_id);
+                },
+            }
+        }
+        return false;
+    }
+
+    fn nodeCouldBeGroupedIntegerCallStyleTypeArg(self: *const Parser, node_id: green.GreenNodeId) bool {
+        return switch (self.nodes.items[node_id.index()].kind) {
+            .Literal => self.nodeCouldBeIntegerCallStyleTypeArg(node_id),
+            .UnaryExpr => self.nodeCouldBeSignedIntegerCallStyleTypeArg(node_id),
+            .GroupExpr => blk: {
+                // Recursive over a finite syntax tree; group nesting is bounded
+                // by source nesting and cannot cycle.
+                const node = self.nodes.items[node_id.index()];
+                var i: usize = 0;
+                while (i < node.children_len) : (i += 1) {
+                    const child = self.children.items[node.children_start + i];
+                    switch (child) {
+                        .token => {},
+                        .node => |child_id| break :blk self.nodeCouldBeGroupedIntegerCallStyleTypeArg(child_id),
                     }
                 }
                 break :blk false;
@@ -3182,8 +3299,9 @@ fn isRightAssociativeBinaryOp(kind: green.TokenKind) bool {
 }
 
 fn isIdentifierLike(kind: green.TokenKind) bool {
+    if (lexer.isBuiltinTypeKeyword(kind)) return true;
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice => true,
         else => false,
     };
 }

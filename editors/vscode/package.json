@@ -2,16 +2,20 @@
   "name": "ora-lang",
   "displayName": "Ora Language",
   "description": "Language support for the Ora smart contract language",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "oralang",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"
   ],
   "activationEvents": [
-    "onLanguage:ora"
+    "onLanguage:ora",
+    "workspaceContains:**/*.ora",
+    "onCommand:ora.restartServer",
+    "onCommand:ora.showCacheStats",
+    "onCommand:ora.openServerOutput"
   ],
   "main": "./extension.js",
   "contributes": {
@@ -41,23 +45,111 @@
         "title": "Ora: Restart Language Server"
       },
       {
+        "command": "ora.showCacheStats",
+        "title": "Ora: Show LSP Cache Stats"
+      },
+      {
+        "command": "ora.openServerOutput",
+        "title": "Ora: Open Language Server Output"
+      },
+      {
         "command": "ora.verify",
         "title": "Ora: Verify Contract"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "ora.restartServer",
+          "when": "resourceLangId == ora"
+        },
+        {
+          "command": "ora.showCacheStats",
+          "when": "resourceLangId == ora"
+        },
+        {
+          "command": "ora.openServerOutput",
+          "when": "resourceLangId == ora"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "ora.showCacheStats",
+          "when": "resourceLangId == ora",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Ora",
       "properties": {
+        "ora.lsp.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the Ora language server."
+        },
         "ora.lsp.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the ora-lsp binary. If empty, uses 'ora-lsp' from PATH."
+          "description": "Path to the ora-lsp binary. If empty, uses a workspace-built zig-out/bin/ora-lsp when available, then 'ora-lsp' from PATH."
+        },
+        "ora.lsp.preferWorkspaceBinary": {
+          "type": "boolean",
+          "default": true,
+          "description": "Prefer a workspace-built zig-out/bin/ora-lsp binary before falling back to PATH."
+        },
+        "ora.lsp.args": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional command-line arguments passed to ora-lsp."
+        },
+        "ora.lsp.env": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Additional environment variables passed to ora-lsp."
         }
       }
-    }
+    },
+    "configurationDefaults": {
+      "[ora]": {
+        "editor.semanticHighlighting.enabled": true,
+        "editor.inlayHints.enabled": "on"
+      }
+    },
+    "semanticTokenScopes": [
+      {
+        "language": "ora",
+        "scopes": {
+          "namespace": ["entity.name.namespace.ora"],
+          "type": ["entity.name.type.ora", "support.type.primitive.ora"],
+          "struct": ["storage.type.struct.ora"],
+          "enum": ["storage.type.enum.ora"],
+          "enumMember": ["variable.other.enummember.ora"],
+          "parameter": ["variable.parameter.ora"],
+          "variable": ["variable.other.ora"],
+          "property": ["variable.other.property.ora"],
+          "function": ["entity.name.function.ora"],
+          "method": ["entity.name.function.method.ora"],
+          "macro": ["support.function.macro.ora"],
+          "keyword": ["keyword.ora"],
+          "comment": ["comment.ora"],
+          "string": ["string.quoted.double.ora"],
+          "number": ["constant.numeric.ora"],
+          "operator": ["keyword.operator.ora"],
+          "decorator": ["meta.annotation.ora"],
+          "event": ["entity.name.type.event.ora"]
+        }
+      }
+    ]
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --check extension.js && node -e \"const fs=require('fs'); for (const f of ['package.json','language-configuration.json','syntaxes/ora.tmLanguage.json']) JSON.parse(fs.readFileSync(f,'utf8'));\""
   },
   "keywords": [
     "ora",

@@ -1,0 +1,35 @@
+contract Vault {
+    struct Config {
+        owner: address,
+        admin: address,
+    }
+
+    storage total: u256 = 0;
+    storage config: Config;
+    storage balances: map<address, u256>;
+    storage buckets: map<u256, u256>;
+
+    pub fn wrong_param(owner: address, other: address, value: u256)
+        modifies balances[owner]
+    {
+        balances[other] = value;
+    }
+
+    pub fn wrong_literal(value: u256)
+        modifies buckets[42]
+    {
+        buckets[43] = value;
+    }
+
+    pub fn wrong_sender_literal(recipient: address, value: u256)
+        modifies balances[msg.sender]
+    {
+        balances[recipient] = value;
+    }
+
+    pub fn wrong_field(next_admin: address)
+        modifies config.owner
+    {
+        config.admin = next_admin;
+    }
+}

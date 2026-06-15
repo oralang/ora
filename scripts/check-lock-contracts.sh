@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ORA_BIN="${ORA_BIN:-./zig-out/bin/ora}"
-EMIT_FLAG="${EMIT_FLAG:---emit-mlir}"
+EMIT_FLAG="${EMIT_FLAG:---emit=mlir:ora}"
 
 if [[ ! -x "$ORA_BIN" ]]; then
   echo "error: ora binary not found at $ORA_BIN" >&2

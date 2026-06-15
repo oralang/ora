@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import argparse
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -22,7 +24,54 @@ def should_skip(path: Path) -> bool:
     return False
 
 
+def extract_sir_output(stdout: str) -> str:
+    marker = "SIR MLIR (after phase5)"
+    if marker in stdout:
+        stdout = stdout.split(marker, 1)[1]
+    lines = [line.rstrip() for line in stdout.strip("\n").splitlines() if line.rstrip() != ""]
+    return "\n".join(lines)
+
+
+def filecheck_exact_line(line: str) -> str:
+    return line.replace(REPO.as_posix(), "{{.*}}")
+
+
+def build_full_snapshot_check(rel: str, sir: str) -> str:
+    lines = [
+        "// AUTO-GENERATED. Do not edit by hand.",
+        f"// INPUT: {rel}",
+        "// CHECK-NOT: builtin.unrealized_conversion_cast",
+    ]
+
+    sir_lines = sir.splitlines()
+    if not sir_lines:
+        lines.append("// CHECK: {{^$}}")
+    else:
+        lines.append(f"// CHECK: {filecheck_exact_line(sir_lines[0])}")
+        for line in sir_lines[1:]:
+            lines.append(f"// CHECK-NEXT: {filecheck_exact_line(line)}")
+
+    return "\n".join(lines) + "\n"
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Generate SIR MLIR FileCheck snapshots for ora-example programs.",
+    )
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="rewrite existing auto-generated checks instead of only creating missing ones",
+    )
+    parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        metavar="ORA_FILE",
+        help="generate or refresh a specific repository-relative .ora input; may be repeated",
+    )
+    args = parser.parse_args()
+
     if not ORA_BIN.exists():
         print(f"error: ora binary not found at {ORA_BIN}. Run 'zig build' first.")
         return 1
@@ -30,30 +79,46 @@ def main() -> int:
     CHECKS_DIR.mkdir(parents=True, exist_ok=True)
 
     covered = set()
+    refresh_checks = []
     for check in CHECKS_DIR.glob("*.check"):
         try:
             text = check.read_text()
         except Exception:
             continue
+        is_auto_generated = text.startswith("// AUTO-GENERATED. Do not edit by hand.")
+        if "\\n// INPUT:" in text:
+            text = text.replace("\\n", "\n")
         m = re.search(r"^// INPUT:\s*(.+)$", text, re.M)
         if m:
-            covered.add(m.group(1).strip())
+            rel = m.group(1).strip()
+            covered.add(rel)
+            if is_auto_generated:
+                refresh_checks.append((check, rel))
 
     ora_files = sorted((REPO / "ora-example").rglob("*.ora"))
+    if args.only:
+        ora_files = [REPO / rel for rel in args.only]
+    elif args.refresh:
+        ora_files = [REPO / rel for _, rel in sorted(refresh_checks, key=lambda item: item[1])]
 
-    created = 0
+    written = 0
     failed = []
+    ora_verify_flag = os.environ.get("ORA_VERIFY_FLAG", "--no-verify")
 
     for path in ora_files:
         rel = path.relative_to(REPO).as_posix()
         if should_skip(path):
             continue
-        if rel in covered:
+        if rel in covered and not args.refresh and not args.only:
             continue
 
         try:
+            command = [str(ORA_BIN)]
+            if ora_verify_flag:
+                command.append(ora_verify_flag)
+            command.extend(["--emit=mlir:sir", str(path)])
             proc = subprocess.run(
-                [str(ORA_BIN), "--emit-mlir=sir", str(path)],
+                command,
                 cwd=REPO,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -72,30 +137,21 @@ def main() -> int:
             failed.append((rel, "empty output"))
             continue
 
-        marker = "SIR MLIR (after phase5)"
-        if marker in out:
-            sir = out.split(marker, 1)[1]
+        sir = extract_sir_output(out)
+        if not sir.strip():
+            failed.append((rel, "empty SIR output"))
+            continue
+
+        if args.refresh and not args.only:
+            check_path = next(path for path, input_rel in refresh_checks if input_rel == rel)
         else:
-            sir = out
-        func_names = re.findall(r"func\\.func\\s+@([A-Za-z0-9_]+)", sir)
+            check_name = "auto__" + rel.replace("/", "__").replace(".ora", ".check")
+            check_path = CHECKS_DIR / check_name
+        check_path.write_text(build_full_snapshot_check(rel, sir))
+        written += 1
 
-        check_name = "auto__" + rel.replace("/", "__").replace(".ora", ".check")
-        check_path = CHECKS_DIR / check_name
-
-        lines = []
-        lines.append("// AUTO-GENERATED. Do not edit by hand.")
-        lines.append(f"// INPUT: {rel}")
-        lines.append("// CHECK-NOT: builtin.unrealized_conversion_cast")
-        if func_names:
-            for name in func_names:
-                lines.append(f"// CHECK-LABEL: func.func @{name}")
-        else:
-            lines.append("// CHECK: module")
-
-        check_path.write_text("\\n".join(lines) + "\\n")
-        created += 1
-
-    print(f"created {created} checks")
+    action = "refreshed" if args.refresh else "created"
+    print(f"{action} {written} checks")
     if failed:
         print("failed:")
         for rel, reason in failed:

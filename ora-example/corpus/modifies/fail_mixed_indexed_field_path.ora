@@ -1,0 +1,12 @@
+contract Vault {
+    struct User {
+        balance: u256,
+    }
+
+    storage users: map<address, User>;
+
+    pub fn unsupported(owner: address)
+        modifies users[owner].balance
+    {
+    }
+}

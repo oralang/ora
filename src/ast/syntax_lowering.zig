@@ -49,6 +49,19 @@ pub fn mixin(Builder: type) type {
                     .node => |node| {
                         const item_id = try Lowering.lowerTopLevelItemNode(self, node, null);
                         try self.root_items.append(self.allocator, item_id);
+                        if (self.items.items[item_id.index()] == .Function) {
+                            const function = self.items.items[item_id.index()].Function;
+                            if (function.abi_decode_permissive) {
+                                try self.diagnostics.appendErrorWithDebug(
+                                    "@decodePermissive is only supported on public contract functions",
+                                    "decodePermissive marker was attached to a root-scope function",
+                                    .{
+                                        .file_id = self.file.file_id,
+                                        .range = function.range,
+                                    },
+                                );
+                            }
+                        }
                     },
                 }
             }
@@ -162,6 +175,10 @@ pub fn mixin(Builder: type) type {
             const params_node = firstDirectChildOfKind(node, .ParameterList) orelse return Lowering.malformedItem(self, node, "missing function parameter list");
             const parameters = try Lowering.lowerParameterListNode(self, params_node, allow_bare_self);
             const return_type = firstDirectTypeChild(node) orelse null;
+            const abi_decode_permissive = try Lowering.functionAbiDecodePermissive(self, node);
+            if (abi_decode_permissive and visibility != .public) {
+                _ = try Lowering.malformedItem(self, node, "@decodePermissive is only supported on public functions");
+            }
 
             var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
             var clauses: std.ArrayList(nodes.SpecClause) = .{};
@@ -197,6 +214,7 @@ pub fn mixin(Builder: type) type {
                 .name = name,
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
                 .is_generic = is_generic,
+                .abi_decode_permissive = abi_decode_permissive,
                 .visibility = visibility,
                 .parameters = parameters,
                 .return_type = if (return_type) |type_node| try Lowering.lowerTypeNode(self, type_node) else null,
@@ -207,6 +225,23 @@ pub fn mixin(Builder: type) type {
             } });
         }
 
+        fn functionAbiDecodePermissive(self: *Builder, node: SyntaxNode) !bool {
+            _ = self;
+            var permissive = false;
+            var it = node.children();
+            while (it.next()) |child| {
+                const child_node = switch (child) {
+                    .token => continue,
+                    .node => |n| n,
+                };
+                if (child_node.kind() != .BuiltinExpr) continue;
+                const name_token = nthDirectIdentifierLikeToken(child_node, 0) orelse continue;
+                if (!std.mem.eql(u8, tokenText(name_token), "decodePermissive")) continue;
+                permissive = true;
+            }
+            return permissive;
+        }
+
         fn lowerStructItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing struct name"));
             const template_params_node = firstDirectChildOfKind(node, .ParameterList);
@@ -215,14 +250,18 @@ pub fn mixin(Builder: type) type {
             else
                 &.{};
             var fields: std.ArrayList(StructField) = .{};
+            var metadata: std.ArrayList(ItemId) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
-                    .node => |field_node| {
-                        if (field_node.kind() != .StructField) continue;
-                        try fields.append(self.allocator, try Lowering.lowerStructFieldNode(self, field_node));
+                    .node => |child_node| {
+                        switch (child_node.kind()) {
+                            .StructField => try fields.append(self.allocator, try Lowering.lowerStructFieldNode(self, child_node)),
+                            .ConstantItem => try metadata.append(self.allocator, try Lowering.lowerConstantItemNode(self, child_node)),
+                            else => {},
+                        }
                     },
                 }
             }
@@ -233,6 +272,7 @@ pub fn mixin(Builder: type) type {
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .metadata = try metadata.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -584,13 +624,192 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerTypeNode(self, type_node)
             else
                 try Lowering.malformedType(self, node, "missing bitfield field type");
+            const layout = try Lowering.lowerBitfieldFieldLayout(self, node);
             return .{
                 .range = node.range(),
                 .name = name,
                 .type_expr = type_expr,
-                .offset = parseBitfieldOffset(node),
-                .width = parseBitfieldWidth(node),
+                .offset = layout.offset,
+                .width = layout.width,
             };
+        }
+
+        fn lowerBitfieldFieldLayout(self: *Builder, node: SyntaxNode) !BitfieldLayout {
+            var layout: BitfieldLayout = .{};
+            var saw_layout = false;
+            var pending_at: ?SyntaxToken = null;
+            var pending_name: ?SyntaxToken = null;
+            var pending_invalid = false;
+
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => |token| switch (token.kind()) {
+                        .At => {
+                            if (saw_layout or pending_at != null) {
+                                try Lowering.emitBitfieldLayoutTokenError(self, token, "duplicate bitfield layout annotation");
+                                pending_invalid = true;
+                                continue;
+                            }
+                            pending_at = token;
+                            pending_name = null;
+                            pending_invalid = false;
+                        },
+                        else => if (pending_at != null and pending_name == null and isIdentifierLike(token.kind())) {
+                            pending_name = token;
+                            if (token.range().start != pending_at.?.range().end) {
+                                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield layout annotation must not contain whitespace after '@'");
+                                pending_invalid = true;
+                            }
+                        },
+                    },
+                    .node => |child_node| switch (child_node.kind()) {
+                        .GroupParen => {
+                            if (pending_at != null) {
+                                if (pending_name) |name_token| {
+                                    if (child_node.range().start != name_token.range().end) {
+                                        try Lowering.emitBitfieldLayoutError(self, child_node, "bitfield layout annotation arguments must immediately follow the annotation name");
+                                        pending_invalid = true;
+                                    }
+                                    if (!pending_invalid) {
+                                        layout = (try Lowering.parseBitfieldAnnotationGroup(self, name_token, child_node)) orelse .{};
+                                        saw_layout = true;
+                                    }
+                                } else {
+                                    try Lowering.emitBitfieldLayoutError(self, child_node, "expected bitfield layout annotation name after '@'");
+                                }
+                                pending_at = null;
+                                pending_name = null;
+                                pending_invalid = false;
+                                continue;
+                            }
+                            if (saw_layout) {
+                                try Lowering.emitBitfieldLayoutError(self, child_node, "duplicate bitfield layout annotation");
+                                continue;
+                            }
+                            saw_layout = true;
+                            layout.width = try Lowering.parseBitfieldWidthGroup(self, child_node);
+                        },
+                        else => if (pending_at != null) {
+                            try Lowering.emitBitfieldLayoutError(self, child_node, "expected bitfield layout annotation arguments");
+                            pending_at = null;
+                            pending_name = null;
+                            pending_invalid = false;
+                            continue;
+                        },
+                    },
+                }
+            }
+
+            if (pending_at) |token| {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "expected bitfield layout annotation arguments");
+            }
+            return layout;
+        }
+
+        fn parseBitfieldAnnotationGroup(self: *Builder, name_token: SyntaxToken, group: SyntaxNode) !?BitfieldLayout {
+            const name = tokenText(name_token);
+            if (std.mem.eql(u8, name, "at")) {
+                return try Lowering.parseBitfieldAtGroup(self, group);
+            }
+            if (std.mem.eql(u8, name, "bits")) {
+                return try Lowering.parseBitfieldBitsGroup(self, group);
+            }
+            try Lowering.emitBitfieldLayoutTokenError(self, name_token, "unsupported bitfield layout annotation");
+            return null;
+        }
+
+        fn parseBitfieldAtGroup(self: *Builder, group: SyntaxNode) !?BitfieldLayout {
+            if (nthDirectIntegerToken(group, 2) != null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects exactly two integer arguments");
+                return null;
+            }
+            if (firstDirectTokenOfKind(group, .DotDot) != null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            }
+            const first = nthDirectIntegerToken(group, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            };
+            const second = nthDirectIntegerToken(group, 1) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@at expects offset and width integer arguments");
+                return null;
+            };
+
+            const offset = try Lowering.parseBitfieldLayoutIntegerToken(self, first) orelse return null;
+            const width = try Lowering.parseBitfieldLayoutIntegerToken(self, second) orelse return null;
+            if (width == 0) {
+                try Lowering.emitBitfieldLayoutTokenError(self, second, "bitfield width must be greater than zero");
+                return null;
+            }
+            if (@addWithOverflow(offset, width)[1] != 0) {
+                try Lowering.emitBitfieldLayoutError(self, group, "bitfield layout range overflows u32");
+                return null;
+            }
+
+            return .{ .offset = offset, .width = width };
+        }
+
+        fn parseBitfieldBitsGroup(self: *Builder, group: SyntaxNode) !?BitfieldLayout {
+            if (nthDirectIntegerToken(group, 2) != null or firstDirectTokenOfKind(group, .DotDot) == null) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits expects exactly one start..end range");
+                return null;
+            }
+            const first = nthDirectIntegerToken(group, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range is missing a start");
+                return null;
+            };
+            const second = nthDirectIntegerToken(group, 1) orelse {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range is missing an end");
+                return null;
+            };
+            const start = try Lowering.parseBitfieldLayoutIntegerToken(self, first) orelse return null;
+            const end = try Lowering.parseBitfieldLayoutIntegerToken(self, second) orelse return null;
+            if (end <= start) {
+                try Lowering.emitBitfieldLayoutError(self, group, "@bits range end must be greater than start");
+                return null;
+            }
+
+            return .{ .offset = start, .width = end - start };
+        }
+
+        fn parseBitfieldWidthGroup(self: *Builder, node: SyntaxNode) !?u32 {
+            const token = nthDirectIntegerToken(node, 0) orelse {
+                try Lowering.emitBitfieldLayoutError(self, node, "bitfield width group expects one integer literal");
+                return null;
+            };
+            if (nthDirectIntegerToken(node, 1) != null) {
+                try Lowering.emitBitfieldLayoutError(self, node, "bitfield width group expects exactly one integer literal");
+                return null;
+            }
+            const width = try Lowering.parseBitfieldLayoutIntegerToken(self, token) orelse return null;
+            if (width == 0) {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield width must be greater than zero");
+                return null;
+            }
+            return width;
+        }
+
+        fn parseBitfieldLayoutIntegerToken(self: *Builder, token: SyntaxToken) !?u32 {
+            return parseBitfieldLayoutU32(token.text()) orelse {
+                try Lowering.emitBitfieldLayoutTokenError(self, token, "bitfield layout integer must fit in u32");
+                return null;
+            };
+        }
+
+        fn emitBitfieldLayoutError(self: *Builder, node: SyntaxNode, message: []const u8) !void {
+            try self.diagnostics.appendErrorWithDebug(message, "invalid bitfield layout annotation", .{
+                .file_id = self.file.file_id,
+                .range = node.range(),
+            });
+        }
+
+        fn emitBitfieldLayoutTokenError(self: *Builder, token: SyntaxToken, message: []const u8) !void {
+            try self.diagnostics.appendErrorWithDebug(message, "invalid bitfield layout annotation", .{
+                .file_id = self.file.file_id,
+                .range = token.range(),
+            });
         }
 
         fn lowerParameterListNode(self: *Builder, node: SyntaxNode, allow_bare_self: bool) ![]Parameter {
@@ -1308,6 +1527,7 @@ pub fn mixin(Builder: type) type {
                 .OldExpr => Lowering.lowerOldExprNode(self, node),
                 .ComptimeExpr => Lowering.lowerComptimeExprNode(self, node),
                 .BuiltinExpr => Lowering.lowerBuiltinExprNode(self, node),
+                .ErrorReturnExpr => Lowering.lowerErrorReturnExprNode(self, node),
                 .ErrorExpr => Support.pushExpr(self, .{ .Error = .{ .range = node.range() } }),
                 else => Lowering.unsupportedExpr(self, node),
             };
@@ -1318,7 +1538,7 @@ pub fn mixin(Builder: type) type {
             return switch (token.kind()) {
                 .IntegerLiteral, .BinaryLiteral, .HexLiteral => Support.pushExpr(self, .{ .IntegerLiteral = .{
                     .range = node.range(),
-                    .text = tokenText(token),
+                    .text = try Lowering.integerLiteralText(self, node, token),
                 } }),
                 .StringLiteral, .RawStringLiteral, .CharacterLiteral => Support.pushExpr(self, .{ .StringLiteral = .{
                     .range = node.range(),
@@ -1338,6 +1558,11 @@ pub fn mixin(Builder: type) type {
                 } }),
                 else => Lowering.malformedExpr(self, node, "unsupported literal token"),
             };
+        }
+
+        fn integerLiteralText(self: *Builder, node: SyntaxNode, token: SyntaxToken) ![]const u8 {
+            const unit_token = nthDirectToken(node, 1) orelse return tokenText(token);
+            return try std.fmt.allocPrint(self.allocator, "{s} {s}", .{ tokenText(token), tokenText(unit_token) });
         }
 
         fn lowerTypeValueExprNode(self: *Builder, node: SyntaxNode) !ExprId {
@@ -1383,6 +1608,21 @@ pub fn mixin(Builder: type) type {
                 .op = mapBinaryOp(op_token.kind()) orelse return Lowering.malformedExpr(self, node, "invalid binary operator"),
                 .lhs = try Lowering.lowerExpressionNode(self, lhs_node),
                 .rhs = try Lowering.lowerExpressionNode(self, rhs_node),
+            } });
+        }
+
+        fn lowerErrorReturnExprNode(self: *Builder, node: SyntaxNode) !ExprId {
+            const name_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedExpr(self, node, "missing error name");
+            var args: std.ArrayList(ExprId) = .{};
+            var ordinal: usize = 0;
+            while (nthDirectNode(node, ordinal)) |arg_node| : (ordinal += 1) {
+                try args.append(self.allocator, try Lowering.lowerExpressionNode(self, arg_node));
+            }
+
+            return Support.pushExpr(self, .{ .ErrorReturn = .{
+                .range = node.range(),
+                .name = tokenText(name_token),
+                .args = try args.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -1581,13 +1821,55 @@ pub fn mixin(Builder: type) type {
                     .name = name.name,
                 } }) },
                 .TypeValue => |type_value| .{ .Type = type_value.type_expr },
-                .IntegerLiteral => |literal| .{ .Integer = .{
-                    .range = literal.range,
-                    .text = literal.text,
-                } },
+                .IntegerLiteral => |literal| try Lowering.integerTypeArg(self, literal.range, .positive, literal.text),
                 .Group => |group| try Lowering.callStyleTypeArg(self, group.expr),
+                .Unary => |unary| if (unary.op == .neg)
+                    try Lowering.negativeIntegerCallStyleTypeArg(self, unary)
+                else
+                    null,
                 else => null,
             };
+        }
+
+        fn negativeIntegerCallStyleTypeArg(self: *Builder, unary: nodes.UnaryExpr) !?TypeArg {
+            const signed = Lowering.signedIntegerTextFromExpr(self, unary.operand, .negative) orelse return null;
+            return try Lowering.integerTypeArg(self, unary.range, signed.sign, signed.text);
+        }
+
+        const IntegerArgSign = enum { positive, negative };
+
+        const SignedIntegerText = struct {
+            sign: IntegerArgSign,
+            text: []const u8,
+        };
+
+        fn signedIntegerTextFromExpr(self: *Builder, expr_id: ExprId, sign: IntegerArgSign) ?SignedIntegerText {
+            return switch (Support.exprRef(self, expr_id).*) {
+                .IntegerLiteral => |literal| .{
+                    .sign = sign,
+                    .text = std.mem.trim(u8, literal.text, " \t\n\r"),
+                },
+                .Group => |group| Lowering.signedIntegerTextFromExpr(self, group.expr, sign),
+                .Unary => |unary| if (unary.op == .neg)
+                    Lowering.signedIntegerTextFromExpr(self, unary.operand, switch (sign) {
+                        .positive => .negative,
+                        .negative => .positive,
+                    })
+                else
+                    null,
+                else => null,
+            };
+        }
+
+        fn integerTypeArg(self: *Builder, range: source.TextRange, sign: IntegerArgSign, text: []const u8) !TypeArg {
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            return .{ .Integer = .{
+                .range = range,
+                .text = switch (sign) {
+                    .positive => try std.fmt.allocPrint(self.allocator, "{s}", .{trimmed}),
+                    .negative => try std.fmt.allocPrint(self.allocator, "-{s}", .{trimmed}),
+                },
+            } };
         }
 
         fn typeValueBaseName(self: *Builder, type_expr_id: TypeExprId) ?[]const u8 {
@@ -1785,20 +2067,36 @@ pub fn mixin(Builder: type) type {
         fn lowerGenericTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing generic type name");
             var args: std.ArrayList(TypeArg) = .{};
+            var pending_minus: ?SyntaxToken = null;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => |token| switch (token.kind()) {
-                        .IntegerLiteral, .BinaryLiteral, .HexLiteral => try args.append(self.allocator, .{ .Integer = .{
-                            .range = token.range(),
-                            .text = tokenText(token),
-                        } }),
+                        .Minus => pending_minus = token,
+                        .IntegerLiteral, .BinaryLiteral, .HexLiteral => {
+                            if (pending_minus) |minus| {
+                                try args.append(self.allocator, try Lowering.integerTypeArg(self, .{ .start = minus.range().start, .end = token.range().end }, .negative, tokenText(token)));
+                                pending_minus = null;
+                            } else {
+                                try args.append(self.allocator, try Lowering.integerTypeArg(self, token.range(), .positive, tokenText(token)));
+                            }
+                        },
                         else => {},
                     },
                     .node => |arg_node| if (isTypeKind(arg_node.kind())) {
+                        // The parser only emits '-' in generic type arguments
+                        // when it is immediately followed by an integer token.
+                        // Treat any other survival as malformed syntax.
+                        if (pending_minus != null) {
+                            return Lowering.malformedType(self, node, "negative integer type argument must be followed by an integer literal");
+                        }
                         try args.append(self.allocator, .{ .Type = try Lowering.lowerTypeNode(self, arg_node) });
                     },
                 }
+            }
+            // Same parser invariant as above, but for a trailing '-' token.
+            if (pending_minus != null) {
+                return Lowering.malformedType(self, node, "negative integer type argument must be followed by an integer literal");
             }
             return Support.pushTypeExpr(self, .{ .Generic = .{
                 .range = node.range(),
@@ -1809,16 +2107,22 @@ pub fn mixin(Builder: type) type {
 
         fn lowerTupleTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             var elements: std.ArrayList(TypeExprId) = .{};
+            var comma_count: usize = 0;
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
-                    .token => {},
+                    .token => |token| if (token.kind() == .Comma) {
+                        comma_count += 1;
+                    },
                     .node => |element_node| if (isTypeKind(element_node.kind())) {
                         try elements.append(self.allocator, try Lowering.lowerTypeNode(self, element_node));
                     },
                 }
             }
-            if (elements.items.len == 1) return elements.items[0];
+            if (elements.items.len == 1) {
+                if (comma_count == 0) return elements.items[0];
+                return Lowering.malformedType(self, node, "single-element tuple types are not supported; use the element type directly");
+            }
             return Support.pushTypeExpr(self, .{ .Tuple = .{
                 .range = node.range(),
                 .elements = try elements.toOwnedSlice(self.allocator),
@@ -1928,13 +2232,17 @@ pub fn mixin(Builder: type) type {
         fn lowerLogDeclItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing log declaration name");
             var fields: std.ArrayList(nodes.LogField) = .{};
+            var metadata: std.ArrayList(ItemId) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
                     .token => {},
-                    .node => |field_node| {
-                        if (field_node.kind() != .LogField) continue;
-                        try fields.append(self.allocator, try Lowering.lowerLogFieldNode(self, field_node));
+                    .node => |child_node| {
+                        switch (child_node.kind()) {
+                            .LogField => try fields.append(self.allocator, try Lowering.lowerLogFieldNode(self, child_node)),
+                            .ConstantItem => try metadata.append(self.allocator, try Lowering.lowerConstantItemNode(self, child_node)),
+                            else => {},
+                        }
                     },
                 }
             }
@@ -1942,6 +2250,7 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .name = tokenText(name_token),
                 .fields = try fields.toOwnedSlice(self.allocator),
+                .metadata = try metadata.toOwnedSlice(self.allocator),
             } });
         }
 
@@ -2003,6 +2312,9 @@ pub fn mixin(Builder: type) type {
                 .Requires => .requires,
                 .Guard => .guard,
                 .Ensures => .ensures,
+                .EnsuresOk => .ensures_ok,
+                .EnsuresErr => .ensures_err,
+                .Modifies => .modifies,
                 else => blk: {
                     _ = try Lowering.malformedExpr(self, node, "invalid specification keyword");
                     break :blk .requires;
@@ -2011,10 +2323,24 @@ pub fn mixin(Builder: type) type {
                 _ = try Lowering.malformedExpr(self, node, "missing specification keyword");
                 break :blk .requires;
             };
-            const expr = if (firstDirectExprChild(node)) |expr_node|
-                try Lowering.lowerExpressionNode(self, expr_node)
-            else
-                try Lowering.malformedExpr(self, node, "missing specification expression");
+            var exprs: std.ArrayList(ExprId) = .{};
+            var it = node.children();
+            while (it.next()) |child| {
+                switch (child) {
+                    .token => {},
+                    .node => |expr_node| if (isExprKind(expr_node.kind())) {
+                        try exprs.append(self.allocator, try Lowering.lowerExpressionNode(self, expr_node));
+                    },
+                }
+            }
+            const expr = switch (exprs.items.len) {
+                0 => try Lowering.malformedExpr(self, node, "missing specification expression"),
+                1 => exprs.items[0],
+                else => try Support.pushExpr(self, .{ .Tuple = .{
+                    .range = node.range(),
+                    .elements = try exprs.toOwnedSlice(self.allocator),
+                } }),
+            };
             return .{
                 .range = node.range(),
                 .kind = kind,
@@ -2384,19 +2710,24 @@ fn bindingReservedKeywordToken(node: SyntaxNode) ?SyntaxToken {
 }
 
 fn isReservedBindingKeyword(kind: syntax.TokenKind) bool {
+    if (syntax.isBuiltinTypeKeyword(kind)) return true;
     return switch (kind) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .Void, .From, .To, .Forall, .Exists, .Where, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .Switch, .Ghost, .Assert, .From, .To, .Forall, .Exists, .Where => true,
         else => false,
     };
 }
 
-fn firstDirectIntegerToken(node: SyntaxNode) ?SyntaxToken {
+fn nthDirectIntegerToken(node: SyntaxNode, ordinal: usize) ?SyntaxToken {
+    var remaining = ordinal;
     var it = node.children();
     while (it.next()) |child| {
         switch (child) {
             .node => {},
             .token => |token| switch (token.kind()) {
-                .IntegerLiteral, .BinaryLiteral, .HexLiteral => return token,
+                .IntegerLiteral, .BinaryLiteral, .HexLiteral => {
+                    if (remaining == 0) return token;
+                    remaining -= 1;
+                },
                 else => {},
             },
         }
@@ -2456,8 +2787,9 @@ fn qualifiedTypeName(self: anytype, node: SyntaxNode) ?[]const u8 {
 }
 
 fn isIdentifierLike(kind: syntax.TokenKind) bool {
+    if (syntax.isBuiltinTypeKeyword(kind)) return true;
     return switch (kind) {
-        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice, .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Bytes, .Void => true,
+        .Identifier, .Init, .From, .To, .Error, .Result, .Map, .Slice => true,
         else => false,
     };
 }
@@ -2541,6 +2873,11 @@ const ForBindings = struct {
     index: ?SyntaxToken,
 };
 
+const BitfieldLayout = struct {
+    offset: ?u32 = null,
+    width: ?u32 = null,
+};
+
 fn parseForBindings(node: SyntaxNode) ?ForBindings {
     var seen_first_pipe = false;
     var seen_second_pipe = false;
@@ -2578,59 +2915,21 @@ fn parseForBindings(node: SyntaxNode) ?ForBindings {
     return null;
 }
 
-fn parseBitfieldOffset(node: SyntaxNode) ?u32 {
-    const at_token = firstDirectTokenOfKind(node, .At) orelse return null;
-    const start = at_token.range().start;
-    const text = node.tree.sourceSlice(.{ .start = start, .end = node.range().end });
-    if (std.mem.indexOf(u8, text, "@at(")) |idx| {
-        return parseFirstU32(text[idx + 4 ..]);
+fn parseBitfieldLayoutU32(text: []const u8) ?u32 {
+    var compact: [128]u8 = undefined;
+    if (text.len > compact.len) return null;
+    var len: usize = 0;
+    for (text) |c| {
+        if (c == '_') continue;
+        compact[len] = c;
+        len += 1;
     }
-    if (std.mem.indexOf(u8, text, "@bits(")) |idx| {
-        return parseFirstU32(text[idx + 6 ..]);
+    const value = compact[0..len];
+    if (std.mem.startsWith(u8, value, "0x") or std.mem.startsWith(u8, value, "0X")) {
+        return std.fmt.parseInt(u32, value[2..], 16) catch null;
     }
-    return null;
-}
-
-fn parseBitfieldWidth(node: SyntaxNode) ?u32 {
-    const at_token = firstDirectTokenOfKind(node, .At) orelse {
-        if (firstDirectChildOfKind(node, .GroupParen) != null or firstDirectTokenOfKind(node, .LeftParen) != null) {
-            return parseFirstU32(node.tree.sourceSlice(node.range()));
-        }
-        return null;
-    };
-    const start = at_token.range().start;
-    const text = node.tree.sourceSlice(.{ .start = start, .end = node.range().end });
-    if (std.mem.indexOf(u8, text, "@at(")) |idx| {
-        const tail = text[idx + 4 ..];
-        if (std.mem.indexOfScalar(u8, tail, ',')) |comma| {
-            return parseFirstU32(tail[comma + 1 ..]);
-        }
-        return null;
+    if (std.mem.startsWith(u8, value, "0b") or std.mem.startsWith(u8, value, "0B")) {
+        return std.fmt.parseInt(u32, value[2..], 2) catch null;
     }
-    if (std.mem.indexOf(u8, text, "@bits(")) |idx| {
-        const tail = text[idx + 6 ..];
-        const start_bit = parseFirstU32(tail) orelse return null;
-        if (std.mem.indexOf(u8, tail, "..")) |dots| {
-            const end_bit = parseFirstU32(tail[dots + 2 ..]) orelse return null;
-            return end_bit - start_bit;
-        }
-    }
-    return null;
-}
-
-fn parseFirstU32(text: []const u8) ?u32 {
-    var start: ?usize = null;
-    var end: usize = 0;
-    for (text, 0..) |c, idx| {
-        if (std.ascii.isDigit(c)) {
-            if (start == null) start = idx;
-            end = idx + 1;
-        } else if (start != null) {
-            break;
-        }
-    }
-    if (start) |s| {
-        return std.fmt.parseInt(u32, text[s..end], 10) catch null;
-    }
-    return null;
+    return std.fmt.parseInt(u32, value, 10) catch null;
 }

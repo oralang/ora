@@ -1,0 +1,31 @@
+enum Status : u8 {
+    Pending = 0,
+    Filled = 1,
+    Cancelled = 2
+}
+
+contract EnumStorageRoundtrip {
+    storage var status: Status;
+
+    pub fn set_filled() {
+        status = Status.Filled;
+    }
+
+    pub fn set_cancelled() {
+        status = Status.Cancelled;
+    }
+
+    pub fn is_filled() -> bool {
+        return status == Status.Filled;
+    }
+
+    pub fn code() -> u256 {
+        if (status == Status.Filled) {
+            return 20;
+        }
+        if (status == Status.Cancelled) {
+            return 30;
+        }
+        return 10;
+    }
+}

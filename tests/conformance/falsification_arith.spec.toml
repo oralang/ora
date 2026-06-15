@@ -1,0 +1,34 @@
+# Execution falsification of the verified ensures(result == a + b), on the
+# in-envelope boundary (requires a,b <= 100). Each row checks result == a + b.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "clamp_sum(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0, 0]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "clamp_sum(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [100, 100]
+returns = { u256 = 200 }
+
+[[call]]
+fn = "clamp_sum(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [100, 0]
+returns = { u256 = 100 }
+
+[[call]]
+fn = "clamp_sum(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [37, 63]
+returns = { u256 = 100 }

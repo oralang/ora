@@ -5,7 +5,7 @@
 // Full verification mode must fail when an untagged ora.assert is not provable.
 //
 // Run with:
-//   ./zig-out/bin/ora build --verify=full --verify-stats --emit-smt-report ora-example/smt/verification/ora_assert_obligation_fail.ora
+//   ./zig-out/bin/ora build --verify=full --verify-stats ora-example/smt/verification/ora_assert_obligation_fail.ora
 //
 // Expected: verification fails with one contract invariant error in alwaysFails.
 // ============================================================================

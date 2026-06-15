@@ -54,7 +54,7 @@ for contract in "${contracts[@]}"; do
   mkdir -p "$out_dir"
 
   echo "==> $contract"
-  emit_args=(--emit-bytecode --emit-sir-text --debug-info -o "$out_dir")
+  emit_args=(--emit=bytecode,sir-text --debug-info -o "$out_dir")
   case "$contract" in
     ora-example/corpus/control-flow/match/*)
       emit_args=(--no-verify "${emit_args[@]}")

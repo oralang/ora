@@ -4,6 +4,26 @@ const ora_root = @import("ora_root");
 
 const references = ora_root.lsp.references;
 const frontend = ora_root.lsp.frontend;
+const token_cache = ora_root.lsp.token_cache;
+const test_analysis = @import("test_analysis.zig");
+
+fn cachedReferences(source: []const u8, position: frontend.Position, include_declaration: bool) ![]frontend.Range {
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(testing.allocator, source);
+    defer fixture.deinit();
+
+    var tokens = try token_cache.Cache.init(testing.allocator, source);
+    defer tokens.deinit(testing.allocator);
+
+    return references.referencesAtCached(
+        testing.allocator,
+        source,
+        position,
+        include_declaration,
+        tokens.tokens,
+        &fixture.analysis,
+    );
+}
 
 fn positionOfNth(source: []const u8, needle: []const u8, nth: usize) !frontend.Position {
     var from: usize = 0;
@@ -41,7 +61,7 @@ test "lsp references: includes declaration and call sites" {
 
     const query = try positionOfNth(source, "helper", 2);
 
-    const ranges = try references.referencesAt(testing.allocator, source, query, true);
+    const ranges = try cachedReferences(source, query, true);
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 3), ranges.len);
@@ -58,7 +78,7 @@ test "lsp references: excludes declaration when requested" {
 
     const query = try positionOfNth(source, "helper", 1);
 
-    const ranges = try references.referencesAt(testing.allocator, source, query, false);
+    const ranges = try cachedReferences(source, query, false);
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 2), ranges.len);
@@ -78,7 +98,7 @@ test "lsp references: respects local scope shadowing" {
 
     const query = try positionOfNth(source, "amount", 3);
 
-    const ranges = try references.referencesAt(testing.allocator, source, query, true);
+    const ranges = try cachedReferences(source, query, true);
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 2), ranges.len);
@@ -88,7 +108,7 @@ test "lsp references: unknown symbol returns empty" {
     const source = "pub fn run() -> u256 { return missing; }";
     const query = try positionOfNth(source, "missing", 0);
 
-    const ranges = try references.referencesAt(testing.allocator, source, query, true);
+    const ranges = try cachedReferences(source, query, true);
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 0), ranges.len);
@@ -98,8 +118,73 @@ test "lsp references: parse failure returns empty" {
     const source = "@import(\"std\");";
     const query = try positionOfNth(source, "import", 0);
 
-    const ranges = try references.referencesAt(testing.allocator, source, query, true);
+    const ranges = try cachedReferences(source, query, true);
     defer testing.allocator.free(ranges);
 
     try testing.expectEqual(@as(usize, 0), ranges.len);
+}
+
+test "lsp references: occurrence index reports builder telemetry" {
+    const source =
+        \\pub fn helper(x: u256) -> u256 { return x; }
+        \\pub fn main() -> u256 {
+        \\    let a: u256 = helper(1);
+        \\    return helper(a);
+        \\}
+    ;
+
+    var fixture: test_analysis.TestAnalysis = undefined;
+    try fixture.init(testing.allocator, source);
+    defer fixture.deinit();
+
+    var tokens = try token_cache.Cache.init(testing.allocator, source);
+    defer tokens.deinit(testing.allocator);
+
+    var index = try references.OccurrenceIndex.init(testing.allocator, source, tokens.tokens, &fixture.analysis);
+    defer index.deinit(testing.allocator);
+
+    try testing.expect(index.occurrences.len > 0);
+    try testing.expectEqual(index.occurrences.len, index.range_indexes.len);
+    try testing.expectEqual(index.occurrences.len, index.name_indexes.len);
+    try testing.expectEqual(index.occurrences.len * 3, index.builderItemsBuilt());
+    try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
+    try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
+    try testing.expect(index.builderGrowthEvents() > 0);
+
+    const query = try positionOfNth(source, "helper", 2);
+    const occurrence = index.occurrenceAt(query) orelse return error.TestExpectedEqual;
+    try testing.expectEqualStrings("helper", occurrence.name);
+}
+
+test "lsp references: imported member index records alias member uses" {
+    const source =
+        \\const Lib = @import("./lib.ora");
+        \\const Other = @import("./other.ora");
+        \\
+        \\pub fn run() -> u256 {
+        \\    return Lib.helper(1) + Other.helper(2) + Lib.value();
+        \\}
+    ;
+    const imports = [_]references.ImportBinding{
+        .{ .alias = "Lib", .resolved_path = "/tmp/lib.ora" },
+        .{ .alias = "Other", .resolved_path = "/tmp/other.ora" },
+    };
+
+    var index = try references.buildImportedMemberIndex(testing.allocator, source, imports[0..]);
+    defer references.deinitImportedMemberIndex(testing.allocator, &index);
+
+    try testing.expectEqual(@as(usize, 3), index.occurrences.len);
+    try testing.expect(index.estimatedByteSize() > 0);
+    try testing.expectEqual(index.occurrences.len, index.builderItemsBuilt());
+    try testing.expect(index.builderCapacityRequested() >= index.builderItemsBuilt());
+    try testing.expectEqual(index.builderCapacityRequested() - index.builderItemsBuilt(), index.builderUnusedCapacity());
+    try testing.expect(index.builderGrowthEvents() > 0);
+
+    const ranges = try references.importedMemberReferencesTo(testing.allocator, &index, "/tmp/lib.ora", "helper");
+    defer testing.allocator.free(ranges);
+
+    try testing.expectEqual(@as(usize, 1), ranges.len);
+    const expected = try positionOfNth(source, "helper", 0);
+    try testing.expectEqual(expected.line, ranges[0].start.line);
+    try testing.expectEqual(expected.character, ranges[0].start.character);
 }

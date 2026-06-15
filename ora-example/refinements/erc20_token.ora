@@ -274,16 +274,10 @@ contract ERC20Token {
                 return amount;
             }
             const burn_fee: u256 = scaled_amount * burn_rate_value;
-            if (burn_fee >= amount) {
-                return 1;
+            if (amount > burn_fee) {
+                return amount -% burn_fee;
             }
-            const actual_burn_raw: u256 = amount - burn_fee;
-            
-            // Ensure we don't burn more than available
-            if (actual_burn_raw < 1) {
-                return 1; // Minimum burn amount
-            }
-            return actual_burn_raw;
+            return 1; // Minimum burn amount
         }
         return amount;
     }

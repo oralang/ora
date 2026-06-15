@@ -1,11 +1,18 @@
 // INPUT: ora-example/smt/verification/assertions.ora
+// requires clauses lower to first-class ora.requires ops, one per source clause.
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK-LABEL: func.func @checkBalance
-// CHECK: ora.requires_count = 1 : i32
-// CHECK: ora.verification = true
+// CHECK-COUNT-1: ora.requires
 // CHECK-LABEL: func.func @checkSum
-// CHECK: ora.requires_count = 2 : i32
-// CHECK: ora.verification = true
+// CHECK-COUNT-3: ora.requires
+// CHECK-LABEL: func.func @verifyInvariant
+// CHECK-COUNT-1: ora.requires
+// CHECK-LABEL: func.func @checkRefinement
+// CHECK: ora.refinement_guard
+// CHECK-COUNT-1: ora.requires
+// CHECK-LABEL: func.func @conditionalCheck
+// CHECK-COUNT-1: ora.requires
+// CHECK-LABEL: func.func @loopAssertion
+// CHECK-COUNT-1: ora.requires
 // CHECK-LABEL: func.func @multipleChecks
-// CHECK: ora.requires_count = 3 : i32
-// CHECK: ora.verification = true
+// CHECK-COUNT-6: ora.requires

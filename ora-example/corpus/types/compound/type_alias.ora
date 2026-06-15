@@ -1,0 +1,48 @@
+struct Pair(comptime T: type) {
+    left: T;
+    right: T;
+}
+
+type Amount = u256;
+type AmountPair = Pair<Amount>;
+type NestedAmountPair = Pair<AmountPair>;
+type AmountArray4 = [Amount; 4];
+type AliasArray(comptime T: type, comptime N: u256) = [T; N];
+type BoundedAmount(comptime MIN: u256, comptime MAX: u256) = InRange<Amount, MIN, MAX>;
+
+contract TypeAliasCorpus {
+    storage var latest: AmountPair;
+
+    pub fn scalar(value: Amount) -> Amount {
+        return value;
+    }
+
+    pub fn pair_left(value: AmountPair) -> Amount {
+        return value.left; 
+    }
+
+    pub fn nested_left(value: NestedAmountPair) -> Amount {
+        return value.left.left;
+    }
+
+    pub fn fixed_array_first(values: AmountArray4) -> Amount {
+        return values[0];
+    }
+
+    pub fn generic_array_second(values: AliasArray<Amount, 2>) -> Amount {
+        return values[1];
+    }
+
+    pub fn bounded_to_plain(value: BoundedAmount<1, 100>) -> Amount {
+        let plain: Amount = value;
+        return plain;
+    }
+
+    pub fn store_pair(value: AmountPair) {
+        latest = value;
+    }
+
+    pub fn load_pair_left() -> Amount {
+        return latest.left;
+    }
+}

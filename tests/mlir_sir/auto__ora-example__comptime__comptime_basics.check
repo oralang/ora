@@ -1,1 +1,22 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/comptime/comptime_basics.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n
+// AUTO-GENERATED. Do not edit by hand.
+// INPUT: ora-example/comptime/comptime_basics.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK: module {
+// CHECK-NEXT:   func.func @basic_arithmetic() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0x6926bda7", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/comptime_basics.ora":6:9)))
+// CHECK-NEXT:     %c205 = sir.const 205 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/comptime/comptime_basics.ora":5:25)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/comptime_basics.ora":6:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c205 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/comptime_basics.ora":6:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.3"("ora.origin_stmt.3"("{{.*}}/ora-example/comptime/comptime_basics.ora":6:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":2:5)
+// CHECK-NEXT:   func.func @refined_constants() attributes {ora.selector = "0xd7e3b1a6", ora.visibility = "pub"} {
+// CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/comptime/comptime_basics.ora":9:5)
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":9:5)
+// CHECK-NEXT:   func.func @comptime_block_example() -> !sir.u256 attributes {ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.selector = "0xecb46a8f", ora.visibility = "pub"} {
+// CHECK-NEXT:     %0 = sir.const 32 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/comptime/comptime_basics.ora":22:9)))
+// CHECK-NEXT:     %c42 = sir.const 42 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/comptime/comptime_basics.ora":19:27)))
+// CHECK-NEXT:     %1 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/comptime/comptime_basics.ora":22:9)))
+// CHECK-NEXT:     sir.store %1 : !sir.ptr<1>, %c42 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/comptime/comptime_basics.ora":22:9)))
+// CHECK-NEXT:     sir.return %1 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/comptime/comptime_basics.ora":22:9)))
+// CHECK-NEXT:   } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":18:5)
+// CHECK-NEXT: } loc("{{.*}}/ora-example/comptime/comptime_basics.ora":1:1)

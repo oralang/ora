@@ -1,0 +1,11 @@
+contract U256MappingStorageSmoke {
+    storage var scores: map<u256, u256>;
+
+    pub fn set_score(id: u256, amount: u256) {
+        scores[id] = amount;
+    }
+
+    pub fn get_score(id: u256) -> u256 {
+        return scores[id];
+    }
+}

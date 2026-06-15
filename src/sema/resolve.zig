@@ -1,5 +1,6 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
+const builtin_types = @import("ora_types").builtin;
 const diagnostics = @import("../diagnostics/mod.zig");
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
@@ -163,6 +164,16 @@ const Resolver = struct {
             .Field => |field| {
                 if (field.value) |expr_id| try self.resolveExpr(expr_id, env);
             },
+            .Struct => |struct_item| {
+                for (struct_item.metadata) |metadata_id| {
+                    try self.resolveItem(metadata_id, env);
+                }
+            },
+            .LogDecl => |log_decl| {
+                for (log_decl.metadata) |metadata_id| {
+                    try self.resolveItem(metadata_id, env);
+                }
+            },
             .Constant => |constant| try self.resolveExpr(constant.value, env),
             .GhostBlock => |ghost_block| try self.resolveBody(ghost_block.body, env),
             else => {},
@@ -294,11 +305,13 @@ const Resolver = struct {
 
     const ResolveExprOptions = struct {
         allow_result_name: bool = false,
+        modifies_clause: bool = false,
     };
 
     fn resolveSpecClause(self: *Resolver, clause: ast.SpecClause, env: *const Env) anyerror!void {
         try self.resolveExprWithOptions(clause.expr, env, .{
-            .allow_result_name = clause.kind == .ensures,
+            .allow_result_name = clause.kind == .ensures or clause.kind == .ensures_ok,
+            .modifies_clause = clause.kind == .modifies,
         });
     }
 
@@ -374,11 +387,14 @@ const Resolver = struct {
             },
             .Field => |field| {
                 if (self.emitDeprecatedErrorNamespace(expr_id, field)) return;
+                if (options.modifies_clause and self.isModifiesEnvironmentKey(expr_id)) return;
                 try self.resolveExprWithOptions(field.base, env, options);
             },
             .Index => |index| {
                 try self.resolveExprWithOptions(index.base, env, options);
-                try self.resolveExprWithOptions(index.index, env, options);
+                if (!options.modifies_clause or !self.isModifiesEnvironmentKey(index.index)) {
+                    try self.resolveExprWithOptions(index.index, env, options);
+                }
             },
             .Group => |group| try self.resolveExprWithOptions(group.expr, env, options),
             .Old => |old| try self.resolveExprWithOptions(old.expr, env, options),
@@ -390,6 +406,18 @@ const Resolver = struct {
             },
             else => {},
         }
+    }
+
+    fn isModifiesEnvironmentKey(self: *Resolver, expr_id: ast.ExprId) bool {
+        const field = switch (self.file.expression(expr_id).*) {
+            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
+            .Field => |field| field,
+            else => return false,
+        };
+        const base = self.file.expression(field.base).*;
+        return base == .Name and
+            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
     }
 
     fn bindPatternIfName(self: *Resolver, env: *Env, pattern_id: ast.PatternId) !void {
@@ -457,29 +485,12 @@ const Resolver = struct {
 
     fn isRecognizedTypeValueName(self: *const Resolver, name: []const u8) bool {
         const trimmed = std.mem.trim(u8, name, " \t\n\r");
-        if (std.mem.eql(u8, trimmed, "void") or
-            std.mem.eql(u8, trimmed, "bool") or
-            std.mem.eql(u8, trimmed, "string") or
-            std.mem.eql(u8, trimmed, "address") or
-            std.mem.eql(u8, trimmed, "bytes") or
+        if (builtin_types.isBuiltinTypeName(trimmed) or
             std.mem.eql(u8, trimmed, "std") or
             std.mem.eql(u8, trimmed, "Ok") or
             std.mem.eql(u8, trimmed, "Err"))
         {
             return true;
-        }
-
-        if (trimmed.len >= 2 and (trimmed[0] == 'u' or trimmed[0] == 'i')) {
-            const bits = trimmed[1..];
-            if (std.mem.eql(u8, bits, "8") or
-                std.mem.eql(u8, bits, "16") or
-                std.mem.eql(u8, bits, "32") or
-                std.mem.eql(u8, bits, "64") or
-                std.mem.eql(u8, bits, "128") or
-                std.mem.eql(u8, bits, "256"))
-            {
-                return true;
-            }
         }
 
         if (self.lookupTypeValueItem(trimmed)) |_| return true;

@@ -265,7 +265,7 @@ else
   mkdir -p "$WORK_DIR"
   BYTECODE_FILE="$WORK_DIR/erc20_bitfield_comptime_generics.hex"
   echo "Compiling bytecode..."
-  "$ORA_BIN" --emit-bytecode -o "$BYTECODE_FILE" "$ORA_SOURCE"
+  "$ORA_BIN" --emit=bytecode -o "$BYTECODE_FILE" "$ORA_SOURCE"
 fi
 
 BYTECODE="$(tr -d '[:space:]' < "$BYTECODE_FILE")"

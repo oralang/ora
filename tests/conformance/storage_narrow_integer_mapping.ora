@@ -1,0 +1,56 @@
+contract NarrowIntegerMappingStorageSmoke {
+    storage var u8_scores: map<u8, u256>;
+    storage var u16_scores: map<u16, u256>;
+    storage var u32_scores: map<u32, u256>;
+    storage var u128_scores: map<u128, u256>;
+    storage var i8_scores: map<i8, u256>;
+    storage var i16_scores: map<i16, u256>;
+
+    pub fn set_u8(id: u8, amount: u256) {
+        u8_scores[id] = amount;
+    }
+
+    pub fn get_u8(id: u8) -> u256 {
+        return u8_scores[id];
+    }
+
+    pub fn set_u16(id: u16, amount: u256) {
+        u16_scores[id] = amount;
+    }
+
+    pub fn get_u16(id: u16) -> u256 {
+        return u16_scores[id];
+    }
+
+    pub fn set_u32(id: u32, amount: u256) {
+        u32_scores[id] = amount;
+    }
+
+    pub fn get_u32(id: u32) -> u256 {
+        return u32_scores[id];
+    }
+
+    pub fn set_u128(id: u128, amount: u256) {
+        u128_scores[id] = amount;
+    }
+
+    pub fn get_u128(id: u128) -> u256 {
+        return u128_scores[id];
+    }
+
+    pub fn set_i8(id: i8, amount: u256) {
+        i8_scores[id] = amount;
+    }
+
+    pub fn get_i8(id: i8) -> u256 {
+        return i8_scores[id];
+    }
+
+    pub fn set_i16(id: i16, amount: u256) {
+        i16_scores[id] = amount;
+    }
+
+    pub fn get_i16(id: i16) -> u256 {
+        return i16_scores[id];
+    }
+}

@@ -1,0 +1,29 @@
+struct Account {
+    balance: u256;
+    nonce: u256;
+    flags: u256;
+}
+
+contract MapStructStorageSmoke {
+    storage var accounts: map<address, Account>;
+
+    pub fn set(account: address, balance: u256, nonce: u256, flags: u256) {
+        accounts[account] = Account { balance: balance, nonce: nonce, flags: flags };
+    }
+
+    pub fn set_nonce(account: address, nonce: u256) {
+        accounts[account].nonce = nonce;
+    }
+
+    pub fn get_balance(account: address) -> u256 {
+        return accounts[account].balance;
+    }
+
+    pub fn get_nonce(account: address) -> u256 {
+        return accounts[account].nonce;
+    }
+
+    pub fn get_flags(account: address) -> u256 {
+        return accounts[account].flags;
+    }
+}

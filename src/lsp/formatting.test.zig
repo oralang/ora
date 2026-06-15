@@ -34,3 +34,19 @@ test "lsp formatting: parse errors surface as ParseError" {
         formatting.formatSourceAlloc(testing.allocator, invalid, .{}),
     );
 }
+
+test "lsp formatting: preserves type alias spacing" {
+    const source =
+        \\type Amount = u256;
+        \\type AmountArray4 = [Amount; 4];
+        \\type AliasArray(comptime T: type, comptime N: u256) = [T; N];
+    ;
+
+    const formatted = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted);
+
+    try testing.expectEqualStrings(source ++ "\n", formatted);
+}

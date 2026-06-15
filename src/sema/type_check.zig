@@ -1,11 +1,20 @@
 const std = @import("std");
+const zig_builtin = @import("builtin");
 const ast = @import("../ast/mod.zig");
 const const_bridge = @import("../comptime/compiler_const_bridge.zig");
 const diagnostics = @import("../diagnostics/mod.zig");
+const diag_messages = diagnostics.messages;
 const model = @import("model.zig");
 const source = @import("../source/mod.zig");
 const descriptors = @import("type_descriptors.zig");
 const region_rules = @import("region.zig");
+const lookup_index = @import("lookup.zig");
+const unique_list = @import("unique_list.zig");
+const compiler_query = @import("../compiler_query.zig");
+const builtins = @import("../builtins.zig");
+const ora_types = @import("ora_types");
+const type_builtin = ora_types.builtin;
+const abi_policy = @import("../abi/policy.zig");
 
 const ItemIndexResult = model.ItemIndexResult;
 const NameResolutionResult = model.NameResolutionResult;
@@ -17,6 +26,7 @@ const LocatedType = model.LocatedType;
 const Region = model.Region;
 const Provenance = model.Provenance;
 const Effect = model.Effect;
+const EffectFlags = model.EffectFlags;
 const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
 const GenericBindingValue = model.GenericBindingValue;
@@ -33,25 +43,30 @@ const TraitInterface = model.TraitInterface;
 const ImplInterface = model.ImplInterface;
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
-const ConstValue = model.ConstValue;
+const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
+const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
-const descriptorFromGenericType = descriptors.descriptorFromGenericType;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
+const refinementArgsFromAst = descriptors.refinementArgsFromAst;
 const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
-const refinements = @import("refinements.zig");
+const refinements = ora_types.refinement_semantics;
 
-pub const ImportQuery = struct {
-    context: *anyopaque,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ItemIndexResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const TypeCheckResult,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
-};
+const BuiltinKind = builtins.Kind;
+
+fn builtinKind(name: []const u8) ?BuiltinKind {
+    return builtins.kindForName(name);
+}
+
+fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .selector, .abi_signature, .event_topic, .struct_fields, .trait_methods => true,
+        else => false,
+    };
+}
 
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
@@ -64,6 +79,53 @@ fn declarationRegion(storage_class: ast.StorageClass) Region {
 
 fn locatedValue(expr_type: Type, expr_region: Region, provenance: Provenance) LocatedType {
     return LocatedType.withRegionAndProvenance(expr_type, expr_region, provenance);
+}
+
+fn u256Type() Type {
+    return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+}
+
+fn addressType() Type {
+    return .{ .address = {} };
+}
+
+fn metatypeMarkerType() Type {
+    return .{ .named = .{ .name = "type" } };
+}
+
+fn abiDecodeErrorType() Type {
+    return .{ .named = .{ .name = "AbiDecodeError" } };
+}
+
+fn typeContainsUnknown(ty: Type) bool {
+    return switch (ty) {
+        .unknown => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsUnknown(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsUnknown(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsUnknown(array.element_type.*),
+        .slice => |slice| typeContainsUnknown(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsUnknown(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsUnknown(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsUnknown(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsUnknown(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
+        else => false,
+    };
 }
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
@@ -95,6 +157,19 @@ fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     return false;
 }
 
+fn switchBranchTypesCompatible(lhs: Type, rhs: Type) bool {
+    if (lhs.kind() == .unknown or rhs.kind() == .unknown) return true;
+    if (lhs.kind() == .never or rhs.kind() == .never) return true;
+
+    const lhs_unwrapped = unwrapRefinement(lhs);
+    const rhs_unwrapped = unwrapRefinement(rhs);
+    const lhs_is_error_union = lhs_unwrapped.kind() == .error_union;
+    const rhs_is_error_union = rhs_unwrapped.kind() == .error_union;
+    if (lhs_is_error_union != rhs_is_error_union) return false;
+
+    return typesAssignable(lhs, rhs) or typesAssignable(rhs, lhs);
+}
+
 fn exactFlowCompatible(expected: model.RefinementType, actual_type: Type) bool {
     if (actual_type.kind() != .refinement) return false;
     if (refinements.kindForName(actual_type.refinement.name) != .exact) return false;
@@ -118,21 +193,22 @@ fn keySegmentEql(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
         .parameter => |index| rhs == .parameter and rhs.parameter == index,
         .constant => |value| rhs == .constant and std.mem.eql(u8, rhs.constant, value),
-        .self_ref => rhs == .self_ref,
+        .msg_sender => rhs == .msg_sender,
+        .tx_origin => rhs == .tx_origin,
         .unknown => rhs == .unknown,
     };
 }
 
 fn keySegmentMayAlias(lhs: KeySegment, rhs: KeySegment) bool {
     return switch (lhs) {
-        .unknown, .self_ref => true,
+        .unknown, .msg_sender, .tx_origin => true,
         .parameter => |lhs_index| switch (rhs) {
             .parameter => |rhs_index| lhs_index == rhs_index,
-            .unknown, .self_ref, .constant => true,
+            .unknown, .msg_sender, .tx_origin, .constant => true,
         },
         .constant => |lhs_value| switch (rhs) {
             .constant => |rhs_value| std.mem.eql(u8, lhs_value, rhs_value),
-            .unknown, .self_ref, .parameter => true,
+            .unknown, .msg_sender, .tx_origin, .parameter => true,
         },
     };
 }
@@ -159,10 +235,38 @@ fn keyPathsMayAlias(lhs: ?[]const KeySegment, rhs: ?[]const KeySegment) bool {
     return true;
 }
 
+fn fieldPathsEql(lhs: ?[]const []const u8, rhs: ?[]const []const u8) bool {
+    if (lhs == null and rhs == null) return true;
+    if (lhs == null or rhs == null) return false;
+    const lhs_path = lhs.?;
+    const rhs_path = rhs.?;
+    if (lhs_path.len != rhs_path.len) return false;
+    for (lhs_path, rhs_path) |lhs_field, rhs_field| {
+        if (!std.mem.eql(u8, lhs_field, rhs_field)) return false;
+    }
+    return true;
+}
+
+fn fieldPathsMayAlias(lhs: ?[]const []const u8, rhs: ?[]const []const u8) bool {
+    if (lhs == null or rhs == null) return true;
+    const lhs_path = lhs.?;
+    const rhs_path = rhs.?;
+    const shared_len = @min(lhs_path.len, rhs_path.len);
+    for (lhs_path[0..shared_len], rhs_path[0..shared_len]) |lhs_field, rhs_field| {
+        if (!std.mem.eql(u8, lhs_field, rhs_field)) return false;
+    }
+    return true;
+}
+
 fn effectSlotEql(lhs: EffectSlot, rhs: EffectSlot) bool {
     return lhs.region == rhs.region and
         std.mem.eql(u8, lhs.name, rhs.name) and
+        fieldPathsEql(lhs.field_path, rhs.field_path) and
         keyPathsEql(lhs.key_path, rhs.key_path);
+}
+
+fn effectSlotIsStorage(slot: EffectSlot) bool {
+    return slot.region == .storage;
 }
 
 fn effectSlotsEql(lhs: []const EffectSlot, rhs: []const EffectSlot) bool {
@@ -173,38 +277,25 @@ fn effectSlotsEql(lhs: []const EffectSlot, rhs: []const EffectSlot) bool {
     return true;
 }
 
+fn itemIdEql(lhs: ast.ItemId, rhs: ast.ItemId) bool {
+    return lhs.index() == rhs.index();
+}
+
 fn effectEql(lhs: Effect, rhs: Effect) bool {
     return switch (lhs) {
         .pure => rhs == .pure,
         .external => rhs == .external,
-        .side_effects => |lhs_effects| rhs == .side_effects and
-            lhs_effects.has_external == rhs.side_effects.has_external and
-            lhs_effects.has_log == rhs.side_effects.has_log and
-            lhs_effects.has_havoc == rhs.side_effects.has_havoc and
-            lhs_effects.has_lock == rhs.side_effects.has_lock and
-            lhs_effects.has_unlock == rhs.side_effects.has_unlock,
+        .side_effects => |lhs_flags| rhs == .side_effects and std.meta.eql(lhs_flags, rhs.side_effects),
         .reads => |lhs_effects| rhs == .reads and
             effectSlotsEql(lhs_effects.slots, rhs.reads.slots) and
-            lhs_effects.has_external == rhs.reads.has_external and
-            lhs_effects.has_log == rhs.reads.has_log and
-            lhs_effects.has_havoc == rhs.reads.has_havoc and
-            lhs_effects.has_lock == rhs.reads.has_lock and
-            lhs_effects.has_unlock == rhs.reads.has_unlock,
+            std.meta.eql(lhs_effects.flags, rhs.reads.flags),
         .writes => |lhs_effects| rhs == .writes and
             effectSlotsEql(lhs_effects.slots, rhs.writes.slots) and
-            lhs_effects.has_external == rhs.writes.has_external and
-            lhs_effects.has_log == rhs.writes.has_log and
-            lhs_effects.has_havoc == rhs.writes.has_havoc and
-            lhs_effects.has_lock == rhs.writes.has_lock and
-            lhs_effects.has_unlock == rhs.writes.has_unlock,
+            std.meta.eql(lhs_effects.flags, rhs.writes.flags),
         .reads_writes => |lhs_effects| rhs == .reads_writes and
             effectSlotsEql(lhs_effects.reads, rhs.reads_writes.reads) and
             effectSlotsEql(lhs_effects.writes, rhs.reads_writes.writes) and
-            lhs_effects.has_external == rhs.reads_writes.has_external and
-            lhs_effects.has_log == rhs.reads_writes.has_log and
-            lhs_effects.has_havoc == rhs.reads_writes.has_havoc and
-            lhs_effects.has_lock == rhs.reads_writes.has_lock and
-            lhs_effects.has_unlock == rhs.reads_writes.has_unlock,
+            std.meta.eql(lhs_effects.flags, rhs.reads_writes.flags),
     };
 }
 
@@ -234,11 +325,27 @@ test "effect slot aliasing distinguishes parameters and constants" {
         .region = .storage,
         .key_path = &[_]KeySegment{.{ .unknown = {} }},
     };
+    const owner_field = EffectSlot{
+        .name = "config",
+        .region = .storage,
+        .field_path = &[_][]const u8{"owner"},
+    };
+    const admin_field = EffectSlot{
+        .name = "config",
+        .region = .storage,
+        .field_path = &[_][]const u8{"admin"},
+    };
+    const config_root = EffectSlot{
+        .name = "config",
+        .region = .storage,
+    };
 
     try std.testing.expect(keyPathsMayAlias(same_param.key_path, same_param.key_path));
     try std.testing.expect(!keyPathsMayAlias(same_param.key_path, other_param.key_path));
     try std.testing.expect(!keyPathsMayAlias(const_one.key_path, const_two.key_path));
     try std.testing.expect(keyPathsMayAlias(unknown.key_path, same_param.key_path));
+    try std.testing.expect(!fieldPathsMayAlias(owner_field.field_path, admin_field.field_path));
+    try std.testing.expect(fieldPathsMayAlias(config_root.field_path, owner_field.field_path));
 }
 
 test "buildEffect preserves external marker across slot summaries" {
@@ -246,10 +353,11 @@ test "buildEffect preserves external marker across slot summaries" {
         .{ .name = "total", .region = .storage },
     };
 
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, true, false, false, false, false) == .external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, true, false, false, false, false).reads.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, true, false, false, false, false).writes.has_external);
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, true, false, false, false, false).reads_writes.has_external);
+    const flags: EffectFlags = .{ .has_external = true };
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &.{}, flags) == .external);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, flags).hasExternal());
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, flags).hasExternal());
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &slots, flags).hasExternal());
 }
 
 test "buildEffect preserves log and havoc markers across slot summaries" {
@@ -257,53 +365,43 @@ test "buildEffect preserves log and havoc markers across slot summaries" {
         .{ .name = "total", .region = .storage },
     };
 
-    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, false, true, false, false, false).reads.has_log);
-    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, false, false, true, false, false).writes.has_havoc);
-    const mixed = TypeChecker.buildEffect(&slots, &slots, true, true, true, true, true).reads_writes;
-    try std.testing.expect(mixed.has_external);
-    try std.testing.expect(mixed.has_log);
-    try std.testing.expect(mixed.has_havoc);
-    try std.testing.expect(mixed.has_lock);
-    try std.testing.expect(mixed.has_unlock);
-    const effects_only = TypeChecker.buildEffect(&.{}, &.{}, false, true, true, true, true).side_effects;
-    try std.testing.expect(effects_only.has_log);
-    try std.testing.expect(effects_only.has_havoc);
-    try std.testing.expect(effects_only.has_lock);
-    try std.testing.expect(effects_only.has_unlock);
+    try std.testing.expect(TypeChecker.buildEffect(&slots, &.{}, .{ .has_log = true }).hasLog());
+    try std.testing.expect(TypeChecker.buildEffect(&.{}, &slots, .{ .has_havoc = true }).hasHavoc());
+    const mixed = TypeChecker.buildEffect(&slots, &slots, .{
+        .has_external = true,
+        .has_log = true,
+        .has_havoc = true,
+        .has_lock = true,
+        .has_unlock = true,
+    });
+    try std.testing.expect(mixed.hasExternal());
+    try std.testing.expect(mixed.hasLog());
+    try std.testing.expect(mixed.hasHavoc());
+    try std.testing.expect(mixed.hasLock());
+    try std.testing.expect(mixed.hasUnlock());
+    const effects_only = TypeChecker.buildEffect(&.{}, &.{}, .{
+        .has_log = true,
+        .has_havoc = true,
+        .has_lock = true,
+        .has_unlock = true,
+    });
+    try std.testing.expect(effects_only.hasLog());
+    try std.testing.expect(effects_only.hasHavoc());
+    try std.testing.expect(effects_only.hasLock());
+    try std.testing.expect(effects_only.hasUnlock());
 }
 
-test "unknown locked call diagnostics mention each locked slot" {
-    var diags = diagnostics.DiagnosticList.init(std.testing.allocator);
-    defer diags.deinit();
+test "buildEffect keeps lock flags when external is also present" {
+    const effect = TypeChecker.buildEffect(&.{}, &.{}, .{
+        .has_external = true,
+        .has_lock = true,
+        .has_unlock = true,
+    });
 
-    var checker = TypeChecker{
-        .arena = std.testing.allocator,
-        .file_id = source.FileId.fromIndex(0),
-        .file = undefined,
-        .item_index = undefined,
-        .resolution = undefined,
-        .const_eval = undefined,
-        .item_types = &.{},
-        .item_regions = &.{},
-        .item_effects = &.{},
-        .pattern_types = &.{},
-        .expr_types = &.{},
-        .call_resolutions = &.{},
-        .expr_effects = &.{},
-        .effect_states = &.{},
-        .current_function_item = null,
-        .diagnostics = &diags,
-    };
-
-    const locked = [_]EffectSlot{
-        .{ .name = "total", .region = .storage },
-        .{ .name = "pending", .region = .transient },
-    };
-    try checker.emitUnknownLockedCallDiagnostics(source.TextRange.init(3, 7), &locked);
-
-    try std.testing.expectEqual(@as(usize, 2), diags.items.items.len);
-    try std.testing.expect(std.mem.eql(u8, diags.items.items[0].message, "unresolved call may write locked storage slot 'total'"));
-    try std.testing.expect(std.mem.eql(u8, diags.items.items[1].message, "unresolved call may write locked transient slot 'pending'"));
+    try std.testing.expect(effect == .side_effects);
+    try std.testing.expect(effect.hasExternal());
+    try std.testing.expect(effect.hasLock());
+    try std.testing.expect(effect.hasUnlock());
 }
 
 pub fn typeCheck(
@@ -315,7 +413,7 @@ pub fn typeCheck(
     resolution: *const NameResolutionResult,
     const_eval: *const ConstEvalResult,
     key: TypeCheckKey,
-    import_query: ?ImportQuery,
+    import_query: ?compiler_query.SemaView,
 ) !TypeCheckResult {
     var result = TypeCheckResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -323,16 +421,24 @@ pub fn typeCheck(
         .item_types = &.{},
         .item_regions = &.{},
         .item_effects = &.{},
+        .item_modifies = &.{},
         .pattern_types = &.{},
+        .pattern_initializers = &.{},
+        .pattern_binding_kinds = &.{},
         .expr_types = &.{},
         .call_resolutions = &.{},
         .expr_effects = &.{},
         .body_types = &.{},
         .instantiated_structs = &.{},
+        .instantiated_struct_lookup = &.{},
         .instantiated_enums = &.{},
+        .instantiated_enum_lookup = &.{},
         .instantiated_bitfields = &.{},
+        .instantiated_bitfield_lookup = &.{},
         .trait_interfaces = &.{},
+        .trait_interface_lookup = &.{},
         .impl_interfaces = &.{},
+        .impl_interface_lookup = &.{},
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
@@ -341,7 +447,10 @@ pub fn typeCheck(
     var item_types = try arena.alloc(Type, file.items.len);
     var item_regions = try arena.alloc(Region, file.items.len);
     const item_effects = try arena.alloc(Effect, file.items.len);
+    const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
+    const pattern_initializers = try arena.alloc(?ast.ExprId, file.patterns.len);
+    const pattern_binding_kinds = try arena.alloc(?ast.BindingKind, file.patterns.len);
     const expr_types = try arena.alloc(Type, file.expressions.len);
     const call_resolutions = try arena.alloc(?ResolvedCall, file.expressions.len);
     const expr_effects = try arena.alloc(Effect, file.expressions.len);
@@ -352,7 +461,10 @@ pub fn typeCheck(
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
+    @memset(item_modifies, null);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
+    @memset(pattern_initializers, null);
+    @memset(pattern_binding_kinds, null);
     @memset(expr_types, .{ .unknown = {} });
     @memset(call_resolutions, null);
     @memset(expr_effects, .pure);
@@ -384,6 +496,10 @@ pub fn typeCheck(
     for (file.statements) |statement| {
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
+            if (decl.value) |expr_id| {
+                pattern_initializers[decl.pattern.index()] = expr_id;
+            }
+            pattern_binding_kinds[decl.pattern.index()] = decl.binding_kind;
             if (decl.type_expr) |type_expr| {
                 _ = type_expr;
                 pattern_types[decl.pattern.index()] = LocatedType.withRegion(.{ .unknown = {} }, declarationRegion(decl.storage_class));
@@ -403,14 +519,20 @@ pub fn typeCheck(
         .item_types = item_types,
         .item_regions = item_regions,
         .item_effects = item_effects,
+        .item_modifies = item_modifies,
         .pattern_types = pattern_types,
+        .pattern_initializers = pattern_initializers,
+        .pattern_binding_kinds = pattern_binding_kinds,
         .expr_types = expr_types,
         .call_resolutions = call_resolutions,
         .expr_effects = expr_effects,
         .effect_states = effect_states,
         .instantiated_structs = .{},
+        .instantiated_struct_lookup = std.StringHashMap(usize).init(arena),
         .instantiated_enums = .{},
+        .instantiated_enum_lookup = std.StringHashMap(usize).init(arena),
         .instantiated_bitfields = .{},
+        .instantiated_bitfield_lookup = std.StringHashMap(usize).init(arena),
         .trait_interfaces = .{},
         .impl_interfaces = .{},
         .catch_error_tag_patterns = catch_error_tag_patterns,
@@ -441,10 +563,7 @@ pub fn typeCheck(
                 const function_bindings = try typechecker.genericBindingsForFunctionTemplate(function);
                 const resolved_params = try arena.alloc(Type, function.parameters.len);
                 for (function.parameters, 0..) |parameter, param_index| {
-                    const resolved_type = if (typechecker.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter)) |ty|
-                        ty
-                    else
-                        try typechecker.resolveTypeExprWithBindings(parameter.type_expr, function_bindings);
+                    const resolved_type = try typechecker.declaredParameterType(ast.ItemId.fromIndex(index), parameter, function_bindings);
                     resolved_params[param_index] = resolved_type;
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(resolved_type, .memory, .calldata);
                 }
@@ -464,7 +583,13 @@ pub fn typeCheck(
                     .{ .void = {} };
             },
             .Field => |field| {
-                if (field.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
+                if (field.type_expr) |type_expr| {
+                    const resolved_type = try typechecker.resolveTypeExpr(type_expr);
+                    item_types[index] = resolved_type;
+                    if (field.storage_class == .storage) {
+                        try typechecker.checkStorageResultTypeSupport(field.range, resolved_type);
+                    }
+                }
             },
             .Constant => |constant| {
                 if (constant.type_expr) |type_expr| item_types[index] = try typechecker.resolveTypeExpr(type_expr);
@@ -483,7 +608,11 @@ pub fn typeCheck(
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
             if (decl.type_expr) |type_expr| {
-                pattern_types[decl.pattern.index()] = LocatedType.withRegion(try typechecker.resolveTypeExpr(type_expr), declarationRegion(decl.storage_class));
+                const resolved_type = try typechecker.resolveTypeExpr(type_expr);
+                pattern_types[decl.pattern.index()] = LocatedType.withRegion(resolved_type, declarationRegion(decl.storage_class));
+                if (decl.storage_class == .storage) {
+                    try typechecker.checkStorageResultTypeSupport(decl.range, resolved_type);
+                }
             }
         }
     }
@@ -492,20 +621,37 @@ pub fn typeCheck(
         try typechecker.visitItem(item_id);
     }
     try typechecker.checkDuplicateImplsAcrossVisibleModules();
+    // Debug/test-only by-construction invariant. The real fail-closed behavior is
+    // the `undefined type 'X'` diagnostic emitted during resolution; this guard only
+    // asserts that no `.unknown` survived type-checking with zero diagnostics, i.e.
+    // it catches a *future* regression that re-introduces a silent `.unknown`. It
+    // re-resolves every explicit type expression, so it is compiled out of release
+    // builds and runs only under debug/test (CI exercises the whole corpus there).
+    if (comptime zig_builtin.mode == .Debug or zig_builtin.is_test) {
+        try typechecker.checkNoSilentUnknownExplicitTypeAnnotations();
+    }
 
     result.item_types = item_types;
     result.item_regions = item_regions;
     result.item_effects = item_effects;
+    result.item_modifies = item_modifies;
     result.pattern_types = pattern_types;
+    result.pattern_initializers = pattern_initializers;
+    result.pattern_binding_kinds = pattern_binding_kinds;
     result.expr_types = expr_types;
     result.call_resolutions = call_resolutions;
     result.expr_effects = expr_effects;
     result.body_types = body_types;
     result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
+    result.instantiated_struct_lookup = try lookup_index.buildNamed(InstantiatedStruct, arena, result.instantiated_structs, "mangled_name");
     result.instantiated_enums = try typechecker.instantiated_enums.toOwnedSlice(arena);
+    result.instantiated_enum_lookup = try lookup_index.buildNamed(InstantiatedEnum, arena, result.instantiated_enums, "mangled_name");
     result.instantiated_bitfields = try typechecker.instantiated_bitfields.toOwnedSlice(arena);
+    result.instantiated_bitfield_lookup = try lookup_index.buildNamed(InstantiatedBitfield, arena, result.instantiated_bitfields, "mangled_name");
     result.trait_interfaces = try typechecker.trait_interfaces.toOwnedSlice(arena);
+    result.trait_interface_lookup = try lookup_index.buildNamed(TraitInterface, arena, result.trait_interfaces, "name");
     result.impl_interfaces = try typechecker.impl_interfaces.toOwnedSlice(arena);
+    result.impl_interface_lookup = try lookup_index.buildPair(ImplInterface, arena, result.impl_interfaces, "trait_name", "target_name");
     return result;
 }
 
@@ -517,18 +663,24 @@ const TypeChecker = struct {
     item_index: *const ItemIndexResult,
     resolution: *const NameResolutionResult,
     const_eval: *const ConstEvalResult,
-    import_query: ?ImportQuery,
+    import_query: ?compiler_query.SemaView,
     item_types: []Type,
     item_regions: []Region,
     item_effects: []Effect,
+    item_modifies: []?[]EffectSlot,
     pattern_types: []LocatedType,
+    pattern_initializers: []?ast.ExprId,
+    pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
     expr_effects: []Effect,
     effect_states: []EffectSummaryState,
     instantiated_structs: std.ArrayList(InstantiatedStruct),
+    instantiated_struct_lookup: std.StringHashMap(usize),
     instantiated_enums: std.ArrayList(InstantiatedEnum),
+    instantiated_enum_lookup: std.StringHashMap(usize),
     instantiated_bitfields: std.ArrayList(InstantiatedBitfield),
+    instantiated_bitfield_lookup: std.StringHashMap(usize),
     trait_interfaces: std.ArrayList(TraitInterface),
     impl_interfaces: std.ArrayList(ImplInterface),
     catch_error_tag_patterns: []bool = &.{},
@@ -536,47 +688,65 @@ const TypeChecker = struct {
     try_scope_depth: usize = 0,
     active_aliases: std.ArrayList(ast.ItemId) = .{},
     current_return_type: ?Type = null,
+    current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
+    comptime_depth: usize = 0,
     diagnostics: *diagnostics.DiagnosticList,
 
-    fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?source.ModuleId {
+    fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?source.ModuleId {
         const query = self.import_query orelse return null;
         return switch (self.file.expression(expr_id).*) {
-            .Name => |name| query.resolve_import_alias(query.context, self.module_id, name.name) catch null,
+            .Name => |name| try query.resolveImportAlias(self.module_id, name.name),
             .Field => |field| blk: {
-                const base_module_id = self.importedModuleForExpr(field.base) orelse break :blk null;
-                break :blk query.resolve_import_alias(query.context, base_module_id, field.name) catch null;
+                const base_module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
+                break :blk try query.resolveImportAlias(base_module_id, field.name);
             },
-            .Group => |group| self.importedModuleForExpr(group.expr),
+            .Group => |group| try self.importedModuleForExpr(group.expr),
             else => null,
         };
     }
 
-    fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) ?Type {
+    fn importedItemType(self: *const TypeChecker, module_id: source.ModuleId, name: []const u8) !?Type {
         const query = self.import_query orelse return null;
-        const item_id = (query.lookup_item(query.context, module_id, name) catch null) orelse return null;
-        const typecheck = query.module_typecheck(query.context, module_id) catch return null;
+        const item_id = (try query.lookupItem(module_id, name)) orelse return null;
+        const typecheck = try query.moduleTypeCheck(module_id);
         return typecheck.item_types[item_id.index()];
     }
 
-    fn importedTypeForPath(self: *const TypeChecker, path: []const u8) ?Type {
+    fn importedTypeForPath(self: *const TypeChecker, path: []const u8) !?Type {
         const query = self.import_query orelse return null;
         var parts = std.mem.splitScalar(u8, path, '.');
         const first = parts.next() orelse return null;
-        var module_id = (query.resolve_import_alias(query.context, self.module_id, first) catch null) orelse return null;
+        var module_id = (try query.resolveImportAlias(self.module_id, first)) orelse return null;
         while (parts.next()) |part| {
             if (parts.peek() == null) {
-                const item_id = (query.lookup_item(query.context, module_id, part) catch null) orelse return null;
-                const typecheck = query.module_typecheck(query.context, module_id) catch return null;
+                const item_id = (try query.lookupItem(module_id, part)) orelse return null;
+                const typecheck = try query.moduleTypeCheck(module_id);
                 return typecheck.item_types[item_id.index()];
             }
-            module_id = (query.resolve_import_alias(query.context, module_id, part) catch null) orelse return null;
+            module_id = (try query.resolveImportAlias(module_id, part)) orelse return null;
         }
         return null;
     }
 
-    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) ?ResolvedCall {
+    fn importedPathIsErrorDecl(self: *const TypeChecker, path: []const u8) !bool {
+        const query = self.import_query orelse return false;
+        var parts = std.mem.splitScalar(u8, path, '.');
+        const first = parts.next() orelse return false;
+        var module_id = (try query.resolveImportAlias(self.module_id, first)) orelse return false;
+        while (parts.next()) |part| {
+            if (parts.peek() == null) {
+                const item_id = (try query.lookupItem(module_id, part)) orelse return false;
+                const target_file = try query.astFile(module_id);
+                return target_file.item(item_id).* == .ErrorDecl;
+            }
+            module_id = (try query.resolveImportAlias(module_id, part)) orelse return false;
+        }
+        return false;
+    }
+
+    fn importedFunctionCallResolution(self: *TypeChecker, call: ast.CallExpr) !?ResolvedCall {
         const query = self.import_query orelse return null;
         const callee_field = switch (self.file.expression(call.callee).*) {
             .Field => |field| field,
@@ -586,9 +756,9 @@ const TypeChecker = struct {
             },
             else => return null,
         };
-        const target_module_id = self.importedModuleForExpr(callee_field.base) orelse return null;
-        const target_item_id = (query.lookup_item(query.context, target_module_id, callee_field.name) catch null) orelse return null;
-        const target_file = (query.ast_file(query.context, target_module_id) catch return null);
+        const target_module_id = (try self.importedModuleForExpr(callee_field.base)) orelse return null;
+        const target_item_id = (try query.lookupItem(target_module_id, callee_field.name)) orelse return null;
+        const target_file = try query.astFile(target_module_id);
         const target_item = target_file.item(target_item_id).*;
         const function = switch (target_item) {
             .Function => |function| function,
@@ -597,13 +767,13 @@ const TypeChecker = struct {
         if (function.parent_contract != null or function.is_comptime) return null;
 
         const bindings = if (function.is_generic) blk: {
-            const inferred = self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call) orelse return null;
+            const inferred = (try self.genericTypeBindingsForImportedCall(target_module_id, target_file, function, call)) orelse return null;
             break :blk inferred;
         } else &.{};
 
-        const runtime_parameter_types = self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings) orelse return null;
+        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings)) orelse return null;
         if (!function.is_generic and call.args.len != runtime_parameter_types.len) return null;
-        const return_type = self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings) orelse return null;
+        const return_type = (try self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
         return .{
             .module_id = target_module_id,
             .item_id = target_item_id,
@@ -619,13 +789,13 @@ const TypeChecker = struct {
         target_file: *const ast.AstFile,
         function: ast.FunctionItem,
         bindings: []const GenericTypeBinding,
-    ) ?[]const Type {
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+    ) !?[]const Type {
+        const runtime_params = try self.runtimeFunctionParameters(function);
         if (runtime_params.len == 0) return &.{};
 
         const query = self.import_query orelse return null;
-        const target_item_index = query.item_index(query.context, target_module_id) catch return null;
-        const target_typecheck = query.module_typecheck(query.context, target_module_id) catch return null;
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -635,17 +805,20 @@ const TypeChecker = struct {
         imported_checker.item_types = target_typecheck.item_types;
         imported_checker.item_regions = target_typecheck.item_regions;
         imported_checker.item_effects = target_typecheck.item_effects;
+        imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
+        imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+        imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
         imported_checker.expr_effects = target_typecheck.expr_effects;
         imported_checker.current_contract = null;
         imported_checker.current_function_item = null;
 
-        const resolved = self.arena.alloc(Type, runtime_params.len) catch return null;
+        const resolved = try self.arena.alloc(Type, runtime_params.len);
         for (runtime_params, 0..) |parameter, index| {
             resolved[index] = if (function.is_generic)
-                imported_checker.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch .{ .unknown = {} }
+                try imported_checker.resolveTypeExprWithBindings(parameter.type_expr, bindings)
             else
                 imported_checker.pattern_types[parameter.pattern.index()].type;
         }
@@ -659,10 +832,10 @@ const TypeChecker = struct {
         target_item_id: ast.ItemId,
         function: ast.FunctionItem,
         bindings: []const GenericTypeBinding,
-    ) ?Type {
+    ) !?Type {
         const query = self.import_query orelse return null;
-        const target_item_index = query.item_index(query.context, target_module_id) catch return null;
-        const target_typecheck = query.module_typecheck(query.context, target_module_id) catch return null;
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         if (!function.is_generic) {
             const item_type = target_typecheck.item_types[target_item_id.index()];
@@ -681,13 +854,16 @@ const TypeChecker = struct {
             imported_checker.item_types = target_typecheck.item_types;
             imported_checker.item_regions = target_typecheck.item_regions;
             imported_checker.item_effects = target_typecheck.item_effects;
+            imported_checker.item_modifies = target_typecheck.item_modifies;
             imported_checker.pattern_types = target_typecheck.pattern_types;
+            imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+            imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
             imported_checker.expr_types = target_typecheck.expr_types;
             imported_checker.call_resolutions = target_typecheck.call_resolutions;
             imported_checker.expr_effects = target_typecheck.expr_effects;
             imported_checker.current_contract = null;
             imported_checker.current_function_item = null;
-            return imported_checker.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
+            return try imported_checker.resolveTypeExprWithBindings(type_expr, bindings);
         }
 
         return .{ .void = {} };
@@ -699,28 +875,28 @@ const TypeChecker = struct {
         target_file: *const ast.AstFile,
         function: ast.FunctionItem,
         call: ast.CallExpr,
-    ) ?[]const GenericTypeBinding {
+    ) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCountInFile(target_file, function);
         if (comptime_count == 0) return &.{};
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+        const runtime_params = try self.runtimeFunctionParameters(function);
         const effective_runtime_count = runtime_params.len;
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+            const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternNameInFile(target_file, parameter.pattern) orelse return null;
-                const value = self.genericBindingValueForImportedCallArg(target_file, parameter, call.args[index]) orelse return null;
+                const value = (try self.genericBindingValueForImportedCallArg(target_file, parameter, call.args[index])) orelse return null;
                 bindings[index] = .{ .name = name, .value = value };
             }
-            self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings) catch return null;
+            try self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+        const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
@@ -731,7 +907,7 @@ const TypeChecker = struct {
             self.inferBindingFromArgTypeInFile(target_file, function, inferable_type_count, param.type_expr, arg_type, bindings);
         }
 
-        self.refineGenericBindingsForImportedRuntimeArgs(
+        try self.refineGenericBindingsForImportedRuntimeArgs(
             target_module_id,
             target_file,
             function,
@@ -739,13 +915,28 @@ const TypeChecker = struct {
             runtime_params,
             call.args,
             bindings,
-        ) catch return null;
+        );
 
         for (bindings) |binding| {
             if (binding.name.len == 0) return null;
         }
-        self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings) catch return null;
+        try self.validateImportedGenericTraitBounds(target_module_id, function, call.range, bindings);
         return bindings;
+    }
+
+    fn visitSpecClauseExpr(self: *TypeChecker, clause: ast.SpecClause) !void {
+        const previous_clause_kind = self.current_spec_clause_kind;
+        self.current_spec_clause_kind = clause.kind;
+        defer self.current_spec_clause_kind = previous_clause_kind;
+        try self.visitExpr(clause.expr);
+    }
+
+    fn currentResultType(self: *const TypeChecker) Type {
+        const return_type = self.current_return_type orelse return .{ .unknown = {} };
+        if (self.current_spec_clause_kind == .ensures_ok) {
+            if (return_type.payloadType()) |payload_type| return payload_type.*;
+        }
+        return return_type;
     }
 
     fn visitItem(self: *TypeChecker, item_id: ast.ItemId) anyerror!void {
@@ -773,6 +964,7 @@ const TypeChecker = struct {
                         });
                     }
                 }
+                try self.checkLogMetadata(log_decl);
             },
             .Function => |function| {
                 try self.validateConstructorFunction(function);
@@ -788,9 +980,38 @@ const TypeChecker = struct {
                 defer self.current_return_type = previous_return_type;
                 try self.validatePublicFunctionAbi(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
-                for (function.clauses) |clause| try self.visitExpr(clause.expr);
+                var declared_modifies: std.ArrayList(EffectSlot) = .{};
+                var has_modifies_clause = false;
+                var has_empty_modifies_clause = false;
+                var has_nonempty_modifies_clause = false;
+                for (function.clauses) |clause| {
+                    if (clause.kind == .modifies) {
+                        has_modifies_clause = true;
+                        if (self.modifiesClauseIsEmpty(clause.expr)) {
+                            has_empty_modifies_clause = true;
+                            if (has_nonempty_modifies_clause) {
+                                try self.emitRangeError(clause.range, "`modifies()` cannot be combined with non-empty `modifies` clauses", .{});
+                            }
+                        } else {
+                            has_nonempty_modifies_clause = true;
+                            if (has_empty_modifies_clause) {
+                                try self.emitRangeError(clause.range, "`modifies()` cannot be combined with non-empty `modifies` clauses", .{});
+                            }
+                        }
+                        try self.collectModifiesClauseSlots(clause, &declared_modifies);
+                        continue;
+                    }
+                    if (clause.kind != .ensures and clause.kind != .ensures_ok and self.exprContainsResult(clause.expr)) {
+                        try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
+                    }
+                    try self.visitSpecClauseExpr(clause);
+                }
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
+                if (has_modifies_clause) {
+                    try self.validateModifiesSubset(function.range, declared_modifies.items, self.item_effects[item_id.index()].writeSlots());
+                    self.item_modifies[item_id.index()] = try declared_modifies.toOwnedSlice(self.arena);
+                }
                 var locked_slots: std.ArrayList(EffectSlot) = .{};
                 try self.validateBodyLocks(function.body, &locked_slots);
                 var external_call_state = try self.initExternalCallValidationState();
@@ -805,6 +1026,13 @@ const TypeChecker = struct {
                 }
                 for (trait_item.methods) |method| {
                     try self.checkDuplicateTraitBounds(method.trait_bounds);
+                    const previous_return_type = self.current_return_type;
+                    self.current_return_type = if (method.return_type) |type_expr|
+                        try self.resolveTypeExpr(type_expr)
+                    else
+                        .{ .void = {} };
+                    defer self.current_return_type = previous_return_type;
+
                     if (trait_item.is_extern and method.extern_call_kind == .none) {
                         try self.emitRangeError(method.range, "extern trait method '{s}' must use 'call fn' or 'staticcall fn'", .{
                             method.name,
@@ -827,15 +1055,21 @@ const TypeChecker = struct {
                     for (method.parameters) |parameter| {
                         self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
                     }
-                    if (method.return_type) |type_expr| {
-                        _ = try self.resolveTypeExpr(type_expr);
+                    for (method.clauses) |clause| {
+                        if (clause.kind == .modifies) {
+                            try self.validateModifiesClause(clause);
+                            continue;
+                        }
+                        if (clause.kind != .ensures and clause.kind != .ensures_ok and self.exprContainsResult(clause.expr)) {
+                            try self.emitRangeError(clause.range, "`result` is only available in ensures clauses", .{});
+                        }
+                        try self.visitSpecClauseExpr(clause);
                     }
-                    for (method.clauses) |clause| try self.visitExpr(clause.expr);
                 }
                 try self.recordTraitInterface(item_id, trait_item);
             },
             .Impl => |impl_item| {
-                try self.checkImplConformance(impl_item);
+                try self.checkImplConformance(item_id, impl_item);
 
                 const previous_contract = self.current_contract;
                 if (self.item_index.lookup(impl_item.target_name)) |target_item_id| {
@@ -861,6 +1095,7 @@ const TypeChecker = struct {
             },
             .Field => |field| if (field.value) |expr_id| {
                 try self.visitExpr(expr_id);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(field.range, expr_id);
                 if (field.type_expr == null) {
                     self.item_types[item_id.index()] = self.expr_types[expr_id.index()];
                 } else {
@@ -873,23 +1108,16 @@ const TypeChecker = struct {
                         const actual_located = self.exprLocatedType(expr_id);
                         const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                         if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitRangeError(field.range, "field '{s}' expects type '{s}', found '{s}'", .{
-                                field.name,
-                                diagnosticTypeDisplayName(self, expected_type),
-                                diagnosticTypeDisplayName(self, actual_type),
-                            });
+                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, actual_type);
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                            try self.emitRangeError(field.range, "field '{s}' expects region '{s}', found '{s}'", .{
-                                field.name,
-                                region_rules.regionDisplayName(expected.region),
-                                region_rules.regionDisplayName(actual.region),
-                            });
+                            try self.emitNamedSubjectExpectedRegionFoundRange(field.range, "field", field.name, expected.region, actual.region);
                         }
                     }
                 }
             },
             .Constant => |constant| {
                 try self.visitExpr(constant.value);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(constant.range, constant.value);
                 if (constant.type_expr == null) {
                     self.item_types[item_id.index()] = self.expr_types[constant.value.index()];
                 } else {
@@ -898,11 +1126,7 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(constant.range, constant.value, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (!typesAssignable(expected_type, actual_type) and actual_type.kind() != .unknown) {
-                        try self.emitRangeError(constant.range, "constant '{s}' expects type '{s}', found '{s}'", .{
-                            constant.name,
-                            diagnosticTypeDisplayName(self, expected_type),
-                            diagnosticTypeDisplayName(self, actual_type),
-                        });
+                        try self.emitNamedSubjectExpectedTypeFoundRange(constant.range, "constant", constant.name, expected_type, actual_type);
                     }
                 }
             },
@@ -911,7 +1135,10 @@ const TypeChecker = struct {
                     self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
                 }
             },
-            .Struct => |struct_item| try self.validateRuntimeAdtCycleForStruct(item_id, struct_item),
+            .Struct => |struct_item| {
+                try self.checkStructMetadata(struct_item);
+                try self.validateRuntimeAdtCycleForStruct(item_id, struct_item);
+            },
             .Enum => |enum_item| {
                 try self.validateEnumVariantPayloadTypes(enum_item);
                 try self.validateEnumVariantValues(enum_item);
@@ -920,6 +1147,40 @@ const TypeChecker = struct {
             .GhostBlock => |ghost_block| try self.visitBody(ghost_block.body),
             .TypeAlias => {},
             else => {},
+        }
+    }
+
+    fn checkLogMetadata(self: *TypeChecker, log_decl: ast.LogDeclItem) !void {
+        var seen_event_name: ?source.TextRange = null;
+        for (log_decl.metadata) |metadata_id| {
+            const metadata = self.file.item(metadata_id).*;
+            if (metadata != .Constant) continue;
+
+            try self.visitItem(metadata_id);
+            const constant = metadata.Constant;
+            if (!std.mem.eql(u8, constant.name, "event_name")) continue;
+
+            if (seen_event_name) |_| {
+                try self.emitRangeError(constant.range, "duplicate log metadata constant 'event_name'", .{});
+            }
+            seen_event_name = constant.range;
+
+            if (self.file.expression(constant.value).* != .StringLiteral) {
+                try self.emitRangeError(constant.range, "log metadata 'event_name' must be a string literal", .{});
+            }
+        }
+    }
+
+    fn checkStructMetadata(self: *TypeChecker, struct_item: ast.StructItem) !void {
+        for (struct_item.metadata) |metadata_id| {
+            const metadata = self.file.item(metadata_id).*;
+            if (metadata != .Constant) continue;
+
+            try self.visitItem(metadata_id);
+            const constant = metadata.Constant;
+            try self.emitRangeError(constant.range, "struct metadata constant '{s}' is not supported in this compiler phase", .{
+                constant.name,
+            });
         }
     }
 
@@ -964,7 +1225,7 @@ const TypeChecker = struct {
     fn validateEnumVariantValues(self: *TypeChecker, enum_item: ast.EnumItem) anyerror!void {
         if (enum_item.is_generic) return;
 
-        var repr_type: Type = .{ .integer = .{} };
+        var repr_type: Type = u256Type();
         if (enum_item.base_type) |type_expr| {
             repr_type = try self.resolveTypeExpr(type_expr);
         }
@@ -1211,20 +1472,16 @@ const TypeChecker = struct {
         }
     }
 
-    const PublicAbiPosition = enum {
-        input,
-        output,
-    };
-
     fn validatePublicFunctionAbi(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {
         if (self.current_contract == null) return;
         if (function.visibility != .public) return;
 
+        const public_abi = self.abiPolicy();
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             if (self.parameterIsBareSelf(parameter)) continue;
             const param_type = self.pattern_types[parameter.pattern.index()].type;
-            if (self.publicAbiSupportsType(param_type, .input)) continue;
+            if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
             if (param_type.kind() == .error_union) {
                 try self.emitRangeError(
@@ -1240,7 +1497,7 @@ const TypeChecker = struct {
             });
         }
 
-        if (function.return_type != null and !self.publicAbiSupportsType(self.current_return_type.?, .output)) {
+        if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
             try self.emitRangeError(function.range, "public function '{s}' uses unsupported return ABI type '{s}'", .{
                 function.name,
                 diagnosticTypeDisplayName(self, self.current_return_type.?),
@@ -1248,168 +1505,188 @@ const TypeChecker = struct {
         }
     }
 
-    fn publicAbiSupportsType(self: *const TypeChecker, ty: Type, position: PublicAbiPosition) bool {
-        return switch (ty) {
-            .unknown => true,
-            .void => position == .output,
-            .bool, .address, .string, .bytes, .fixed_bytes, .integer, .bitfield => true,
-            .enum_ => |named| !self.enumHasPayload(named.name),
-            .refinement => |refinement| self.publicAbiSupportsType(refinement.base_type.*, position),
-            .array => |array| self.publicAbiSupportsType(array.element_type.*, position),
-            .slice => |slice| self.publicAbiSupportsType(slice.element_type.*, position),
-            .tuple => |elements| blk: {
-                for (elements) |element| {
-                    if (!self.publicAbiSupportsType(element, position)) break :blk false;
-                }
-                break :blk true;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                for (struct_type.fields) |field| {
-                    if (!self.publicAbiSupportsType(field.ty, position)) break :blk false;
-                }
-                break :blk true;
-            },
-            .struct_, .contract, .named => true,
-            .error_union => |error_union| switch (position) {
-                .input => self.publicAbiSupportsResultInput(ty),
-                .output => self.publicAbiSupportsType(error_union.payload_type.*, .output),
-            },
-            else => false,
-        };
+    fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        try self.checkResultCarrierTypeSupport(range, ty, "storage Result values");
     }
 
-    fn publicAbiSupportsResultInput(self: *const TypeChecker, ty: Type) bool {
-        const error_union = switch (ty) {
-            .error_union => |error_union| error_union,
-            else => return false,
-        };
-        if (error_union.error_types.len != 1) return false;
-        if (!self.publicAbiSupportsResultCarrierType(error_union.payload_type.*)) return false;
-        const payload_words = self.publicAbiStaticWordCount(error_union.payload_type.*);
-        if (!self.publicAbiErrorTypeHasPayload(error_union.error_types[0])) return true;
-        if (!self.publicAbiSupportsResultCarrierType(error_union.error_types[0])) return false;
-        const error_words = self.publicAbiStaticWordCount(error_union.error_types[0]);
-        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return false;
-        return true;
-    }
-
-    fn publicAbiSupportsResultCarrierType(self: *const TypeChecker, ty: Type) bool {
-        if (self.publicAbiStaticWordCount(ty) != null) return true;
-        return switch (ty) {
-            .bytes, .string => true,
-            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(slice.element_type.*),
-            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(array.element_type.*),
-            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(refinement.base_type.*),
-            else => false,
-        };
-    }
-
-    fn publicAbiSupportsResultDynamicArrayElement(self: *const TypeChecker, ty: Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
-            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(refinement.base_type.*),
-            .named => |named| blk: {
-                const item_id = self.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (self.file.item(item_id).*) {
-                    .Enum => !self.enumHasPayload(named.name),
-                    .Bitfield => true,
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn publicAbiStaticWordCount(self: *const TypeChecker, ty: Type) ?usize {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .bitfield => 1,
-            .enum_ => |named| if (self.enumHasPayload(named.name)) null else 1,
-            .refinement => |refinement| self.publicAbiStaticWordCount(refinement.base_type.*),
-            .tuple => |elements| blk: {
-                var total: usize = 0;
-                for (elements) |element| {
-                    total += self.publicAbiStaticWordCount(element) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .array => |array| blk: {
-                const len = array.len orelse break :blk null;
-                const element_words = self.publicAbiStaticWordCount(array.element_type.*) orelse break :blk null;
-                break :blk element_words * len;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                var total: usize = 0;
-                for (struct_type.fields) |field| {
-                    total += self.publicAbiStaticWordCount(field.ty) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
-            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(named.name),
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
-                if (parseIntegerSpelling(named.name) != null) break :blk 1;
-                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
-                const item_id = self.item_index.lookup(named.name) orelse break :blk null;
-                break :blk switch (self.file.item(item_id).*) {
-                    .Enum => if (self.enumHasPayload(named.name)) null else 1,
-                    .Bitfield => 1,
-                    .Struct => self.publicAbiStaticWordCountForStructDecl(named.name),
-                    .Contract => self.publicAbiStaticWordCountForContractDecl(named.name),
-                    .ErrorDecl => |error_decl| blk2: {
-                        var total: usize = 0;
-                        for (error_decl.parameters) |parameter| {
-                            total += self.publicAbiStaticWordCount(self.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
-                        }
-                        break :blk2 total;
-                    },
-                    else => null,
-                };
-            },
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForNamedStruct(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        return switch (self.file.item(item_id).*) {
-            .Struct => self.publicAbiStaticWordCountForStructDecl(name),
-            .Contract => self.publicAbiStaticWordCountForContractDecl(name),
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForStructDecl(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        const struct_item = switch (self.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (struct_item.fields) |field| {
-            total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch return null) orelse return null;
+    fn checkLocalResultAggregateTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        const unwrapped = unwrapRefinement(ty);
+        switch (unwrapped) {
+            .array => |array| try self.checkLocalResultAggregateCarrierSupport(range, array.element_type.*),
+            .tuple => |fields| for (fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field),
+            .anonymous_struct => |anon| for (anon.fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field.ty),
+            else => {},
         }
-        return total;
     }
 
-    fn publicAbiStaticWordCountForContractDecl(self: *const TypeChecker, name: []const u8) ?usize {
-        const item_id = self.item_index.lookup(name) orelse return null;
-        const contract_item = switch (self.file.item(item_id).*) {
-            .Contract => |contract_item| contract_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (contract_item.members) |member_id| {
-            switch (self.file.item(member_id).*) {
-                .Field => |field| {
-                    if (field.type_expr) |type_expr| {
-                        total += self.publicAbiStaticWordCount(descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch return null) orelse return null;
-                    } else return null;
-                },
-                else => {},
+    fn checkLocalResultAggregateCarrierSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
+        const unwrapped = unwrapRefinement(ty);
+        switch (unwrapped) {
+            .array => |array| return self.checkLocalResultAggregateCarrierSupport(range, array.element_type.*),
+            .tuple => |fields| {
+                for (fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field);
+                return;
+            },
+            .anonymous_struct => |anon| {
+                for (anon.fields) |field| try self.checkLocalResultAggregateCarrierSupport(range, field.ty);
+                return;
+            },
+            .error_union => {},
+            else => return,
+        }
+
+        const error_union = unwrapped.error_union;
+        if (!localResultAggregatePayloadIsScalar(error_union.payload_type.*)) {
+            try self.emitRangeError(
+                range,
+                "local Result aggregate values currently require a scalar success payload",
+                .{},
+            );
+            return;
+        }
+
+        try self.checkResultErrorTypesPayloadless(range, error_union, "local Result aggregate values");
+    }
+
+    fn checkResultCarrierTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type, subject: []const u8) !void {
+        const unwrapped = unwrapRefinement(ty);
+        switch (unwrapped) {
+            .array => |array| return self.checkResultCarrierTypeSupport(range, array.element_type.*, subject),
+            .tuple => |fields| {
+                for (fields) |field| try self.checkResultCarrierTypeSupport(range, field, subject);
+                return;
+            },
+            .anonymous_struct => |anon| {
+                for (anon.fields) |field| try self.checkResultCarrierTypeSupport(range, field.ty, subject);
+                return;
+            },
+            .error_union => {},
+            else => return,
+        }
+
+        const error_union = unwrapped.error_union;
+        if (storageResultPayloadNeedsPointer(error_union.payload_type.*)) {
+            try self.emitRangeError(
+                range,
+                "{s} currently support only scalar, string, bytes, or slice success payloads",
+                .{subject},
+            );
+            return;
+        }
+
+        try self.checkResultErrorTypesPayloadless(range, error_union, subject);
+    }
+
+    fn checkResultErrorTypesPayloadless(self: *TypeChecker, range: source.TextRange, error_union: anytype, subject: []const u8) !void {
+        for (error_union.error_types) |error_type| {
+            const named = switch (error_type) {
+                .named => |named| named.name,
+                else => continue,
+            };
+            const error_item_id = self.lookupErrorItemInScope(named) orelse continue;
+            const error_item = self.file.item(error_item_id).*;
+            if (error_item != .ErrorDecl) continue;
+            if (error_item.ErrorDecl.parameters.len == 0) continue;
+            try self.emitRangeError(
+                range,
+                "{s} currently require payloadless error types",
+                .{subject},
+            );
+            return;
+        }
+    }
+
+    const PublicAbiPolicyProvider = struct {
+        checker: *const TypeChecker,
+
+        pub fn patternType(self: @This(), pattern_id: ast.PatternId) Type {
+            return self.checker.pattern_types[pattern_id.index()].type;
+        }
+
+        pub fn enumHasPayload(self: @This(), name: []const u8) bool {
+            return self.checker.enumHasPayload(name);
+        }
+
+        pub fn namedTypeKind(self: @This(), name: []const u8) abi_policy.NamedTypeKind {
+            if (self.checker.instantiatedEnumByName(name) != null) return .enum_;
+            if (self.checker.instantiatedBitfieldByName(name) != null) return .bitfield;
+            if (self.checker.instantiatedStructByName(name) != null) return .struct_;
+            const item_id = self.checker.item_index.lookup(name) orelse return .none;
+            return switch (self.checker.file.item(item_id).*) {
+                .Enum => .enum_,
+                .Bitfield => .bitfield,
+                .Struct => .struct_,
+                .Contract => .contract,
+                .ErrorDecl => .error_decl,
+                .TypeAlias => .type_alias,
+                else => .none,
+            };
+        }
+
+        pub fn typeAliasTarget(self: @This(), name: []const u8) ?Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            return switch (self.checker.file.item(item_id).*) {
+                .TypeAlias => |type_alias| descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, type_alias.target_type) catch null,
+                else => null,
+            };
+        }
+
+        pub fn structFieldTypes(self: @This(), name: []const u8) ?[]const Type {
+            if (self.checker.instantiatedStructByName(name)) |instantiated| {
+                const fields = self.checker.arena.alloc(Type, instantiated.fields.len) catch return null;
+                for (instantiated.fields, 0..) |field, index| fields[index] = field.ty;
+                return fields;
             }
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const struct_item = switch (self.checker.file.item(item_id).*) {
+                .Struct => |struct_item| struct_item,
+                else => return null,
+            };
+            const fields = self.checker.arena.alloc(Type, struct_item.fields.len) catch return null;
+            for (struct_item.fields, 0..) |field, index| {
+                fields[index] = descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, field.type_expr) catch return null;
+            }
+            return fields;
         }
-        return total;
+
+        pub fn contractFieldTypes(self: @This(), name: []const u8) ?[]const Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const contract_item = switch (self.checker.file.item(item_id).*) {
+                .Contract => |contract_item| contract_item,
+                else => return null,
+            };
+            var fields: std.ArrayList(Type) = .{};
+            for (contract_item.members) |member_id| {
+                switch (self.checker.file.item(member_id).*) {
+                    .Field => |field| {
+                        const type_expr = field.type_expr orelse return null;
+                        const field_type = descriptorFromTypeExpr(self.checker.arena, self.checker.file, self.checker.item_index, type_expr) catch return null;
+                        fields.append(self.checker.arena, field_type) catch return null;
+                    },
+                    else => {},
+                }
+            }
+            return fields.toOwnedSlice(self.checker.arena) catch null;
+        }
+
+        pub fn errorPayloadTypes(self: @This(), name: []const u8) ?[]const Type {
+            const item_id = self.checker.item_index.lookup(name) orelse return null;
+            const error_decl = switch (self.checker.file.item(item_id).*) {
+                .ErrorDecl => |error_decl| error_decl,
+                else => return null,
+            };
+            const payloads = self.checker.arena.alloc(Type, error_decl.parameters.len) catch return null;
+            for (error_decl.parameters, 0..) |parameter, index| {
+                payloads[index] = self.checker.pattern_types[parameter.pattern.index()].type;
+            }
+            return payloads;
+        }
+    };
+
+    fn abiPolicy(self: *const TypeChecker) abi_policy.Policy(PublicAbiPolicyProvider) {
+        return .{
+            .provider = .{ .checker = self },
+        };
     }
 
     fn checkDuplicateTraitBounds(self: *TypeChecker, bounds: []const ast.TraitBound) anyerror!void {
@@ -1429,32 +1706,7 @@ const TypeChecker = struct {
         }
     }
 
-    fn publicAbiErrorTypeHasPayload(self: *const TypeChecker, ty: Type) bool {
-        const name = ty.name() orelse return true;
-        const item_id = self.item_index.lookup(name) orelse return true;
-        return switch (self.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => true,
-        };
-    }
-
-    fn parseIntegerSpelling(name: []const u8) ?void {
-        if (name.len < 2) return null;
-        if (name[0] != 'u' and name[0] != 'i') return null;
-        _ = std.fmt.parseUnsigned(u16, name[1..], 10) catch return null;
-    }
-
-    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-        if (!std.mem.startsWith(u8, name, "bytes")) return null;
-        if (name.len <= "bytes".len) return null;
-        const digits = name["bytes".len..];
-        if (digits.len > 1 and digits[0] == '0') return null;
-        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-        if (len < 1 or len > 32) return null;
-        return len;
-    }
-
-    fn checkImplConformance(self: *TypeChecker, impl_item: anytype) anyerror!void {
+    fn checkImplConformance(self: *TypeChecker, impl_item_id: ast.ItemId, impl_item: anytype) anyerror!void {
         const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse {
             try self.emitRangeError(impl_item.range, "impl references unknown trait '{s}'", .{
                 impl_item.trait_name,
@@ -1494,7 +1746,11 @@ const TypeChecker = struct {
         }
 
         for (trait_item.methods) |trait_method| {
-            const impl_method = self.findImplMethodByName(impl_item, trait_method.name);
+            const impl_method_id = self.item_index.lookupImplMethod(self.file, impl_item_id, trait_method.name);
+            const impl_method = if (impl_method_id) |method_id| switch (self.file.item(method_id).*) {
+                .Function => |function| function,
+                else => null,
+            } else null;
             if (impl_method == null) {
                 try self.emitRangeError(impl_item.range, "impl missing method '{s}' required by trait '{s}'", .{
                     trait_method.name,
@@ -1507,30 +1763,13 @@ const TypeChecker = struct {
 
         for (impl_item.methods) |method_id| {
             const method = self.file.item(method_id).Function;
-            if (!self.traitHasMethodNamed(trait_item, method.name)) {
+            if (self.item_index.lookupTraitMethod(self.file, trait_item_id, method.name) == null) {
                 try self.emitRangeError(method.range, "impl contains method '{s}' which is not part of trait '{s}'", .{
                     method.name,
                     trait_item.name,
                 });
             }
         }
-    }
-
-    fn traitHasMethodNamed(self: *TypeChecker, trait_item: anytype, name: []const u8) bool {
-        _ = self;
-        for (trait_item.methods) |method| {
-            if (std.mem.eql(u8, method.name, name)) return true;
-        }
-        return false;
-    }
-
-    fn findImplMethodByName(self: *TypeChecker, impl_item: anytype, name: []const u8) ?ast.FunctionItem {
-        for (impl_item.methods) |method_id| {
-            const item = self.file.item(method_id).*;
-            if (item != .Function) continue;
-            if (std.mem.eql(u8, item.Function.name, name)) return item.Function;
-        }
-        return null;
     }
 
     fn checkImplMethodSignature(self: *TypeChecker, trait_name: []const u8, trait_method: anytype, impl_method: ast.FunctionItem) anyerror!void {
@@ -1606,13 +1845,7 @@ const TypeChecker = struct {
     }
 
     fn functionHasBareSelf(self: *const TypeChecker, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            const pattern = self.file.pattern(parameter.pattern).*;
-            if (pattern != .Name) return false;
-            return std.mem.eql(u8, pattern.Name.name, "self");
-        }
-        return false;
+        return model.functionHasRuntimeSelf(self.file, function);
     }
 
     fn parameterTypeForFunctionItem(self: *TypeChecker, function_item_id: ast.ItemId, parameter: ast.Parameter) ?Type {
@@ -1622,13 +1855,24 @@ const TypeChecker = struct {
         return self.nominalItemSelfType(target_item_id);
     }
 
+    fn declaredParameterType(
+        self: *TypeChecker,
+        function_item_id: ast.ItemId,
+        parameter: ast.Parameter,
+        bindings: []const GenericTypeBinding,
+    ) !Type {
+        if (self.parameterTypeForFunctionItem(function_item_id, parameter)) |ty| return ty;
+        if (self.isGenericTypeParameter(parameter)) return metatypeMarkerType();
+        return try self.resolveTypeExprWithBindings(parameter.type_expr, bindings);
+    }
+
     fn genericBindingsForFunctionTemplate(self: *TypeChecker, function: ast.FunctionItem) ![]const GenericTypeBinding {
         if (!function.is_generic) return &.{};
 
         var count: usize = 0;
         for (function.parameters) |parameter| {
             if (!parameter.is_comptime) continue;
-            if (!self.isGenericTypeParameter(parameter) and !self.comptimeIntegerParameter(parameter)) continue;
+            if (!self.isGenericTypeParameter(parameter) and !(try self.comptimeIntegerParameter(parameter))) continue;
             count += 1;
         }
 
@@ -1645,7 +1889,7 @@ const TypeChecker = struct {
                 index += 1;
                 continue;
             }
-            if (self.comptimeIntegerParameter(parameter)) {
+            if (try self.comptimeIntegerParameter(parameter)) {
                 bindings[index] = .{
                     .name = name,
                     .value = .{ .integer = name },
@@ -1667,6 +1911,100 @@ const TypeChecker = struct {
         return self.resolveTypeExprWithBindings(type_expr, try self.currentFunctionGenericBindings());
     }
 
+    fn checkExplicitTypeExprResolved(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) !void {
+        if (!self.diagnostics.isEmpty()) return;
+        const range = self.typeExprRange(type_expr);
+        const before = self.diagnostics.len();
+        const ty = try self.resolveTypeExprWithBindings(type_expr, bindings);
+        if (self.diagnostics.len() != before) return;
+        if (!typeContainsUnknown(ty)) return;
+        try self.emitRangeError(range, "internal: unresolved type survived type-checking with no diagnostic", .{});
+    }
+
+    fn checkEnumVariantPayloadTypeExprs(self: *TypeChecker, variant: ast.EnumVariant, bindings: []const GenericTypeBinding) !void {
+        switch (variant.payload) {
+            .none => {},
+            .positional => |payloads| for (payloads) |type_expr| {
+                try self.checkExplicitTypeExprResolved(type_expr, bindings);
+            },
+            .named => |fields| for (fields) |field| {
+                try self.checkExplicitTypeExprResolved(field.type_expr, bindings);
+            },
+        }
+    }
+
+    fn checkNoSilentUnknownExplicitTypeAnnotations(self: *TypeChecker) !void {
+        if (!self.diagnostics.isEmpty()) return;
+
+        for (self.file.items, 0..) |item, index| {
+            if (!self.diagnostics.isEmpty()) return;
+            switch (item) {
+                .Function => |function| {
+                    const bindings = try self.genericBindingsForFunctionTemplate(function);
+                    for (function.parameters) |parameter| {
+                        if (self.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter) != null) continue;
+                        if (self.isGenericTypeParameter(parameter)) continue;
+                        try self.checkExplicitTypeExprResolved(parameter.type_expr, bindings);
+                    }
+                    if (function.return_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, bindings);
+                    }
+                },
+                .Struct => |struct_item| {
+                    if (struct_item.is_generic) continue;
+                    for (struct_item.fields) |field| {
+                        try self.checkExplicitTypeExprResolved(field.type_expr, &.{});
+                    }
+                },
+                .Bitfield => |bitfield_item| {
+                    if (bitfield_item.is_generic) continue;
+                    if (bitfield_item.base_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                    }
+                },
+                .Enum => |enum_item| {
+                    if (enum_item.is_generic) continue;
+                    if (enum_item.base_type) |type_expr| {
+                        try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                    }
+                    for (enum_item.variants) |variant| {
+                        try self.checkEnumVariantPayloadTypeExprs(variant, &.{});
+                    }
+                },
+                .LogDecl => |log_decl| {
+                    for (log_decl.fields) |field| {
+                        try self.checkExplicitTypeExprResolved(field.type_expr, &.{});
+                    }
+                },
+                .ErrorDecl => |error_decl| {
+                    for (error_decl.parameters) |parameter| {
+                        try self.checkExplicitTypeExprResolved(parameter.type_expr, &.{});
+                    }
+                },
+                .Field => |field| if (field.type_expr) |type_expr| {
+                    try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                },
+                .Constant => |constant| if (constant.type_expr) |type_expr| {
+                    try self.checkExplicitTypeExprResolved(type_expr, &.{});
+                },
+                .TypeAlias => |type_alias| {
+                    if (!type_alias.is_generic) {
+                        try self.checkExplicitTypeExprResolved(type_alias.target_type, &.{});
+                    }
+                },
+                else => {},
+            }
+        }
+
+        for (self.file.statements) |statement| {
+            if (!self.diagnostics.isEmpty()) return;
+            if (statement != .VariableDecl) continue;
+            if (statement.VariableDecl.type_expr) |type_expr| {
+                try self.checkExplicitTypeExprResolved(type_expr, &.{});
+            }
+        }
+    }
+
     fn parameterIsBareSelf(self: *TypeChecker, parameter: ast.Parameter) bool {
         const pattern = self.file.pattern(parameter.pattern).*;
         if (pattern != .Name) return false;
@@ -1674,13 +2012,12 @@ const TypeChecker = struct {
     }
 
     fn enclosingImplForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ImplItem {
-        for (self.file.items) |item| {
-            if (item != .Impl) continue;
-            for (item.Impl.methods) |candidate_id| {
-                if (candidate_id.index() == method_item_id.index()) return item.Impl;
-            }
-        }
-        return null;
+        const impl_item_id = self.enclosingImplItemIdForMethod(method_item_id) orelse return null;
+        return self.file.item(impl_item_id).Impl;
+    }
+
+    fn enclosingImplItemIdForMethod(self: *const TypeChecker, method_item_id: ast.ItemId) ?ast.ItemId {
+        return self.item_index.lookupImplContainingMethod(method_item_id);
     }
 
     fn nominalItemSelfType(self: *const TypeChecker, item_id: ast.ItemId) ?Type {
@@ -1758,11 +2095,11 @@ const TypeChecker = struct {
             const item = self.file.item(item_id).*;
             if (item != .Import) continue;
             const alias = item.Import.alias orelse continue;
-            const module_id = (query.resolve_import_alias(query.context, self.module_id, alias) catch null) orelse continue;
+            const module_id = (try query.resolveImportAlias(self.module_id, alias)) orelse continue;
             if (imported_modules.contains(module_id)) continue;
             try imported_modules.put(module_id, {});
 
-            const imported_typecheck = query.module_typecheck(query.context, module_id) catch continue;
+            const imported_typecheck = try query.moduleTypeCheck(module_id);
             for (imported_typecheck.impl_interfaces) |impl_interface| {
                 try self.recordVisibleImplKey(&seen, &reported, impl_interface.trait_name, impl_interface.target_name, item.Import.range);
             }
@@ -1797,11 +2134,13 @@ const TypeChecker = struct {
         for (trait_item.methods, 0..) |method, index| {
             methods[index] = try self.buildTraitMethodSignature(method);
         }
+        const method_lookup = try lookup_index.buildNamed(TraitMethodSignature, self.arena, methods, "name");
         try self.trait_interfaces.append(self.arena, .{
             .trait_item_id = trait_item_id,
             .name = trait_item.name,
             .is_extern = trait_item.is_extern,
             .methods = methods,
+            .method_lookup = method_lookup,
         });
     }
 
@@ -1815,6 +2154,7 @@ const TypeChecker = struct {
             const method = self.file.item(method_id).Function;
             methods[index] = try self.buildFunctionMethodSignature(method);
         }
+        const method_lookup = try lookup_index.buildNamed(TraitMethodSignature, self.arena, methods, "name");
         try self.impl_interfaces.append(self.arena, .{
             .impl_item_id = impl_item_id,
             .trait_item_id = trait_item_id,
@@ -1822,6 +2162,7 @@ const TypeChecker = struct {
             .trait_name = impl_item.trait_name,
             .target_name = impl_item.target_name,
             .methods = methods,
+            .method_lookup = method_lookup,
         });
     }
 
@@ -1867,8 +2208,13 @@ const TypeChecker = struct {
                 }
                 if (decl.value) |expr_id| {
                     try self.visitExpr(expr_id);
+                    _ = try self.emitResolvedIntegerOverflowIfNeeded(decl.range, expr_id);
                     if (decl.type_expr != null) {
                         try self.contextualizeLiteral(expr_id, self.pattern_types[decl.pattern.index()].type);
+                    }
+                    if (decl.type_expr == null and self.comptime_depth == 0 and typeHasUnresolvedInteger(self.expr_types[expr_id.index()])) {
+                        try self.emitRangeError(decl.range, "ambiguous integer type; annotate or suffix the integer literal", .{});
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     }
                     const actual_type = self.expr_types[expr_id.index()];
                     const actual_located = self.exprLocatedType(expr_id);
@@ -1886,22 +2232,20 @@ const TypeChecker = struct {
                         } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                             const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                             if (!typesFlowCompatible(expected_type, actual_type)) {
-                                try self.emitRangeError(decl.range, "declaration expects type '{s}', found '{s}'", .{
-                                    diagnosticTypeDisplayName(self, expected_type),
-                                    diagnosticTypeDisplayName(self, actual_type),
-                                });
+                                try self.emitExpectedTypeFoundRange(decl.range, "declaration", expected_type, actual_type);
                             } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                                try self.emitRangeError(decl.range, "declaration expects region '{s}', found '{s}'", .{
-                                    region_rules.regionDisplayName(expected.region),
-                                    region_rules.regionDisplayName(actual.region),
-                                });
+                                try self.emitExpectedRegionFoundRange(decl.range, "declaration", expected.region, actual.region);
                             }
                         }
                     }
                 }
+                if (decl.storage_class != .storage) {
+                    try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
+                }
             },
             .Return => |ret| if (ret.value) |expr_id| {
                 try self.visitExpr(expr_id);
+                _ = try self.emitResolvedIntegerOverflowIfNeeded(ret.range, expr_id);
                 if (self.current_return_type) |expected_type| {
                     try self.contextualizeLiteral(expr_id, expected_type);
                     const actual_type = self.expr_types[expr_id.index()];
@@ -1909,10 +2253,7 @@ const TypeChecker = struct {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
                         if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitRangeError(ret.range, "return expects type '{s}', found '{s}'", .{
-                                diagnosticTypeDisplayName(self, expected_type),
-                                diagnosticTypeDisplayName(self, actual_type),
-                            });
+                            try self.emitExpectedTypeFoundRange(ret.range, "return", expected_type, actual_type);
                         }
                         // No region check — return values are loaded to stack,
                         // so all source regions are valid regardless of return type region.
@@ -1933,7 +2274,14 @@ const TypeChecker = struct {
             },
             .For => |for_stmt| {
                 try self.visitExpr(for_stmt.iterable);
-                if (for_stmt.range_end) |end_expr| try self.visitExpr(end_expr);
+                if (for_stmt.range_end != null) {
+                    try self.contextualizeLiteral(for_stmt.iterable, forRangeIndexType());
+                }
+                self.assignForPatternTypes(for_stmt);
+                if (for_stmt.range_end) |end_expr| {
+                    try self.visitExpr(end_expr);
+                    try self.contextualizeLiteral(end_expr, forRangeIndexType());
+                }
                 for (for_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
                 try self.visitBody(for_stmt.body);
             },
@@ -1980,8 +2328,9 @@ const TypeChecker = struct {
             .Havoc => {},
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
-                const expected = self.patternLocatedType(assign.target);
+                const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
+                try self.contextualizeLiteral(assign.value, expected_type);
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
                     // Keep lowering/recovery moving after reporting the overflow.
@@ -1989,15 +2338,9 @@ const TypeChecker = struct {
                     const actual_located = self.exprLocatedType(assign.value);
                     const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
                     if (!typesFlowCompatible(expected_type, actual_type)) {
-                        try self.emitRangeError(assign.range, "assignment expects type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, expected_type),
-                            diagnosticTypeDisplayName(self, actual_type),
-                        });
+                        try self.emitExpectedTypeFoundRange(assign.range, "assignment", expected_type, actual_type);
                     } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
-                        try self.emitRangeError(assign.range, "assignment expects region '{s}', found '{s}'", .{
-                            region_rules.regionDisplayName(expected.region),
-                            region_rules.regionDisplayName(actual.region),
-                        });
+                        try self.emitExpectedRegionFoundRange(assign.range, "assignment", expected.region, actual.region);
                     }
                 }
             },
@@ -2010,7 +2353,14 @@ const TypeChecker = struct {
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
         switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral => |literal| self.expr_types[expr_id.index()] = integerLiteralType(literal.text),
+            .IntegerLiteral => |literal| {
+                if (invalidIntegerLiteralSuffix(literal.text)) |suffix| {
+                    try self.emitExprError(expr_id, "invalid integer type suffix '{s}'; supported integer types are {s}", .{ suffix, descriptors.supported_integer_type_names_text });
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                } else {
+                    self.expr_types[expr_id.index()] = integerLiteralType(literal.text);
+                }
+            },
             .StringLiteral => self.expr_types[expr_id.index()] = .{ .string = {} },
             .BoolLiteral => self.expr_types[expr_id.index()] = .{ .bool = {} },
             .AddressLiteral => self.expr_types[expr_id.index()] = .{ .address = {} },
@@ -2072,7 +2422,7 @@ const TypeChecker = struct {
                         diagnosticTypeDisplayName(self, address_type),
                     });
                 }
-                if (gas_type.kind() != .unknown and gas_type.kind() != .integer) {
+                if (gas_type.kind() != .unknown and !isIntegerType(gas_type)) {
                     try self.emitExprError(expr_id, "external proxy gas must be integer, found '{s}'", .{
                         diagnosticTypeDisplayName(self, gas_type),
                     });
@@ -2097,30 +2447,34 @@ const TypeChecker = struct {
                 for (switch_expr.arms) |arm| {
                     try self.visitSwitchPattern(arm.pattern, condition_type, arm.range);
                     try self.visitExpr(arm.value);
-                    const arm_type = self.expr_types[arm.value.index()];
-                    if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !typesAssignable(result_type, arm_type) and !typesAssignable(arm_type, result_type)) {
+                    if (result_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(arm.value, result_type);
+                    } else if (condition_type.kind() == .error_union and self.exprIsResultConstructor(arm.value)) {
+                        try self.contextualizeLiteral(arm.value, condition_type);
+                    }
+                    const arm_type = self.switchArmResultType(condition_type, arm.value);
+                    if (!saw_mismatch and result_type.kind() != .unknown and arm_type.kind() != .unknown and !switchBranchTypesCompatible(result_type, arm_type)) {
                         saw_mismatch = true;
-                        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            diagnosticTypeDisplayName(self, result_type),
-                            diagnosticTypeDisplayName(self, arm_type),
-                        });
+                        try self.emitSwitchBranchTypeMismatch(expr_id, condition_type, result_type, arm_type);
                     }
                     if (!saw_mismatch) {
-                        result_type = mergeExprType(result_type, self.expr_types[arm.value.index()]);
+                        result_type = mergeExprType(result_type, arm_type);
                     }
                 }
                 if (switch_expr.else_expr) |else_expr| {
                     try self.visitExpr(else_expr);
-                    const else_type = self.expr_types[else_expr.index()];
-                    if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !typesAssignable(result_type, else_type) and !typesAssignable(else_type, result_type)) {
+                    if (result_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(else_expr, result_type);
+                    } else if (condition_type.kind() == .error_union and self.exprIsResultConstructor(else_expr)) {
+                        try self.contextualizeLiteral(else_expr, condition_type);
+                    }
+                    const else_type = self.switchArmResultType(condition_type, else_expr);
+                    if (!saw_mismatch and result_type.kind() != .unknown and else_type.kind() != .unknown and !switchBranchTypesCompatible(result_type, else_type)) {
                         saw_mismatch = true;
-                        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
-                            diagnosticTypeDisplayName(self, result_type),
-                            diagnosticTypeDisplayName(self, else_type),
-                        });
+                        try self.emitSwitchBranchTypeMismatch(expr_id, condition_type, result_type, else_type);
                     }
                     if (!saw_mismatch) {
-                        result_type = mergeExprType(result_type, self.expr_types[else_expr.index()]);
+                        result_type = mergeExprType(result_type, else_type);
                     }
                 }
                 if (saw_mismatch) result_type = .{ .unknown = {} };
@@ -2129,6 +2483,8 @@ const TypeChecker = struct {
                 try self.warnWildcardCoversNamedSumVariants(condition_type, switch_expr.arms, switch_expr.else_expr != null, switch_expr.range);
             },
             .Comptime => |comptime_expr| {
+                self.comptime_depth += 1;
+                defer self.comptime_depth -= 1;
                 try self.visitBody(comptime_expr.body);
                 const body = self.file.body(comptime_expr.body).*;
                 if (body.statements.len == 0) {
@@ -2149,14 +2505,14 @@ const TypeChecker = struct {
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
                     .Name => |name| if (std.mem.eql(u8, name.name, "result"))
-                        (self.current_return_type orelse .{ .unknown = {} })
+                        self.currentResultType()
                     else
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
             },
             .Result => {
-                self.expr_types[expr_id.index()] = self.current_return_type orelse .{ .unknown = {} };
+                self.expr_types[expr_id.index()] = self.currentResultType();
             },
             .Unary => |unary| {
                 try self.visitExpr(unary.operand);
@@ -2181,12 +2537,19 @@ const TypeChecker = struct {
                 const result_type = if ((binary.op == .eq or binary.op == .ne) and self.exprIsTypeValue(binary.lhs) and self.exprIsTypeValue(binary.rhs))
                     Type{ .bool = {} }
                 else
-                    self.binaryResultType(
+                    try self.binaryResultType(
                         binary.op,
                         lhs_type,
                         rhs_type,
                     );
                 var final_type = result_type;
+                if (binaryComptimeIntegerOperandResolutionType(binary.op, lhs_type, rhs_type)) |operand_type| {
+                    const lhs_resolution = try self.resolveIntegerExpression(self.exprRange(binary.lhs), binary.lhs, operand_type);
+                    const rhs_resolution = try self.resolveIntegerExpression(self.exprRange(binary.rhs), binary.rhs, operand_type);
+                    if (lhs_resolution == .overflow or rhs_resolution == .overflow) {
+                        final_type = .{ .unknown = {} };
+                    }
+                }
                 if (result_type.kind() != .unknown and try self.hasInvalidConstantShiftAmount(expr_id, binary.op, lhs_type, binary.rhs)) {
                     final_type = .{ .unknown = {} };
                 }
@@ -2202,8 +2565,14 @@ const TypeChecker = struct {
             .Call => |call| {
                 try self.visitExpr(call.callee);
                 for (call.args) |arg| try self.visitExpr(arg);
-                self.call_resolutions[expr_id.index()] = self.importedFunctionCallResolution(call);
-                const result_type = self.callReturnType(call);
+                if (call.args.len == 0) {
+                    if (self.environmentIntrinsicValueType(call.callee)) |result_type| {
+                        self.expr_types[expr_id.index()] = result_type;
+                        return;
+                    }
+                }
+                self.call_resolutions[expr_id.index()] = try self.importedFunctionCallResolution(call);
+                const result_type = try self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.checkEnumVariantConstructorCall(expr_id, call)) {
                     return;
@@ -2230,7 +2599,7 @@ const TypeChecker = struct {
                             };
                             if (function) |resolved_function| {
                                 if (resolved_function.is_generic) {
-                                    const bindings = self.genericTypeBindingsForCall(resolved_function, call);
+                                    const bindings = try self.genericTypeBindingsForCall(resolved_function, call);
                                     if (bindings == null) {
                                         try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
                                     } else {
@@ -2257,25 +2626,39 @@ const TypeChecker = struct {
                 }
             },
             .Builtin => |builtin| {
+                const kind = builtinKind(builtin.name) orelse {
+                    for (builtin.args) |arg| try self.visitExpr(arg);
+                    try self.emitExprError(expr_id, "unknown built-in function '@{s}'", .{builtin.name});
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return;
+                };
+
+                if (isReferenceConstevalBuiltin(kind)) {
+                    self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
+                    try self.checkBuiltinArguments(kind, builtin);
+                    return;
+                }
+
                 for (builtin.args) |arg| try self.visitExpr(arg);
-                if (std.mem.eql(u8, builtin.name, "lock") or std.mem.eql(u8, builtin.name, "unlock")) {
+                if (kind == .lock or kind == .unlock) {
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
                         builtin.name,
                     });
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                     return;
                 }
-                const result_type = self.builtinReturnType(builtin);
+                const result_type = try self.builtinReturnType(kind, builtin);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.emitBuiltinIntegerOverflowIfNeeded(expr_id, builtin, result_type)) {
                     self.expr_types[expr_id.index()] = .{ .unknown = {} };
                 }
-                try self.checkBuiltinArguments(expr_id, builtin);
+                try self.checkBuiltinArguments(kind, builtin);
             },
             .Field => |field| {
                 try self.visitExpr(field.base);
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                const result_type = self.environmentIntrinsicValueType(expr_id) orelse
+                    try self.fieldAccessTypeForExpr(field.base, field.name);
                 self.expr_types[expr_id.index()] = result_type;
                 if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
@@ -2306,7 +2689,7 @@ const TypeChecker = struct {
             },
             .Quantified => |quantified| {
                 self.pattern_types[quantified.pattern.index()] = LocatedType.unlocated(
-                    try descriptorFromTypeExpr(self.arena, self.file, self.item_index, quantified.type_expr),
+                    try self.resolveTypeExprInCurrentContext(quantified.type_expr),
                 );
                 if (quantified.condition) |condition| try self.visitExpr(condition);
                 try self.visitExpr(quantified.body);
@@ -2368,11 +2751,8 @@ const TypeChecker = struct {
                 continue;
             }
             if (actual_type.kind() != .unknown and expected_type.kind() != .unknown and !typesFlowCompatible(expected_type, actual_type)) {
-                try self.emitRangeError(self.exprRange(arg), "log field '{s}' expects type '{s}', found '{s}'", .{
-                    field.name,
-                    diagnosticTypeDisplayName(self, expected_type),
-                    diagnosticTypeDisplayName(self, actual_type),
-                });
+                const subject = try std.fmt.allocPrint(self.arena, "log field '{s}'", .{field.name});
+                try self.emitExpectedTypeFoundRange(self.exprRange(arg), subject, expected_type, actual_type);
             }
         }
     }
@@ -2385,10 +2765,10 @@ const TypeChecker = struct {
         };
     }
 
-    fn callReturnType(self: *TypeChecker, call: ast.CallExpr) Type {
-        if (self.importedCallReturnType(call)) |result| return result;
-        if (self.genericCallReturnType(call)) |result| return result;
-        if (self.externProxyCallReturnType(call)) |result| return result;
+    fn callReturnType(self: *TypeChecker, call: ast.CallExpr) !Type {
+        if (try self.importedCallReturnType(call)) |result| return result;
+        if (try self.genericCallReturnType(call)) |result| return result;
+        if (try self.externProxyCallReturnType(call)) |result| return result;
         if (self.enumVariantConstructorInfo(call.callee)) |info| return info.enum_type;
         if (self.calleeErrorDeclItem(call.callee)) |item_id| {
             return self.item_types[item_id.index()];
@@ -2419,27 +2799,19 @@ const TypeChecker = struct {
         if (enum_type.kind() != .enum_) return null;
         const enum_name = enum_type.enum_.name;
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, field.name)) {
-                    return .{ .enum_type = enum_type, .payload_type = variant.payload_type };
-                }
-            }
-            return null;
+            const variant = instantiated.variantByName(field.name) orelse return null;
+            return .{ .enum_type = enum_type, .payload_type = variant.payload_type };
         }
         const item_id = self.item_index.lookup(enum_name) orelse return null;
         const enum_item = switch (self.file.item(item_id).*) {
             .Enum => |enum_item| enum_item,
             else => return null,
         };
-        for (enum_item.variants) |variant| {
-            if (std.mem.eql(u8, variant.name, field.name)) {
-                return .{
-                    .enum_type = enum_type,
-                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
-                };
-            }
-        }
-        return null;
+        const variant_index = self.item_index.lookupEnumVariantIndex(item_id, field.name) orelse return null;
+        return .{
+            .enum_type = enum_type,
+            .payload_type = self.resolveEnumVariantPayloadType(enum_item.variants[variant_index].payload, &.{}) catch return null,
+        };
     }
 
     fn checkEnumVariantConstructorCall(self: *TypeChecker, expr_id: ast.ExprId, call: ast.CallExpr) !bool {
@@ -2461,10 +2833,7 @@ const TypeChecker = struct {
                     try self.contextualizeLiteral(arg, expected);
                     const actual = self.expr_types[arg.index()];
                     if (!typesFlowCompatible(expected, actual) and actual.kind() != .unknown) {
-                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, expected),
-                            diagnosticTypeDisplayName(self, actual),
-                        });
+                        try self.emitExpectedTypeFoundExpr(arg, expected, actual);
                     }
                 }
             },
@@ -2477,10 +2846,7 @@ const TypeChecker = struct {
                     try self.contextualizeLiteral(arg, field.ty);
                     const actual = self.expr_types[arg.index()];
                     if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
-                        try self.emitExprError(arg, "expected type '{s}', found '{s}'", .{
-                            diagnosticTypeDisplayName(self, field.ty),
-                            diagnosticTypeDisplayName(self, actual),
-                        });
+                        try self.emitExpectedTypeFoundExpr(arg, field.ty, actual);
                     }
                 }
             },
@@ -2492,18 +2858,15 @@ const TypeChecker = struct {
                 try self.contextualizeLiteral(call.args[0], payload_type);
                 const actual = self.expr_types[call.args[0].index()];
                 if (!typesFlowCompatible(payload_type, actual) and actual.kind() != .unknown) {
-                    try self.emitExprError(call.args[0], "expected type '{s}', found '{s}'", .{
-                        diagnosticTypeDisplayName(self, payload_type),
-                        diagnosticTypeDisplayName(self, actual),
-                    });
+                    try self.emitExpectedTypeFoundExpr(call.args[0], payload_type, actual);
                 }
             },
         }
         return true;
     }
 
-    fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
-        const resolved = self.importedFunctionCallResolution(call) orelse return null;
+    fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
+        const resolved = (try self.importedFunctionCallResolution(call)) orelse return null;
         return resolved.return_type;
     }
 
@@ -2544,7 +2907,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+    fn genericCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
         const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
         const function = switch (self.file.item(callee_id).*) {
             .Function => |function| function,
@@ -2552,8 +2915,8 @@ const TypeChecker = struct {
         };
         if (!function.is_generic) return null;
 
-        const bindings = self.genericTypeBindingsForCall(function, call) orelse return .{ .unknown = {} };
-        const runtime_parameters = self.runtimeFunctionParameters(function) catch return .{ .unknown = {} };
+        const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return .{ .unknown = {} };
+        const runtime_parameters = try self.runtimeFunctionParameters(function);
         const comptime_count = self.leadingComptimeParameterCount(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_parameters.len - @as(usize, if (method_receiver_supplied) 1 else 0);
@@ -2564,20 +2927,20 @@ const TypeChecker = struct {
             call.args.len;
         if (effective_runtime_count != runtime_arg_count) return .{ .unknown = {} };
         if (function.return_type) |type_expr| {
-            return self.resolveTypeExprWithBindings(type_expr, bindings) catch .{ .unknown = {} };
+            return try self.resolveTypeExprWithBindings(type_expr, bindings);
         }
         return .{ .void = {} };
     }
 
-    fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) ?Type {
+    fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
         const method = self.externProxyMethodSignature(call.callee) orelse return null;
-        const error_types = self.arena.alloc(Type, method.errors.len + 1) catch return .{ .unknown = {} };
+        const error_types = try self.arena.alloc(Type, method.errors.len + 1);
         error_types[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
         for (method.errors, 0..) |error_name, index| {
             error_types[index + 1] = .{ .named = .{ .name = error_name } };
         }
         return .{ .error_union = .{
-            .payload_type = self.storeType(method.return_type) catch return .{ .unknown = {} },
+            .payload_type = try self.storeType(method.return_type),
             .error_types = error_types,
         } };
     }
@@ -2592,29 +2955,29 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) ?[]const GenericTypeBinding {
+    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCount(function);
         if (comptime_count == 0) return &.{};
-        const runtime_params = self.runtimeFunctionParameters(function) catch return null;
+        const runtime_params = try self.runtimeFunctionParameters(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
         const effective_runtime_count = runtime_params.len - @as(usize, if (method_receiver_supplied) 1 else 0);
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+            const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternName(parameter.pattern) orelse return null;
-                const value = self.genericBindingValueForCallArg(parameter, call.args[index]) orelse return null;
+                const value = (try self.genericBindingValueForCallArg(parameter, call.args[index])) orelse return null;
                 bindings[index] = .{ .name = name, .value = value };
             }
-            self.validateGenericTraitBounds(function, call.range, bindings) catch return null;
+            try self.validateGenericTraitBounds(function, call.range, bindings);
             return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        const bindings = self.arena.alloc(GenericTypeBinding, comptime_count) catch return null;
+        const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
@@ -2626,12 +2989,12 @@ const TypeChecker = struct {
             self.inferBindingFromArgType(function, inferable_type_count, param.type_expr, arg_type, bindings);
         }
 
-        self.refineGenericBindingsForRuntimeArgs(function, inferable_type_count, infer_runtime_params, call.args, bindings) catch return null;
+        try self.refineGenericBindingsForRuntimeArgs(function, inferable_type_count, infer_runtime_params, call.args, bindings);
 
         for (bindings) |binding| {
             if (binding.name.len == 0) return null;
         }
-        self.validateGenericTraitBounds(function, call.range, bindings) catch return null;
+        try self.validateGenericTraitBounds(function, call.range, bindings);
         return bindings;
     }
 
@@ -2706,6 +3069,290 @@ const TypeChecker = struct {
         }
     }
 
+    fn exprContainsResult(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Result => true,
+            .Group => |group| self.exprContainsResult(group.expr),
+            .Old => |old| self.exprContainsResult(old.expr),
+            .Quantified => |quantified| self.exprContainsResult(quantified.body),
+            .Unary => |unary| self.exprContainsResult(unary.operand),
+            .Binary => |binary| self.exprContainsResult(binary.lhs) or self.exprContainsResult(binary.rhs),
+            .Field => |field| self.exprContainsResult(field.base),
+            .Index => |index| self.exprContainsResult(index.base) or self.exprContainsResult(index.index),
+            .Call => |call| blk: {
+                if (self.exprContainsResult(call.callee)) break :blk true;
+                for (call.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Builtin => |builtin| blk: {
+                for (builtin.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Tuple => |tuple| blk: {
+                for (tuple.elements) |element| {
+                    if (self.exprContainsResult(element)) break :blk true;
+                }
+                break :blk false;
+            },
+            .ArrayLiteral => |array| blk: {
+                for (array.elements) |element| {
+                    if (self.exprContainsResult(element)) break :blk true;
+                }
+                break :blk false;
+            },
+            .StructLiteral => |struct_literal| blk: {
+                for (struct_literal.fields) |field| {
+                    if (self.exprContainsResult(field.value)) break :blk true;
+                }
+                break :blk false;
+            },
+            .ErrorReturn => |error_return| blk: {
+                for (error_return.args) |arg| {
+                    if (self.exprContainsResult(arg)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Switch => |switch_expr| blk: {
+                if (self.exprContainsResult(switch_expr.condition)) break :blk true;
+                for (switch_expr.arms) |arm| {
+                    if (self.switchPatternContainsResult(arm.pattern)) break :blk true;
+                    if (self.exprContainsResult(arm.value)) break :blk true;
+                }
+                if (switch_expr.else_expr) |else_expr| {
+                    if (self.exprContainsResult(else_expr)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Name => |name| std.mem.eql(u8, name.name, "result"),
+            .TypeValue,
+            .Comptime,
+            .ExternalProxy,
+            .IntegerLiteral,
+            .StringLiteral,
+            .BoolLiteral,
+            .AddressLiteral,
+            .BytesLiteral,
+            .Error,
+            => false,
+        };
+    }
+
+    fn validateModifiesClause(self: *TypeChecker, clause: ast.SpecClause) !void {
+        var slots: std.ArrayList(EffectSlot) = .{};
+        try self.collectModifiesClauseSlots(clause, &slots);
+    }
+
+    fn modifiesClauseIsEmpty(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.modifiesClauseIsEmpty(group.expr),
+            .Tuple => |tuple| tuple.elements.len == 0,
+            else => false,
+        };
+    }
+
+    fn collectModifiesClauseSlots(self: *TypeChecker, clause: ast.SpecClause, slots: *std.ArrayList(EffectSlot)) !void {
+        // This helper only validates and collects declared paths. HIR lowering
+        // exports them for verifier framing only after the caller stores them
+        // in item_modifies, which happens after the compiler-derived write-set
+        // subset check succeeds for the same body.
+        try self.visitModifiesExpr(clause.expr);
+        try self.collectModifiesExprSlots(clause.expr, slots);
+    }
+
+    fn visitModifiesExpr(self: *TypeChecker, expr_id: ast.ExprId) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.visitModifiesExpr(group.expr),
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| try self.visitModifiesExpr(element);
+            },
+            .Field => |field| {
+                if (self.isModifiesEnvironmentKey(expr_id)) {
+                    self.expr_types[expr_id.index()] = .{ .address = {} };
+                    return;
+                }
+                try self.visitModifiesExpr(field.base);
+                const base_type = self.expr_types[field.base.index()];
+                const result_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                self.expr_types[expr_id.index()] = result_type;
+                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                    if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
+                        try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
+                            diagnosticTypeDisplayName(self, base_type),
+                            field.name,
+                        });
+                    }
+                }
+            },
+            .Index => |index| {
+                try self.visitModifiesExpr(index.base);
+                if (self.isModifiesEnvironmentKey(index.index)) {
+                    self.expr_types[index.index.index()] = .{ .address = {} };
+                } else {
+                    try self.visitExpr(index.index);
+                }
+                const base_type = self.expr_types[index.base.index()];
+                const result_type = self.indexAccessType(base_type, index.index);
+                self.expr_types[expr_id.index()] = result_type;
+                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                    try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
+                }
+            },
+            else => try self.visitExpr(expr_id),
+        }
+    }
+
+    fn isModifiesEnvironmentKey(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        const field = switch (self.file.expression(expr_id).*) {
+            .Group => |group| return self.isModifiesEnvironmentKey(group.expr),
+            .Field => |field| field,
+            else => return false,
+        };
+        const base = self.file.expression(field.base).*;
+        return base == .Name and
+            ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
+    }
+
+    fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *std.ArrayList(EffectSlot)) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.collectModifiesExprSlots(group.expr, slots),
+            .Tuple => |tuple| {
+                for (tuple.elements) |element| try self.collectModifiesExprSlots(element, slots);
+            },
+            else => {
+                if (try self.modifiesStorageSlotForExpr(expr_id)) |slot| {
+                    if (slot.region != .storage) {
+                        try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths", .{});
+                    } else if (slot.field_path != null and slot.key_path != null) {
+                        try self.emitExprError(expr_id, "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`", .{});
+                    } else {
+                        try self.appendUniqueSlot(slots, slot);
+                    }
+                } else {
+                    try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`", .{});
+                }
+            },
+        }
+    }
+
+    fn modifiesStorageSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.modifiesStorageSlotForExpr(group.expr),
+            .Name => self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()]),
+            .Field => |field| blk: {
+                const base_slot = (try self.modifiesStorageSlotForExpr(field.base)) orelse break :blk null;
+                const result_type = self.expr_types[expr_id.index()];
+                if (result_type.kind() == .unknown) break :blk null;
+                break :blk self.slotWithField(base_slot, field.name);
+            },
+            .Index => |index| blk: {
+                const base_slot = (try self.modifiesStorageSlotForExpr(index.base)) orelse break :blk null;
+                const base_type = self.expr_types[index.base.index()];
+                if (base_type.kind() != .map) {
+                    try self.emitExprError(expr_id, "`modifies` v1 only supports indexing map storage paths", .{});
+                    break :blk null;
+                }
+                try self.validateModifiesKeyExpr(index.index);
+                break :blk self.slotWithIndexKey(base_slot, index.index);
+            },
+            else => null,
+        };
+    }
+
+    fn validateModifiesKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !void {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.validateModifiesKeyExpr(group.expr),
+            .IntegerLiteral, .StringLiteral, .AddressLiteral, .BytesLiteral, .BoolLiteral => {},
+            .Name => {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id) != null) return,
+                        .item => {},
+                    }
+                }
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+            },
+            .Field => |field| {
+                const base = self.file.expression(field.base).*;
+                if (base == .Name and
+                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
+                {
+                    return;
+                }
+                try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{});
+            },
+            else => try self.emitExprError(expr_id, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1", .{}),
+        }
+    }
+
+    fn validateModifiesSubset(self: *TypeChecker, range: source.TextRange, declared_slots: []const EffectSlot, actual_writes: []const EffectSlot) !void {
+        for (actual_writes) |write_slot| {
+            if (write_slot.region != .storage) continue;
+            if (self.modifiesDeclaresSlot(declared_slots, write_slot)) continue;
+            const display = try self.effectSlotDisplayName(write_slot);
+            const message = try diag_messages.modifiesMissingWrite(self.arena, display);
+            try self.emitRangeMessage(range, message);
+        }
+    }
+
+    fn modifiesDeclaresSlot(self: *TypeChecker, declared_slots: []const EffectSlot, write_slot: EffectSlot) bool {
+        _ = self;
+        for (declared_slots) |declared_slot| {
+            if (effectSlotEql(declared_slot, write_slot)) return true;
+        }
+        return false;
+    }
+
+    fn effectSlotDisplayName(self: *TypeChecker, slot: EffectSlot) ![]const u8 {
+        var buffer: std.ArrayList(u8) = .{};
+        const writer = buffer.writer(self.arena);
+        try writer.writeAll(slot.name);
+        if (slot.field_path) |field_path| {
+            for (field_path) |field_name| {
+                try writer.writeByte('.');
+                try writer.writeAll(field_name);
+            }
+        }
+        if (slot.key_path) |key_path| {
+            for (key_path) |segment| {
+                try writer.writeByte('[');
+                switch (segment) {
+                    .parameter => |index| if (self.parameterNameForIndex(index)) |name| {
+                        try writer.writeAll(name);
+                    } else {
+                        try writer.print("param#{d}", .{index});
+                    },
+                    .constant => |value| try writer.writeAll(value),
+                    .msg_sender => try writer.writeAll("msg.sender"),
+                    .tx_origin => try writer.writeAll("tx.origin"),
+                    .unknown => try writer.writeAll("?"),
+                }
+                try writer.writeByte(']');
+            }
+        }
+        return buffer.items;
+    }
+
+    fn switchPatternContainsResult(self: *TypeChecker, pattern: ast.SwitchPattern) bool {
+        return switch (pattern) {
+            .Expr => |expr_id| self.exprContainsResult(expr_id),
+            .Range => |range_pattern| self.exprContainsResult(range_pattern.start) or self.exprContainsResult(range_pattern.end),
+            .NamedError => |named_error| self.exprContainsResult(named_error.callee),
+            .Or => |or_pattern| blk: {
+                for (or_pattern.alternatives) |alternative| {
+                    if (self.switchPatternContainsResult(alternative)) break :blk true;
+                }
+                break :blk false;
+            },
+            .Ok, .Err, .Else => false,
+        };
+    }
+
     fn validateGenericSwitchPatternInstantiation(self: *TypeChecker, pattern: ast.SwitchPattern, bindings: []const GenericTypeBinding) anyerror!void {
         switch (pattern) {
             .Expr => |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings),
@@ -2750,9 +3397,9 @@ const TypeChecker = struct {
                 try self.validateGenericExprInstantiation(binary.lhs, bindings);
                 try self.validateGenericExprInstantiation(binary.rhs, bindings);
 
-                const lhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.lhs, bindings), bindings);
-                const rhs_type = try self.substituteGenericType(self.templateExprTypeForInstantiation(binary.rhs, bindings), bindings);
-                const instantiated_result = self.binaryResultType(binary.op, lhs_type, rhs_type);
+                const lhs_type = try self.substituteGenericType(try self.templateExprTypeForInstantiation(binary.lhs, bindings), bindings);
+                const rhs_type = try self.substituteGenericType(try self.templateExprTypeForInstantiation(binary.rhs, bindings), bindings);
+                const instantiated_result = try self.binaryResultType(binary.op, lhs_type, rhs_type);
                 if (instantiated_result.kind() == .unknown and lhs_type.kind() != .unknown and rhs_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "invalid binary operator '{s}' for types '{s}' and '{s}'", .{
                         binaryOpName(binary.op),
@@ -2764,28 +3411,28 @@ const TypeChecker = struct {
         }
     }
 
-    fn templateExprTypeForInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) Type {
+    fn templateExprTypeForInstantiation(self: *TypeChecker, expr_id: ast.ExprId, bindings: []const GenericTypeBinding) !Type {
         return switch (self.file.expression(expr_id).*) {
-            .Name => self.instantiatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()], bindings),
-            .Group => |group| self.templateExprTypeForInstantiation(group.expr, bindings),
+            .Name => try self.instantiatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()], bindings),
+            .Group => |group| try self.templateExprTypeForInstantiation(group.expr, bindings),
             else => self.expr_types[expr_id.index()],
         };
     }
 
-    fn instantiatedTypeForBinding(self: *TypeChecker, binding: ?ResolvedBinding, bindings: []const GenericTypeBinding) Type {
+    fn instantiatedTypeForBinding(self: *TypeChecker, binding: ?ResolvedBinding, bindings: []const GenericTypeBinding) !Type {
         const template_type = self.typeForBinding(binding);
         if (template_type.kind() != .unknown) {
-            return self.substituteGenericType(template_type, bindings) catch template_type;
+            return try self.substituteGenericType(template_type, bindings);
         }
         const resolved = binding orelse return .{ .unknown = {} };
         return switch (resolved) {
             .item => |item_id| blk: {
                 const item_type = self.item_types[item_id.index()];
-                break :blk self.substituteGenericType(item_type, bindings) catch item_type;
+                break :blk try self.substituteGenericType(item_type, bindings);
             },
             .pattern => |pattern_id| blk: {
                 if (self.parameterTypeExprForPattern(pattern_id)) |type_expr_id| {
-                    break :blk self.resolveTypeExprWithBindings(type_expr_id, bindings) catch .{ .unknown = {} };
+                    break :blk try self.resolveTypeExprWithBindings(type_expr_id, bindings);
                 }
                 break :blk .{ .unknown = {} };
             },
@@ -2846,11 +3493,7 @@ const TypeChecker = struct {
     }
 
     fn functionHasRuntimeSelf(self: *const TypeChecker, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
-        }
-        return false;
+        return model.functionHasRuntimeSelf(self.file, function);
     }
 
     fn callSuppliesMethodReceiver(self: *const TypeChecker, expr_id: ast.ExprId) bool {
@@ -2877,7 +3520,7 @@ const TypeChecker = struct {
             const comptime_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
             const bindings = if (function.is_generic)
-                self.genericTypeBindingsForCall(function, call) orelse return
+                (try self.genericTypeBindingsForCall(function, call)) orelse return
             else
                 &.{};
             if (function.is_generic) {
@@ -2891,7 +3534,7 @@ const TypeChecker = struct {
             if (runtime_parameters.len != runtime_args.len) return;
             for (runtime_args, runtime_parameters) |arg, parameter| {
                 const param_type = if (function.is_generic)
-                    self.resolveTypeExprWithBindings(parameter.type_expr, bindings) catch Type{ .unknown = {} }
+                    try self.resolveTypeExprWithBindings(parameter.type_expr, bindings)
                 else
                     self.pattern_types[parameter.pattern.index()].type;
                 try self.contextualizeLiteral(arg, param_type);
@@ -2900,9 +3543,7 @@ const TypeChecker = struct {
                 if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                     !typesFlowCompatible(param_type, arg_type))
                 {
-                    try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                        diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                    });
+                    try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
                 }
             }
             return;
@@ -2919,9 +3560,7 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
@@ -2937,25 +3576,86 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
 
-    fn checkBuiltinArguments(self: *TypeChecker, expr_id: ast.ExprId, builtin: ast.BuiltinExpr) !void {
-        _ = expr_id;
-        if (std.mem.eql(u8, builtin.name, "divTrunc") or
-            std.mem.eql(u8, builtin.name, "divFloor") or
-            std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact") or
-            std.mem.eql(u8, builtin.name, "divmod"))
-        {
-            try self.checkDivisionBuiltinArguments(builtin);
+    fn checkBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        switch (kind) {
+            .cast, .bit_cast, .truncate => try self.checkCastLikeBuiltinArguments(kind, builtin),
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .div_with_overflow,
+            .mod_with_overflow,
+            .neg_with_overflow,
+            .shl_with_overflow,
+            .shr_with_overflow,
+            .power_with_overflow,
+            => try self.checkOverflowBuiltinArguments(kind, builtin),
+            .div_trunc, .div_floor, .div_ceil, .div_exact, .divmod => try self.checkDivisionBuiltinArguments(builtin),
+            .keccak256 => try self.checkKeccak256BuiltinArguments(builtin),
+            .abi_encode => try self.checkAbiEncodeBuiltinArguments(builtin),
+            .abi_decode, .abi_decode_permissive => try self.checkAbiDecodeBuiltinArguments(kind, builtin),
+            .chain_id => try self.checkChainIdBuiltinArguments(builtin),
+            .compile_error => try self.checkCompileErrorBuiltinArguments(builtin),
+            .selector, .abi_signature => try self.checkAbiFunctionReferenceBuiltinArguments(builtin),
+            .event_topic => try self.checkEventReferenceBuiltinArguments(builtin),
+            .struct_fields => try self.checkReflectionBuiltinArguments(builtin, "structFields", "struct", TypeChecker.resolveBuiltinStructReference),
+            .trait_methods => try self.checkReflectionBuiltinArguments(builtin, "traitMethods", "trait", TypeChecker.resolveBuiltinTraitReference),
+            .concat => try self.checkConcatBuiltinArguments(builtin),
+            .slice => try self.checkSliceBuiltinArguments(builtin),
+            else => {},
         }
-        if (std.mem.eql(u8, builtin.name, "keccak256")) {
-            try self.checkKeccak256BuiltinArguments(builtin);
+    }
+
+    fn checkCastLikeBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        _ = kind;
+        if (builtin.type_arg == null or builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@{s} expects a type argument and 1 value argument", .{builtin.name});
+        }
+    }
+
+    fn checkOverflowBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const expected_args: usize = if (kind == .neg_with_overflow) 1 else 2;
+        if (builtin.args.len != expected_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects {d} arguments", .{ builtin.name, expected_args });
+            return;
+        }
+
+        const target_type = self.builtinDivisionOperandType(builtin);
+        if (target_type.kind() != .unknown) {
+            for (builtin.args) |arg| {
+                try self.contextualizeLiteral(arg, target_type);
+                _ = try self.emitIntegerOverflowIfNeeded(self.exprRange(arg), arg, target_type);
+            }
+        }
+
+        const lhs_type = self.expr_types[builtin.args[0].index()];
+        const lhs_base = if (lhs_type.refinementBaseType()) |base| base.* else lhs_type;
+        if (lhs_base.kind() != .unknown and !isIntegerType(lhs_base)) {
+            try self.emitRangeError(builtin.range, "@{s} expects integer operands", .{builtin.name});
+            return;
+        }
+
+        if (expected_args == 1) return;
+
+        const rhs_type = self.expr_types[builtin.args[1].index()];
+        const rhs_base = if (rhs_type.refinementBaseType()) |base| base.* else rhs_type;
+        if (rhs_base.kind() != .unknown and !isIntegerType(rhs_base)) {
+            try self.emitRangeError(builtin.range, "@{s} expects integer operands", .{builtin.name});
+            return;
+        }
+
+        if (lhs_base.kind() != .unknown and rhs_base.kind() != .unknown and
+            !typesFlowCompatible(lhs_base, rhs_base) and !typesFlowCompatible(rhs_base, lhs_base))
+        {
+            try self.emitRangeError(builtin.range, "@{s} expects compatible integer operand types, found '{s}' and '{s}'", .{
+                builtin.name,
+                diagnosticTypeDisplayName(self, lhs_type),
+                diagnosticTypeDisplayName(self, rhs_type),
+            });
         }
     }
 
@@ -2971,6 +3671,323 @@ const TypeChecker = struct {
             else => try self.emitRangeError(builtin.range, "@keccak256 expects a string or bytes argument, found '{s}'", .{
                 diagnosticTypeDisplayName(self, arg_type),
             }),
+        }
+    }
+
+    fn checkAbiEncodeBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@abiEncode expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+
+        const arg_type = self.expr_types[builtin.args[0].index()];
+        if (arg_type.kind() == .unknown) return;
+        const policy = self.abiPolicy();
+        if (!policy.supportsAbiEncode(arg_type)) {
+            try self.emitRangeError(builtin.range, "@abiEncode: type '{s}' has no ABI representation", .{
+                diagnosticTypeDisplayName(self, arg_type),
+            });
+        }
+    }
+
+    fn checkAbiDecodeBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const logical_arg_count = builtin.args.len + @as(usize, if (builtin.type_arg != null) 1 else 0);
+        const expected_value_args: usize = if (builtin.type_arg != null) 1 else 2;
+        if (builtin.args.len != expected_value_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects 2 arguments, found {d}", .{ builtin.name, logical_arg_count });
+            return;
+        }
+
+        // The parser routes source-level @abiDecode(T, bytes) through type_arg.
+        // The expression-type fallback is defensive for manually constructed ASTs.
+        const target_type = if (builtin.type_arg) |type_arg|
+            try self.resolveTypeExprInCurrentContext(type_arg)
+        else blk: {
+            if (!self.exprIsTypeValue(builtin.args[0])) {
+                const arg_type = self.expr_types[builtin.args[0].index()];
+                try self.emitRangeError(builtin.range, "@{s} expects a type as its first argument, found '{s}'", .{
+                    builtin.name, diagnosticTypeDisplayName(self, arg_type),
+                });
+                return;
+            }
+            break :blk self.expr_types[builtin.args[0].index()];
+        };
+
+        if (target_type.kind() == .unknown) return;
+        const policy = self.abiPolicy();
+        if (!policy.supportsAbiDecode(target_type)) {
+            try self.emitRangeError(builtin.range, "@{s}: type '{s}' has no ABI representation", .{
+                builtin.name, diagnosticTypeDisplayName(self, target_type),
+            });
+        } else if (kind == .abi_decode_permissive and self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .permissive)) {
+            try self.emitRangeError(builtin.range, "runtime @abiDecodePermissive does not yet support target type '{s}'", .{
+                diagnosticTypeDisplayName(self, target_type),
+            });
+        } else if (self.comptime_depth == 0 and !policy.supportsRuntimeAbiDecode(target_type, .strict)) {
+            try self.emitRangeError(builtin.range, "runtime @abiDecode does not yet support target type '{s}'", .{
+                diagnosticTypeDisplayName(self, target_type),
+            });
+        }
+
+        const bytes_arg = if (builtin.type_arg != null) builtin.args[0] else builtin.args[1];
+        const bytes_type = self.expr_types[bytes_arg.index()];
+        switch (bytes_type.kind()) {
+            .bytes, .fixed_bytes => {},
+            else => try self.emitRangeError(builtin.range, "@{s} expects bytes as its second argument, found '{s}'", .{
+                builtin.name, diagnosticTypeDisplayName(self, bytes_type),
+            }),
+        }
+    }
+
+    fn checkChainIdBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 0) {
+            try self.emitRangeError(builtin.range, "@chainId expects 0 arguments", .{});
+        }
+    }
+
+    fn checkCompileErrorBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@compileError expects 1 argument", .{});
+            return;
+        }
+
+        const arg_type = self.expr_types[builtin.args[0].index()];
+        if (arg_type.kind() != .string) {
+            try self.emitRangeError(builtin.range, "@compileError expects a string argument", .{});
+        }
+    }
+
+    fn checkAbiFunctionReferenceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@{s} expects 1 argument", .{builtin.name});
+            return;
+        }
+
+        if ((try self.resolveBuiltinFunctionReferenceType(builtin.args[0])) == null) {
+            try self.emitRangeError(builtin.range, "@{s} requires a function reference", .{builtin.name});
+        }
+    }
+
+    fn checkEventReferenceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@eventTopic expects 1 argument", .{});
+            return;
+        }
+
+        if (self.resolveBuiltinEventReference(builtin.args[0]) == null) {
+            try self.emitRangeError(builtin.range, "@eventTopic requires an event reference", .{});
+        }
+    }
+
+    fn checkReflectionBuiltinArguments(
+        self: *TypeChecker,
+        builtin: ast.BuiltinExpr,
+        comptime builtin_name: []const u8,
+        comptime kind_word: []const u8,
+        comptime resolve: fn (*const TypeChecker, ast.ExprId) ?ast.ItemId,
+    ) !void {
+        if (builtin.args.len != 1) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+
+        if (resolve(self, builtin.args[0]) == null and !self.reflectionArgumentIsGenericTypeValue(builtin.args[0])) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects a " ++ kind_word ++ " type, found {s}", .{
+                self.reflectionArgumentKindDescription(builtin.args[0]),
+            });
+        }
+    }
+
+    fn reflectionArgumentIsGenericTypeValue(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.reflectionArgumentIsGenericTypeValue(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk false;
+                break :blk switch (binding) {
+                    .pattern => |pattern_id| if (self.pattern_types[pattern_id.index()].type.name()) |name|
+                        std.mem.eql(u8, name, "type")
+                    else
+                        false,
+                    .item => false,
+                };
+            },
+            else => false,
+        };
+    }
+
+    /// Resolves `Name` or `Contract.Member` paths to an item id, recursing
+    /// through `.Group` wrappers. Caller filters by item tag.
+    fn resolveBuiltinItemReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resolveBuiltinItemReference(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                break :blk switch (binding) {
+                    .item => |item_id| item_id,
+                    .pattern => null,
+                };
+            },
+            .Field => |field| blk: {
+                const base_item_id = self.resolveBuiltinItemReference(field.base) orelse break :blk null;
+                break :blk self.item_index.lookupContractMemberWithRoles(self.file, base_item_id, field.name, .{
+                    .log_decl = true,
+                    .struct_ = true,
+                    .function = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                    .constant = true,
+                    .error_decl = true,
+                });
+            },
+            else => null,
+        };
+    }
+
+    fn resolveBuiltinEventReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .LogDecl) item_id else null;
+    }
+
+    fn resolveBuiltinStructReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .Struct) item_id else null;
+    }
+
+    fn resolveBuiltinTraitReference(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
+        const item_id = self.resolveBuiltinItemReference(expr_id) orelse return null;
+        return if (self.file.item(item_id).* == .Trait) item_id else null;
+    }
+
+    fn reflectionArgumentKindDescription(self: *TypeChecker, expr_id: ast.ExprId) []const u8 {
+        if (self.resolveBuiltinItemReference(expr_id)) |item_id| {
+            return switch (self.file.item(item_id).*) {
+                .Struct => "a struct",
+                .Trait => "a trait",
+                .Contract => "a contract",
+                .Enum => "an enum",
+                .Bitfield => "a bitfield",
+                .Function => "a function",
+                .LogDecl => "an event",
+                .TypeAlias => "a type alias",
+                else => "a non-type item",
+            };
+        }
+
+        switch (self.file.expression(expr_id).*) {
+            .Name => |name| {
+                const ty = self.typeValueNameType(name.name);
+                switch (ty.kind()) {
+                    .integer, .bool, .string, .address, .bytes, .fixed_bytes, .void => return "a primitive type",
+                    .struct_ => return "a struct",
+                    .contract => return "a contract",
+                    .enum_ => return "an enum",
+                    .bitfield => return "a bitfield",
+                    else => {},
+                }
+            },
+            .TypeValue => return "a type",
+            else => {},
+        }
+
+        self.visitExpr(expr_id) catch {};
+        const arg_type = self.expr_types[expr_id.index()];
+        if (arg_type.kind() != .unknown) {
+            return std.fmt.allocPrint(self.arena, "a value of type '{s}'", .{
+                diagnosticTypeDisplayName(self, arg_type),
+            }) catch "a value";
+        }
+        return "an unknown value";
+    }
+
+    fn resolveBuiltinFunctionReferenceType(self: *const TypeChecker, expr_id: ast.ExprId) !?Type {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.resolveBuiltinFunctionReferenceType(group.expr),
+            .Name => blk: {
+                const binding = self.resolution.expr_bindings[expr_id.index()] orelse break :blk null;
+                const item_id = switch (binding) {
+                    .item => |item_id| item_id,
+                    .pattern => break :blk null,
+                };
+                if (self.file.item(item_id).* != .Function) break :blk null;
+                const ty = self.item_types[item_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+            .Field => |field| blk: {
+                if (switch (self.file.expression(field.base).*) {
+                    .Name => |name| name.name,
+                    .Group => |group| switch (self.file.expression(group.expr).*) {
+                        .Name => |name| name.name,
+                        else => null,
+                    },
+                    else => null,
+                }) |base_name| {
+                    const binding = self.resolution.expr_bindings[field.base.index()];
+                    if (binding) |resolved| switch (resolved) {
+                        .item => |item_id| switch (self.file.item(item_id).*) {
+                            .Trait => |trait_item| {
+                                const trait_interface = self.traitInterfaceByName(trait_item.name) orelse break :blk null;
+                                const method = self.findTraitMethodSignature(trait_interface, field.name) orelse break :blk null;
+                                break :blk try self.functionTypeFromTraitSignature(method);
+                            },
+                            .Contract => {
+                                const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field.name, .{ .function = true }) orelse break :blk null;
+                                const ty = self.item_types[member_id.index()];
+                                break :blk if (ty.kind() == .function) ty else null;
+                            },
+                            else => {},
+                        },
+                        .pattern => {},
+                    };
+                    _ = base_name;
+                }
+
+                const ty = self.expr_types[expr_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+            else => blk: {
+                const ty = self.expr_types[expr_id.index()];
+                break :blk if (ty.kind() == .function) ty else null;
+            },
+        };
+    }
+
+    fn checkConcatBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 2) {
+            try self.emitRangeError(builtin.range, "@concat expects 2 arguments", .{});
+            return;
+        }
+
+        const lhs_type = self.expr_types[builtin.args[0].index()];
+        const rhs_type = self.expr_types[builtin.args[1].index()];
+        if (lhs_type.kind() == .string and rhs_type.kind() == .string) return;
+        if (lhs_type.kind() == .bytes and rhs_type.kind() == .bytes) return;
+
+        try self.emitRangeError(builtin.range, "@concat expects two string arguments or two bytes arguments, found '{s}' and '{s}'", .{
+            diagnosticTypeDisplayName(self, lhs_type),
+            diagnosticTypeDisplayName(self, rhs_type),
+        });
+    }
+
+    fn checkSliceBuiltinArguments(self: *TypeChecker, builtin: ast.BuiltinExpr) !void {
+        if (builtin.args.len != 3) {
+            try self.emitRangeError(builtin.range, "@slice expects 3 arguments", .{});
+            return;
+        }
+
+        const value_type = self.expr_types[builtin.args[0].index()];
+        switch (value_type.kind()) {
+            .string, .bytes => {},
+            else => try self.emitRangeError(builtin.range, "@slice expects a string or bytes value, found '{s}'", .{
+                diagnosticTypeDisplayName(self, value_type),
+            }),
+        }
+
+        const start_type = self.expr_types[builtin.args[1].index()];
+        const length_type = self.expr_types[builtin.args[2].index()];
+        const start_base = if (start_type.refinementBaseType()) |base| base.* else start_type;
+        const length_base = if (length_type.refinementBaseType()) |base| base.* else length_type;
+        if (start_base.kind() != .integer or length_base.kind() != .integer) {
+            try self.emitRangeError(builtin.range, "@slice expects integer start and length operands", .{});
         }
     }
 
@@ -3018,9 +4035,7 @@ const TypeChecker = struct {
             if (arg_type.kind() != .unknown and param_type.kind() != .unknown and
                 !typesFlowCompatible(param_type, arg_type))
             {
-                try self.emitExprError(arg, "expected argument type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, param_type), diagnosticTypeDisplayName(self, arg_type),
-                });
+                try self.emitExpectedArgumentTypeFoundExpr(arg, param_type, arg_type);
             }
         }
     }
@@ -3057,7 +4072,7 @@ const TypeChecker = struct {
         bindings: []GenericTypeBinding,
     ) !void {
         for (args, runtime_params) |arg, param| {
-            const expected_type: Type = self.resolveTypeExprWithBindings(param.type_expr, bindings) catch .{ .unknown = {} };
+            const expected_type: Type = try self.resolveTypeExprWithBindings(param.type_expr, bindings);
             if (expected_type.kind() == .unknown) continue;
             try self.contextualizeLiteral(arg, expected_type);
             const arg_type = self.expr_types[arg.index()];
@@ -3077,8 +4092,8 @@ const TypeChecker = struct {
         bindings: []GenericTypeBinding,
     ) !void {
         const query = self.import_query orelse return;
-        const target_item_index = try query.item_index(query.context, target_module_id);
-        const target_typecheck = try query.module_typecheck(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
+        const target_typecheck = try query.moduleTypeCheck(target_module_id);
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -3088,7 +4103,10 @@ const TypeChecker = struct {
         imported_checker.item_types = target_typecheck.item_types;
         imported_checker.item_regions = target_typecheck.item_regions;
         imported_checker.item_effects = target_typecheck.item_effects;
+        imported_checker.item_modifies = target_typecheck.item_modifies;
         imported_checker.pattern_types = target_typecheck.pattern_types;
+        imported_checker.pattern_initializers = target_typecheck.pattern_initializers;
+        imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
         imported_checker.expr_effects = target_typecheck.expr_effects;
@@ -3096,7 +4114,7 @@ const TypeChecker = struct {
         imported_checker.current_function_item = null;
 
         for (args, runtime_params) |arg, param| {
-            const expected_type: Type = imported_checker.resolveTypeExprWithBindings(param.type_expr, bindings) catch .{ .unknown = {} };
+            const expected_type: Type = try imported_checker.resolveTypeExprWithBindings(param.type_expr, bindings);
             if (expected_type.kind() == .unknown) continue;
             try self.contextualizeLiteral(arg, expected_type);
             const arg_type = self.expr_types[arg.index()];
@@ -3262,31 +4280,52 @@ const TypeChecker = struct {
         };
     }
 
-    fn importedTypeArgFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?Type {
+    fn importedTypeArgFromExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?Type {
         return switch (self.file.expression(expr_id).*) {
             .Field => |field| blk: {
-                const module_id = self.importedModuleForExpr(field.base) orelse break :blk null;
-                break :blk self.importedItemType(module_id, field.name);
+                const module_id = (try self.importedModuleForExpr(field.base)) orelse break :blk null;
+                break :blk try self.importedItemType(module_id, field.name);
             },
-            .Group => |group| self.importedTypeArgFromExpr(group.expr),
+            .Group => |group| try self.importedTypeArgFromExpr(group.expr),
             else => null,
         };
     }
 
     fn exprIntegerText(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
+        return self.signedExprIntegerText(expr_id, .positive);
+    }
+
+    const ExprIntegerSign = enum { positive, negative };
+
+    fn signedExprIntegerText(self: *const TypeChecker, expr_id: ast.ExprId, sign: ExprIntegerSign) ?[]const u8 {
         return switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
-            .Group => |group| self.exprIntegerText(group.expr),
+            .IntegerLiteral => |literal| self.normalizedExprIntegerText(sign, literal.text),
+            .Group => |group| self.signedExprIntegerText(group.expr, sign),
+            .Unary => |unary| if (unary.op == .neg)
+                self.signedExprIntegerText(unary.operand, switch (sign) {
+                    .positive => .negative,
+                    .negative => .positive,
+                })
+            else
+                null,
             else => null,
         };
     }
 
-    fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
+    fn normalizedExprIntegerText(self: *const TypeChecker, sign: ExprIntegerSign, text: []const u8) ?[]const u8 {
+        const trimmed = std.mem.trim(u8, text, " \t\n\r");
+        return switch (sign) {
+            .positive => trimmed,
+            .negative => std.fmt.allocPrint(self.arena, "-{s}", .{trimmed}) catch null,
+        };
+    }
+
+    fn genericBindingValueForCallArg(self: *const TypeChecker, parameter: ast.Parameter, arg_expr: ast.ExprId) !?GenericBindingValue {
         if (self.isGenericTypeParameter(parameter)) {
             if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
-            if (self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
+            if (try self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
@@ -3299,12 +4338,12 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn genericBindingValueForImportedCallArg(self: *const TypeChecker, target_file: *const ast.AstFile, parameter: ast.Parameter, arg_expr: ast.ExprId) ?GenericBindingValue {
+    fn genericBindingValueForImportedCallArg(self: *const TypeChecker, target_file: *const ast.AstFile, parameter: ast.Parameter, arg_expr: ast.ExprId) !?GenericBindingValue {
         if (self.isGenericTypeParameterInFile(target_file, parameter)) {
             if (self.typeArgTypeFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
-            if (self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
+            if (try self.importedTypeArgFromExpr(arg_expr)) |arg_type| {
                 if (arg_type.kind() != .unknown) return .{ .ty = arg_type };
             }
             const arg_name = self.typeArgNameFromExpr(arg_expr) orelse return null;
@@ -3348,7 +4387,7 @@ const TypeChecker = struct {
         bindings: []const GenericTypeBinding,
     ) anyerror!void {
         const query = self.import_query orelse return;
-        const target_item_index = try query.item_index(query.context, target_module_id);
+        const target_item_index = try query.itemIndex(target_module_id);
         try self.validateGenericTraitBoundsInIndex(function, call_range, bindings, target_item_index);
     }
 
@@ -3393,9 +4432,9 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn comptimeIntegerParameter(self: *const TypeChecker, parameter: ast.Parameter) bool {
+    fn comptimeIntegerParameter(self: *const TypeChecker, parameter: ast.Parameter) !bool {
         if (!parameter.is_comptime) return false;
-        const ty = descriptorFromTypeExpr(self.arena, self.file, self.item_index, parameter.type_expr) catch Type{ .unknown = {} };
+        const ty = try descriptorFromTypeExpr(self.arena, self.file, self.item_index, parameter.type_expr);
         return ty.kind() == .integer;
     }
 
@@ -3524,6 +4563,43 @@ const TypeChecker = struct {
         };
     }
 
+    fn namedTypeExprName(self: *const TypeChecker, type_expr: ast.TypeExprId) ?[]const u8 {
+        return switch (self.file.typeExpr(type_expr).*) {
+            .Path => |path| std.mem.trim(u8, path.name, " \t\n\r"),
+            else => null,
+        };
+    }
+
+    fn errorUnionErrorDisplayType(self: *const TypeChecker, type_expr: ast.TypeExprId) Type {
+        const qualified = self.namedTypeExprName(type_expr) orelse return .{ .unknown = {} };
+        const name = if (std.mem.lastIndexOfScalar(u8, qualified, '.')) |dot_index|
+            qualified[dot_index + 1 ..]
+        else
+            qualified;
+        if (name.len == 0) return .{ .unknown = {} };
+        return .{ .named = .{ .name = name } };
+    }
+
+    fn checkErrorUnionErrorName(self: *TypeChecker, error_type: ast.TypeExprId) !bool {
+        const range = self.typeExprRange(error_type);
+        const name = self.namedTypeExprName(error_type) orelse {
+            try self.emitInvalidErrorUnionErrorName(range);
+            return false;
+        };
+        if (self.lookupErrorItemInScope(name) != null) return true;
+        if (try self.importedPathIsErrorDecl(name)) return true;
+        {
+            try self.emitUndefinedErrorName(range, name);
+            return false;
+        }
+    }
+
+    fn checkErrorUnionErrorNames(self: *TypeChecker, eu: ast.ErrorUnionTypeExpr, valid_errors: []bool) !void {
+        for (eu.errors, 0..) |error_type, index| {
+            valid_errors[index] = try self.checkErrorUnionErrorName(error_type);
+        }
+    }
+
     fn substituteGenericArgs(self: *TypeChecker, args: []const ast.TypeArg, bindings: []const GenericTypeBinding) ![]const ast.TypeArg {
         const resolved = try self.arena.alloc(ast.TypeArg, args.len);
         for (args, 0..) |arg, index| {
@@ -3559,32 +4635,58 @@ const TypeChecker = struct {
         };
     }
 
+    fn descriptorFromTypeItem(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        name: []const u8,
+        bindings: []const GenericTypeBinding,
+    ) !?Type {
+        return switch (self.file.item(item_id).*) {
+            .Contract => .{ .contract = .{ .name = name } },
+            .Struct => .{ .struct_ = .{ .name = name } },
+            .Bitfield => .{ .bitfield = .{ .name = name } },
+            .Enum => .{ .enum_ = .{ .name = name } },
+            .ErrorDecl => .{ .named = .{ .name = name } },
+            .TypeAlias => |type_alias| try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
+            else => null,
+        };
+    }
+
+    fn resolvePathTypeName(
+        self: *TypeChecker,
+        range: source.TextRange,
+        raw_name: []const u8,
+        bindings: []const GenericTypeBinding,
+    ) !Type {
+        const trimmed = std.mem.trim(u8, raw_name, " \t\n\r");
+        if (refinements.isPathFormName(trimmed)) {
+            return .{ .refinement = .{
+                .name = refinements.nameForKind(.non_zero_address),
+                .base_type = try self.storeType(.{ .address = {} }),
+                .args = &.{},
+            } };
+        }
+        for (bindings) |binding| {
+            if (!std.mem.eql(u8, trimmed, binding.name)) continue;
+            if (genericBindingType(binding)) |bound_type| return bound_type;
+        }
+        if (descriptors.invalidIntegerTypeName(trimmed)) {
+            try self.emitInvalidIntegerTypeName(range, trimmed);
+            return .{ .unknown = {} };
+        }
+        if (descriptors.descriptorFromBuiltinName(trimmed)) |ty| return ty;
+        if (descriptors.parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
+        if (try self.importedTypeForPath(trimmed)) |imported_type| return imported_type;
+        if (self.lookupTypeItemInScope(trimmed)) |item_id| {
+            if (try self.descriptorFromTypeItem(item_id, trimmed, bindings)) |ty| return ty;
+        }
+        try self.emitUndefinedTypeName(range, trimmed);
+        return .{ .unknown = {} };
+    }
+
     fn resolveTypeExprWithBindings(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) anyerror!Type {
         return switch (self.file.typeExpr(type_expr).*) {
-            .Path => |path| blk: {
-                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
-                if (refinements.isPathFormName(trimmed)) {
-                    break :blk .{ .refinement = .{
-                        .name = "NonZeroAddress",
-                        .base_type = try self.storeType(.{ .address = {} }),
-                        .args = &.{},
-                    } };
-                }
-                for (bindings) |binding| {
-                    if (!std.mem.eql(u8, trimmed, binding.name)) continue;
-                    if (genericBindingType(binding)) |bound_type| break :blk bound_type;
-                }
-                if (self.importedTypeForPath(trimmed)) |imported_type| {
-                    break :blk imported_type;
-                }
-                if (self.item_index.lookup(trimmed)) |item_id| {
-                    switch (self.file.item(item_id).*) {
-                        .TypeAlias => |type_alias| break :blk try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
-                        else => {},
-                    }
-                }
-                break :blk descriptorFromPathName(self.file, self.item_index, trimmed);
-            },
+            .Path => |path| try self.resolvePathTypeName(path.range, path.name, bindings),
             .Generic => |generic| self.resolveGenericTypeWithBindings(generic, bindings),
             .Tuple => |tuple| blk: {
                 const elements = try self.arena.alloc(Type, tuple.elements.len);
@@ -3611,8 +4713,14 @@ const TypeChecker = struct {
                 .element_type = try self.storeType(try self.resolveTypeExprWithBindings(slice.element, bindings)),
             } },
             .ErrorUnion => |error_union| blk: {
+                const valid_errors = try self.arena.alloc(bool, error_union.errors.len);
+                try self.checkErrorUnionErrorNames(error_union, valid_errors);
                 const errors = try self.arena.alloc(Type, error_union.errors.len);
                 for (error_union.errors, 0..) |error_type, index| {
+                    if (!valid_errors[index]) {
+                        errors[index] = self.errorUnionErrorDisplayType(error_type);
+                        continue;
+                    }
                     errors[index] = try self.resolveTypeExprWithBindings(error_type, bindings);
                 }
                 break :blk .{ .error_union = .{
@@ -3629,7 +4737,11 @@ const TypeChecker = struct {
     }
 
     fn resolveGenericTypeWithBindings(self: *TypeChecker, generic: ast.GenericTypeExpr, bindings: []const GenericTypeBinding) anyerror!Type {
-        if (self.importedTypeForPath(generic.name)) |imported_type| {
+        if (descriptors.invalidIntegerTypeName(generic.name)) {
+            try self.emitInvalidIntegerTypeName(generic.range, generic.name);
+            return .{ .unknown = {} };
+        }
+        if (try self.importedTypeForPath(generic.name)) |imported_type| {
             return imported_type;
         }
         if (self.lookupTypeItemInScope(generic.name)) |item_id| {
@@ -3689,7 +4801,7 @@ const TypeChecker = struct {
             }
 
             const payload_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
-            const error_type = try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings);
+            const error_type = try self.resolveResultErrorTypeExpr(generic.args[1].Type, bindings);
             if (error_type.kind() != .unknown and error_type.kind() != .named) {
                 try self.emitRangeError(generic.range, "Result<T, E> currently requires a named error type for E", .{});
                 return .{ .unknown = {} };
@@ -3706,19 +4818,82 @@ const TypeChecker = struct {
         if (refinements.isKnownName(generic.name)) {
             if (generic.args.len > 0 and generic.args[0] == .Type) {
                 const resolved_args = try self.substituteGenericArgs(generic.args, bindings);
+                const semantic_args = try refinementArgsFromAst(self.arena, resolved_args);
+                const base_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+                if (!try self.validateRefinementGenericBounds(generic.range, generic.name, base_type, semantic_args)) {
+                    return .{ .unknown = {} };
+                }
                 return .{ .refinement = .{
                     .name = generic.name,
-                    .base_type = try self.storeType(try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings)),
-                    .args = resolved_args,
+                    .base_type = try self.storeType(base_type),
+                    .args = semantic_args,
                 } };
             }
         }
 
         if (bindings.len == 0) {
-            return descriptorFromGenericType(self.arena, self.file, self.item_index, generic);
+            return self.resolvePathTypeName(generic.range, generic.name, bindings);
         }
 
-        return descriptorFromPathName(self.file, self.item_index, generic.name);
+        return self.resolvePathTypeName(generic.range, generic.name, bindings);
+    }
+
+    fn resolveResultErrorTypeExpr(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) !Type {
+        if (self.file.typeExpr(type_expr).* == .Path) {
+            const path = self.file.typeExpr(type_expr).Path;
+            const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+            if (std.mem.eql(u8, trimmed, "AbiDecodeError")) return abiDecodeErrorType();
+        }
+        return self.resolveTypeExprWithBindings(type_expr, bindings);
+    }
+
+    fn validateRefinementGenericBounds(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        base_type: Type,
+        args: []const model.RefinementArg,
+    ) !bool {
+        var local_base = base_type;
+        const refinement: model.RefinementType = .{
+            .name = name,
+            .base_type = &local_base,
+            .args = args,
+        };
+        const info = refinements.bounds(refinement) orelse return true;
+        const signed = refinementIntegerBaseSignedness(info.base_type) orelse return true;
+        if (signed) return true;
+
+        if (negativeIntegerText(info.min_text) orelse negativeIntegerText(info.max_text)) |bound| {
+            try self.emitRangeError(
+                range,
+                "{s} bound {s} is negative; {s} base requires non-negative bound",
+                .{ name, bound, refinementIntegerBaseName(info.base_type) },
+            );
+            return false;
+        }
+        return true;
+    }
+
+    fn refinementIntegerBaseSignedness(ty: Type) ?bool {
+        return switch (ty) {
+            .refinement => |refinement| refinementIntegerBaseSignedness(refinement.base_type.*),
+            .integer => |integer| integer.signed,
+            else => null,
+        };
+    }
+
+    fn refinementIntegerBaseName(ty: Type) []const u8 {
+        return switch (ty) {
+            .refinement => |refinement| refinementIntegerBaseName(refinement.base_type.*),
+            .integer => |integer| integer.spelling orelse "unsigned integer",
+            else => "unsigned integer",
+        };
+    }
+
+    fn negativeIntegerText(text: ?[]const u8) ?[]const u8 {
+        const raw = std.mem.trim(u8, text orelse return null, " \t\n\r");
+        return if (std.mem.startsWith(u8, raw, "-")) raw else null;
     }
 
     fn lookupTypeItemInScope(self: *const TypeChecker, name: []const u8) ?ast.ItemId {
@@ -3726,17 +4901,13 @@ const TypeChecker = struct {
         if (self.current_contract) |contract_id| {
             if (contract_id.index() >= self.file.items.len or self.file.item(contract_id).* != .Contract) {
                 if (self.item_index.lookup(trimmed)) |item_id| return item_id;
-            } else {
-                const contract = self.file.item(contract_id).Contract;
-                for (contract.members) |member_id| {
-                    switch (self.file.item(member_id).*) {
-                        .Struct => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .Enum => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .Bitfield => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        .TypeAlias => |item| if (std.mem.eql(u8, item.name, trimmed)) return member_id,
-                        else => {},
-                    }
-                }
+            } else if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, trimmed, .{
+                .struct_ = true,
+                .enum_ = true,
+                .bitfield = true,
+                .type_alias = true,
+            })) |member_id| {
+                return member_id;
             }
         }
         if (self.item_index.lookup(trimmed)) |item_id| return item_id;
@@ -3746,6 +4917,29 @@ const TypeChecker = struct {
                 .Enum => |enum_item| if (std.mem.eql(u8, enum_item.name, trimmed)) return ast.ItemId.fromIndex(index),
                 .Bitfield => |bitfield_item| if (std.mem.eql(u8, bitfield_item.name, trimmed)) return ast.ItemId.fromIndex(index),
                 .TypeAlias => |type_alias| if (std.mem.eql(u8, type_alias.name, trimmed)) return ast.ItemId.fromIndex(index),
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn lookupErrorItemInScope(self: *const TypeChecker, name: []const u8) ?ast.ItemId {
+        const trimmed = std.mem.trim(u8, name, " \t\n\r");
+        if (self.current_contract) |contract_id| {
+            if (contract_id.index() < self.file.items.len and self.file.item(contract_id).* == .Contract) {
+                if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, trimmed, .{
+                    .error_decl = true,
+                })) |member_id| {
+                    return member_id;
+                }
+            }
+        }
+        if (self.item_index.lookup(trimmed)) |item_id| {
+            if (self.file.item(item_id).* == .ErrorDecl) return item_id;
+        }
+        for (self.file.items, 0..) |item, index| {
+            switch (item) {
+                .ErrorDecl => |error_decl| if (std.mem.eql(u8, error_decl.name, trimmed)) return ast.ItemId.fromIndex(index),
                 else => {},
             }
         }
@@ -3782,16 +4976,12 @@ const TypeChecker = struct {
         const variant_name = name[dot_index + 1 ..];
 
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants) |variant| {
-                if (std.mem.eql(u8, variant.name, variant_name)) {
-                    return .{
-                        .enum_type = .{ .enum_ = .{ .name = enum_name } },
-                        .variant_name = variant_name,
-                        .payload_type = variant.payload_type,
-                    };
-                }
-            }
-            return null;
+            const variant = instantiated.variantByName(variant_name) orelse return null;
+            return .{
+                .enum_type = .{ .enum_ = .{ .name = enum_name } },
+                .variant_name = variant_name,
+                .payload_type = variant.payload_type,
+            };
         }
 
         const item_id = self.lookupTypeItemInScope(enum_name) orelse return null;
@@ -3799,16 +4989,12 @@ const TypeChecker = struct {
             .Enum => |enum_item| enum_item,
             else => return null,
         };
-        for (enum_item.variants) |variant| {
-            if (std.mem.eql(u8, variant.name, variant_name)) {
-                return .{
-                    .enum_type = .{ .enum_ = .{ .name = enum_item.name } },
-                    .variant_name = variant_name,
-                    .payload_type = self.resolveEnumVariantPayloadType(variant.payload, &.{}) catch return null,
-                };
-            }
-        }
-        return null;
+        const variant_index = self.item_index.lookupEnumVariantIndex(item_id, variant_name) orelse return null;
+        return .{
+            .enum_type = .{ .enum_ = .{ .name = enum_item.name } },
+            .variant_name = variant_name,
+            .payload_type = self.resolveEnumVariantPayloadType(enum_item.variants[variant_index].payload, &.{}) catch return null,
+        };
     }
 
     fn checkEnumVariantStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !void {
@@ -3829,53 +5015,55 @@ const TypeChecker = struct {
         for (struct_literal.fields) |init| {
             const existing = try seen_fields.fetchPut(init.name, {});
             if (existing != null) {
-                try self.emitRangeError(init.range, "duplicate field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+                try self.emitAdtVariantFieldRange(init.range, .duplicate, init.name, info.variant_name);
             }
         }
 
         const payload_fields = payload_type.anonymous_struct.fields;
+        const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.arena, struct_literal.fields, "name");
         for (payload_fields) |field| {
-            const init = self.findStructLiteralField(struct_literal.fields, field.name) orelse {
-                try self.emitExprError(expr_id, "missing field '{s}' for ADT variant '{s}'", .{ field.name, info.variant_name });
+            const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field.name) orelse {
+                try self.emitAdtVariantFieldExpr(expr_id, .missing, field.name, info.variant_name);
                 continue;
             };
             try self.contextualizeLiteral(init.value, field.ty);
             const actual = self.expr_types[init.value.index()];
             if (!typesFlowCompatible(field.ty, actual) and actual.kind() != .unknown) {
-                try self.emitExprError(init.value, "expected type '{s}', found '{s}'", .{
-                    diagnosticTypeDisplayName(self, field.ty),
-                    diagnosticTypeDisplayName(self, actual),
-                });
+                try self.emitExpectedTypeFoundExpr(init.value, field.ty, actual);
             }
         }
 
         for (struct_literal.fields) |init| {
-            if (self.findAnonymousStructField(payload_fields, init.name) == null) {
-                try self.emitRangeError(init.range, "unknown field '{s}' for ADT variant '{s}'", .{ init.name, info.variant_name });
+            if (model.anonymousStructFieldByName(payload_fields, init.name) == null) {
+                try self.emitAdtVariantFieldRange(init.range, .unknown, init.name, info.variant_name);
             }
         }
     }
 
-    fn findStructLiteralField(self: *const TypeChecker, fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
-        _ = self;
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
-        }
-        return null;
-    }
-
-    fn findAnonymousStructField(self: *const TypeChecker, fields: []const model.AnonymousStructField, name: []const u8) ?model.AnonymousStructField {
-        _ = self;
-        for (fields) |field| {
-            if (std.mem.eql(u8, field.name, name)) return field;
-        }
-        return null;
-    }
-
     fn contextualizeLiteral(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type) !void {
+        switch (try self.resolveIntegerExpression(self.exprRange(expr_id), expr_id, expected_type)) {
+            .not_applicable => {},
+            .resolved, .overflow => return,
+        }
+        if (try self.resolveAddressLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
+
         const expr = self.file.expression(expr_id).*;
         switch (expr) {
             .Group => |group| return self.contextualizeLiteral(group.expr, expected_type),
+            .Comptime => |comptime_expr| {
+                const body = self.file.body(comptime_expr.body).*;
+                if (body.statements.len == 0) return;
+                const value_expr = switch (self.file.statement(body.statements[body.statements.len - 1]).*) {
+                    .Expr => |expr_stmt| expr_stmt.expr,
+                    .Return => |ret| ret.value orelse return,
+                    else => return,
+                };
+                try self.contextualizeLiteral(value_expr, expected_type);
+                const actual_type = self.expr_types[value_expr.index()];
+                if (actual_type.kind() != .unknown and !typesFlowCompatible(expected_type, actual_type)) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
+            .IntegerLiteral => {},
             .Call => |call| {
                 if (!self.isResultConstructorCall(call, "Ok")) {
                     if (!self.isResultConstructorCall(call, "Err")) return;
@@ -3919,6 +5107,12 @@ const TypeChecker = struct {
                 }
                 self.expr_types[expr_id.index()] = expected_type;
             },
+            .BytesLiteral => |literal| {
+                if (expected_type.kind() != .fixed_bytes) return;
+                if (literal.text.len % 2 != 0) return;
+                if (literal.text.len / 2 != expected_type.fixed_bytes.len) return;
+                self.expr_types[expr_id.index()] = expected_type;
+            },
             .StructLiteral => |struct_literal| {
                 if (struct_literal.type_expr != null or struct_literal.type_name.len != 0) return;
                 self.expr_types[expr_id.index()] = expected_type;
@@ -3951,6 +5145,47 @@ const TypeChecker = struct {
         };
     }
 
+    fn exprIsResultConstructor(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsResultConstructor(group.expr),
+            .Call => |call| self.isResultConstructorCall(call, "Ok") or self.isResultConstructorCall(call, "Err"),
+            else => false,
+        };
+    }
+
+    fn switchArmResultType(self: *const TypeChecker, condition_type: Type, expr_id: ast.ExprId) Type {
+        const actual_type = self.expr_types[expr_id.index()];
+        if (condition_type.kind() == .error_union and actual_type.kind() == .unknown and self.exprIsResultConstructor(expr_id)) {
+            return condition_type;
+        }
+        return actual_type;
+    }
+
+    fn emitSwitchBranchTypeMismatch(self: *TypeChecker, expr_id: ast.ExprId, condition_type: Type, lhs: Type, rhs: Type) !void {
+        if (condition_type.kind() == .error_union) {
+            const lhs_is_error_union = unwrapRefinement(lhs).kind() == .error_union;
+            const rhs_is_error_union = unwrapRefinement(rhs).kind() == .error_union;
+            if (lhs_is_error_union != rhs_is_error_union) {
+                try self.emitExprError(expr_id, "match expression arms have incompatible types '{s}' and '{s}'; wrap success values with Ok(...) or use try", .{
+                    diagnosticTypeDisplayName(self, lhs),
+                    diagnosticTypeDisplayName(self, rhs),
+                });
+                return;
+            }
+
+            try self.emitExprError(expr_id, "match expression arms have incompatible types '{s}' and '{s}'", .{
+                diagnosticTypeDisplayName(self, lhs),
+                diagnosticTypeDisplayName(self, rhs),
+            });
+            return;
+        }
+
+        try self.emitExprError(expr_id, "switch expression branches have incompatible types '{s}' and '{s}'", .{
+            diagnosticTypeDisplayName(self, lhs),
+            diagnosticTypeDisplayName(self, rhs),
+        });
+    }
+
     fn instantiateGenericStruct(
         self: *TypeChecker,
         item_id: ast.ItemId,
@@ -3969,10 +5204,11 @@ const TypeChecker = struct {
                     .ty = try self.resolveTypeExprWithBindings(field.type_expr, bindings),
                 };
             }
-            try self.instantiated_structs.append(self.arena, .{
+            try self.appendInstantiatedStruct(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .fields = fields,
+                .field_lookup = try lookup_index.buildNamed(InstantiatedStructField, self.arena, fields, "name"),
             });
         }
 
@@ -4013,10 +5249,15 @@ const TypeChecker = struct {
     }
 
     fn instantiatedStructByName(self: *const TypeChecker, name: []const u8) ?InstantiatedStruct {
-        for (self.instantiated_structs.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_struct_lookup.get(name) orelse return null;
+        return self.instantiated_structs.items[index];
+    }
+
+    fn appendInstantiatedStruct(self: *TypeChecker, instantiated: InstantiatedStruct) !void {
+        std.debug.assert(self.instantiated_struct_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_structs.items.len;
+        try self.instantiated_structs.append(self.arena, instantiated);
+        try self.instantiated_struct_lookup.put(instantiated.mangled_name, index);
     }
 
     fn instantiateGenericEnum(
@@ -4030,14 +5271,16 @@ const TypeChecker = struct {
         const mangled_name = try self.mangleGenericStructName(enum_item.name, bindings);
 
         if (self.instantiatedEnumByName(mangled_name) == null) {
-            try self.instantiated_enums.append(self.arena, .{
+            const variants = try self.resolveEnumVariantPayloads(enum_item, bindings);
+            try self.appendInstantiatedEnum(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .repr_type = if (enum_item.base_type) |type_expr|
                     try self.resolveTypeExprWithBindings(type_expr, bindings)
                 else
                     null,
-                .variants = try self.resolveEnumVariantPayloads(enum_item, bindings),
+                .variants = variants,
+                .variant_lookup = try lookup_index.buildNamed(model.InstantiatedEnumVariant, self.arena, variants, "name"),
             });
         }
 
@@ -4064,8 +5307,8 @@ const TypeChecker = struct {
         if (enumBytesLiteralText(self.file, expr_id)) |bytes| return .{ .bytes = bytes };
         const value = self.const_eval.values[expr_id.index()] orelse return null;
         return switch (value) {
-            .integer => |integer| .{ .integer = integer.toInt(i64) catch return null },
-            .boolean => |boolean| .{ .integer = if (boolean) 1 else 0 },
+            .integer => |integer| .{ .integer = integer },
+            .boolean => |boolean| .{ .integer = BigInt.initSet(self.arena, @as(i64, @intFromBool(boolean))) catch return null },
             .string => |string| .{ .string = string },
             else => null,
         };
@@ -4122,10 +5365,15 @@ const TypeChecker = struct {
     }
 
     fn instantiatedEnumByName(self: *const TypeChecker, name: []const u8) ?InstantiatedEnum {
-        for (self.instantiated_enums.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_enum_lookup.get(name) orelse return null;
+        return self.instantiated_enums.items[index];
+    }
+
+    fn appendInstantiatedEnum(self: *TypeChecker, instantiated: InstantiatedEnum) !void {
+        std.debug.assert(self.instantiated_enum_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_enums.items.len;
+        try self.instantiated_enums.append(self.arena, instantiated);
+        try self.instantiated_enum_lookup.put(instantiated.mangled_name, index);
     }
 
     fn enumHasPayload(self: *const TypeChecker, name: []const u8) bool {
@@ -4166,7 +5414,7 @@ const TypeChecker = struct {
                     .width = field.width,
                 };
             }
-            try self.instantiated_bitfields.append(self.arena, .{
+            try self.appendInstantiatedBitfield(.{
                 .template_item_id = item_id,
                 .mangled_name = mangled_name,
                 .base_type = if (bitfield_item.base_type) |type_expr|
@@ -4174,6 +5422,7 @@ const TypeChecker = struct {
                 else
                     null,
                 .fields = fields,
+                .field_lookup = try lookup_index.buildNamed(InstantiatedBitfieldField, self.arena, fields, "name"),
             });
         }
 
@@ -4262,7 +5511,7 @@ const TypeChecker = struct {
             };
             return .{ .ty = ty };
         }
-        if (self.comptimeIntegerParameter(parameter)) {
+        if (try self.comptimeIntegerParameter(parameter)) {
             const integer = self.resolveIntegerGenericArg(arg, outer_bindings) orelse return invalid_instantiation;
             return .{ .integer = integer };
         }
@@ -4270,82 +5519,166 @@ const TypeChecker = struct {
     }
 
     fn instantiatedBitfieldByName(self: *const TypeChecker, name: []const u8) ?InstantiatedBitfield {
-        for (self.instantiated_bitfields.items) |instantiated| {
-            if (std.mem.eql(u8, instantiated.mangled_name, name)) return instantiated;
-        }
-        return null;
+        const index = self.instantiated_bitfield_lookup.get(name) orelse return null;
+        return self.instantiated_bitfields.items[index];
     }
 
-    fn builtinReturnType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
-        if (std.mem.eql(u8, builtin.name, "cast") or
-            std.mem.eql(u8, builtin.name, "bitCast") or
-            std.mem.eql(u8, builtin.name, "truncate"))
-        {
-            if (builtin.type_arg) |type_expr| return descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_expr) catch .{ .unknown = {} };
-            if (std.mem.eql(u8, builtin.name, "truncate") and builtin.args.len > 0) {
-                return self.expr_types[builtin.args[0].index()];
-            }
-            return .{ .unknown = {} };
-        }
+    fn appendInstantiatedBitfield(self: *TypeChecker, instantiated: InstantiatedBitfield) !void {
+        std.debug.assert(self.instantiated_bitfield_lookup.get(instantiated.mangled_name) == null);
+        const index = self.instantiated_bitfields.items.len;
+        try self.instantiated_bitfields.append(self.arena, instantiated);
+        try self.instantiated_bitfield_lookup.put(instantiated.mangled_name, index);
+    }
 
-        if (builtin.args.len > 0 and (std.mem.eql(u8, builtin.name, "divTrunc") or
-            std.mem.eql(u8, builtin.name, "divFloor") or
-            std.mem.eql(u8, builtin.name, "divCeil") or
-            std.mem.eql(u8, builtin.name, "divExact")))
-        {
-            return self.builtinDivisionOperandType(builtin);
-        }
+    fn builtinReturnType(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !Type {
+        return switch (kind) {
+            .cast, .bit_cast, .truncate => {
+                if (builtin.type_arg) |type_expr| return try self.resolveTypeExprInCurrentContext(type_expr);
+                if (kind == .truncate and builtin.args.len > 0) {
+                    return self.expr_types[builtin.args[0].index()];
+                }
+                return .{ .unknown = {} };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "divmod")) {
-            const value_type = self.builtinDivisionOperandType(builtin);
-            if (value_type.kind() != .unknown) {
-                const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
-                tuple_types[0] = value_type;
-                tuple_types[1] = value_type;
-                return .{ .tuple = tuple_types };
-            }
-            return .{ .unknown = {} };
-        }
+            .div_trunc, .div_floor, .div_ceil, .div_exact => {
+                if (builtin.args.len > 0) return self.builtinDivisionOperandType(builtin);
+                return .{ .unknown = {} };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "addWithOverflow") or
-            std.mem.eql(u8, builtin.name, "subWithOverflow") or
-            std.mem.eql(u8, builtin.name, "mulWithOverflow") or
-            std.mem.eql(u8, builtin.name, "divWithOverflow") or
-            std.mem.eql(u8, builtin.name, "modWithOverflow") or
-            std.mem.eql(u8, builtin.name, "negWithOverflow") or
-            std.mem.eql(u8, builtin.name, "shlWithOverflow") or
-            std.mem.eql(u8, builtin.name, "shrWithOverflow") or
-            std.mem.eql(u8, builtin.name, "powerWithOverflow"))
-        {
-            if (builtin.args.len > 0) {
+            .divmod => {
+                const value_type = self.builtinDivisionOperandType(builtin);
+                if (value_type.kind() != .unknown) {
+                    const tuple_types = try self.arena.alloc(Type, 2);
+                    tuple_types[0] = value_type;
+                    tuple_types[1] = value_type;
+                    return .{ .tuple = tuple_types };
+                }
+                return .{ .unknown = {} };
+            },
+
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .div_with_overflow,
+            .mod_with_overflow,
+            .neg_with_overflow,
+            .shl_with_overflow,
+            .shr_with_overflow,
+            .power_with_overflow,
+            => {
+                if (builtin.args.len > 0) {
+                    const value_type = self.expr_types[builtin.args[0].index()];
+                    const tuple_types = try self.arena.alloc(Type, 2);
+                    tuple_types[0] = value_type;
+                    tuple_types[1] = .{ .bool = {} };
+                    return .{ .tuple = tuple_types };
+                }
+                return .{ .unknown = {} };
+            },
+
+            .size_of, .keccak256, .chain_id => descriptorFromPathName(self.file, self.item_index, "u256"),
+
+            .abi_encode => .{ .bytes = {} },
+
+            .abi_decode, .abi_decode_permissive => {
+                const target_type = if (builtin.type_arg) |type_arg|
+                    try self.resolveTypeExprInCurrentContext(type_arg)
+                else blk: {
+                    if (builtin.args.len == 0) return .{ .unknown = {} };
+                    break :blk self.expr_types[builtin.args[0].index()];
+                };
+                const payload_type = try self.arena.alloc(Type, 1);
+                payload_type[0] = target_type;
+                const error_types = try self.arena.alloc(Type, 1);
+                error_types[0] = .{ .named = .{ .name = "AbiDecodeError" } };
+                return .{ .error_union = .{
+                    .payload_type = &payload_type[0],
+                    .error_types = error_types,
+                } };
+            },
+
+            .selector => .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } },
+
+            .event_topic => .{ .fixed_bytes = .{ .len = 32, .spelling = "bytes32" } },
+
+            .compile_error => .{ .never = {} },
+
+            .struct_fields => try self.reflectionSliceType(try self.structFieldReflectionType()),
+
+            .trait_methods => try self.reflectionSliceType(try self.traitMethodReflectionType()),
+
+            .concat, .slice => {
+                if (builtin.args.len == 0) return .{ .unknown = {} };
                 const value_type = self.expr_types[builtin.args[0].index()];
-                const tuple_types = self.arena.alloc(Type, 2) catch return .{ .unknown = {} };
-                tuple_types[0] = value_type;
-                tuple_types[1] = .{ .bool = {} };
-                return .{ .tuple = tuple_types };
-            }
-            return .{ .unknown = {} };
-        }
+                return switch (value_type.kind()) {
+                    .string => .{ .string = {} },
+                    .bytes => .{ .bytes = {} },
+                    else => .{ .unknown = {} },
+                };
+            },
 
-        if (std.mem.eql(u8, builtin.name, "sizeOf") or std.mem.eql(u8, builtin.name, "keccak256")) {
-            return descriptorFromPathName(self.file, self.item_index, "u256");
-        }
+            .type_name, .abi_signature => .{ .string = {} },
 
-        if (std.mem.eql(u8, builtin.name, "typeName")) {
-            return .{ .string = {} };
-        }
+            .lock, .unlock => .{ .unknown = {} },
+        };
+    }
 
-        return .{ .unknown = {} };
+    fn reflectionTypeType(self: *const TypeChecker) Type {
+        _ = self;
+        return .{ .named = .{ .name = "type" } };
+    }
+
+    fn reflectionSliceType(self: *const TypeChecker, element: Type) !Type {
+        const stored = try self.arena.create(Type);
+        stored.* = element;
+        return .{ .slice = .{ .element_type = stored } };
+    }
+
+    fn structFieldReflectionType(self: *const TypeChecker) !Type {
+        const fields = try self.arena.alloc(model.AnonymousStructField, 2);
+        fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
+        fields[1] = .{ .name = "type", .ty = self.reflectionTypeType() };
+        return .{ .anonymous_struct = .{ .fields = fields } };
+    }
+
+    fn traitMethodReflectionType(self: *const TypeChecker) !Type {
+        const type_element = try self.arena.create(Type);
+        type_element.* = self.reflectionTypeType();
+
+        const string_element = try self.arena.create(Type);
+        string_element.* = .{ .string = {} };
+
+        // Keep this field order in sync with buildTraitMethodsCtValue.
+        const fields = try self.arena.alloc(model.AnonymousStructField, 7);
+        fields[0] = .{ .name = "name", .ty = .{ .string = {} } };
+        fields[1] = .{ .name = "params", .ty = .{ .slice = .{ .element_type = type_element } } };
+        fields[2] = .{ .name = "return_type", .ty = self.reflectionTypeType() };
+        fields[3] = .{ .name = "has_self", .ty = .{ .bool = {} } };
+        fields[4] = .{ .name = "call_kind", .ty = .{ .string = {} } };
+        fields[5] = .{ .name = "declared_errors", .ty = .{ .slice = .{ .element_type = string_element } } };
+        fields[6] = .{ .name = "selector", .ty = .{ .fixed_bytes = .{ .len = 4, .spelling = "bytes4" } } };
+        return .{ .anonymous_struct = .{ .fields = fields } };
     }
 
     fn builtinDivisionOperandType(self: *const TypeChecker, builtin: ast.BuiltinExpr) Type {
         if (builtin.args.len == 0) return .{ .unknown = {} };
-        const lhs = self.expr_types[builtin.args[0].index()];
-        if (builtin.args.len < 2) return lhs;
-        const rhs = self.expr_types[builtin.args[1].index()];
-        const lhs_expr = self.file.expression(builtin.args[0]).*;
-        const rhs_expr = self.file.expression(builtin.args[1]).*;
-        if (lhs_expr == .IntegerLiteral and rhs_expr != .IntegerLiteral and rhs.kind() == .integer) return rhs;
+        const lhs_expr_id = builtin.args[0];
+        const lhs = self.expr_types[lhs_expr_id.index()];
+        if (builtin.args.len < 2) {
+            if (self.exprCanAdoptIntegerContext(lhs_expr_id) and unwrapRefinement(lhs).kind() == .comptime_integer) return u256Type();
+            return lhs;
+        }
+
+        const rhs_expr_id = builtin.args[1];
+        const rhs = self.expr_types[rhs_expr_id.index()];
+        const lhs_base = unwrapRefinement(lhs);
+        const rhs_base = unwrapRefinement(rhs);
+        const lhs_adopts = self.exprCanAdoptIntegerContext(lhs_expr_id) and lhs_base.kind() == .comptime_integer;
+        const rhs_adopts = self.exprCanAdoptIntegerContext(rhs_expr_id) and rhs_base.kind() == .comptime_integer;
+
+        if (lhs_adopts and rhs_base.kind() == .integer) return rhs;
+        if (rhs_adopts and lhs_base.kind() == .integer) return lhs;
+        if (lhs_adopts and rhs_adopts) return u256Type();
         return lhs;
     }
 
@@ -4354,6 +5687,12 @@ const TypeChecker = struct {
         self.current_function_item = item_id;
         defer self.current_function_item = previous_function_item;
         var state = EffectCollectorState.init();
+        for (function.clauses) |clause| {
+            switch (clause.kind) {
+                .requires, .guard, .ensures, .ensures_ok, .ensures_err => try self.collectExprEffects(clause.expr, &state),
+                .invariant, .modifies => {},
+            }
+        }
         try self.collectBodyEffects(function.body, &state);
         return self.effectFromState(state);
     }
@@ -4576,70 +5915,58 @@ const TypeChecker = struct {
     }
 
     fn validateExprExternalCalls(self: *TypeChecker, expr_id: ast.ExprId, state: *ExternalCallValidationState) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Call => |call| {
-                try self.validateExprExternalCalls(call.callee, state);
-                for (call.args) |arg| try self.validateExprExternalCalls(arg, state);
-
-                if (self.externProxyMethodSignature(call.callee)) |method| {
-                    if (method.extern_call_kind == .call) {
-                        try self.mergeStorageSlots(&state.frozen_pre_call_writes, state.current_writes.items);
-                    }
-                    return;
-                }
-
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                            const writes = self.effectWrites(self.item_effects[callee_id.index()]);
-                            try self.emitExternalCallWriteDiagnostics(call.range, writes, state.frozen_pre_call_writes.items);
-                            try self.mergeStorageSlots(&state.current_writes, writes);
-                        },
-                        else => {},
-                    }
-                }
-            },
-            .Unary => |unary| try self.validateExprExternalCalls(unary.operand, state),
-            .Binary => |binary| {
-                try self.validateExprExternalCalls(binary.lhs, state);
-                try self.validateExprExternalCalls(binary.rhs, state);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprExternalCalls(element, state),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprExternalCalls(element, state),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprExternalCalls(field.value, state),
-            .Switch => |switch_expr| {
-                try self.validateExprExternalCalls(switch_expr.condition, state);
-                for (switch_expr.arms) |arm| {
-                    try self.validateSwitchPatternExternalCalls(arm.pattern, state);
-                    try self.validateExprExternalCalls(arm.value, state);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.validateExprExternalCalls(else_expr, state);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprExternalCalls(arg, state),
-            .Field => |field| try self.validateExprExternalCalls(field.base, state),
-            .Index => |index| {
-                try self.validateExprExternalCalls(index.base, state);
-                try self.validateExprExternalCalls(index.index, state);
-            },
-            .Group => |group| try self.validateExprExternalCalls(group.expr, state),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
+        var visitor = ExternalCallExprValidator{
+            .checker = self,
+            .state = state,
+        };
+        try ast.walk.walkExpr(ExternalCallExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternExternalCalls(self: *TypeChecker, pattern: ast.SwitchPattern, state: *ExternalCallValidationState) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.validateExprExternalCalls(expr_id, state),
-            .Range => |range_pattern| {
-                try self.validateExprExternalCalls(range_pattern.start, state);
-                try self.validateExprExternalCalls(range_pattern.end, state);
-            },
-            .NamedError => |named_error| try self.validateExprExternalCalls(named_error.callee, state),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternExternalCalls(alternative, state),
-            .Ok, .Err, .Else => {},
-        }
+        var visitor = ExternalCallExprValidator{
+            .checker = self,
+            .state = state,
+        };
+        try ast.walk.walkSwitchPattern(ExternalCallExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
+
+    const validation_expr_walk_options: ast.walk.WalkOptions = .{
+        .walk_pattern_bindings = false,
+        .walk_external_proxy_exprs = false,
+        .walk_error_return_args = false,
+        .walk_old_exprs = false,
+    };
+
+    const ExternalCallExprValidator = struct {
+        checker: *TypeChecker,
+        state: *ExternalCallValidationState,
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Call => |call| {
+                    if (self.checker.externProxyMethodSignature(call.callee)) |method| {
+                        if (method.extern_call_kind == .call) {
+                            try self.checker.mergeStorageSlots(&self.state.frozen_pre_call_writes, self.state.current_writes.items);
+                        }
+                        return;
+                    }
+
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| {
+                                try self.checker.ensureFunctionEffectSummary(callee_id, function);
+                                const writes = self.checker.item_effects[callee_id.index()].writeSlots();
+                                try self.checker.emitExternalCallWriteDiagnostics(call.range, writes, self.state.frozen_pre_call_writes.items);
+                                try self.checker.mergeStorageSlots(&self.state.current_writes, writes);
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    };
 
     fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
         switch (self.file.statement(statement_id).*) {
@@ -4723,11 +6050,11 @@ const TypeChecker = struct {
             },
             .Lock => |lock_stmt| {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
-                if (self.lockSlotForExpr(lock_stmt.path)) |slot| try self.appendUniqueSlot(locked_slots, slot);
+                if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueSlot(locked_slots, slot);
             },
             .Unlock => |unlock_stmt| {
                 try self.validateExprLocks(unlock_stmt.path, locked_slots);
-                if (self.lockSlotForExpr(unlock_stmt.path)) |slot| self.removeLockedSlot(locked_slots, slot);
+                if (try self.runtimeLockSlotForExpr(unlock_stmt.path, "`@unlock`")) |slot| self.removeLockedSlot(locked_slots, slot);
             },
             .Assign => |assign| {
                 try self.validateExprLocks(assign.value, locked_slots);
@@ -4739,61 +6066,38 @@ const TypeChecker = struct {
     }
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Call => |call| {
-                try self.validateExprLocks(call.callee, locked_slots);
-                for (call.args) |arg| try self.validateExprLocks(arg, locked_slots);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                        },
-                        else => {},
-                    }
-                } else if (self.callableType(call.callee).kind() == .function) {
-                    try self.emitUnknownLockedCallDiagnostics(call.range, locked_slots.items);
-                }
-            },
-            .Unary => |unary| try self.validateExprLocks(unary.operand, locked_slots),
-            .Binary => |binary| {
-                try self.validateExprLocks(binary.lhs, locked_slots);
-                try self.validateExprLocks(binary.rhs, locked_slots);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.validateExprLocks(element, locked_slots),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.validateExprLocks(element, locked_slots),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.validateExprLocks(field.value, locked_slots),
-            .Switch => |switch_expr| {
-                try self.validateExprLocks(switch_expr.condition, locked_slots);
-                for (switch_expr.arms) |arm| {
-                    try self.validateSwitchPatternLocks(arm.pattern, locked_slots);
-                    try self.validateExprLocks(arm.value, locked_slots);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.validateExprLocks(else_expr, locked_slots);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.validateExprLocks(arg, locked_slots),
-            .Field => |field| try self.validateExprLocks(field.base, locked_slots),
-            .Index => |index| {
-                try self.validateExprLocks(index.base, locked_slots);
-                try self.validateExprLocks(index.index, locked_slots);
-            },
-            .Group => |group| try self.validateExprLocks(group.expr, locked_slots),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .ErrorReturn, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
+        _ = locked_slots;
+        var visitor = LockExprValidator{
+            .checker = self,
+        };
+        try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.validateExprLocks(expr_id, locked_slots),
-            .Range => |range_pattern| {
-                try self.validateExprLocks(range_pattern.start, locked_slots);
-                try self.validateExprLocks(range_pattern.end, locked_slots);
-            },
-            .NamedError => |named_error| try self.validateExprLocks(named_error.callee, locked_slots),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.validateSwitchPatternLocks(alternative, locked_slots),
-            .Ok, .Err, .Else => {},
-        }
+        _ = locked_slots;
+        var visitor = LockExprValidator{
+            .checker = self,
+        };
+        try ast.walk.walkSwitchPattern(LockExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
+
+    const LockExprValidator = struct {
+        checker: *TypeChecker,
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Call => |call| {
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| try self.checker.ensureFunctionEffectSummary(callee_id, function),
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    };
 
     fn statementExpr(self: *TypeChecker, statement_id: ast.StmtId) ?ast.ExprId {
         return switch (self.file.statement(statement_id).*) {
@@ -4821,25 +6125,58 @@ const TypeChecker = struct {
         };
     }
 
+    fn runtimeLockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId, op_name: []const u8) !?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.runtimeLockSlotForExpr(group.expr, op_name),
+            .Name => |name| blk: {
+                const slot = self.lookupNamedFieldSlot(name.name) orelse break :blk null;
+                if (slot.region != .storage) {
+                    try self.emitExprError(expr_id, "{s} v1 only supports current-contract storage paths", .{op_name});
+                    break :blk null;
+                }
+                break :blk slot;
+            },
+            .Index => |index| blk: {
+                const base_expr = switch (self.file.expression(index.base).*) {
+                    .Group => |group| group.expr,
+                    else => index.base,
+                };
+                const base = switch (self.file.expression(base_expr).*) {
+                    .Name => |name| self.lookupNamedFieldSlot(name.name) orelse break :blk null,
+                    else => {
+                        try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths", .{op_name});
+                        break :blk null;
+                    },
+                };
+                if (base.region != .storage) {
+                    try self.emitExprError(expr_id, "{s} v1 only supports current-contract storage paths", .{op_name});
+                    break :blk null;
+                }
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
+            .Field => {
+                try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths; struct-field locks are not runtime-lowered yet", .{op_name});
+                return null;
+            },
+            else => {
+                try self.emitExprError(expr_id, "{s} v1 only supports storage roots or single-key indexed storage paths", .{op_name});
+                return null;
+            },
+        };
+    }
+
     fn emitLockedWriteDiagnostics(self: *TypeChecker, range: source.TextRange, writes: []const EffectSlot, locked_slots: []const EffectSlot) !void {
         for (writes) |write_slot| {
             for (locked_slots) |locked_slot| {
                 if (!self.effectSlotsMayAlias(write_slot, locked_slot)) continue;
-                try self.emitRangeError(range, "cannot write locked {s} slot '{s}'", .{
+                const message = try diag_messages.lockedWrite(
+                    self.arena,
                     region_rules.regionDisplayName(write_slot.region),
                     write_slot.name,
-                });
+                );
+                try self.emitRangeMessage(range, message);
                 break;
             }
-        }
-    }
-
-    fn emitUnknownLockedCallDiagnostics(self: *TypeChecker, range: source.TextRange, locked_slots: []const EffectSlot) !void {
-        for (locked_slots) |locked_slot| {
-            try self.emitRangeError(range, "unresolved call may write locked {s} slot '{s}'", .{
-                region_rules.regionDisplayName(locked_slot.region),
-                locked_slot.name,
-            });
         }
     }
 
@@ -4848,134 +6185,48 @@ const TypeChecker = struct {
             if (write_slot.region != .storage) continue;
             for (frozen_pre_call_writes) |frozen_slot| {
                 if (!self.effectSlotsMayAlias(write_slot, frozen_slot)) continue;
-                try self.emitRangeError(range, "cannot write storage slot '{s}' after external call because it was written before the call", .{
-                    write_slot.name,
-                });
+                const message = try diag_messages.externalCallWriteAfterPreWrite(self.arena, write_slot.name);
+                try self.emitRangeMessage(range, message);
                 break;
             }
         }
-    }
-
-    fn effectWrites(self: *TypeChecker, effect: Effect) []const EffectSlot {
-        _ = self;
-        return switch (effect) {
-            .pure, .external, .side_effects, .reads => &.{},
-            .writes => |write_effect| write_effect.slots,
-            .reads_writes => |read_write| read_write.writes,
-        };
-    }
-
-    fn effectHasExternal(self: *TypeChecker, effect: Effect) bool {
-        _ = self;
-        return switch (effect) {
-            .pure => false,
-            .external => true,
-            .side_effects => |side_effects| side_effects.has_external,
-            .reads => |read_effect| read_effect.has_external,
-            .writes => |write_effect| write_effect.has_external,
-            .reads_writes => |read_write| read_write.has_external,
-        };
-    }
-
-    fn effectHasLog(self: *TypeChecker, effect: Effect) bool {
-        _ = self;
-        return switch (effect) {
-            .pure, .external => false,
-            .side_effects => |side_effects| side_effects.has_log,
-            .reads => |read_effect| read_effect.has_log,
-            .writes => |write_effect| write_effect.has_log,
-            .reads_writes => |read_write| read_write.has_log,
-        };
-    }
-
-    fn effectHasHavoc(self: *TypeChecker, effect: Effect) bool {
-        _ = self;
-        return switch (effect) {
-            .pure, .external => false,
-            .side_effects => |side_effects| side_effects.has_havoc,
-            .reads => |read_effect| read_effect.has_havoc,
-            .writes => |write_effect| write_effect.has_havoc,
-            .reads_writes => |read_write| read_write.has_havoc,
-        };
-    }
-
-    fn effectHasLock(self: *TypeChecker, effect: Effect) bool {
-        _ = self;
-        return switch (effect) {
-            .pure, .external => false,
-            .side_effects => |side_effects| side_effects.has_lock,
-            .reads => |read_effect| read_effect.has_lock,
-            .writes => |write_effect| write_effect.has_lock,
-            .reads_writes => |read_write| read_write.has_lock,
-        };
-    }
-
-    fn effectHasUnlock(self: *TypeChecker, effect: Effect) bool {
-        _ = self;
-        return switch (effect) {
-            .pure, .external => false,
-            .side_effects => |side_effects| side_effects.has_unlock,
-            .reads => |read_effect| read_effect.has_unlock,
-            .writes => |write_effect| write_effect.has_unlock,
-            .reads_writes => |read_write| read_write.has_unlock,
-        };
     }
 
     const EffectCollectorState = struct {
         reads: std.ArrayList(EffectSlot) = .{},
         writes: std.ArrayList(EffectSlot) = .{},
-        has_external: bool = false,
-        has_log: bool = false,
-        has_havoc: bool = false,
-        has_lock: bool = false,
-        has_unlock: bool = false,
+        flags: EffectFlags = .{},
 
         fn init() EffectCollectorState {
             return .{};
         }
+
+        fn mergeFlags(self: *EffectCollectorState, flags: EffectFlags) void {
+            self.flags.merge(flags);
+        }
+    };
+
+    const effect_collector_walk_options: ast.walk.WalkOptions = .{
+        .walk_assignment_target_patterns = false,
+        .walk_pattern_bindings = false,
+        .walk_external_proxy_exprs = false,
+        .walk_old_exprs = false,
     };
 
     fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var clone: std.ArrayList(EffectSlot) = .{};
-        for (items) |item| try clone.append(self.arena, item);
-        return clone;
-    }
-
-    fn mergeLockedSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
-        for (src) |slot| try self.appendUniqueSlot(dst, slot);
+        return unique_list.clone(EffectSlot, self.arena, items);
     }
 
     fn mergeStorageSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
-        for (src) |slot| {
-            if (slot.region != .storage) continue;
-            try self.appendUniqueSlot(dst, slot);
-        }
+        try unique_list.mergeUnique(EffectSlot, self.arena, dst, src, effectSlotEql, effectSlotIsStorage);
     }
 
     fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var result: std.ArrayList(EffectSlot) = .{};
-        for (lhs) |lhs_slot| {
-            for (rhs) |rhs_slot| {
-                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
-                try result.append(self.arena, lhs_slot);
-                break;
-            }
-        }
-        return result;
+        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, null);
     }
 
     fn intersectStorageSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        var result: std.ArrayList(EffectSlot) = .{};
-        for (lhs) |lhs_slot| {
-            if (lhs_slot.region != .storage) continue;
-            for (rhs) |rhs_slot| {
-                if (rhs_slot.region != .storage) continue;
-                if (!effectSlotEql(lhs_slot, rhs_slot)) continue;
-                try result.append(self.arena, lhs_slot);
-                break;
-            }
-        }
-        return result;
+        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, effectSlotIsStorage);
     }
 
     fn removeLockedSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) void {
@@ -4989,186 +6240,127 @@ const TypeChecker = struct {
         }
     }
 
-    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, has_external: bool, has_log: bool, has_havoc: bool, has_lock: bool, has_unlock: bool) Effect {
+    fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, flags: EffectFlags) Effect {
         if (reads.len == 0 and writes.len == 0) {
-            if (has_external and !has_log and !has_havoc) return .external;
-            if (has_external or has_log or has_havoc or has_lock or has_unlock) return .{ .side_effects = .{
-                .has_external = has_external,
-                .has_log = has_log,
-                .has_havoc = has_havoc,
-                .has_lock = has_lock,
-                .has_unlock = has_unlock,
-            } };
+            if (flags.externalOnly()) return .external;
+            if (flags.any()) return .{ .side_effects = flags };
             return .pure;
         }
         if (reads.len == 0) return .{ .writes = .{
             .slots = writes,
-            .has_external = has_external,
-            .has_log = has_log,
-            .has_havoc = has_havoc,
-            .has_lock = has_lock,
-            .has_unlock = has_unlock,
+            .flags = flags,
         } };
         if (writes.len == 0) return .{ .reads = .{
             .slots = reads,
-            .has_external = has_external,
-            .has_log = has_log,
-            .has_havoc = has_havoc,
-            .has_lock = has_lock,
-            .has_unlock = has_unlock,
+            .flags = flags,
         } };
         return .{ .reads_writes = .{
             .reads = reads,
             .writes = writes,
-            .has_external = has_external,
-            .has_log = has_log,
-            .has_havoc = has_havoc,
-            .has_lock = has_lock,
-            .has_unlock = has_unlock,
+            .flags = flags,
         } };
     }
 
     fn effectFromState(self: *TypeChecker, state: EffectCollectorState) Effect {
         _ = self;
-        return buildEffect(state.reads.items, state.writes.items, state.has_external, state.has_log, state.has_havoc, state.has_lock, state.has_unlock);
+        return buildEffect(state.reads.items, state.writes.items, state.flags);
     }
 
     fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, state: *EffectCollectorState) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| {
-            try self.collectStmtEffects(statement_id, state);
-        }
-    }
-
-    fn collectStmtEffects(self: *TypeChecker, statement_id: ast.StmtId, state: *EffectCollectorState) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| {
-                try self.collectExprEffects(expr_id, state);
-            },
-            .Return => |ret| if (ret.value) |expr_id| {
-                try self.collectExprEffects(expr_id, state);
-            },
-            .If => |if_stmt| {
-                try self.collectExprEffects(if_stmt.condition, state);
-                try self.collectBodyEffects(if_stmt.then_body, state);
-                if (if_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, state);
-            },
-            .While => |while_stmt| {
-                try self.collectExprEffects(while_stmt.condition, state);
-                for (while_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, state);
-                try self.collectBodyEffects(while_stmt.body, state);
-            },
-            .For => |for_stmt| {
-                try self.collectExprEffects(for_stmt.iterable, state);
-                if (for_stmt.range_end) |end_expr| try self.collectExprEffects(end_expr, state);
-                for (for_stmt.invariants) |expr_id| try self.collectExprEffects(expr_id, state);
-                try self.collectBodyEffects(for_stmt.body, state);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprEffects(switch_stmt.condition, state);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternEffects(arm.pattern, state);
-                    try self.collectBodyEffects(arm.body, state);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyEffects(else_body, state);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyEffects(try_stmt.try_body, state);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyEffects(catch_clause.body, state);
-            },
-            .Log => |log_stmt| {
-                state.has_log = true;
-                for (log_stmt.args) |arg| try self.collectExprEffects(arg, state);
-            },
-            .Havoc => state.has_havoc = true,
-            .Lock => state.has_lock = true,
-            .Unlock => state.has_unlock = true,
-            .Break => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
-            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprEffects(expr_id, state),
-            .Assert => |assert_stmt| try self.collectExprEffects(assert_stmt.condition, state),
-            .Assume => |assume_stmt| try self.collectExprEffects(assume_stmt.condition, state),
-            .Assign => |assign| {
-                try self.collectExprEffects(assign.value, state);
-                try self.collectPatternTargetEffects(assign.target, assign.op, state);
-            },
-            .Expr => |expr_stmt| try self.collectExprEffects(expr_stmt.expr, state),
-            .Block => |block| try self.collectBodyEffects(block.body, state),
-            .LabeledBlock => |block| try self.collectBodyEffects(block.body, state),
-            .Error => {},
-        }
+        var visitor = EffectCollector{
+            .checker = self,
+            .root = state,
+        };
+        try ast.walk.walkBody(EffectCollector, &visitor, self.file, body_id, effect_collector_walk_options);
     }
 
     fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) anyerror!void {
-        var expr_state = EffectCollectorState.init();
-        switch (self.file.expression(expr_id).*) {
-            .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .TypeValue, .Result, .Error => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprEffects(element, &expr_state),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprEffects(element, &expr_state),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprEffects(field.value, &expr_state),
-            .Switch => |switch_expr| {
-                try self.collectExprEffects(switch_expr.condition, &expr_state);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternEffects(arm.pattern, &expr_state);
-                    try self.collectExprEffects(arm.value, &expr_state);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprEffects(else_expr, &expr_state);
-            },
-            .Comptime, .ExternalProxy => {},
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprEffects(arg, &expr_state),
-            .Name => {
-                if (self.fieldSlotForBinding(self.resolution.expr_bindings[expr_id.index()])) |slot| {
-                    try self.appendUniqueSlot(&expr_state.reads, slot);
-                }
-            },
-            .Unary => |unary| try self.collectExprEffects(unary.operand, &expr_state),
-            .Binary => |binary| {
-                try self.collectExprEffects(binary.lhs, &expr_state);
-                try self.collectExprEffects(binary.rhs, &expr_state);
-            },
-            .Call => |call| {
-                try self.collectExprEffects(call.callee, &expr_state);
-                for (call.args) |arg| try self.collectExprEffects(arg, &expr_state);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| {
-                    switch (self.file.item(callee_id).*) {
-                        .Function => |function| {
-                            try self.ensureFunctionEffectSummary(callee_id, function);
-                            try self.mergeEffect(&expr_state, self.item_effects[callee_id.index()]);
-                        },
-                        else => {},
-                    }
-                } else if (self.callableType(call.callee).kind() == .function) {
-                    expr_state.has_external = true;
-                }
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprEffects(arg, &expr_state),
-            .Field => |field| try self.collectExprEffects(field.base, &expr_state),
-            .Index => |index| {
-                try self.collectExprEffects(index.index, &expr_state);
-                if (self.lockSlotForExpr(expr_id)) |slot| {
-                    try self.appendUniqueSlot(&expr_state.reads, slot);
-                } else {
-                    try self.collectExprEffects(index.base, &expr_state);
-                }
-            },
-            .Group => |group| try self.collectExprEffects(group.expr, &expr_state),
-            .Old, .Quantified => {},
-        }
-        self.expr_effects[expr_id.index()] = self.effectFromState(expr_state);
-        try self.mergeEffect(state, self.expr_effects[expr_id.index()]);
+        var visitor = EffectCollector{
+            .checker = self,
+            .root = state,
+        };
+        try ast.walk.walkExpr(EffectCollector, &visitor, self.file, expr_id, effect_collector_walk_options);
     }
 
-    fn collectSwitchPatternEffects(self: *TypeChecker, pattern: ast.SwitchPattern, state: *EffectCollectorState) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprEffects(expr_id, state),
-            .Range => |range_pattern| {
-                try self.collectExprEffects(range_pattern.start, state);
-                try self.collectExprEffects(range_pattern.end, state);
-            },
-            .NamedError => |named_error| try self.collectExprEffects(named_error.callee, state),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternEffects(alternative, state),
-            .Ok, .Err, .Else => {},
+    const EffectCollector = struct {
+        checker: *TypeChecker,
+        root: *EffectCollectorState,
+        expr_stack: std.ArrayList(EffectCollectorState) = .{},
+
+        fn current(self: *@This()) *EffectCollectorState {
+            if (self.expr_stack.items.len == 0) return self.root;
+            return &self.expr_stack.items[self.expr_stack.items.len - 1];
         }
-    }
+
+        pub fn enterStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!ast.walk.WalkControl {
+            switch (file.statement(statement_id).*) {
+                .Log => self.current().flags.has_log = true,
+                .Havoc => self.current().flags.has_havoc = true,
+                .Lock => {
+                    self.current().flags.has_lock = true;
+                    return .skip_children;
+                },
+                .Unlock => {
+                    self.current().flags.has_unlock = true;
+                    return .skip_children;
+                },
+                else => {},
+            }
+            return .descend;
+        }
+
+        pub fn exitStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!void {
+            switch (file.statement(statement_id).*) {
+                .Assign => |assign| try self.checker.collectPatternTargetEffects(assign.target, assign.op, self.current()),
+                else => {},
+            }
+        }
+
+        pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
+            try self.expr_stack.append(self.checker.arena, EffectCollectorState.init());
+            switch (file.expression(expr_id).*) {
+                .Index => |index| {
+                    try ast.walk.walkExpr(EffectCollector, self, file, index.index, effect_collector_walk_options);
+                    if (self.checker.lockSlotForExpr(expr_id)) |slot| {
+                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                    } else {
+                        try ast.walk.walkExpr(EffectCollector, self, file, index.base, effect_collector_walk_options);
+                    }
+                    return .skip_children;
+                },
+                else => return .descend,
+            }
+        }
+
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            switch (file.expression(expr_id).*) {
+                .Name => {
+                    if (self.checker.fieldSlotForBinding(self.checker.resolution.expr_bindings[expr_id.index()])) |slot| {
+                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                    }
+                },
+                .Call => |call| {
+                    if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                        switch (self.checker.file.item(callee_id).*) {
+                            .Function => |function| {
+                                try self.checker.ensureFunctionEffectSummary(callee_id, function);
+                                try self.checker.mergeEffect(self.current(), self.checker.item_effects[callee_id.index()]);
+                            },
+                            else => {},
+                        }
+                    } else if (self.checker.callableType(call.callee).kind() == .function) {
+                        self.current().flags.has_external = true;
+                    }
+                },
+                else => {},
+            }
+
+            const expr_state = self.expr_stack.pop() orelse unreachable;
+            const effect = self.checker.effectFromState(expr_state);
+            self.checker.expr_effects[expr_id.index()] = effect;
+            try self.checker.mergeEffect(self.current(), effect);
+        }
+    };
 
     fn collectPatternTargetEffects(self: *TypeChecker, pattern_id: ast.PatternId, op: ast.AssignmentOp, state: *EffectCollectorState) anyerror!void {
         switch (self.file.pattern(pattern_id).*) {
@@ -5179,7 +6371,12 @@ const TypeChecker = struct {
                 }
             },
             .Field => |field| {
-                try self.collectPatternTargetEffects(field.base, .add_assign, state);
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueSlot(&state.writes, slot);
+                } else {
+                    try self.collectPatternTargetEffects(field.base, .add_assign, state);
+                }
             },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
@@ -5202,7 +6399,13 @@ const TypeChecker = struct {
                     try self.appendUniqueSlot(&state.reads, slot);
                 }
             },
-            .Field => |field| try self.collectPatternExprReads(field.base, state),
+            .Field => |field| {
+                if (self.patternFieldSlot(pattern_id)) |slot| {
+                    try self.appendUniqueSlot(&state.reads, slot);
+                } else {
+                    try self.collectPatternExprReads(field.base, state);
+                }
+            },
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
                 if (self.patternFieldSlot(pattern_id)) |slot| {
@@ -5219,7 +6422,10 @@ const TypeChecker = struct {
     fn patternFieldSlot(self: *TypeChecker, pattern_id: ast.PatternId) ?EffectSlot {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| self.lookupNamedFieldSlot(name.name),
-            .Field => |field| self.patternFieldSlot(field.base),
+            .Field => |field| blk: {
+                const base = self.patternFieldSlot(field.base) orelse break :blk null;
+                break :blk self.slotWithField(base, field.name);
+            },
             .Index => |index| blk: {
                 const base = self.patternFieldSlot(index.base) orelse break :blk null;
                 break :blk self.slotWithIndexKey(base, index.index);
@@ -5247,28 +6453,19 @@ const TypeChecker = struct {
 
     fn lookupNamedFieldSlot(self: *TypeChecker, name: []const u8) ?EffectSlot {
         if (self.current_contract) |contract_id| {
-            const contract = self.file.item(contract_id).Contract;
-            for (contract.members) |member_id| {
-                switch (self.file.item(member_id).*) {
-                    .Field => |field| {
-                        if (field.storage_class == .none) continue;
-                        if (std.mem.eql(u8, field.name, name)) return .{
-                            .name = field.name,
-                            .region = declarationRegion(field.storage_class),
-                        };
-                    },
-                    else => {},
-                }
+            if (self.item_index.lookupContractMemberWithRoles(self.file, contract_id, name, .{ .field = true })) |member_id| {
+                const field = self.file.item(member_id).Field;
+                if (field.storage_class != .none) return .{
+                    .name = field.name,
+                    .region = declarationRegion(field.storage_class),
+                };
             }
         }
         return self.fieldSlotForBinding(if (self.item_index.lookup(name)) |item_id| .{ .item = item_id } else null);
     }
 
     fn appendUniqueSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) !void {
-        for (slots.items) |existing| {
-            if (effectSlotEql(existing, slot)) return;
-        }
-        try slots.append(self.arena, slot);
+        try unique_list.appendUnique(EffectSlot, self.arena, slots, slot, effectSlotEql);
     }
 
     fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
@@ -5282,7 +6479,18 @@ const TypeChecker = struct {
         return slot;
     }
 
+    fn slotWithField(self: *TypeChecker, base: EffectSlot, field_name: []const u8) ?EffectSlot {
+        const base_len: usize = if (base.field_path) |path| path.len else 0;
+        const path = self.arena.alloc([]const u8, base_len + 1) catch return null;
+        if (base.field_path) |existing| @memcpy(path[0..existing.len], existing);
+        path[base_len] = field_name;
+        var slot = base;
+        slot.field_path = path;
+        return slot;
+    }
+
     fn keySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) KeySegment {
+        if (self.environmentKeySegmentForExpr(expr_id)) |segment| return segment;
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.keySegmentForExpr(group.expr),
             .Name => blk: {
@@ -5290,7 +6498,7 @@ const TypeChecker = struct {
                     switch (binding) {
                         .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id)) |index| {
                             break :blk .{ .parameter = index };
-                        },
+                        } else if (self.localAliasEnvironmentKeySegment(pattern_id)) |segment| break :blk segment,
                         .item => {},
                     }
                 }
@@ -5301,17 +6509,80 @@ const TypeChecker = struct {
             .AddressLiteral => |literal| .{ .constant = literal.text },
             .BytesLiteral => |literal| .{ .constant = literal.text },
             .BoolLiteral => |literal| .{ .constant = if (literal.value) "true" else "false" },
-            .Field => |field| blk: {
-                const base = self.file.expression(field.base).*;
-                if (base == .Name and std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) {
-                    break :blk .self_ref;
-                }
-                if (base == .Name and std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")) {
-                    break :blk .self_ref;
-                }
-                break :blk .unknown;
-            },
             else => .unknown,
+        };
+    }
+
+    fn localAliasEnvironmentKeySegment(self: *TypeChecker, pattern_id: ast.PatternId) ?KeySegment {
+        const binding_kind = self.pattern_binding_kinds[pattern_id.index()] orelse return null;
+        switch (binding_kind) {
+            .let_, .constant, .immutable => {},
+            .var_ => return null,
+        }
+        const value = self.initializerExprForPattern(pattern_id) orelse return null;
+        return self.environmentKeySegmentForExpr(value);
+    }
+
+    fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.environmentKeySegmentForExpr(group.expr),
+            .Call => |call| if (call.args.len == 0) self.environmentKeySegmentForExpr(call.callee) else null,
+            .Field => blk: {
+                const msg_sender_paths = [_][]const []const u8{
+                    &.{ "msg", "sender" },
+                    &.{ "std", "msg", "sender" },
+                    &.{ "std", "transaction", "sender" },
+                };
+                for (msg_sender_paths) |path| {
+                    if (self.exprPathMatches(expr_id, path)) break :blk .msg_sender;
+                }
+                const tx_origin_paths = [_][]const []const u8{
+                    &.{ "tx", "origin" },
+                    &.{ "std", "tx", "origin" },
+                };
+                for (tx_origin_paths) |path| {
+                    if (self.exprPathMatches(expr_id, path)) break :blk .tx_origin;
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+    }
+
+    fn environmentIntrinsicValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {
+        const address_paths = [_][]const []const u8{
+            &.{ "std", "msg", "sender" },
+            &.{ "std", "transaction", "sender" },
+            &.{ "std", "tx", "origin" },
+            &.{ "std", "block", "coinbase" },
+        };
+        for (address_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return addressType();
+        }
+
+        const integer_paths = [_][]const []const u8{
+            &.{ "std", "msg", "value" },
+            &.{ "std", "transaction", "gasprice" },
+            &.{ "std", "block", "timestamp" },
+            &.{ "std", "block", "number" },
+        };
+        for (integer_paths) |path| {
+            if (self.exprPathMatches(expr_id, path)) return u256Type();
+        }
+
+        return null;
+    }
+
+    fn exprPathMatches(self: *TypeChecker, expr_id: ast.ExprId, components: []const []const u8) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprPathMatches(group.expr, components),
+            .Name => |name| components.len == 1 and std.mem.eql(u8, name.name, components[0]),
+            .Field => |field| blk: {
+                if (components.len < 2) break :blk false;
+                if (!std.mem.eql(u8, field.name, components[components.len - 1])) break :blk false;
+                break :blk self.exprPathMatches(field.base, components[0 .. components.len - 1]);
+            },
+            else => false,
         };
     }
 
@@ -5327,50 +6598,29 @@ const TypeChecker = struct {
         return null;
     }
 
+    fn parameterNameForIndex(self: *const TypeChecker, parameter_index: u32) ?[]const u8 {
+        const function_item = self.current_function_item orelse return null;
+        const function = switch (self.file.item(function_item).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        const index: usize = @intCast(parameter_index);
+        if (index >= function.parameters.len) return null;
+        return self.patternName(function.parameters[index].pattern);
+    }
+
     fn effectSlotsMayAlias(self: *const TypeChecker, lhs: EffectSlot, rhs: EffectSlot) bool {
         _ = self;
         if (lhs.region != rhs.region) return false;
         if (!std.mem.eql(u8, lhs.name, rhs.name)) return false;
+        if (!fieldPathsMayAlias(lhs.field_path, rhs.field_path)) return false;
         return keyPathsMayAlias(lhs.key_path, rhs.key_path);
     }
 
     fn mergeEffect(self: *TypeChecker, state: *EffectCollectorState, effect: Effect) !void {
-        switch (effect) {
-            .pure => {},
-            .external => state.has_external = true,
-            .side_effects => |side_effects| {
-                state.has_external = state.has_external or side_effects.has_external;
-                state.has_log = state.has_log or side_effects.has_log;
-                state.has_havoc = state.has_havoc or side_effects.has_havoc;
-                state.has_lock = state.has_lock or side_effects.has_lock;
-                state.has_unlock = state.has_unlock or side_effects.has_unlock;
-            },
-            .reads => |read_effect| {
-                state.has_external = state.has_external or read_effect.has_external;
-                state.has_log = state.has_log or read_effect.has_log;
-                state.has_havoc = state.has_havoc or read_effect.has_havoc;
-                state.has_lock = state.has_lock or read_effect.has_lock;
-                state.has_unlock = state.has_unlock or read_effect.has_unlock;
-                for (read_effect.slots) |slot| try self.appendUniqueSlot(&state.reads, slot);
-            },
-            .writes => |write_effect| {
-                state.has_external = state.has_external or write_effect.has_external;
-                state.has_log = state.has_log or write_effect.has_log;
-                state.has_havoc = state.has_havoc or write_effect.has_havoc;
-                state.has_lock = state.has_lock or write_effect.has_lock;
-                state.has_unlock = state.has_unlock or write_effect.has_unlock;
-                for (write_effect.slots) |slot| try self.appendUniqueSlot(&state.writes, slot);
-            },
-            .reads_writes => |read_write| {
-                state.has_external = state.has_external or read_write.has_external;
-                state.has_log = state.has_log or read_write.has_log;
-                state.has_havoc = state.has_havoc or read_write.has_havoc;
-                state.has_lock = state.has_lock or read_write.has_lock;
-                state.has_unlock = state.has_unlock or read_write.has_unlock;
-                for (read_write.reads) |slot| try self.appendUniqueSlot(&state.reads, slot);
-                for (read_write.writes) |slot| try self.appendUniqueSlot(&state.writes, slot);
-            },
-        }
+        state.mergeFlags(effect.flags());
+        for (effect.readSlots()) |slot| try self.appendUniqueSlot(&state.reads, slot);
+        for (effect.writeSlots()) |slot| try self.appendUniqueSlot(&state.writes, slot);
     }
 
     fn calleeFunctionItem(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
@@ -5388,18 +6638,8 @@ const TypeChecker = struct {
             .Field => |field| blk: {
                 const base_type = self.expr_types[field.base.index()];
                 const contract_item_id = self.itemIdForType(base_type) orelse break :blk null;
-                switch (self.file.item(contract_item_id).*) {
-                    .Contract => |contract| {
-                        for (contract.members) |member_id| {
-                            switch (self.file.item(member_id).*) {
-                                .Function => |function| if (std.mem.eql(u8, function.name, field.name)) break :blk member_id,
-                                else => {},
-                            }
-                        }
-                    },
-                    else => {},
-                }
-                break :blk null;
+                if (self.file.item(contract_item_id).* != .Contract) break :blk null;
+                break :blk self.item_index.lookupContractMemberWithRoles(self.file, contract_item_id, field.name, .{ .function = true });
             },
             .Group => |group| self.calleeFunctionItem(group.expr),
             else => null,
@@ -5410,142 +6650,39 @@ const TypeChecker = struct {
         const previous_function_item = self.current_function_item;
         self.current_function_item = item_id;
         defer self.current_function_item = previous_function_item;
-        try self.collectBodyDirectCallees(function.body, callees);
+
+        var visitor = DirectCalleeCollector{
+            .checker = self,
+            .callees = callees,
+        };
+        try ast.walk.walkBody(DirectCalleeCollector, &visitor, self.file, function.body, .{
+            .walk_pattern_bindings = false,
+            .walk_external_proxy_exprs = false,
+            .walk_old_exprs = false,
+        });
     }
 
-    fn collectBodyDirectCallees(self: *TypeChecker, body_id: ast.BodyId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| try self.collectStmtDirectCallees(statement_id, callees);
-    }
+    const DirectCalleeCollector = struct {
+        checker: *TypeChecker,
+        callees: *std.ArrayList(ast.ItemId),
 
-    fn collectStmtDirectCallees(self: *TypeChecker, statement_id: ast.StmtId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Return => |ret| if (ret.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .If => |if_stmt| {
-                try self.collectExprDirectCallees(if_stmt.condition, callees);
-                try self.collectBodyDirectCallees(if_stmt.then_body, callees);
-                if (if_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
-            },
-            .While => |while_stmt| {
-                try self.collectExprDirectCallees(while_stmt.condition, callees);
-                for (while_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
-                try self.collectBodyDirectCallees(while_stmt.body, callees);
-            },
-            .For => |for_stmt| {
-                try self.collectExprDirectCallees(for_stmt.iterable, callees);
-                if (for_stmt.range_end) |end_expr| try self.collectExprDirectCallees(end_expr, callees);
-                for (for_stmt.invariants) |expr_id| try self.collectExprDirectCallees(expr_id, callees);
-                try self.collectBodyDirectCallees(for_stmt.body, callees);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprDirectCallees(switch_stmt.condition, callees);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
-                    try self.collectBodyDirectCallees(arm.body, callees);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyDirectCallees(else_body, callees);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyDirectCallees(try_stmt.try_body, callees);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyDirectCallees(catch_clause.body, callees);
-            },
-            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Lock => |lock_stmt| try self.collectExprDirectCallees(lock_stmt.path, callees),
-            .Unlock => |unlock_stmt| try self.collectExprDirectCallees(unlock_stmt.path, callees),
-            .Assert => |assert_stmt| try self.collectExprDirectCallees(assert_stmt.condition, callees),
-            .Assume => |assume_stmt| try self.collectExprDirectCallees(assume_stmt.condition, callees),
-            .Assign => |assign| {
-                try self.collectExprDirectCallees(assign.value, callees);
-                try self.collectPatternDirectCallees(assign.target, callees);
-            },
-            .Expr => |expr_stmt| try self.collectExprDirectCallees(expr_stmt.expr, callees),
-            .Block => |block| try self.collectBodyDirectCallees(block.body, callees),
-            .LabeledBlock => |block| try self.collectBodyDirectCallees(block.body, callees),
-            .Havoc, .Error => {},
-            .Break => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Continue => |jump| if (jump.value) |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-        }
-    }
-
-    fn collectExprDirectCallees(self: *TypeChecker, expr_id: ast.ExprId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.expression(expr_id).*) {
-            .TypeValue => {},
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprDirectCallees(element, callees),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprDirectCallees(element, callees),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprDirectCallees(field.value, callees),
-            .Switch => |switch_expr| {
-                try self.collectExprDirectCallees(switch_expr.condition, callees);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternDirectCallees(arm.pattern, callees);
-                    try self.collectExprDirectCallees(arm.value, callees);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprDirectCallees(else_expr, callees);
-            },
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Unary => |unary| try self.collectExprDirectCallees(unary.operand, callees),
-            .Binary => |binary| {
-                try self.collectExprDirectCallees(binary.lhs, callees);
-                try self.collectExprDirectCallees(binary.rhs, callees);
-            },
-            .Call => |call| {
-                try self.collectExprDirectCallees(call.callee, callees);
-                for (call.args) |arg| try self.collectExprDirectCallees(arg, callees);
-                if (self.calleeFunctionItem(call.callee)) |callee_id| try self.appendUniqueItemId(callees, callee_id);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprDirectCallees(arg, callees),
-            .Field => |field| try self.collectExprDirectCallees(field.base, callees),
-            .Index => |index| {
-                try self.collectExprDirectCallees(index.base, callees);
-                try self.collectExprDirectCallees(index.index, callees);
-            },
-            .Group => |group| try self.collectExprDirectCallees(group.expr, callees),
-            .Comptime, .ExternalProxy, .Old, .Quantified, .Name, .IntegerLiteral, .StringLiteral, .BoolLiteral, .AddressLiteral, .BytesLiteral, .Result, .Error => {},
-        }
-    }
-
-    fn collectPatternDirectCallees(self: *TypeChecker, pattern_id: ast.PatternId, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (self.file.pattern(pattern_id).*) {
-            .Field => |field| try self.collectPatternDirectCallees(field.base, callees),
-            .Index => |index| {
-                try self.collectPatternDirectCallees(index.base, callees);
-                try self.collectExprDirectCallees(index.index, callees);
-            },
-            .Name, .StructDestructure, .Error => {},
-        }
-    }
-
-    fn collectSwitchPatternDirectCallees(self: *TypeChecker, pattern: ast.SwitchPattern, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprDirectCallees(expr_id, callees),
-            .Range => |range_pattern| {
-                try self.collectExprDirectCallees(range_pattern.start, callees);
-                try self.collectExprDirectCallees(range_pattern.end, callees);
-            },
-            .NamedError => |named_error| try self.collectExprDirectCallees(named_error.callee, callees),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternDirectCallees(alternative, callees),
-            .Ok, .Err, .Else => {},
-        }
-    }
-
-    fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
-        for (items.items) |existing| {
-            if (existing.index() == item_id.index()) return;
-        }
-        try items.append(self.arena, item_id);
-    }
-
-    fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
-        for (self.file.statements) |statement| {
-            switch (statement) {
-                .VariableDecl => |decl| {
-                    if (decl.pattern != pattern_id) continue;
-                    return decl.value;
+        pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
+            _ = file;
+            switch (self.checker.file.expression(expr_id).*) {
+                .Call => |call| if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
+                    try self.checker.appendUniqueItemId(self.callees, callee_id);
                 },
                 else => {},
             }
         }
-        return null;
+    };
+
+    fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
+        try unique_list.appendUnique(ast.ItemId, self.arena, items, item_id, itemIdEql);
+    }
+
+    fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
+        return self.pattern_initializers[pattern_id.index()];
     }
 
     fn storeType(self: *TypeChecker, ty: Type) !*const Type {
@@ -5564,22 +6701,25 @@ const TypeChecker = struct {
         };
     }
 
-    fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) Type {
-        if (scaledArithmeticResultType(self, op, lhs_type, rhs_type)) |ty| return ty;
+    fn binaryResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) !Type {
+        if (try scaledArithmeticResultType(self, op, lhs_type, rhs_type)) |ty| return ty;
         return switch (op) {
             .add => if (lhs_type.kind() == .string and rhs_type.kind() == .string)
                 .{ .string = {} }
+            else if (lhs_type.kind() == .bytes and rhs_type.kind() == .bytes)
+                .{ .bytes = {} }
             else
                 arithmeticResultType(lhs_type, rhs_type),
             .wrapping_add, .sub, .wrapping_sub, .mul, .wrapping_mul, .div, .mod, .pow, .wrapping_pow => arithmeticResultType(lhs_type, rhs_type),
-            .bit_and, .bit_or, .bit_xor, .shl, .wrapping_shl, .shr, .wrapping_shr => bitwiseResultType(lhs_type, rhs_type),
+            .bit_and, .bit_or, .bit_xor => bitwiseResultType(lhs_type, rhs_type),
+            .shl, .wrapping_shl, .shr, .wrapping_shr => shiftResultType(lhs_type, rhs_type),
             .and_and, .or_or => if (lhs_type.kind() == .bool and rhs_type.kind() == .bool) .{ .bool = {} } else .{ .unknown = {} },
             .eq, .ne => if (typesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
             .lt, .le, .gt, .ge => if (orderedTypesComparable(lhs_type, rhs_type)) .{ .bool = {} } else .{ .unknown = {} },
         };
     }
 
-    fn scaledArithmeticResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) ?Type {
+    fn scaledArithmeticResultType(self: *const TypeChecker, op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) !?Type {
         if (lhs_type.kind() != .refinement or rhs_type.kind() != .refinement) return null;
         const lhs = lhs_type.refinement;
         const rhs = rhs_type.refinement;
@@ -5593,7 +6733,7 @@ const TypeChecker = struct {
                 lhs_type
             else
                 .{ .unknown = {} },
-            .mul, .wrapping_mul => self.makeScaledRefinementType(lhs.base_type.*, lhs_decimals, rhs_decimals),
+            .mul, .wrapping_mul => try self.makeScaledRefinementType(lhs.base_type.*, lhs_decimals, rhs_decimals),
             else => null,
         };
     }
@@ -5606,20 +6746,20 @@ const TypeChecker = struct {
         };
     }
 
-    fn makeScaledRefinementType(self: *const TypeChecker, base_type: Type, lhs_decimals: []const u8, rhs_decimals: []const u8) Type {
+    fn makeScaledRefinementType(self: *const TypeChecker, base_type: Type, lhs_decimals: []const u8, rhs_decimals: []const u8) !Type {
         const lhs = std.fmt.parseInt(u32, lhs_decimals, 10) catch return .{ .unknown = {} };
         const rhs = std.fmt.parseInt(u32, rhs_decimals, 10) catch return .{ .unknown = {} };
         const total = lhs + rhs;
-        const total_text = std.fmt.allocPrint(self.arena, "{d}", .{total}) catch return .{ .unknown = {} };
+        const total_text = try std.fmt.allocPrint(self.arena, "{d}", .{total});
 
-        const stored_base = self.arena.create(Type) catch return .{ .unknown = {} };
+        const stored_base = try self.arena.create(Type);
         stored_base.* = base_type;
 
-        const args = self.arena.alloc(ast.TypeArg, 2) catch return .{ .unknown = {} };
-        args[0] = ast.TypeArg{ .Type = ast.TypeExprId.fromIndex(0) };
-        args[1] = ast.TypeArg{ .Integer = .{ .range = undefined, .text = total_text } };
+        const args = try self.arena.alloc(model.RefinementArg, 2);
+        args[0] = .Type;
+        args[1] = .{ .Integer = .{ .text = total_text } };
         return .{ .refinement = .{
-            .name = "Scaled",
+            .name = refinements.nameForKind(.scaled),
             .base_type = stored_base,
             .args = args,
         } };
@@ -5643,7 +6783,7 @@ const TypeChecker = struct {
                 };
                 break :blk self.typeValueNameType(name.name).kind() != .unknown;
             },
-            else => false,
+            else => if (self.expr_types[expr_id.index()].name()) |name| std.mem.eql(u8, name, "type") else false,
         };
     }
 
@@ -5654,7 +6794,7 @@ const TypeChecker = struct {
             std.mem.eql(u8, trimmed, "string") or
             std.mem.eql(u8, trimmed, "address") or
             std.mem.eql(u8, trimmed, "bytes") or
-            parseFixedBytesSpelling(trimmed) != null)
+            type_builtin.parseFixedBytesName(trimmed) != null)
         {
             return descriptorFromPathName(self.file, self.item_index, trimmed);
         }
@@ -5682,78 +6822,58 @@ const TypeChecker = struct {
     fn fieldAccessType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !Type {
         if (std.mem.eql(u8, field_name, "len")) {
             switch (base_type.kind()) {
-                .string, .bytes => return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
+                .string, .bytes, .array, .slice => return .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
                 else => {},
             }
         }
         if (overflowTupleFieldType(base_type, field_name)) |field_type| return field_type;
         if (anonymousStructFieldType(base_type, field_name)) |field_type| return field_type;
-        if (self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
-        if (self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
-        if (self.concreteImplMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.externalProxyMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.traitBoundMethodType(base_type, field_name)) |method_type| return method_type;
+        if (try self.concreteImplMethodType(base_type, field_name)) |method_type| return method_type;
         if (base_type.kind() == .struct_) {
             if (self.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
-                for (instantiated.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-                }
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
                 return .{ .unknown = {} };
             }
         }
         if (base_type.kind() == .enum_) {
             if (self.instantiatedEnumByName(base_type.enum_.name)) |instantiated| {
-                const enum_item = self.file.item(instantiated.template_item_id).Enum;
-                for (enum_item.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) return base_type;
-                }
-                return .{ .unknown = {} };
+                return if (instantiated.variantIndex(field_name) != null) base_type else .{ .unknown = {} };
             }
         }
         if (base_type.kind() == .bitfield) {
             if (self.instantiatedBitfieldByName(base_type.bitfield.name)) |instantiated| {
-                for (instantiated.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-                }
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
                 return .{ .unknown = {} };
             }
         }
         const item_id = self.itemIdForType(base_type) orelse return .{ .unknown = {} };
         return switch (self.file.item(item_id).*) {
             .Struct => |struct_item| blk: {
-                for (struct_item.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) {
-                        break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
-                    }
-                }
-                break :blk .{ .unknown = {} };
+                _ = struct_item;
+                const field = self.item_index.lookupStructField(self.file, item_id, field_name) orelse break :blk .{ .unknown = {} };
+                break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
             },
             .Bitfield => |bitfield_item| blk: {
-                for (bitfield_item.fields) |field| {
-                    if (std.mem.eql(u8, field.name, field_name)) {
-                        break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
-                    }
-                }
-                break :blk .{ .unknown = {} };
+                _ = bitfield_item;
+                const field = self.item_index.lookupBitfieldField(self.file, item_id, field_name) orelse break :blk .{ .unknown = {} };
+                break :blk try descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr);
             },
-            .Contract => |contract| blk: {
-                for (contract.members) |member_id| {
-                    const member = self.file.item(member_id).*;
-                    switch (member) {
-                        .Field => |field| if (std.mem.eql(u8, field.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Constant => |constant| if (std.mem.eql(u8, constant.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Function => |function| if (std.mem.eql(u8, function.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Struct => |struct_item| if (std.mem.eql(u8, struct_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Bitfield => |bitfield_item| if (std.mem.eql(u8, bitfield_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        .Enum => |enum_item| if (std.mem.eql(u8, enum_item.name, field_name)) break :blk self.item_types[member_id.index()],
-                        else => {},
-                    }
-                }
-                break :blk .{ .unknown = {} };
+            .Contract => blk: {
+                const member_id = self.item_index.lookupContractMemberWithRoles(self.file, item_id, field_name, .{
+                    .field = true,
+                    .constant = true,
+                    .function = true,
+                    .struct_ = true,
+                    .bitfield = true,
+                    .enum_ = true,
+                }) orelse break :blk .{ .unknown = {} };
+                break :blk self.item_types[member_id.index()];
             },
             .Enum => |enum_item| blk: {
                 if (self.instantiatedEnumByName(enum_item.name)) |_| break :blk base_type;
-                for (enum_item.variants) |variant| {
-                    if (std.mem.eql(u8, variant.name, field_name)) break :blk base_type;
-                }
+                if (self.item_index.lookupEnumVariantIndex(item_id, field_name) != null) break :blk base_type;
                 break :blk .{ .unknown = {} };
             },
             .ErrorDecl => |error_decl| blk: {
@@ -5773,24 +6893,24 @@ const TypeChecker = struct {
     }
 
     fn fieldAccessTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !Type {
-        if (self.importedModuleForExpr(base_expr_id)) |module_id| {
-            if (self.importedItemType(module_id, field_name)) |ty| return ty;
+        if (try self.importedModuleForExpr(base_expr_id)) |module_id| {
+            if (try self.importedItemType(module_id, field_name)) |ty| return ty;
             if (self.import_query) |query| {
-                if ((query.resolve_import_alias(query.context, module_id, field_name) catch null) != null) {
+                if ((try query.resolveImportAlias(module_id, field_name)) != null) {
                     return .{ .unknown = {} };
                 }
             }
         }
-        if (self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
+        if (try self.associatedMethodTypeForExpr(base_expr_id, field_name)) |method_type| return method_type;
         const base_type = self.expr_types[base_expr_id.index()];
         return self.fieldAccessType(base_type, field_name);
     }
 
-    fn externalProxyMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn externalProxyMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         if (base_type.kind() != .external_proxy) return null;
         const trait_interface = self.traitInterfaceByName(base_type.external_proxy.trait_name) orelse return null;
         const method = self.findTraitMethodSignature(trait_interface, field_name) orelse return null;
-        return self.functionTypeFromTraitSignature(method);
+        return try self.functionTypeFromTraitSignature(method);
     }
 
     fn externProxyMethodSignature(self: *const TypeChecker, expr_id: ast.ExprId) ?TraitMethodSignature {
@@ -5920,11 +7040,8 @@ const TypeChecker = struct {
         var matching_impls: usize = 0;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name) and method.receiver_kind == .value_self) {
-                    matching_impls += 1;
-                    break;
-                }
+            if (impl_interface.hasMethodByNameAndReceiver(field.name, .value_self)) {
+                matching_impls += 1;
             }
         }
         if (matching_impls > 1) {
@@ -5950,11 +7067,8 @@ const TypeChecker = struct {
         var matching_impls: usize = 0;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (std.mem.eql(u8, method.name, field.name) and method.receiver_kind == .none) {
-                    matching_impls += 1;
-                    break;
-                }
+            if (impl_interface.hasMethodByNameAndReceiver(field.name, .none)) {
+                matching_impls += 1;
             }
         }
         if (matching_impls > 1) {
@@ -6011,10 +7125,10 @@ const TypeChecker = struct {
         return false;
     }
 
-    fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn associatedMethodTypeForExpr(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         if (!self.exprRepresentsType(base_expr_id)) return null;
-        if (self.traitBoundAssociatedMethodType(base_expr_id, field_name)) |method_type| return method_type;
-        return self.concreteAssociatedMethodType(base_expr_id, field_name);
+        if (try self.traitBoundAssociatedMethodType(base_expr_id, field_name)) |method_type| return method_type;
+        return try self.concreteAssociatedMethodType(base_expr_id, field_name);
     }
 
     fn exprRepresentsType(self: *const TypeChecker, expr_id: ast.ExprId) bool {
@@ -6035,7 +7149,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn traitBoundAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn traitBoundAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const parameter_name = self.genericTypeParameterNameForExpr(base_expr_id) orelse return null;
         const function_item_id = self.current_function_item orelse return null;
         const function = switch (self.file.item(function_item_id).*) {
@@ -6052,21 +7166,21 @@ const TypeChecker = struct {
             if (matched != null) return null;
             matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
-    fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) ?Type {
+    fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const target_name = self.concreteTypeNameForExpr(base_expr_id) orelse return null;
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (!std.mem.eql(u8, method.name, field_name) or method.receiver_kind != .none) continue;
-                if (matched != null) return null;
-                matched = method;
-            }
+            const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .none);
+            if (method_count == 0) continue;
+            if (matched != null or method_count > 1) return null;
+            const method = impl_interface.methodByNameAndReceiver(field_name, .none) orelse continue;
+            matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
     fn genericTypeParameterNameForExpr(self: *const TypeChecker, expr_id: ast.ExprId) ?[]const u8 {
@@ -6108,8 +7222,8 @@ const TypeChecker = struct {
         };
     }
 
-    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) Type {
-        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) !Type {
+        const returns = try self.arena.alloc(Type, 1);
         returns[0] = method_signature.return_type;
         return .{ .function = .{
             .name = method_signature.name,
@@ -6118,7 +7232,7 @@ const TypeChecker = struct {
         } };
     }
 
-    fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn traitBoundMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const type_name = base_type.name() orelse return null;
         const function_item_id = self.current_function_item orelse return null;
         const function = switch (self.file.item(function_item_id).*) {
@@ -6137,7 +7251,7 @@ const TypeChecker = struct {
         }
 
         const method_signature = matched orelse return null;
-        const returns = self.arena.alloc(Type, 1) catch return .{ .unknown = {} };
+        const returns = try self.arena.alloc(Type, 1);
         returns[0] = method_signature.return_type;
         return .{ .function = .{
             .name = method_signature.name,
@@ -6146,36 +7260,44 @@ const TypeChecker = struct {
         } };
     }
 
-    fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) ?Type {
+    fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const target_name = base_type.name() orelse return null;
-        if (self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
+        if (try self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
         var matched: ?TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
-            for (impl_interface.methods) |method| {
-                if (!std.mem.eql(u8, method.name, field_name) or method.receiver_kind != .value_self) continue;
-                if (matched != null) return null;
-                matched = method;
-            }
+            const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .value_self);
+            if (method_count == 0) continue;
+            if (matched != null or method_count > 1) return null;
+            const method = impl_interface.methodByNameAndReceiver(field_name, .value_self) orelse continue;
+            matched = method;
         }
-        return self.functionTypeFromTraitSignature(matched orelse return null);
+        return try self.functionTypeFromTraitSignature(matched orelse return null);
     }
 
-    fn currentImplMethodType(self: *const TypeChecker, target_name: []const u8, field_name: []const u8) ?Type {
+    fn currentImplMethodType(self: *const TypeChecker, target_name: []const u8, field_name: []const u8) !?Type {
         const function_item_id = self.current_function_item orelse return null;
         const impl_item = self.enclosingImplForMethod(function_item_id) orelse return null;
         if (!std.mem.eql(u8, impl_item.target_name, target_name)) return null;
 
-        var matched: ?Type = null;
-        for (impl_item.methods) |method_item_id| {
-            const item = self.file.item(method_item_id).*;
-            if (item != .Function) continue;
-            const function = item.Function;
-            if (!std.mem.eql(u8, function.name, field_name) or !self.functionHasBareSelf(function)) continue;
-            if (matched != null) return null;
-            matched = self.item_types[method_item_id.index()];
-        }
-        return matched;
+        const impl_item_id = self.enclosingImplItemIdForMethod(function_item_id) orelse return null;
+        if (self.item_index.countImplMethodsByReceiver(self.file, impl_item_id, field_name, .value_self) > 1) return null;
+        const method_item_id = self.item_index.lookupImplMethodByReceiver(self.file, impl_item_id, field_name, .value_self) orelse return null;
+        const method_function = switch (self.file.item(method_item_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        const method_type = self.item_types[method_item_id.index()];
+        if (method_type.kind() != .function) return null;
+        const param_types = if (self.functionHasBareSelf(method_function) and method_type.function.param_types.len != 0)
+            method_type.function.param_types[1..]
+        else
+            method_type.function.param_types;
+        return .{ .function = .{
+            .name = method_type.function.name,
+            .param_types = param_types,
+            .return_types = method_type.function.return_types,
+        } };
     }
 
     fn traitInterfaceByName(self: *const TypeChecker, name: []const u8) ?TraitInterface {
@@ -6187,10 +7309,7 @@ const TypeChecker = struct {
 
     fn findTraitMethodSignature(self: *const TypeChecker, trait_interface: TraitInterface, name: []const u8) ?TraitMethodSignature {
         _ = self;
-        for (trait_interface.methods) |method| {
-            if (std.mem.eql(u8, method.name, name)) return method;
-        }
-        return null;
+        return trait_interface.methodByName(name);
     }
 
     fn indexAccessType(self: *const TypeChecker, base_type: Type, index_expr_id: ast.ExprId) Type {
@@ -6205,6 +7324,33 @@ const TypeChecker = struct {
             },
             else => .{ .unknown = {} },
         };
+    }
+
+    fn assignForPatternTypes(self: *TypeChecker, for_stmt: ast.ForStmt) void {
+        const item_type = self.forIterableItemType(self.expr_types[for_stmt.iterable.index()]);
+        self.pattern_types[for_stmt.item_pattern.index()] = LocatedType.unlocated(item_type);
+        if (for_stmt.index_pattern) |index_pattern| {
+            self.pattern_types[index_pattern.index()] = LocatedType.unlocated(forRangeIndexType());
+        }
+    }
+
+    fn forIterableItemType(self: *const TypeChecker, iterable_type: Type) Type {
+        _ = self;
+        if (iterable_type.elementType()) |element| return element.*;
+        return switch (iterable_type) {
+            .bytes, .string => .{ .integer = .{ .bits = 8, .signed = false, .spelling = "u8" } },
+            .integer => iterable_type,
+            .comptime_integer => forRangeIndexType(),
+            else => .{ .unknown = {} },
+        };
+    }
+
+    fn forRangeIndexType() Type {
+        return .{ .integer = .{
+            .bits = 256,
+            .signed = false,
+            .spelling = "u256",
+        } };
     }
 
     fn constTupleIndex(self: *const TypeChecker, expr_id: ast.ExprId) ?usize {
@@ -6251,121 +7397,36 @@ const TypeChecker = struct {
     }
 
     fn collectBodyErrorTypes(self: *TypeChecker, body_id: ast.BodyId, error_types: *std.ArrayList(Type)) anyerror!void {
-        const body = self.file.body(body_id).*;
-        for (body.statements) |statement_id| {
-            try self.collectStmtErrorTypes(statement_id, error_types);
-        }
+        var visitor = ErrorTypeCollector{
+            .checker = self,
+            .error_types = error_types,
+        };
+        try ast.walk.walkBody(ErrorTypeCollector, &visitor, self.file, body_id, .{
+            .walk_assignment_target_patterns = false,
+            .walk_pattern_bindings = false,
+            .enter_comptime_bodies = true,
+            .enter_quantified_bodies = true,
+            .walk_external_proxy_exprs = false,
+            .walk_old_exprs = false,
+        });
     }
 
-    fn collectStmtErrorTypes(self: *TypeChecker, statement_id: ast.StmtId, error_types: *std.ArrayList(Type)) anyerror!void {
-        switch (self.file.statement(statement_id).*) {
-            .VariableDecl => |decl| if (decl.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .Return => |ret| if (ret.value) |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .If => |if_stmt| {
-                try self.collectExprErrorTypes(if_stmt.condition, error_types);
-                try self.collectBodyErrorTypes(if_stmt.then_body, error_types);
-                if (if_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
-            },
-            .While => |while_stmt| {
-                try self.collectExprErrorTypes(while_stmt.condition, error_types);
-                for (while_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
-                try self.collectBodyErrorTypes(while_stmt.body, error_types);
-            },
-            .For => |for_stmt| {
-                try self.collectExprErrorTypes(for_stmt.iterable, error_types);
-                if (for_stmt.range_end) |end_expr| try self.collectExprErrorTypes(end_expr, error_types);
-                for (for_stmt.invariants) |expr_id| try self.collectExprErrorTypes(expr_id, error_types);
-                try self.collectBodyErrorTypes(for_stmt.body, error_types);
-            },
-            .Switch => |switch_stmt| {
-                try self.collectExprErrorTypes(switch_stmt.condition, error_types);
-                for (switch_stmt.arms) |arm| {
-                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
-                    try self.collectBodyErrorTypes(arm.body, error_types);
-                }
-                if (switch_stmt.else_body) |else_body| try self.collectBodyErrorTypes(else_body, error_types);
-            },
-            .Try => |try_stmt| {
-                try self.collectBodyErrorTypes(try_stmt.try_body, error_types);
-                if (try_stmt.catch_clause) |catch_clause| try self.collectBodyErrorTypes(catch_clause.body, error_types);
-            },
-            .Log => |log_stmt| for (log_stmt.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            .Lock => |lock_stmt| try self.collectExprErrorTypes(lock_stmt.path, error_types),
-            .Unlock => |unlock_stmt| try self.collectExprErrorTypes(unlock_stmt.path, error_types),
-            .Assert => |assert_stmt| try self.collectExprErrorTypes(assert_stmt.condition, error_types),
-            .Assume => |assume_stmt| try self.collectExprErrorTypes(assume_stmt.condition, error_types),
-            .Assign => |assign| try self.collectExprErrorTypes(assign.value, error_types),
-            .Expr => |expr_stmt| try self.collectExprErrorTypes(expr_stmt.expr, error_types),
-            .Block => |block| try self.collectBodyErrorTypes(block.body, error_types),
-            .LabeledBlock => |block| try self.collectBodyErrorTypes(block.body, error_types),
-            else => {},
-        }
-    }
+    const ErrorTypeCollector = struct {
+        checker: *TypeChecker,
+        error_types: *std.ArrayList(Type),
 
-    fn collectExprErrorTypes(self: *TypeChecker, expr_id: ast.ExprId, error_types: *std.ArrayList(Type)) anyerror!void {
-        const expr_type = self.expr_types[expr_id.index()];
-        if (expr_type.kind() == .error_union) {
-            for (expr_type.errorTypes()) |error_type| try self.appendUniqueErrorType(error_types, error_type);
+        pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
+            _ = file;
+            const expr_type = self.checker.expr_types[expr_id.index()];
+            if (expr_type.kind() == .error_union) {
+                for (expr_type.errorTypes()) |error_type| try self.checker.appendUniqueErrorType(self.error_types, error_type);
+            }
+            return .descend;
         }
-
-        switch (self.file.expression(expr_id).*) {
-            .Unary => |unary| try self.collectExprErrorTypes(unary.operand, error_types),
-            .Binary => |binary| {
-                try self.collectExprErrorTypes(binary.lhs, error_types);
-                try self.collectExprErrorTypes(binary.rhs, error_types);
-            },
-            .Call => |call| {
-                try self.collectExprErrorTypes(call.callee, error_types);
-                for (call.args) |arg| try self.collectExprErrorTypes(arg, error_types);
-            },
-            .Builtin => |builtin| for (builtin.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            .Field => |field| try self.collectExprErrorTypes(field.base, error_types),
-            .Index => |index| {
-                try self.collectExprErrorTypes(index.base, error_types);
-                try self.collectExprErrorTypes(index.index, error_types);
-            },
-            .Tuple => |tuple| for (tuple.elements) |element| try self.collectExprErrorTypes(element, error_types),
-            .ArrayLiteral => |array| for (array.elements) |element| try self.collectExprErrorTypes(element, error_types),
-            .StructLiteral => |struct_literal| for (struct_literal.fields) |field| try self.collectExprErrorTypes(field.value, error_types),
-            .Switch => |switch_expr| {
-                try self.collectExprErrorTypes(switch_expr.condition, error_types);
-                for (switch_expr.arms) |arm| {
-                    try self.collectSwitchPatternErrorTypes(arm.pattern, error_types);
-                    try self.collectExprErrorTypes(arm.value, error_types);
-                }
-                if (switch_expr.else_expr) |else_expr| try self.collectExprErrorTypes(else_expr, error_types);
-            },
-            .Comptime => |comptime_expr| {
-                try self.collectBodyErrorTypes(comptime_expr.body, error_types);
-            },
-            .Group => |group| try self.collectExprErrorTypes(group.expr, error_types),
-            .Quantified => |quantified| {
-                if (quantified.condition) |condition| try self.collectExprErrorTypes(condition, error_types);
-                try self.collectExprErrorTypes(quantified.body, error_types);
-            },
-            .ErrorReturn => |error_return| for (error_return.args) |arg| try self.collectExprErrorTypes(arg, error_types),
-            else => {},
-        }
-    }
-
-    fn collectSwitchPatternErrorTypes(self: *TypeChecker, pattern: ast.SwitchPattern, error_types: *std.ArrayList(Type)) anyerror!void {
-        switch (pattern) {
-            .Expr => |expr_id| try self.collectExprErrorTypes(expr_id, error_types),
-            .Range => |range_pattern| {
-                try self.collectExprErrorTypes(range_pattern.start, error_types);
-                try self.collectExprErrorTypes(range_pattern.end, error_types);
-            },
-            .NamedError => |named_error| try self.collectExprErrorTypes(named_error.callee, error_types),
-            .Or => |or_pattern| for (or_pattern.alternatives) |alternative| try self.collectSwitchPatternErrorTypes(alternative, error_types),
-            .Ok, .Err, .Else => {},
-        }
-    }
+    };
 
     fn appendUniqueErrorType(self: *TypeChecker, error_types: *std.ArrayList(Type), error_type: Type) anyerror!void {
-        for (error_types.items) |existing| {
-            if (typeEql(existing, error_type)) return;
-        }
-        try error_types.append(self.arena, error_type);
+        try unique_list.appendUnique(Type, self.arena, error_types, error_type, typeEql);
     }
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {
@@ -6374,7 +7435,7 @@ const TypeChecker = struct {
             else => return false,
         }
         if (lhs_type.kind() != .integer) return false;
-        const bits = lhs_type.integer.bits orelse return false;
+        const bits = lhs_type.integer.bits;
         const value = self.const_eval.values[rhs_expr_id.index()] orelse return false;
         const amount = switch (value) {
             .integer => |integer| integer,
@@ -6399,8 +7460,81 @@ const TypeChecker = struct {
         return false;
     }
 
-    fn emitIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
-        const value = self.const_eval.values[expr_id.index()] orelse return false;
+    fn resolveIntegerExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !IntegerResolutionResult {
+        const expected = unwrapRefinement(expected_type);
+        if (expected.kind() != .integer) return .not_applicable;
+
+        const actual = unwrapRefinement(self.expr_types[expr_id.index()]);
+        switch (actual.kind()) {
+            .comptime_integer => {
+                const value = (try self.integerValueForResolution(expr_id)) orelse return .not_applicable;
+                if (value != .integer) return .not_applicable;
+            },
+            .integer => {
+                if (self.expr_types[expr_id.index()].kind() != .integer and self.expr_types[expr_id.index()].kind() != .comptime_integer) return .not_applicable;
+                if (!typesAssignable(expected, actual)) return .not_applicable;
+                if (!sameIntegerShape(expected.integer, actual.integer)) {
+                    if (!self.exprCanAdoptIntegerContext(expr_id)) return .not_applicable;
+                    const value = (try self.integerValueForResolution(expr_id)) orelse return .not_applicable;
+                    if (value != .integer) return .not_applicable;
+                }
+            },
+            else => return .not_applicable,
+        }
+
+        if (try self.emitIntegerOverflowAgainst(range, expr_id, expected)) {
+            self.expr_types[expr_id.index()] = .{ .unknown = {} };
+            return .overflow;
+        }
+
+        self.expr_types[expr_id.index()] = expected;
+        return .resolved;
+    }
+
+    fn resolveAddressLiteralExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (unwrapRefinement(expected_type).kind() != .address) return false;
+
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| {
+                const resolved = try self.resolveAddressLiteralExpression(range, group.expr, expected_type);
+                if (resolved) self.expr_types[expr_id.index()] = addressType();
+                return resolved;
+            },
+            .IntegerLiteral => |literal| {
+                if (integerLiteralTypeSuffix(literal.text) != null) return false;
+                const value = (try const_bridge.parseIntegerLiteral(self.arena, integerLiteralValueText(literal.text))) orelse return false;
+                if (value != .integer) return false;
+                _ = value.integer.toInt(u160) catch {
+                    const value_text = try self.integerValueText(value.integer);
+                    try self.emitConstantValueDoesNotFitRange(range, value_text, "address");
+                    self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                    return true;
+                };
+                self.expr_types[expr_id.index()] = addressType();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    fn integerValueForResolution(self: *TypeChecker, expr_id: ast.ExprId) !?ConstValue {
+        if (self.const_eval.values[expr_id.index()]) |value| return value;
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral => |literal| try const_bridge.parseIntegerLiteral(self.arena, integerLiteralValueText(literal.text)),
+            .Group => |group| try self.integerValueForResolution(group.expr),
+            else => null,
+        };
+    }
+
+    fn exprCanAdoptIntegerContext(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .IntegerLiteral, .Group, .Comptime, .Unary, .Binary => true,
+            else => false,
+        };
+    }
+
+    fn emitIntegerOverflowAgainst(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        const value = (try self.integerValueForResolution(expr_id)) orelse return false;
         if (value != .integer or expected_type.kind() != .integer) return false;
         const checked_value = if (exprUsesWrappedIntegerValue(self, expr_id))
             try const_bridge.wrapIntegerToType(self.arena, value.integer, expected_type.integer)
@@ -6408,11 +7542,25 @@ const TypeChecker = struct {
             value.integer;
         if (integerValueFitsType(checked_value, expected_type.integer)) return false;
         const value_text = try self.integerValueText(checked_value);
-        try self.emitRangeError(range, "constant value {s} does not fit in type '{s}'", .{
-            value_text,
-            diagnosticTypeDisplayName(self, expected_type),
-        });
+        try self.emitConstantValueDoesNotFitRange(range, value_text, diagnosticTypeDisplayName(self, expected_type));
         return true;
+    }
+
+    fn emitResolvedIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId) !bool {
+        const actual = self.expr_types[expr_id.index()];
+        if (actual.kind() != .integer) return false;
+        return switch (try self.resolveIntegerExpression(range, expr_id, actual)) {
+            .overflow => true,
+            .not_applicable, .resolved => false,
+        };
+    }
+
+    fn emitIntegerOverflowIfNeeded(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (try self.emitResolvedIntegerOverflowIfNeeded(range, expr_id)) return true;
+        return switch (try self.resolveIntegerExpression(range, expr_id, expected_type)) {
+            .overflow => true,
+            .not_applicable, .resolved => false,
+        };
     }
 
     fn emitBuiltinIntegerOverflowIfNeeded(self: *TypeChecker, expr_id: ast.ExprId, builtin: ast.BuiltinExpr, result_type: Type) !bool {
@@ -6422,10 +7570,7 @@ const TypeChecker = struct {
         if (value != .integer or result_type.kind() != .integer) return false;
         if (integerValueFitsType(value.integer, result_type.integer)) return false;
         const value_text = try self.integerValueText(value.integer);
-        try self.emitExprError(expr_id, "constant value {s} does not fit in cast target type '{s}'", .{
-            value_text,
-            diagnosticTypeDisplayName(self, result_type),
-        });
+        try self.emitConstantValueDoesNotFitCastTargetExpr(expr_id, value_text, diagnosticTypeDisplayName(self, result_type));
         return true;
     }
 
@@ -6456,12 +7601,8 @@ const TypeChecker = struct {
             if (expected_type.kind() == .unknown or actual_type.kind() == .unknown) continue;
             if (!typesAssignable(expected_type, actual_type)) {
                 const parameter_name = self.patternName(parameter.pattern) orelse "<error payload>";
-                try self.emitExprError(expr_id, "error '{s}' argument '{s}' expects type '{s}', found '{s}'", .{
-                    error_decl.name,
-                    parameter_name,
-                    diagnosticTypeDisplayName(self, expected_type),
-                    diagnosticTypeDisplayName(self, actual_type),
-                });
+                const subject = try std.fmt.allocPrint(self.arena, "error '{s}' argument '{s}'", .{ error_decl.name, parameter_name });
+                try self.emitSubjectExpectedTypeFoundExpr(expr_id, subject, expected_type, actual_type);
             }
         }
 
@@ -6745,7 +7886,7 @@ const TypeChecker = struct {
         }
 
         for (destructure.fields) |binding_field| {
-            const field = self.findAnonymousStructField(fields, binding_field.name) orelse {
+            const field = model.anonymousStructFieldByName(fields, binding_field.name) orelse {
                 self.pattern_types[binding_field.binding.index()] = LocatedType.unlocated(.{ .unknown = {} });
                 try self.emitRangeError(binding_field.range, "unknown ADT payload field '{s}'", .{binding_field.name});
                 continue;
@@ -6754,15 +7895,9 @@ const TypeChecker = struct {
         }
 
         if (!destructure.has_rest) {
+            const binding_lookup = try lookup_index.buildNamed(ast.nodes.StructDestructureField, self.arena, destructure.fields, "name");
             for (fields) |field| {
-                var found = false;
-                for (destructure.fields) |binding_field| {
-                    if (std.mem.eql(u8, binding_field.name, field.name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
+                if (lookup_index.findNamed(binding_lookup, field.name) == null) {
                     try self.emitRangeError(range, "missing ADT payload field '{s}'", .{field.name});
                 }
             }
@@ -6995,21 +8130,15 @@ const TypeChecker = struct {
 
         const enum_name = variant_enum_type.name() orelse return null;
         if (self.instantiatedEnumByName(enum_name)) |instantiated| {
-            for (instantiated.variants, 0..) |variant, index| {
-                if (std.mem.eql(u8, variant.name, field.name)) return index;
-            }
-            return null;
+            return instantiated.variantIndex(field.name);
         }
 
         const item_id = self.item_index.lookup(enum_name) orelse return null;
-        const enum_item = switch (self.file.item(item_id).*) {
-            .Enum => |enum_item| enum_item,
+        switch (self.file.item(item_id).*) {
+            .Enum => {},
             else => return null,
-        };
-        for (enum_item.variants, 0..) |variant, index| {
-            if (std.mem.eql(u8, variant.name, field.name)) return index;
         }
-        return null;
+        return self.item_index.lookupEnumVariantIndex(item_id, field.name);
     }
 
     fn validateMatchPatternFamily(self: *TypeChecker, condition_type: Type, arms: anytype, range: source.TextRange) !void {
@@ -7123,47 +8252,172 @@ const TypeChecker = struct {
         expected: usize,
         found: usize,
     ) !void {
-        try self.emitRangeError(range, "generic {s} '{s}' expects {d} arguments, found {d}", .{
-            kind,
-            name,
-            expected,
-            found,
-        });
+        const message = try diag_messages.genericArity(self.arena, kind, name, expected, found);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitInvalidIntegerTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        const message = try diag_messages.invalidIntegerTypeName(self.arena, name, descriptors.supported_integer_type_names_text);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitUndefinedTypeName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "undefined type '{s}'", .{name});
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitUndefinedErrorName(self: *TypeChecker, range: source.TextRange, name: []const u8) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "undefined error '{s}'", .{name});
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitInvalidErrorUnionErrorName(self: *TypeChecker, range: source.TextRange) !void {
+        const message = "error-union error must be a declared error name";
+        if (self.hasDiagnosticAtRange(range, message)) return;
+        try self.emitRangeMessage(range, message);
     }
 
     fn emitExprError(self: *TypeChecker, expr_id: ast.ExprId, comptime fmt: []const u8, args: anytype) !void {
         var buffer: [256]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, fmt, args);
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitRangeError(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
+        var buffer: [256]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, fmt, args);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitExprMessage(self: *TypeChecker, expr_id: ast.ExprId, message: []const u8) !void {
         try self.diagnostics.appendError(message, .{
             .file_id = self.file_id,
             .range = source.rangeOf(self.file.expression(expr_id).*),
         });
     }
 
-    fn emitRangeError(self: *TypeChecker, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
-        var buffer: [256]u8 = undefined;
-        const message = try std.fmt.bufPrint(&buffer, fmt, args);
+    fn hasDiagnosticAtRange(self: *const TypeChecker, range: source.TextRange, message: []const u8) bool {
+        for (self.diagnostics.items.items) |diag| {
+            if (!std.mem.eql(u8, diag.message, message)) continue;
+            if (diag.labels.len == 0) continue;
+            const location = diag.labels[0].location;
+            if (location.file_id != self.file_id) continue;
+            if (location.range.start == range.start and location.range.end == range.end) return true;
+        }
+        return false;
+    }
+
+    fn emitRangeMessage(self: *TypeChecker, range: source.TextRange, message: []const u8) !void {
         try self.diagnostics.appendError(message, .{
             .file_id = self.file_id,
             .range = range,
         });
     }
 
-    fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) Type {
+    fn emitExpectedTypeFoundRange(self: *TypeChecker, range: source.TextRange, subject: []const u8, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitExpectedRegionFoundRange(self: *TypeChecker, range: source.TextRange, subject: []const u8, expected_region: Region, actual_region: Region) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "region",
+            region_rules.regionDisplayName(expected_region),
+            region_rules.regionDisplayName(actual_region),
+        );
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitNamedSubjectExpectedTypeFoundRange(self: *TypeChecker, range: source.TextRange, subject_kind: []const u8, subject_name: []const u8, expected_type: Type, actual_type: Type) !void {
+        const subject = try std.fmt.allocPrint(self.arena, "{s} '{s}'", .{ subject_kind, subject_name });
+        try self.emitExpectedTypeFoundRange(range, subject, expected_type, actual_type);
+    }
+
+    fn emitNamedSubjectExpectedRegionFoundRange(self: *TypeChecker, range: source.TextRange, subject_kind: []const u8, subject_name: []const u8, expected_region: Region, actual_region: Region) !void {
+        const subject = try std.fmt.allocPrint(self.arena, "{s} '{s}'", .{ subject_kind, subject_name });
+        try self.emitExpectedRegionFoundRange(range, subject, expected_region, actual_region);
+    }
+
+    fn emitExpectedTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            null,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitSubjectExpectedTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, subject: []const u8, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            subject,
+            "type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitExpectedArgumentTypeFoundExpr(self: *TypeChecker, expr_id: ast.ExprId, expected_type: Type, actual_type: Type) !void {
+        const message = try diag_messages.expectedFound(
+            self.arena,
+            null,
+            "argument type",
+            diagnosticTypeDisplayName(self, expected_type),
+            diagnosticTypeDisplayName(self, actual_type),
+        );
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitConstantValueDoesNotFitRange(self: *TypeChecker, range: source.TextRange, value_text: []const u8, type_name: []const u8) !void {
+        const message = try diag_messages.constantValueDoesNotFit(self.arena, value_text, type_name);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitConstantValueDoesNotFitCastTargetExpr(self: *TypeChecker, expr_id: ast.ExprId, value_text: []const u8, type_name: []const u8) !void {
+        const message = try diag_messages.constantValueDoesNotFitCastTarget(self.arena, value_text, type_name);
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn emitAdtVariantFieldRange(self: *TypeChecker, range: source.TextRange, issue: diag_messages.FieldIssue, field_name: []const u8, variant_name: []const u8) !void {
+        const message = try diag_messages.adtVariantField(self.arena, issue, field_name, variant_name);
+        try self.emitRangeMessage(range, message);
+    }
+
+    fn emitAdtVariantFieldExpr(self: *TypeChecker, expr_id: ast.ExprId, issue: diag_messages.FieldIssue, field_name: []const u8, variant_name: []const u8) !void {
+        const message = try diag_messages.adtVariantField(self.arena, issue, field_name, variant_name);
+        try self.emitExprMessage(expr_id, message);
+    }
+
+    fn patternType(self: *const TypeChecker, pattern_id: ast.PatternId) anyerror!Type {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()].type;
                 if (direct.kind() != .unknown) break :blk direct;
                 break :blk self.lookupNamedPatternType(name.name);
             },
-            .Field => |field| self.fieldPatternType(field),
-            .Index => |index| self.indexPatternType(index),
+            .Field => |field| try self.fieldPatternType(field),
+            .Index => |index| try self.indexPatternType(index),
             .StructDestructure => self.pattern_types[pattern_id.index()].type,
             .Error => .{ .unknown = {} },
         };
     }
 
-    fn patternLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) LocatedType {
+    fn patternLocatedType(self: *const TypeChecker, pattern_id: ast.PatternId) anyerror!LocatedType {
         return switch (self.file.pattern(pattern_id).*) {
             .Name => |name| blk: {
                 const direct = self.pattern_types[pattern_id.index()];
@@ -7172,8 +8426,8 @@ const TypeChecker = struct {
             },
             .StructDestructure => self.pattern_types[pattern_id.index()],
             .Field => |field| blk: {
-                const base = self.patternLocatedType(field.base);
-                const field_type = self.fieldPatternType(field);
+                const base = try self.patternLocatedType(field.base);
+                const field_type = try self.fieldPatternType(field);
                 break :blk .{
                     .type = field_type,
                     .region = base.region,
@@ -7181,8 +8435,8 @@ const TypeChecker = struct {
                 };
             },
             .Index => |index| blk: {
-                const base = self.patternLocatedType(index.base);
-                const index_type = self.indexPatternType(index);
+                const base = try self.patternLocatedType(index.base);
+                const index_type = try self.indexPatternType(index);
                 break :blk .{
                     .type = index_type,
                     .region = base.region,
@@ -7236,13 +8490,13 @@ const TypeChecker = struct {
         };
     }
 
-    fn fieldPatternType(self: *const TypeChecker, field: ast.FieldPattern) Type {
-        const base_type = self.patternType(field.base);
-        return self.fieldAccessType(base_type, field.name) catch .{ .unknown = {} };
+    fn fieldPatternType(self: *const TypeChecker, field: ast.FieldPattern) anyerror!Type {
+        const base_type = try self.patternType(field.base);
+        return try self.fieldAccessType(base_type, field.name);
     }
 
-    fn indexPatternType(self: *const TypeChecker, index: ast.IndexPattern) Type {
-        const base_type = self.patternType(index.base);
+    fn indexPatternType(self: *const TypeChecker, index: ast.IndexPattern) anyerror!Type {
+        const base_type = try self.patternType(index.base);
         return self.indexAccessType(base_type, index.index);
     }
 
@@ -7293,10 +8547,8 @@ fn overflowTupleFieldType(base_type: Type, field_name: []const u8) ?Type {
 
 fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
     if (base_type.kind() != .anonymous_struct) return null;
-    for (base_type.anonymous_struct.fields) |field| {
-        if (std.mem.eql(u8, field.name, field_name)) return field.ty;
-    }
-    return null;
+    const field = base_type.anonymous_struct.fieldByName(field_name) orelse return null;
+    return field.ty;
 }
 
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
@@ -7306,8 +8558,11 @@ fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
-    if (sameConcreteType(lhs, rhs)) return lhs;
-    return lhs;
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .comptime_integer) return .{ .comptime_integer = .{} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (lhs.kind() == .integer and rhs.kind() == .comptime_integer) return lhs;
+    if (sameIntegerShape(lhs.integer, rhs.integer)) return lhs;
+    return .{ .unknown = {} };
 }
 
 fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
@@ -7316,6 +8571,19 @@ fn bitwiseResultType(lhs_type: Type, rhs_type: Type) Type {
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
+    if (lhs.kind() == .fixed_bytes and rhs.kind() == .fixed_bytes and sameConcreteType(lhs, rhs)) return lhs;
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .comptime_integer) return .{ .comptime_integer = .{} };
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (lhs.kind() == .integer and rhs.kind() == .comptime_integer) return lhs;
+    if (sameIntegerShape(lhs.integer, rhs.integer)) return lhs;
+    return .{ .unknown = {} };
+}
+
+fn shiftResultType(lhs_type: Type, rhs_type: Type) Type {
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return .{ .unknown = {} };
     return lhs;
 }
@@ -7324,7 +8592,12 @@ fn integerLiteralType(text: []const u8) Type {
     if (integerTypeSuffix(text)) |integer| {
         return .{ .integer = integer };
     }
-    return .{ .integer = .{} };
+    return .{ .comptime_integer = .{} };
+}
+
+fn invalidIntegerLiteralSuffix(text: []const u8) ?[]const u8 {
+    const suffix = integerLiteralTypeSuffix(text) orelse return null;
+    return if (descriptors.invalidIntegerTypeName(suffix)) suffix else null;
 }
 
 fn parseEnumVariantIntegerLiteral(text: []const u8) ?i64 {
@@ -7343,6 +8616,16 @@ fn enumBytesLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const 
 }
 
 fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
+    const suffix = integerLiteralTypeSuffix(text) orelse return null;
+    return descriptors.integerTypeFromName(suffix);
+}
+
+fn integerLiteralValueText(text: []const u8) []const u8 {
+    const suffix = integerLiteralTypeSuffix(text) orelse return text;
+    return text[0 .. text.len - suffix.len];
+}
+
+fn integerLiteralTypeSuffix(text: []const u8) ?[]const u8 {
     const unsigned_index = std.mem.lastIndexOfScalar(u8, text, 'u');
     const signed_index = std.mem.lastIndexOfScalar(u8, text, 'i');
     const suffix_index = switch (unsigned_index != null and signed_index != null) {
@@ -7351,25 +8634,14 @@ fn integerTypeSuffix(text: []const u8) ?model.IntegerType {
     };
     const start = suffix_index orelse return null;
     if (start == 0 or start + 1 >= text.len) return null;
-    const suffix = text[start..];
-    const signed = switch (suffix[0]) {
-        'u' => false,
-        'i' => true,
-        else => return null,
-    };
-    const bits = std.fmt.parseInt(u16, suffix[1..], 10) catch return null;
-    return .{
-        .bits = bits,
-        .signed = signed,
-        .spelling = suffix,
-    };
+    return text[start..];
 }
 
 fn typesComparable(lhs_type: Type, rhs_type: Type) bool {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
     if (sameConcreteType(lhs, rhs)) return true;
-    if (isIntegerType(lhs) and isIntegerType(rhs)) return true;
+    if (integerOperandsHaveResolutionTarget(lhs, rhs)) return true;
     return false;
 }
 
@@ -7382,11 +8654,131 @@ fn orderedTypesComparable(lhs_type: Type, rhs_type: Type) bool {
 }
 
 fn isIntegerType(ty: Type) bool {
-    return unwrapRefinement(ty).kind() == .integer;
+    return switch (unwrapRefinement(ty).kind()) {
+        .integer, .comptime_integer => true,
+        else => false,
+    };
+}
+
+fn binaryComptimeIntegerOperandResolutionType(op: ast.BinaryOp, lhs_type: Type, rhs_type: Type) ?Type {
+    switch (op) {
+        .add,
+        .wrapping_add,
+        .sub,
+        .wrapping_sub,
+        .mul,
+        .wrapping_mul,
+        .div,
+        .mod,
+        .pow,
+        .wrapping_pow,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .eq,
+        .ne,
+        .lt,
+        .le,
+        .gt,
+        .ge,
+        => {},
+        .shl, .wrapping_shl, .shr, .wrapping_shr, .and_and, .or_or => return null,
+    }
+
+    const lhs = unwrapRefinement(lhs_type);
+    const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
+    if (rhs.kind() == .comptime_integer and lhs.kind() == .integer) return lhs;
+    return null;
+}
+
+fn integerOperandsHaveResolutionTarget(lhs: Type, rhs: Type) bool {
+    if (!isIntegerType(lhs) or !isIntegerType(rhs)) return false;
+    if (lhs.kind() == .comptime_integer or rhs.kind() == .comptime_integer) return true;
+    return sameIntegerShape(lhs.integer, rhs.integer);
+}
+
+fn sameIntegerShape(lhs: model.IntegerType, rhs: model.IntegerType) bool {
+    return lhs.bits == rhs.bits and lhs.signed == rhs.signed;
+}
+
+fn typeHasUnresolvedInteger(ty: Type) bool {
+    return switch (ty) {
+        .comptime_integer => true,
+        .integer => false,
+        .tuple => |elements| {
+            for (elements) |element| {
+                if (typeHasUnresolvedInteger(element)) return true;
+            }
+            return false;
+        },
+        .anonymous_struct => |struct_type| {
+            for (struct_type.fields) |field| {
+                if (typeHasUnresolvedInteger(field.ty)) return true;
+            }
+            return false;
+        },
+        .array => |array| typeHasUnresolvedInteger(array.element_type.*),
+        .slice => |slice| typeHasUnresolvedInteger(slice.element_type.*),
+        .map => |map| {
+            if (map.key_type) |key| {
+                if (typeHasUnresolvedInteger(key.*)) return true;
+            }
+            if (map.value_type) |value| {
+                if (typeHasUnresolvedInteger(value.*)) return true;
+            }
+            return false;
+        },
+        .error_union => |error_union| {
+            if (typeHasUnresolvedInteger(error_union.payload_type.*)) return true;
+            for (error_union.error_types) |error_type| {
+                if (typeHasUnresolvedInteger(error_type)) return true;
+            }
+            return false;
+        },
+        .refinement => |refinement| typeHasUnresolvedInteger(refinement.base_type.*),
+        else => false,
+    };
 }
 
 fn unwrapRefinement(ty: Type) Type {
     return if (ty.refinementBaseType()) |base| base.* else ty;
+}
+
+fn storageResultPayloadNeedsPointer(ty: Type) bool {
+    return switch (unwrapRefinement(ty).kind()) {
+        // These are pointer-backed, but storage lowering has explicit
+        // storage-root representations for Result success payloads.
+        .slice,
+        .string,
+        .bytes,
+        => false,
+        .tuple,
+        .anonymous_struct,
+        .struct_,
+        .array,
+        .map,
+        .error_union,
+        .function,
+        .external_proxy,
+        .contract,
+        => true,
+        else => false,
+    };
+}
+
+fn localResultAggregatePayloadIsScalar(ty: Type) bool {
+    return switch (unwrapRefinement(ty).kind()) {
+        .void,
+        .bool,
+        .integer,
+        .address,
+        .fixed_bytes,
+        .bitfield,
+        .enum_,
+        => true,
+        else => false,
+    };
 }
 
 fn isGenericTypeParam(ty: Type) bool {
@@ -7420,8 +8812,8 @@ fn exprUsesWrappedIntegerValue(self: *const TypeChecker, expr_id: ast.ExprId) bo
 }
 
 fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
-    const bits = integer.bits orelse return true;
-    const signed = integer.signed orelse return true;
+    const bits = integer.bits;
+    const signed = integer.signed;
     if (bits == 0) return value.eqlZero();
     return value.fitsInTwosComp(if (signed) .signed else .unsigned, bits);
 }
@@ -7429,7 +8821,7 @@ fn integerValueFitsType(value: BigInt, integer: model.IntegerType) bool {
 fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
     if (lhs_type.kind() != rhs_type.kind()) return false;
     return switch (lhs_type) {
-        .unknown, .void, .bool, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -7450,8 +8842,9 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
 }
 
 fn shouldDeferGenericLiteralBinding(existing: Type, candidate: Type) bool {
-    if (existing.kind() != .integer or candidate.kind() != .integer) return false;
-    return candidate.integer.spelling == null;
+    if (!isIntegerType(existing) or !isIntegerType(candidate)) return false;
+    if (candidate.kind() == .comptime_integer) return true;
+    return false;
 }
 
 fn unaryOpName(op: ast.UnaryOp) []const u8 {
@@ -7496,9 +8889,11 @@ fn binaryOpName(op: ast.BinaryOp) []const u8 {
 fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), ty: Type) !void {
     switch (ty) {
         .unknown => try buffer.appendSlice(allocator, "unknown"),
+        .never => try buffer.appendSlice(allocator, "never"),
         .void => try buffer.appendSlice(allocator, "void"),
         .bool => try buffer.appendSlice(allocator, "bool"),
         .integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "integer"),
+        .comptime_integer => try buffer.appendSlice(allocator, "integer"),
         .string => try buffer.appendSlice(allocator, "string"),
         .address => try buffer.appendSlice(allocator, "address"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
@@ -7578,9 +8973,11 @@ fn diagnosticTypeDisplayName(self: *TypeChecker, ty: Type) []const u8 {
 fn typeDisplayName(ty: Type) []const u8 {
     return switch (ty) {
         .unknown => "unknown",
+        .never => "never",
         .void => "void",
         .bool => "bool",
         .integer => |integer| integer.spelling orelse "integer",
+        .comptime_integer => "integer",
         .string => "string",
         .address => "address",
         .bytes => "bytes",
@@ -7683,34 +9080,34 @@ test "typesFlowCompatible accepts guardable refinement strengthening" {
         .name = "MinValue",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "100" } },
         },
     } };
     const min200: Type = .{ .refinement = .{
         .name = "MinValue",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "200" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "200" } },
         },
     } };
     const range_wide: Type = .{ .refinement = .{
         .name = "InRange",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "0" } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "10000" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "0" } },
+            model.RefinementArg{ .Integer = .{ .text = "10000" } },
         },
     } };
     const range_narrow: Type = .{ .refinement = .{
         .name = "InRange",
         .base_type = base,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 0 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "100" } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "5000" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "100" } },
+            model.RefinementArg{ .Integer = .{ .text = "5000" } },
         },
     } };
 
@@ -7740,16 +9137,16 @@ test "typesAssignable accepts semantically identical refinements from distinct s
         .name = "MinValue",
         .base_type = base_a,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 1 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "1" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "1" } },
         },
     } };
     const rhs: Type = .{ .refinement = .{
         .name = "MinValue",
         .base_type = base_b,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 2 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "1" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "1" } },
         },
     } };
 
@@ -7772,16 +9169,16 @@ test "typesFlowCompatible rejects non-guardable refinement mismatches" {
         .name = "Scaled",
         .base_type = base_a,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 1 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "18" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "18" } },
         },
     } };
     const scaled6: Type = .{ .refinement = .{
         .name = "Scaled",
         .base_type = base_b,
         .args = &.{
-            ast.TypeArg{ .Type = ast.TypeExprId{ .value = 2 } },
-            ast.TypeArg{ .Integer = .{ .range = undefined, .text = "6" } },
+            model.RefinementArg{ .Type = {} },
+            model.RefinementArg{ .Integer = .{ .text = "6" } },
         },
     } };
     const plain_u256: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
@@ -7789,4 +9186,25 @@ test "typesFlowCompatible rejects non-guardable refinement mismatches" {
     try testing.expect(!typesFlowCompatible(scaled18, scaled6));
     try testing.expect(!typesFlowCompatible(scaled18, plain_u256));
     try testing.expect(typesFlowCompatible(plain_u256, scaled18));
+}
+
+test "integer literal suffixes use closed builtin width set" {
+    const u256_integer = integerTypeSuffix("1 u256") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 256), u256_integer.bits);
+    try std.testing.expectEqual(false, u256_integer.signed);
+    try std.testing.expectEqualStrings("u256", u256_integer.spelling.?);
+
+    const i8_integer = integerTypeSuffix("1 i8") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 8), i8_integer.bits);
+    try std.testing.expectEqual(true, i8_integer.signed);
+
+    const u160_integer = integerTypeSuffix("1 u160") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 160), u160_integer.bits);
+    try std.testing.expectEqual(false, u160_integer.signed);
+
+    try std.testing.expect(integerTypeSuffix("1 u24") == null);
+    try std.testing.expectEqualStrings("u24", invalidIntegerLiteralSuffix("1 u24") orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("u1_6", invalidIntegerLiteralSuffix("1 u1_6") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(invalidIntegerLiteralSuffix("1 wei") == null);
+    try std.testing.expect(invalidIntegerLiteralSuffix("1 microether") == null);
 }

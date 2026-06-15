@@ -1,0 +1,48 @@
+// Reentrancy attacker for reentrancy_lock_guard.ora (executed conformance).
+//
+// `attack` calls the victim's locked `withdraw`, passing its own address as the
+// hook. The victim, inside its locked section, calls back `onCall`, which
+// re-enters `withdraw`. The victim's second `@lock(gate)` must revert, so the
+// re-entrant call returns Err and the victim commits exactly one entry.
+comptime const std = @import("std");
+
+extern trait VictimApi {
+    call fn withdraw(self, hook: address) -> u256;
+}
+
+error ExternalCallFailed;
+
+contract ReentrancyAttacker {
+    storage var victim: address;
+    storage var myself: address;
+    storage var reentry_attempts: u256 = 0;
+
+    pub fn init(victim_addr: address) {
+        victim = victim_addr;
+    }
+
+    pub fn onCall() -> bool {
+        reentry_attempts += 1;
+        if (reentry_attempts > 1) {
+            return false;
+        }
+        let inner = external<VictimApi>(victim, gas: 100000).withdraw(myself);
+        return match (inner) {
+            Ok(_) => true,
+            Err(_) => false,
+        };
+    }
+
+    pub fn attack(self_addr: address) -> u256 {
+        myself = self_addr;
+        let outer = external<VictimApi>(victim, gas: 300000).withdraw(self_addr);
+        return match (outer) {
+            Ok(value) => value,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn reentryAttempts() -> u256 {
+        return reentry_attempts;
+    }
+}

@@ -35,15 +35,52 @@ pub const Symbol = struct {
 
 pub const SemanticIndex = struct {
     symbols: []Symbol,
+    root_symbol_indexes: []u32 = &.{},
+    symbol_depths: []u16 = &.{},
+    symbol_position_order: []u32 = &.{},
+    symbol_name_order: []u32 = &.{},
     parse_succeeded: bool,
+    builder_capacity_requested: usize = 0,
+    builder_items_built: usize = 0,
+    builder_unused_capacity: usize = 0,
+    builder_growth_events: usize = 0,
 
     pub fn deinit(self: *SemanticIndex, allocator: Allocator) void {
+        deinitSymbols(allocator, self.symbols);
+        allocator.free(self.root_symbol_indexes);
+        allocator.free(self.symbol_depths);
+        allocator.free(self.symbol_position_order);
+        allocator.free(self.symbol_name_order);
+    }
+
+    pub fn estimatedByteSize(self: *const SemanticIndex) usize {
+        var total = mulSat(self.symbols.len, @sizeOf(Symbol));
+        total = addSat(total, mulSat(self.root_symbol_indexes.len, @sizeOf(u32)));
+        total = addSat(total, mulSat(self.symbol_depths.len, @sizeOf(u16)));
+        total = addSat(total, mulSat(self.symbol_position_order.len, @sizeOf(u32)));
+        total = addSat(total, mulSat(self.symbol_name_order.len, @sizeOf(u32)));
         for (self.symbols) |symbol| {
-            allocator.free(symbol.name);
-            if (symbol.detail) |detail| allocator.free(detail);
-            if (symbol.doc_comment) |doc| allocator.free(doc);
+            total = addSat(total, symbol.name.len);
+            if (symbol.detail) |detail| total = addSat(total, detail.len);
+            if (symbol.doc_comment) |doc| total = addSat(total, doc.len);
         }
-        allocator.free(self.symbols);
+        return total;
+    }
+
+    pub fn builderCapacityRequested(self: *const SemanticIndex) usize {
+        return self.builder_capacity_requested;
+    }
+
+    pub fn builderItemsBuilt(self: *const SemanticIndex) usize {
+        return self.builder_items_built;
+    }
+
+    pub fn builderUnusedCapacity(self: *const SemanticIndex) usize {
+        return self.builder_unused_capacity;
+    }
+
+    pub fn builderGrowthEvents(self: *const SemanticIndex) usize {
+        return self.builder_growth_events;
     }
 };
 
@@ -66,23 +103,51 @@ pub fn deinitDocumentSymbols(allocator: Allocator, symbols: []DocumentSymbol) vo
     allocator.free(symbols);
 }
 
-pub fn indexDocument(allocator: Allocator, source: []const u8) !SemanticIndex {
-    var builder = try SymbolBuilder.init(allocator, source);
+pub fn indexAstFileWithSourceStoreAlloc(
+    result_allocator: Allocator,
+    scratch_allocator: Allocator,
+    sources: *const compiler.source.SourceStore,
+    file_id: compiler.FileId,
+    source: []const u8,
+    ast_file: *const compiler.ast.AstFile,
+    parse_succeeded: bool,
+) !SemanticIndex {
+    var builder = SymbolBuilder.initBorrowedSources(
+        result_allocator,
+        scratch_allocator,
+        sources,
+        file_id,
+        source,
+    );
     errdefer builder.deinit();
 
-    var parse_result = try compiler.syntax.parse(allocator, compiler.FileId.fromIndex(0), source);
-    defer parse_result.deinit();
-
-    var lower_result = try compiler.ast.lower(allocator, &parse_result.tree);
-    defer lower_result.deinit();
-
-    for (lower_result.file.root_items) |item_id| {
-        try collectItem(&builder, &lower_result.file, item_id, null, false);
+    for (ast_file.root_items) |item_id| {
+        try collectItem(&builder, ast_file, item_id, null, false);
     }
 
+    const builder_capacity_requested = builder.symbols.capacity;
+    const builder_items_built = builder.symbols.items.len;
+    const symbols = try builder.finish();
+    errdefer deinitSymbols(result_allocator, symbols);
+    const root_symbol_indexes = try buildRootSymbolIndexes(result_allocator, symbols);
+    errdefer result_allocator.free(root_symbol_indexes);
+    const symbol_depths = try buildSymbolDepths(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_depths);
+    const symbol_position_order = try buildSymbolPositionOrder(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_position_order);
+    const symbol_name_order = try buildSymbolNameOrder(result_allocator, symbols);
+    errdefer result_allocator.free(symbol_name_order);
     return .{
-        .symbols = try builder.finish(),
-        .parse_succeeded = parse_result.diagnostics.isEmpty() and lower_result.diagnostics.isEmpty(),
+        .symbols = symbols,
+        .root_symbol_indexes = root_symbol_indexes,
+        .symbol_depths = symbol_depths,
+        .symbol_position_order = symbol_position_order,
+        .symbol_name_order = symbol_name_order,
+        .parse_succeeded = parse_succeeded,
+        .builder_capacity_requested = builder_capacity_requested,
+        .builder_items_built = builder_items_built,
+        .builder_unused_capacity = if (builder_capacity_requested > builder_items_built) builder_capacity_requested - builder_items_built else 0,
+        .builder_growth_events = builder.builder_growth_events,
     };
 }
 
@@ -160,6 +225,77 @@ fn buildDocumentSymbolRecursive(
     };
 }
 
+fn deinitSymbols(allocator: Allocator, symbols: []Symbol) void {
+    for (symbols) |symbol| {
+        allocator.free(symbol.name);
+        if (symbol.detail) |detail| allocator.free(detail);
+        if (symbol.doc_comment) |doc| allocator.free(doc);
+    }
+    allocator.free(symbols);
+}
+
+fn buildRootSymbolIndexes(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    var root_count: usize = 0;
+    for (symbols) |symbol| {
+        if (symbol.parent == null) root_count += 1;
+    }
+
+    const indexes = try allocator.alloc(u32, root_count);
+    var out: usize = 0;
+    for (symbols, 0..) |symbol, index| {
+        if (symbol.parent != null) continue;
+        indexes[out] = try symbolIndexU32(index);
+        out += 1;
+    }
+    return indexes;
+}
+
+fn buildSymbolDepths(allocator: Allocator, symbols: []const Symbol) ![]u16 {
+    const depths = try allocator.alloc(u16, symbols.len);
+    for (symbols, 0..) |_, index| {
+        depths[index] = @intCast(@min(symbolDepth(symbols, index), std.math.maxInt(u16)));
+    }
+    return depths;
+}
+
+fn buildSymbolPositionOrder(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    const order = try allocator.alloc(u32, symbols.len);
+    for (order, 0..) |*slot, index| {
+        slot.* = try symbolIndexU32(index);
+    }
+    std.mem.sort(u32, order, symbols, lessSymbolStart);
+    return order;
+}
+
+fn buildSymbolNameOrder(allocator: Allocator, symbols: []const Symbol) ![]u32 {
+    const order = try allocator.alloc(u32, symbols.len);
+    for (order, 0..) |*slot, index| {
+        slot.* = try symbolIndexU32(index);
+    }
+    std.mem.sort(u32, order, symbols, lessSymbolName);
+    return order;
+}
+
+fn symbolIndexU32(index: usize) !u32 {
+    return std.math.cast(u32, index) orelse error.SymbolIndexOverflow;
+}
+
+fn lessSymbolStart(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool {
+    const lhs = symbols[lhs_index];
+    const rhs = symbols[rhs_index];
+    if (positionLessThan(lhs.range.start, rhs.range.start)) return true;
+    if (positionLessThan(rhs.range.start, lhs.range.start)) return false;
+    return lhs_index < rhs_index;
+}
+
+fn lessSymbolName(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool {
+    const lhs = symbols[lhs_index];
+    const rhs = symbols[rhs_index];
+    const order = std.mem.order(u8, lhs.name, rhs.name);
+    if (order != .eq) return order == .lt;
+    return lhs_index < rhs_index;
+}
+
 fn collectItem(
     builder: *SymbolBuilder,
     file: *const compiler.ast.AstFile,
@@ -177,25 +313,25 @@ fn collectItem(
         },
         .Function => |function_decl| {
             const function_kind: SymbolKind = if (in_contract) .method else .function;
-            const function_detail = try formatFunctionDetailAlloc(builder.allocator, file, function_decl);
+            const function_detail = try formatFunctionDetailAlloc(builder.result_allocator, file, function_decl);
             const function_index = try builder.addSymbol(function_decl.name, function_kind, function_decl.range, parent, function_detail);
             for (function_decl.parameters) |parameter| {
                 const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                 _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, function_index, parameter_type);
             }
         },
         .Field => |field_decl| {
             const variable_kind: SymbolKind = if (in_contract) .field else .variable;
             const variable_type = if (field_decl.type_expr) |type_expr|
-                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+                try formatTypeExprAlloc(builder.result_allocator, file, type_expr)
             else
                 null;
             _ = try builder.addSymbol(field_decl.name, variable_kind, field_decl.range, parent, variable_type);
         },
         .Constant => |constant_decl| {
             const constant_type = if (constant_decl.type_expr) |type_expr|
-                try formatTypeExprAlloc(builder.allocator, file, type_expr)
+                try formatTypeExprAlloc(builder.result_allocator, file, type_expr)
             else
                 null;
             _ = try builder.addSymbol(constant_decl.name, .constant, constant_decl.range, parent, constant_type);
@@ -203,33 +339,33 @@ fn collectItem(
         .Struct => |struct_decl| {
             const struct_index = try builder.addSymbol(struct_decl.name, .struct_decl, struct_decl.range, parent, null);
             for (struct_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, struct_index, field_type);
             }
         },
         .Bitfield => |bitfield_decl| {
             const bitfield_index = try builder.addSymbol(bitfield_decl.name, .bitfield_decl, bitfield_decl.range, parent, null);
             for (bitfield_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, bitfield_index, field_type);
             }
         },
         .Enum => |enum_decl| {
-            const enum_detail = try formatEnumDetailAlloc(builder.allocator, file, enum_decl);
+            const enum_detail = try formatEnumDetailAlloc(builder.result_allocator, file, enum_decl);
             const enum_index = try builder.addSymbol(enum_decl.name, .enum_decl, enum_decl.range, parent, enum_detail);
             for (enum_decl.variants) |variant| {
-                const variant_detail = try formatEnumVariantDetailAlloc(builder.allocator, file, variant);
+                const variant_detail = try formatEnumVariantDetailAlloc(builder.result_allocator, file, variant);
                 _ = try builder.addSymbol(variant.name, .enum_member, variant.range, enum_index, variant_detail);
             }
         },
         .Trait => |trait_decl| {
             const trait_index = try builder.addSymbol(trait_decl.name, .trait_decl, trait_decl.range, parent, null);
             for (trait_decl.methods) |method| {
-                const method_detail = try formatTraitMethodDetailAlloc(builder.allocator, file, method);
+                const method_detail = try formatTraitMethodDetailAlloc(builder.result_allocator, file, method);
                 const method_index = try builder.addSymbol(method.name, .method, method.range, trait_index, method_detail);
                 for (method.parameters) |parameter| {
                     const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                    const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                    const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                     _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, method_index, parameter_type);
                 }
             }
@@ -238,38 +374,38 @@ fn collectItem(
             }
         },
         .Impl => |impl_decl| {
-            const impl_name = try std.fmt.allocPrint(builder.allocator, "impl {s} for {s}", .{ impl_decl.trait_name, impl_decl.target_name });
-            defer builder.allocator.free(impl_name);
-            const impl_detail = try std.fmt.allocPrint(builder.allocator, "for {s}", .{impl_decl.target_name});
+            const impl_name = try std.fmt.allocPrint(builder.scratch_allocator, "impl {s} for {s}", .{ impl_decl.trait_name, impl_decl.target_name });
+            defer builder.scratch_allocator.free(impl_name);
+            const impl_detail = try std.fmt.allocPrint(builder.result_allocator, "for {s}", .{impl_decl.target_name});
             const impl_index = try builder.addSymbolWithSelectionName(impl_name, impl_decl.trait_name, .impl_decl, impl_decl.range, parent, impl_detail);
             for (impl_decl.methods) |method_id| {
                 try collectItem(builder, file, method_id, impl_index, true);
             }
         },
         .TypeAlias => |alias_decl| {
-            const alias_detail = try formatTypeExprAlloc(builder.allocator, file, alias_decl.target_type);
+            const alias_detail = try formatTypeExprAlloc(builder.result_allocator, file, alias_decl.target_type);
             _ = try builder.addSymbol(alias_decl.name, .type_alias, alias_decl.range, parent, alias_detail);
         },
         .LogDecl => |log_decl| {
-            const log_detail = try formatLogDetailAlloc(builder.allocator, file, log_decl);
+            const log_detail = try formatLogDetailAlloc(builder.result_allocator, file, log_decl);
             const log_index = try builder.addSymbol(log_decl.name, .event, log_decl.range, parent, log_detail);
             for (log_decl.fields) |field| {
-                const field_type = try formatTypeExprAlloc(builder.allocator, file, field.type_expr);
+                const field_type = try formatTypeExprAlloc(builder.result_allocator, file, field.type_expr);
                 _ = try builder.addSymbol(field.name, .field, field.range, log_index, field_type);
             }
         },
         .ErrorDecl => |error_decl| {
-            const error_detail = try formatErrorDetailAlloc(builder.allocator, file, error_decl);
+            const error_detail = try formatErrorDetailAlloc(builder.result_allocator, file, error_decl);
             const error_index = try builder.addSymbol(error_decl.name, .error_decl, error_decl.range, parent, error_detail);
             for (error_decl.parameters) |parameter| {
                 const parameter_name = patternName(file, parameter.pattern) orelse continue;
-                const parameter_type = try formatTypeExprAlloc(builder.allocator, file, parameter.type_expr);
+                const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);
                 _ = try builder.addSymbol(parameter_name, .parameter, parameter.range, error_index, parameter_type);
             }
         },
         .Import => |import_decl| {
             if (import_decl.alias) |alias| {
-                const detail = try std.fmt.allocPrint(builder.allocator, "import \"{s}\"", .{import_decl.path});
+                const detail = try std.fmt.allocPrint(builder.result_allocator, "import \"{s}\"", .{import_decl.path});
                 _ = try builder.addSymbol(alias, .variable, import_decl.range, parent, detail);
             }
         },
@@ -277,7 +413,54 @@ fn collectItem(
     }
 }
 
-pub fn findSymbolAtPosition(symbols: []const Symbol, position: frontend.Position) ?usize {
+pub fn findSymbolAtPosition(index: *const SemanticIndex, position: frontend.Position) ?usize {
+    if (index.symbol_depths.len == index.symbols.len and index.symbol_position_order.len == index.symbols.len) {
+        return findSymbolAtPositionIndexed(index.symbols, index.symbol_depths, index.symbol_position_order, position);
+    }
+    return findSymbolAtPositionLinear(index.symbols, position);
+}
+
+pub fn symbolIndexesWithNamePrefix(index: *const SemanticIndex, prefix: []const u8) ?[]const u32 {
+    if (prefix.len == 0) return null;
+    if (index.symbol_name_order.len != index.symbols.len) return null;
+
+    const start = lowerBoundSymbolName(index.symbols, index.symbol_name_order, prefix);
+    var end = start;
+    while (end < index.symbol_name_order.len) : (end += 1) {
+        const symbol = index.symbols[index.symbol_name_order[end]];
+        if (!std.mem.startsWith(u8, symbol.name, prefix)) break;
+    }
+    return index.symbol_name_order[start..end];
+}
+
+pub fn symbolIndexNamed(index: *const SemanticIndex, name: []const u8) ?usize {
+    if (index.symbol_name_order.len == index.symbols.len) {
+        const start = lowerBoundSymbolName(index.symbols, index.symbol_name_order, name);
+        if (start < index.symbol_name_order.len) {
+            const symbol_index: usize = index.symbol_name_order[start];
+            if (std.mem.eql(u8, index.symbols[symbol_index].name, name)) return symbol_index;
+        }
+        return null;
+    }
+
+    for (index.symbols, 0..) |symbol, symbol_index| {
+        if (std.mem.eql(u8, symbol.name, name)) return symbol_index;
+    }
+    return null;
+}
+
+pub fn symbolIndexWithSelectionRange(index: *const SemanticIndex, range: frontend.Range) ?usize {
+    const symbol_index = findSymbolAtPosition(index, range.start) orelse return null;
+    const symbol = index.symbols[symbol_index];
+    if (rangesEqual(symbol.selection_range, range)) return symbol_index;
+
+    for (index.symbols, 0..) |candidate, candidate_index| {
+        if (rangesEqual(candidate.selection_range, range)) return candidate_index;
+    }
+    return null;
+}
+
+pub fn findSymbolAtPositionLinear(symbols: []const Symbol, position: frontend.Position) ?usize {
     var best_index: ?usize = null;
     var best_in_selection = false;
     var best_depth: usize = 0;
@@ -304,6 +487,90 @@ pub fn findSymbolAtPosition(symbols: []const Symbol, position: frontend.Position
     }
 
     return best_index;
+}
+
+fn findSymbolAtPositionIndexed(
+    symbols: []const Symbol,
+    symbol_depths: []const u16,
+    symbol_position_order: []const u32,
+    position: frontend.Position,
+) ?usize {
+    var best_index: ?usize = null;
+    var best_in_selection = false;
+    var best_depth: usize = 0;
+    var best_span: u64 = std.math.maxInt(u64);
+
+    var i = upperBoundSymbolStart(symbols, symbol_position_order, position);
+    while (i > 0) {
+        i -= 1;
+        const symbol_index: usize = symbol_position_order[i];
+        const symbol = symbols[symbol_index];
+        const in_selection = rangeContainsPosition(symbol.selection_range, position);
+        if (in_selection) return symbol_index;
+        const in_range = in_selection or rangeContainsPosition(symbol.range, position);
+        if (!in_range) continue;
+
+        const depth: usize = symbol_depths[symbol_index];
+        const span = rangeSize(symbol.range);
+
+        if (best_index == null or
+            (in_selection and !best_in_selection) or
+            (in_selection == best_in_selection and depth > best_depth) or
+            (in_selection == best_in_selection and depth == best_depth and span < best_span))
+        {
+            best_index = symbol_index;
+            best_in_selection = in_selection;
+            best_depth = depth;
+            best_span = span;
+        }
+    }
+
+    return best_index;
+}
+
+fn upperBoundSymbolStart(
+    symbols: []const Symbol,
+    symbol_position_order: []const u32,
+    position: frontend.Position,
+) usize {
+    var low: usize = 0;
+    var high: usize = symbol_position_order.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const symbol = symbols[symbol_position_order[mid]];
+        if (!positionLessThan(position, symbol.range.start)) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn lowerBoundSymbolName(
+    symbols: []const Symbol,
+    symbol_name_order: []const u32,
+    prefix: []const u8,
+) usize {
+    var low: usize = 0;
+    var high: usize = symbol_name_order.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        const symbol = symbols[symbol_name_order[mid]];
+        if (std.mem.order(u8, symbol.name, prefix) == .lt) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
+fn rangesEqual(a: frontend.Range, b: frontend.Range) bool {
+    return a.start.line == b.start.line and
+        a.start.character == b.start.character and
+        a.end.line == b.end.line and
+        a.end.character == b.end.character;
 }
 
 fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, function_decl: compiler.ast.FunctionItem) ![]u8 {
@@ -337,7 +604,10 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
             .requires => "    requires(",
             .guard => "    guard(",
             .ensures => "    ensures(",
+            .ensures_ok => "    ensures_ok(",
+            .ensures_err => "    ensures_err(",
             .invariant => "    invariant(",
+            .modifies => "    modifies(",
         });
         try writeExprText(writer, file, clause.expr);
         try writer.writeByte(')');
@@ -430,6 +700,14 @@ fn unaryOpText(op: compiler.ast.UnaryOp) []const u8 {
         .bit_not => "~",
         .try_ => "try ",
     };
+}
+
+fn addSat(a: usize, b: usize) usize {
+    return std.math.add(usize, a, b) catch std.math.maxInt(usize);
+}
+
+fn mulSat(a: usize, b: usize) usize {
+    return std.math.mul(usize, a, b) catch std.math.maxInt(usize);
 }
 
 fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, error_decl: compiler.ast.ErrorDeclItem) ![]u8 {
@@ -556,7 +834,10 @@ fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.
             .requires => "    requires(",
             .guard => "    guard(",
             .ensures => "    ensures(",
+            .ensures_ok => "    ensures_ok(",
+            .ensures_err => "    ensures_err(",
             .invariant => "    invariant(",
+            .modifies => "    modifies(",
         });
         try writeExprText(writer, file, clause.expr);
         try writer.writeByte(')');
@@ -710,18 +991,24 @@ pub fn toLspKind(kind: SymbolKind) u8 {
 }
 
 const SymbolBuilder = struct {
-    allocator: Allocator,
+    result_allocator: Allocator,
+    scratch_allocator: Allocator,
     symbols: std.ArrayList(Symbol),
-    sources: compiler.source.SourceStore,
+    sources: *const compiler.source.SourceStore,
     file_id: compiler.FileId,
     source_text: []const u8,
+    builder_growth_events: usize = 0,
 
-    fn init(allocator: Allocator, source_text: []const u8) !SymbolBuilder {
-        var sources = compiler.source.SourceStore.init(allocator);
-        errdefer sources.deinit();
-        const file_id = try sources.addFile("<lsp>", source_text);
+    fn initBorrowedSources(
+        result_allocator: Allocator,
+        scratch_allocator: Allocator,
+        sources: *const compiler.source.SourceStore,
+        file_id: compiler.FileId,
+        source_text: []const u8,
+    ) SymbolBuilder {
         return .{
-            .allocator = allocator,
+            .result_allocator = result_allocator,
+            .scratch_allocator = scratch_allocator,
             .symbols = .{},
             .sources = sources,
             .file_id = file_id,
@@ -731,19 +1018,15 @@ const SymbolBuilder = struct {
 
     fn deinit(self: *SymbolBuilder) void {
         for (self.symbols.items) |symbol| {
-            self.allocator.free(symbol.name);
-            if (symbol.detail) |detail| self.allocator.free(detail);
-            if (symbol.doc_comment) |doc| self.allocator.free(doc);
+            self.result_allocator.free(symbol.name);
+            if (symbol.detail) |detail| self.result_allocator.free(detail);
+            if (symbol.doc_comment) |doc| self.result_allocator.free(doc);
         }
-        self.symbols.deinit(self.allocator);
-        self.sources.deinit();
+        self.symbols.deinit(self.result_allocator);
     }
 
     fn finish(self: *SymbolBuilder) ![]Symbol {
-        const owned = try self.symbols.toOwnedSlice(self.allocator);
-        self.sources.deinit();
-        self.sources = compiler.source.SourceStore.init(self.allocator);
-        return owned;
+        return self.symbols.toOwnedSlice(self.result_allocator);
     }
 
     fn addSymbol(
@@ -766,13 +1049,15 @@ const SymbolBuilder = struct {
         parent: ?usize,
         detail: ?[]u8,
     ) !usize {
-        const name_copy = try self.allocator.dupe(u8, name);
-        errdefer self.allocator.free(name_copy);
-        errdefer if (detail) |detail_text| self.allocator.free(detail_text);
+        const name_copy = try self.result_allocator.dupe(u8, name);
+        errdefer self.result_allocator.free(name_copy);
+        errdefer if (detail) |detail_text| self.result_allocator.free(detail_text);
 
         const doc = try self.extractDocComment(range);
+        errdefer if (doc) |doc_text| self.result_allocator.free(doc_text);
 
-        try self.symbols.append(self.allocator, .{
+        const capacity_before = self.symbols.capacity;
+        try self.symbols.append(self.result_allocator, .{
             .name = name_copy,
             .detail = detail,
             .doc_comment = doc,
@@ -781,12 +1066,15 @@ const SymbolBuilder = struct {
             .selection_range = self.textRangeToSelectionRange(range, selection_name),
             .parent = parent,
         });
+        if (self.symbols.capacity > capacity_before) {
+            self.builder_growth_events += 1;
+        }
 
         return self.symbols.items.len - 1;
     }
 
-    /// Extract doc comments (// lines) immediately preceding a declaration.
-    /// Scans backwards from the declaration start to find contiguous comment lines.
+    /// Extract public doc comments (`///` lines) immediately preceding a declaration.
+    /// Plain `//` comments are internal notes and are not harvested for public docs.
     fn extractDocComment(self: *const SymbolBuilder, range: compiler.TextRange) !?[]u8 {
         const start: usize = @intCast(@min(range.start, self.source_text.len));
         if (start == 0) return null;
@@ -799,7 +1087,7 @@ const SymbolBuilder = struct {
 
         // Now walk backwards through preceding comment lines.
         var comment_lines = std.ArrayList([]const u8){};
-        defer comment_lines.deinit(self.allocator);
+        defer comment_lines.deinit(self.scratch_allocator);
 
         var scan_pos = line_start;
         while (scan_pos > 0) {
@@ -816,13 +1104,13 @@ const SymbolBuilder = struct {
             const line = self.source_text[prev_line_start..prev_line_end];
             const trimmed = std.mem.trimLeft(u8, line, " \t");
 
-            if (std.mem.startsWith(u8, trimmed, "//")) {
-                // Strip the // prefix and optional leading space.
-                var comment_text = trimmed[2..];
+            if (std.mem.startsWith(u8, trimmed, "///")) {
+                // Strip the /// prefix and optional leading space.
+                var comment_text = trimmed[3..];
                 if (comment_text.len > 0 and comment_text[0] == ' ') {
                     comment_text = comment_text[1..];
                 }
-                try comment_lines.append(self.allocator, comment_text);
+                try comment_lines.append(self.scratch_allocator, comment_text);
                 scan_pos = prev_line_start;
             } else if (trimmed.len == 0) {
                 // Empty line — stop collecting.
@@ -844,7 +1132,7 @@ const SymbolBuilder = struct {
             if (i < comment_lines.items.len - 1) total_len += 1; // newline
         }
 
-        const result = try self.allocator.alloc(u8, total_len);
+        const result = try self.result_allocator.alloc(u8, total_len);
         var offset: usize = 0;
         for (comment_lines.items, 0..) |line, i| {
             @memcpy(result[offset .. offset + line.len], line);
@@ -859,11 +1147,12 @@ const SymbolBuilder = struct {
     }
 
     fn textRangeToRange(self: *const SymbolBuilder, range: compiler.TextRange) frontend.Range {
-        const start = self.sources.lineColumn(.{
+        const sources = self.sourceStore();
+        const start = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.start, .end = range.start },
         });
-        const end = self.sources.lineColumn(.{
+        const end = sources.lineColumn(.{
             .file_id = self.file_id,
             .range = .{ .start = range.end, .end = range.end },
         });
@@ -897,6 +1186,10 @@ const SymbolBuilder = struct {
         selection.end.line = selection.start.line;
         selection.end.character = std.math.add(u32, selection.start.character, name_len) catch std.math.maxInt(u32);
         return selection;
+    }
+
+    fn sourceStore(self: *const SymbolBuilder) *const compiler.source.SourceStore {
+        return self.sources;
     }
 };
 

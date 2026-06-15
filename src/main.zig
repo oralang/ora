@@ -13,13 +13,16 @@
 
 const std = @import("std");
 const lib = @import("ora_lib");
+const ora_types = @import("ora_types");
 const build_options = @import("build_options");
 const cli_args = @import("cli/args.zig");
 const compiler = lib.compiler;
+const refinements = ora_types.refinement_semantics;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
-const Metrics = @import("metrics.zig").Metrics;
+const Metrics = lib.metrics.Metrics;
+const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
 
 /// MLIR-related command line options
@@ -31,18 +34,18 @@ const MlirOptions = struct {
     emit_cfg_mode: ?[]const u8 = null,
     opt_level: ?[]const u8,
     output_dir: ?[]const u8,
+    output_file: ?[]const u8 = null,
     debug_enabled: bool = false,
     debug_info: bool = false,
     canonicalize: bool = true,
     validate_mlir: bool = true,
     verify_z3: bool = true,
     verify_mode: ?[]const u8 = null,
-    verify_calls: ?bool = null,
-    verify_state: ?bool = null,
     verify_stats: bool = false,
     explain_cores: bool = false,
     z3_proofs: bool = false,
     minimize_cores: bool = false,
+    keep_proved_checks: bool = false,
     emit_smt_report: bool = false,
     mlir_pass_pipeline: ?[]const u8 = null,
     mlir_verify_each_pass: bool = false,
@@ -56,6 +59,7 @@ const MlirOptions = struct {
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
     suppress_artifact_logs: bool = false,
+    chain_id: u64 = compiler.compile_options.default_chain_id,
     metrics: *Metrics = undefined,
 
     fn getOptimizationLevel(self: MlirOptions) OptimizationLevel {
@@ -74,6 +78,40 @@ const MlirOptions = struct {
         return .Basic; // Final fallback
     }
 };
+
+const ChainIdSelection = struct {
+    cli_chain_id: ?u64,
+
+    fn resolve(self: ChainIdSelection, compiler_chain_id: ?u64, target_chain_id: ?u64) u64 {
+        return self.cli_chain_id orelse target_chain_id orelse compiler_chain_id orelse compiler.compile_options.default_chain_id;
+    }
+};
+
+const CompileContext = struct {
+    include_roots: ?[]const []const u8,
+    resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
+};
+
+fn compileOptionsForChain(chain_id: u64) compiler.compile_options.CompileOptions {
+    return compileOptionsForChainWithMetrics(chain_id, null);
+}
+
+fn compileOptionsForChainWithMetrics(chain_id: u64, instrumentation: ?*Metrics) compiler.compile_options.CompileOptions {
+    return .{ .chain_id = chain_id, .instrumentation = instrumentation };
+}
+
+fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
+    var iterator = try std.process.argsWithAllocator(allocator);
+    defer iterator.deinit();
+
+    while (iterator.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--metrics") or std.mem.eql(u8, arg, "--time-report")) {
+            return true;
+        }
+    }
+    return false;
+}
 
 const OptimizationLevel = enum {
     None,
@@ -104,7 +142,6 @@ const DebugCliOptions = struct {
     signature: ?[]const u8 = null,
     arg_values: std.ArrayList([]const u8),
     calldata_hex: ?[]const u8 = null,
-    verify_requested: bool = false,
     /// Headless mode: emit debug artifacts but skip launching the TUI.
     /// Used by debug-artifact regression tests and for offline artifact
     /// generation that ships traces to another engineer.
@@ -114,9 +151,8 @@ const DebugCliOptions = struct {
     /// stdio; suitable for piping to a DAP-aware editor (VS Code
     /// launch.json, etc.). Mutually exclusive with --no-tui.
     dap: bool = false,
-    /// Limit overrides forwarded verbatim to ora-evm-debug-tui. Stored as
-    /// the raw text so we can re-emit them onto the spawned argv without
-    /// any (re)formatting drift.
+    /// Limit overrides forwarded to ora-evm-debug-tui after parse-time
+    /// validation. Stored as raw text only to preserve CLI spelling.
     gas_limit: ?[]const u8 = null,
     max_steps: ?[]const u8 = null,
     deploy_step_cap: ?[]const u8 = null,
@@ -176,7 +212,7 @@ const InitTemplates = struct {
         \\
         \\## Commands
         \\- `ora build`
-        \\- `ora emit --emit-typed-ast contracts/main.ora`
+        \\- `ora emit --emit=typed-ast contracts/main.ora`
     ;
 };
 
@@ -188,17 +224,80 @@ fn hasEmitFlags(parsed: cli_args.CliOptions) bool {
         parsed.emit_mlir_sir or
         parsed.emit_sir_text or
         parsed.emit_bytecode or
-        parsed.emit_cfg;
+        parsed.emit_cfg or
+        parsed.emit_smt_report or
+        parsed.emit_abi or
+        parsed.emit_abi_solidity or
+        parsed.emit_abi_extras;
+}
+
+fn hasFmtFlags(parsed: cli_args.CliOptions) bool {
+    return parsed.fmt_check or parsed.fmt_diff or parsed.fmt_stdout or parsed.fmt_width != null;
+}
+
+fn bytecodeFileExtension(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".hex") or
+        std.mem.endsWith(u8, path, ".bytecode") or
+        std.mem.endsWith(u8, path, ".bin");
+}
+
+fn emitOutputCount(parsed: cli_args.CliOptions) usize {
+    var count: usize = 0;
+    if (parsed.emit_tokens) count += 1;
+    if (parsed.emit_ast) count += 1;
+    if (parsed.emit_typed_ast) count += 1;
+    if (parsed.emit_mlir) count += 1;
+    if (parsed.emit_mlir_sir) count += 1;
+    if (parsed.emit_sir_text) count += 1;
+    if (parsed.emit_bytecode) count += 1;
+    if (parsed.emit_cfg) count += 1;
+    if (parsed.emit_smt_report) count += 1;
+    if (parsed.emit_abi) count += 1;
+    if (parsed.emit_abi_solidity) count += 1;
+    if (parsed.emit_abi_extras) count += 1;
+    return count;
+}
+
+fn claimDebugOption(seen: *bool) !void {
+    if (seen.*) return error.DuplicateArgument;
+    seen.* = true;
+}
+
+fn validatePositiveI64(text: []const u8) !void {
+    const value = std.fmt.parseInt(i64, text, 10) catch return error.InvalidDebugOptions;
+    if (value <= 0) return error.InvalidDebugOptions;
+}
+
+fn validatePositiveU64(text: []const u8) !void {
+    const value = std.fmt.parseInt(u64, text, 10) catch return error.InvalidDebugOptions;
+    if (value == 0) return error.InvalidDebugOptions;
+}
+
+fn validatePositiveUsize(text: []const u8) !void {
+    const value = std.fmt.parseInt(usize, text, 10) catch return error.InvalidDebugOptions;
+    if (value == 0) return error.InvalidDebugOptions;
 }
 
 fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) !DebugCliOptions {
     var opts = DebugCliOptions.init();
     errdefer opts.deinit(allocator);
 
+    var seen_init_signature = false;
+    var seen_init_calldata_hex = false;
+    var seen_signature = false;
+    var seen_calldata_hex = false;
+    var seen_no_tui = false;
+    var seen_dap = false;
+    var seen_gas_limit = false;
+    var seen_max_steps = false;
+    var seen_deploy_step_cap = false;
+    var seen_artifact_max_bytes = false;
+
     var i: usize = 0;
     while (i < args.len) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--init-signature")) {
+            try claimDebugOption(&seen_init_signature);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.init_signature = args[i + 1];
             i += 2;
@@ -211,12 +310,14 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
             continue;
         }
         if (std.mem.eql(u8, arg, "--init-calldata-hex")) {
+            try claimDebugOption(&seen_init_calldata_hex);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.init_calldata_hex = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--signature")) {
+            try claimDebugOption(&seen_signature);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.signature = args[i + 1];
             i += 2;
@@ -229,46 +330,53 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
             continue;
         }
         if (std.mem.eql(u8, arg, "--calldata-hex")) {
+            try claimDebugOption(&seen_calldata_hex);
             if (i + 1 >= args.len) return error.MissingArgument;
             opts.calldata_hex = args[i + 1];
             i += 2;
             continue;
         }
 
-        if (std.mem.eql(u8, arg, "--verify") or std.mem.startsWith(u8, arg, "--verify=")) {
-            opts.verify_requested = true;
-        }
-
         if (std.mem.eql(u8, arg, "--no-tui")) {
+            try claimDebugOption(&seen_no_tui);
             opts.no_tui = true;
             i += 1;
             continue;
         }
         if (std.mem.eql(u8, arg, "--dap")) {
+            try claimDebugOption(&seen_dap);
             opts.dap = true;
             i += 1;
             continue;
         }
         if (std.mem.eql(u8, arg, "--gas-limit")) {
+            try claimDebugOption(&seen_gas_limit);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveI64(args[i + 1]);
             opts.gas_limit = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--max-steps")) {
+            try claimDebugOption(&seen_max_steps);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveU64(args[i + 1]);
             opts.max_steps = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--deploy-step-cap")) {
+            try claimDebugOption(&seen_deploy_step_cap);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveUsize(args[i + 1]);
             opts.deploy_step_cap = args[i + 1];
             i += 2;
             continue;
         }
         if (std.mem.eql(u8, arg, "--artifact-max-bytes")) {
+            try claimDebugOption(&seen_artifact_max_bytes);
             if (i + 1 >= args.len) return error.MissingArgument;
+            try validatePositiveUsize(args[i + 1]);
             opts.artifact_max_bytes = args[i + 1];
             i += 2;
             continue;
@@ -340,7 +448,10 @@ fn runInitCommand(target_dir: []const u8) !void {
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const backing_allocator = gpa.allocator();
+    const metrics_requested = try rawArgsRequestMetrics(backing_allocator);
+    var counting_allocator = allocation_stats.CountingAllocator.init(backing_allocator);
+    const allocator = if (metrics_requested) counting_allocator.allocator() else backing_allocator;
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
@@ -350,7 +461,16 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
+        try printUsage();
+        return;
+    }
+
     if (args.len >= 2 and std.mem.eql(u8, args[1], "init")) {
+        if (args.len == 3 and (std.mem.eql(u8, args[2], "-h") or std.mem.eql(u8, args[2], "--help"))) {
+            try printUsage();
+            return;
+        }
         if (args.len > 3) {
             std.debug.print("error: init accepts at most one optional <path>\n", .{});
             try printUsage();
@@ -393,22 +513,28 @@ pub fn main() !void {
     var parse_args: std.ArrayList([]const u8) = .{};
     defer parse_args.deinit(allocator);
     if (subcommand == .Debug) {
-        debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch {
+        debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch |err| {
+            std.debug.print("error: invalid debug arguments: {s}\n", .{@errorName(err)});
             try printUsage();
-            return;
+            std.process.exit(2);
         };
         try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
     } else {
         for (args_to_parse) |arg| try parse_args.append(allocator, arg);
     }
 
-    var parsed = cli_args.parseArgs(parse_args.items) catch {
+    var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
+        std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
         try printUsage();
-        return;
+        std.process.exit(2);
     };
 
     if (subcommand == .Fmt) {
         parsed.fmt = true;
+    }
+    if (parsed.show_help) {
+        try printUsage();
+        return;
     }
     if (parsed.show_version) {
         try printVersion();
@@ -416,6 +542,7 @@ pub fn main() !void {
     }
 
     const output_dir: ?[]const u8 = parsed.output_dir;
+    const output_file: ?[]const u8 = parsed.output_file;
     const input_file: ?[]const u8 = parsed.input_file;
     const emit_tokens: bool = parsed.emit_tokens;
     const emit_ast: bool = parsed.emit_ast;
@@ -428,16 +555,18 @@ pub fn main() !void {
     const emit_bytecode: bool = parsed.emit_bytecode;
     const emit_cfg: bool = parsed.emit_cfg;
     const emit_cfg_mode: ?[]const u8 = parsed.emit_cfg_mode;
+    const emit_abi: bool = parsed.emit_abi;
+    const emit_abi_solidity: bool = parsed.emit_abi_solidity;
+    const emit_abi_extras: bool = parsed.emit_abi_extras;
     const canonicalize_mlir: bool = parsed.canonicalize_mlir;
     const validate_mlir: bool = parsed.validate_mlir;
     const verify_z3: bool = parsed.verify_z3;
     const verify_mode: ?[]const u8 = parsed.verify_mode;
-    const verify_calls: ?bool = parsed.verify_calls;
-    const verify_state: ?bool = parsed.verify_state;
     const verify_stats: bool = parsed.verify_stats;
     const explain_cores: bool = parsed.explain_cores or parsed.minimize_cores;
     const z3_proofs: bool = parsed.z3_proofs;
     const minimize_cores: bool = parsed.minimize_cores;
+    const keep_proved_checks: bool = parsed.keep_proved_checks;
     const emit_smt_report: bool = parsed.emit_smt_report;
     const mlir_pass_pipeline: ?[]const u8 = parsed.mlir_pass_pipeline;
     const mlir_verify_each_pass: bool = parsed.mlir_verify_each_pass;
@@ -464,13 +593,22 @@ pub fn main() !void {
     const fmt_stdout: bool = parsed.fmt_stdout;
     const fmt_width: ?u32 = parsed.fmt_width;
     const metrics_enabled: bool = parsed.metrics;
+    const cli_chain_id: ?u64 = parsed.chain_id;
+    const chain_ids = ChainIdSelection{ .cli_chain_id = cli_chain_id };
 
     var metrics = Metrics.init(metrics_enabled);
+    if (metrics_enabled and metrics_requested) {
+        metrics.setAllocationStats(&counting_allocator.stats);
+    }
 
     log.setDebugEnabled(debug_enabled);
 
     // handle fmt command
     if (fmt) {
+        if (output_dir != null or output_file != null or hasEmitFlags(parsed)) {
+            std.debug.print("error: fmt mode accepts only fmt options and an input path.\n", .{});
+            std.process.exit(2);
+        }
         if (input_file == null) {
             std.debug.print("error: fmt requires an input file or directory\n", .{});
             try printUsage();
@@ -489,7 +627,29 @@ pub fn main() !void {
         .None => if (emit_flags_requested) .Emit else .Build,
     };
     if (command_kind == .Build and emit_flags_requested) {
-        std.debug.print("error: build mode does not accept --emit-* flags. Use 'ora emit ...' for debug outputs.\n", .{});
+        std.debug.print("error: build mode does not accept emit selectors. Use 'ora emit --emit=<list> ...' for debug outputs.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (command_kind != .Fmt and hasFmtFlags(parsed)) {
+        std.debug.print("error: formatter options require 'ora fmt'.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (output_dir) |dir| {
+        if (bytecodeFileExtension(dir)) {
+            std.debug.print("error: '-o/--out-dir' expects a directory; use '--out-file' for '{s}'.\n", .{dir});
+            std.process.exit(2);
+        }
+    }
+
+    if (output_file != null and command_kind != .Emit) {
+        std.debug.print("error: --out-file is only valid with 'ora emit --emit=bytecode'.\n", .{});
+        std.process.exit(2);
+    }
+
+    if (output_file != null and (!parsed.emit_bytecode or emitOutputCount(parsed) != 1)) {
+        std.debug.print("error: --out-file requires exactly '--emit=bytecode'.\n", .{});
         std.process.exit(2);
     }
 
@@ -504,21 +664,21 @@ pub fn main() !void {
     }
 
     if ((mlir_verify_each_pass or mlir_pass_timing) and mlir_pass_pipeline == null) {
-        std.debug.print("error: --mlir-verify-each-pass and --mlir-pass-timing require --mlir-pass-pipeline.\n", .{});
+        std.debug.print("error: MLIR debug options verify-each and timing require --mlir-pass-pipeline.\n", .{});
         std.process.exit(2);
     }
 
     if (mlir_print_ir_pass != null and mlir_print_ir == null) {
-        std.debug.print("error: --mlir-print-ir-pass requires --mlir-print-ir.\n", .{});
+        std.debug.print("error: MLIR debug option print-ir-pass requires print-ir:<mode>.\n", .{});
         std.process.exit(2);
     }
 
     if (command_kind == .Emit) {
         // if no --emit-X flag is set, default to MLIR generation
-        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
+        if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
             emit_mlir = true; // Default: emit MLIR
         }
-        if ((emit_sir_text or emit_bytecode or (emit_cfg and emit_cfg_mode != null and std.ascii.eqlIgnoreCase(emit_cfg_mode.?, "sir"))) and !emit_mlir_sir) {
+        if ((emit_sir_text or emit_bytecode) and !emit_mlir_sir) {
             emit_mlir_sir = true;
         }
     }
@@ -532,18 +692,18 @@ pub fn main() !void {
         .emit_cfg_mode = emit_cfg_mode,
         .opt_level = mlir_opt_level,
         .output_dir = output_dir,
+        .output_file = output_file,
         .debug_enabled = debug_enabled,
         .debug_info = debug_info,
         .canonicalize = canonicalize_mlir,
         .validate_mlir = validate_mlir,
         .verify_z3 = verify_z3,
         .verify_mode = verify_mode,
-        .verify_calls = verify_calls,
-        .verify_state = verify_state,
         .verify_stats = verify_stats,
         .explain_cores = explain_cores,
         .z3_proofs = z3_proofs,
         .minimize_cores = minimize_cores,
+        .keep_proved_checks = keep_proved_checks,
         .emit_smt_report = emit_smt_report,
         .mlir_pass_pipeline = mlir_pass_pipeline,
         .mlir_verify_each_pass = mlir_verify_each_pass,
@@ -556,24 +716,27 @@ pub fn main() !void {
         .cpp_lowering_stub = cpp_lowering_stub,
         .persist_ora_mlir = false,
         .persist_sir_mlir = false,
+        .chain_id = cli_chain_id orelse compiler.compile_options.default_chain_id,
         .metrics = &metrics,
     };
 
     if (command_kind == .Debug) {
         const debug_options = debug_cli.?;
         const file_path = parsed.input_file.?;
-        const resolver = try discoverResolverOptionsForFile(allocator, file_path);
-        defer if (resolver.include_roots) |include_roots| {
+        const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+        defer if (compile_context.include_roots) |include_roots| {
             freeResolvedIncludeRoots(allocator, include_roots);
         };
 
         var debug_mlir_options = mlir_options;
+        debug_mlir_options.chain_id = compile_context.chain_id;
         debug_mlir_options.emit_mlir = false;
         debug_mlir_options.emit_mlir_sir = true;
         debug_mlir_options.emit_sir_text = true;
         debug_mlir_options.emit_bytecode = true;
+        debug_mlir_options.emit_cfg_mode = "sir";
         debug_mlir_options.debug_info = true;
-        if (!debug_options.verify_requested) {
+        if (!parsed.verify_requested) {
             debug_mlir_options.verify_z3 = false;
             debug_mlir_options.emit_smt_report = false;
         }
@@ -600,7 +763,7 @@ pub fn main() !void {
             file_path,
             parsed.output_dir,
             debug_mlir_options,
-            resolver.options,
+            compile_context.resolver_options,
         );
         defer allocator.free(artifact_root);
 
@@ -642,6 +805,7 @@ pub fn main() !void {
 
         var build_resolver_options: import_graph.ResolverOptions = .{};
         var build_output_dir: ?[]const u8 = output_dir;
+        var build_chain_id = mlir_options.chain_id;
         if (input_file) |build_file_path| {
             const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
             const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
@@ -659,6 +823,9 @@ pub fn main() !void {
                     std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
                     std.process.exit(2);
                 };
+
+                const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
+                build_chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
 
                 if (target_idx_opt) |target_idx| {
                     const target = loaded.config.targets[target_idx];
@@ -732,17 +899,20 @@ pub fn main() !void {
             }
         }
 
+        var build_mlir_options = mlir_options;
+        build_mlir_options.chain_id = build_chain_id;
+
         const build_result = if (input_file) |build_file_path|
             runBuildArtifacts(
                 allocator,
                 build_file_path,
                 build_output_dir,
-                mlir_options,
+                build_mlir_options,
                 build_resolver_options,
                 if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
             )
         else
-            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options);
+            runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, chain_ids);
 
         var stderr_buffer_build: [1024]u8 = undefined;
         var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
@@ -764,14 +934,24 @@ pub fn main() !void {
 
     const file_path = input_file.?;
 
-    const resolver = try discoverResolverOptionsForFile(allocator, file_path);
-    defer if (resolver.include_roots) |include_roots| {
+    const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+    defer if (compile_context.include_roots) |include_roots| {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
-    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg) {
-        std.debug.print("error: emit requires an explicit --emit-* mode.\n", .{});
+    if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
+        std.debug.print("error: emit requires an explicit --emit=<list> mode.\n", .{});
         std.process.exit(2);
+    }
+
+    var emit_mlir_options = mlir_options;
+    emit_mlir_options.chain_id = compile_context.chain_id;
+
+    if (emit_abi or emit_abi_solidity or emit_abi_extras) {
+        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
+            error.MissingContract => std.process.exit(2),
+            else => return err,
+        };
     }
 
     if (emit_tokens) {
@@ -781,11 +961,11 @@ pub fn main() !void {
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, resolver.options, &metrics, debug_enabled);
-    } else if (emit_cfg or emit_sir_text or emit_bytecode) {
-        try runMlirEmitAdvanced(allocator, file_path, mlir_options, resolver.options, debug_enabled);
-    } else {
-        try runCompilerMlirEmit(allocator, file_path, mlir_options, resolver.options, debug_enabled);
+        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled);
+    } else if (emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report) {
+        try runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+    } else if (emit_mlir or emit_mlir_sir) {
+        try runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -865,18 +1045,10 @@ fn runBuildArtifacts(
         std.process.exit(2);
     }
 
-    // reset output tree so each build produces a coherent artifact bundle
-    var artifact_root_exists = true;
-    std.fs.cwd().access(artifact_root, .{}) catch |err| switch (err) {
-        error.FileNotFound => artifact_root_exists = false,
-        else => return err,
-    };
-    if (artifact_root_exists) {
-        try std.fs.cwd().deleteTree(artifact_root);
-    }
+    // Never delete a user-supplied output root. Build writes its known artifact
+    // files under stable subdirectories and may overwrite files it owns, but it
+    // must not recursively remove unrelated user data.
     try std.fs.cwd().makePath(artifact_root);
-    var build_succeeded = false;
-    errdefer if (!build_succeeded) std.fs.cwd().deleteTree(artifact_root) catch {};
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
@@ -895,10 +1067,10 @@ fn runBuildArtifacts(
     try std.fs.cwd().makePath(verify_dir);
     try std.fs.cwd().makePath(mlir_dir);
 
-    try validateConfiguredInitArgs(allocator, file_path, resolver_options, configured_init_args);
+    try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
     // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -956,7 +1128,6 @@ fn runBuildArtifacts(
 
     try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
     try stdout.flush();
-    build_succeeded = true;
 }
 
 fn printBuildArtifactSummary(
@@ -1018,21 +1189,15 @@ fn runDebugArtifacts(
     defer allocator.free(default_root);
     const artifact_root = output_dir orelse default_root;
 
-    var artifact_root_exists = true;
-    std.fs.cwd().access(artifact_root, .{}) catch |err| switch (err) {
-        error.FileNotFound => artifact_root_exists = false,
-        else => return err,
-    };
-    if (artifact_root_exists) {
-        try std.fs.cwd().deleteTree(artifact_root);
-    }
+    // Debug artifact output follows the same safety rule as build output:
+    // create directories and overwrite compiler-owned files, never wipe roots.
     try std.fs.cwd().makePath(artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
     try std.fs.cwd().makePath(abi_dir);
 
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.debug_enabled);
+    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     var debug_mlir_options = base_options;
     debug_mlir_options.output_dir = artifact_root;
@@ -1492,11 +1657,15 @@ fn validateConfiguredInitArgs(
     allocator: std.mem.Allocator,
     file_path: []const u8,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
     configured_init_args: []const project_config.InitArg,
 ) !void {
     if (configured_init_args.len == 0) return;
 
-    var compilation = try compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options);
+    var compilation = try compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChain(chain_id),
+    });
     defer compilation.deinit();
 
     const module = compilation.db.sources.module(compilation.root_module_id);
@@ -1594,6 +1763,7 @@ fn runBuildFromDiscoveredConfig(
     allocator: std.mem.Allocator,
     cli_output_dir: ?[]const u8,
     base_options: MlirOptions,
+    chain_ids: ChainIdSelection,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
@@ -1652,11 +1822,14 @@ fn runBuildFromDiscoveredConfig(
         try stdout.print("Building target '{s}' from {s}\n", .{ target.name, root_path });
         try stdout.flush();
 
+        var target_options = base_options;
+        target_options.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id);
+
         try runBuildArtifacts(
             allocator,
             root_path,
             target_output,
-            base_options,
+            target_options,
             .{
                 .include_roots = include_roots,
             },
@@ -1665,13 +1838,11 @@ fn runBuildFromDiscoveredConfig(
     }
 }
 
-fn discoverResolverOptionsForFile(
+fn discoverCompileContextForFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
-) !struct {
-    include_roots: ?[]const []const u8,
-    options: import_graph.ResolverOptions,
-} {
+    chain_ids: ChainIdSelection,
+) !CompileContext {
     const start_dir = std.fs.path.dirname(file_path) orelse ".";
     const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
         std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
@@ -1681,7 +1852,8 @@ fn discoverResolverOptionsForFile(
     if (loaded_opt == null) {
         return .{
             .include_roots = null,
-            .options = .{},
+            .resolver_options = .{},
+            .chain_id = chain_ids.resolve(null, null),
         };
     }
 
@@ -1701,15 +1873,17 @@ fn discoverResolverOptionsForFile(
         };
         return .{
             .include_roots = include_roots,
-            .options = .{
+            .resolver_options = .{
                 .include_roots = include_roots,
             },
+            .chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target.chain_id),
         };
     }
 
     return .{
         .include_roots = null,
-        .options = .{},
+        .resolver_options = .{},
+        .chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, null),
     };
 }
 
@@ -1735,22 +1909,16 @@ fn printUsage() !void {
     try stdout.print("                           If <file.ora> is omitted, builds all [[targets]] from ora.toml\n", .{});
     try stdout.print("                           Outputs: bytecode, ABI, Ora/SIR MLIR, SIR text, SMT report\n", .{});
     try stdout.print("                           Reads ora.toml [compiler].init_args and [[targets]].init_args\n", .{});
-    try stdout.print("  emit                   - Debug emission mode (use --emit-*)\n", .{});
+    try stdout.print("  emit                   - Debug emission mode (use --emit=<list>)\n", .{});
     try stdout.print("  debug                  - Compile debugger artifacts and launch the Ora EVM debugger\n", .{});
     try stdout.print("  init [path]            - Scaffold a new Ora project directory\n", .{});
-    try stdout.print("  --emit-tokens          - Stop after lexical analysis (emit tokens)\n", .{});
-    try stdout.print("  --emit-ast             - Stop after parsing (emit AST)\n", .{});
-    try stdout.print("  --emit-ast=json|tree   - Emit AST in JSON or tree format\n", .{});
-    try stdout.print("  --emit-typed-ast       - Stop after parsing (emit typed AST)\n", .{});
-    try stdout.print("  --emit-typed-ast=json|tree - Emit typed AST in JSON or tree format\n", .{});
-    try stdout.print("  --emit-mlir[=ora|sir|both] - Emit MLIR (default mode: ora)\n", .{});
-    try stdout.print("  --emit-sir-text        - Emit Sensei SIR text IR (after conversion)\n", .{});
-    try stdout.print("  --emit-bytecode        - Emit EVM bytecode from Sensei SIR text\n", .{});
-    try stdout.print("  --emit-cfg[=ora|sir]   - Generate control flow graph (default: ora)\n", .{});
+    try stdout.print("  --emit=<list>          - Comma list: tokens, ast[:json|tree], typed-ast[:json|tree], mlir[:ora|sir|both], sir-text, bytecode, cfg[:ora|sir|sir-diff], abi[:solidity|extras], smt-report\n", .{});
+    try stdout.print("  --chain-id <id>        - Chain id exposed to @chainId() (default: 31337; overrides ora.toml)\n", .{});
+    try stdout.print("  -h, --help             - Show this help text\n", .{});
     try stdout.print("  -v, --version          - Show version and logo\n", .{});
     try stdout.print("\nOutput Options:\n", .{});
-    try stdout.print("  -o <dir>               - Build mode: artifact root directory (default: artifacts/<name>)\n", .{});
-    try stdout.print("  -o <file|dir>          - Emit mode: output file/dir\n", .{});
+    try stdout.print("  -o, --out-dir <dir>    - Artifact/output directory (default: artifacts/<name> for build)\n", .{});
+    try stdout.print("  --out-file <file>      - Exact output file for 'ora emit --emit=bytecode'\n", .{});
     try stdout.print("\nOptimization Options:\n", .{});
     try stdout.print("  -O0, -Onone            - No optimization (default)\n", .{});
     try stdout.print("  -O1, -Obasic           - Basic optimizations\n", .{});
@@ -1760,26 +1928,16 @@ fn printUsage() !void {
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
     try stdout.print("  --mlir-pass-pipeline <pipeline> - Run custom MLIR pass pipeline on Ora MLIR\n", .{});
-    try stdout.print("  --mlir-verify-each-pass - Enable verifier while running custom pass pipeline\n", .{});
-    try stdout.print("  --mlir-pass-timing     - Enable MLIR pass timing for custom pass pipeline\n", .{});
-    try stdout.print("  --mlir-pass-statistics - Print operation-count stats across MLIR stages\n", .{});
-    try stdout.print("  --mlir-print-ir=before|after|before-after|all - Print stage MLIR snapshots\n", .{});
-    try stdout.print("  --mlir-print-ir-pass <stage-filter> - Filter snapshots by stage name\n", .{});
-    try stdout.print("  --mlir-crash-reproducer <path> - Save current MLIR when a stage fails\n", .{});
-    try stdout.print("  --mlir-print-op-on-diagnostic - Print module snapshot with MLIR diagnostics\n", .{});
+    try stdout.print("  --mlir-debug=<list>    - Comma list: verify-each, timing, statistics, print-ir:<mode>, print-ir-pass:<name>, crash-reproducer:<path>, print-op-on-diagnostic\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
     try stdout.print("  --no-verify            - Disable Z3 verification (emit mode only)\n", .{});
-    try stdout.print("  --verify-calls         - Enable call reasoning in Z3 encoder (default)\n", .{});
-    try stdout.print("  --no-verify-calls      - Disable call reasoning (treat calls as unknown)\n", .{});
-    try stdout.print("  --verify-state         - Enable storage/map state threading (default)\n", .{});
-    try stdout.print("  --no-verify-state      - Disable state threading (treat loads as unknown)\n", .{});
     try stdout.print("  --verify-stats         - Print Z3 query stats summary\n", .{});
     try stdout.print("  --explain              - Enable unsat-core explain mode for SMT verification\n", .{});
     try stdout.print("  --z3-proofs            - Emit raw Z3 proof objects in SMT reports/debug output (slower)\n", .{});
+    try stdout.print("  --keep-proved-checks   - Keep SMT-proved guards/requires/ensures/invariants as runtime checks (falsification harness)\n", .{});
     try stdout.print("  --minimize-cores       - Greedily minimize explain-mode unsat cores; implies --explain\n", .{});
-    try stdout.print("  --emit-smt-report      - Emit SMT encoding audit report (.md + .json)\n", .{});
     try stdout.print("  --debug                - Enable compiler debug output\n", .{});
     try stdout.print("  --debug-info           - Preserve source-stable lowering for debugger artifacts\n", .{});
     try stdout.print("  --metrics              - Print compilation phase timing report\n", .{});
@@ -1972,14 +2130,12 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
 
         // Print user-friendly explanation.
         if (parsed) |g| {
-            if (std.mem.eql(u8, g.refinement_kind, "NonZeroAddress")) {
-                try stdout.print("     -> `{s}` can be the zero address\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "MinValue")) {
-                try stdout.print("     -> `{s}` can be zero (below minimum)\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "MaxValue")) {
-                try stdout.print("     -> `{s}` can exceed maximum value\n", .{g.variable_name});
-            } else if (std.mem.eql(u8, g.refinement_kind, "InRange")) {
-                try stdout.print("     -> `{s}` can be out of range\n", .{g.variable_name});
+            if (refinements.hasGuardViolationExplanation(g.refinement_kind)) {
+                try stdout.print("     -> ", .{});
+                if (!try refinements.writeGuardViolationExplanation(stdout, g.refinement_kind, g.variable_name)) {
+                    try stdout.print("{s} guard failed for {s}", .{ g.refinement_kind, g.variable_name });
+                }
+                try stdout.print("\n", .{});
             }
         }
     }
@@ -1990,6 +2146,25 @@ fn printVerificationDiagnostics(stdout: anytype, diagnostics: []const z3_errors.
     for (diagnostics) |diag| {
         try stdout.print("  {s}\n", .{diag.guard_id});
     }
+}
+
+test "verification diagnostics explain registry-backed NonZero guard violations" {
+    const allocator = std.testing.allocator;
+    var counterexample = z3_errors.Counterexample.init(allocator);
+    defer counterexample.deinit();
+
+    var diagnostics = [_]z3_errors.Diagnostic{.{
+        .guard_id = "guard:test.ora:1:2:3:NonZero:amount",
+        .function_name = "deposit",
+        .counterexample = counterexample,
+        .allocator = allocator,
+    }};
+
+    var buffer: std.ArrayList(u8) = .{};
+    defer buffer.deinit(allocator);
+
+    try printVerificationDiagnostics(buffer.writer(allocator), diagnostics[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "`amount` can be zero") != null);
 }
 
 fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
@@ -2167,26 +2342,115 @@ fn exitOnCompilerErrors(
     std.process.exit(1);
 }
 
+fn rejectIfNotEmittable(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
+    try writeDetectOnlyTypeFallbacks(writer, sources, lowering, debug_enabled);
+    if (lowering.isEmittable()) return;
+
+    try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
+    if (lowering.type_fallback_count != 0) {
+        try writer.print("  type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    }
+    if (lowering.placeholder_count != 0) {
+        try writer.print("  placeholders: {d}\n", .{lowering.placeholder_count});
+    }
+    if (lowering.default_value_count != 0) {
+        try writer.print("  default values: {d}\n", .{lowering.default_value_count});
+    }
+    try writer.flush();
+    std.process.exit(1);
+}
+
+fn rejectIfExecutableFallbacksSurvive(
+    writer: anytype,
+    lowering: *const compiler.hir.LoweringResult,
+) !void {
+    if (compiler.hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+        try writer.print(
+            "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
+            .{ violation.op_name, violation.reason },
+        );
+        try writer.flush();
+        std.process.exit(1);
+    }
+}
+
+fn exitIfCompilationNotArtifactEmittable(
+    writer: anytype,
+    compilation: *const compiler.driver.Compilation,
+) !void {
+    if (compilation.isArtifactEmittable()) return;
+    try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+    try writer.flush();
+    std.process.exit(1);
+}
+
+fn writeDetectOnlyTypeFallbacks(
+    writer: anytype,
+    sources: ?*const compiler.source.SourceStore,
+    lowering: *const compiler.hir.LoweringResult,
+    debug_enabled: bool,
+) !void {
+    const report_enabled = debug_enabled or blk: {
+        if (std.posix.getenv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
+            break :blk env_value[0] != 0 and env_value[0] != '0';
+        }
+        break :blk false;
+    };
+    if (!report_enabled or lowering.type_fallback_count == 0) return;
+
+    try writer.print("debug: HIR type fallbacks: {d}\n", .{lowering.type_fallback_count});
+    for (lowering.type_fallbacks) |fallback| {
+        if (sources) |source_store| {
+            const file = source_store.file(fallback.location.file_id);
+            const line_column = source_store.lineColumn(fallback.location);
+            try writer.print(
+                "debug: HIR type fallback: {s} at {s}:{d}:{d}\n",
+                .{ @tagName(fallback.reason), file.path, line_column.line, line_column.column },
+            );
+        } else {
+            try writer.print("debug: HIR type fallback: {s}\n", .{@tagName(fallback.reason)});
+        }
+    }
+    try writer.flush();
+}
+
 fn exitOnCompilationErrors(
     writer: anytype,
     db: *compiler.db.CompilerDb,
     module_id: compiler.source.ModuleId,
     debug_enabled: bool,
 ) !*const compiler.sema.TypeCheckResult {
-    const module = db.sources.module(module_id);
+    const root_module = db.sources.module(module_id);
+    const package = db.sources.package(root_module.package_id);
+    var root_typecheck: ?*const compiler.sema.TypeCheckResult = null;
 
-    const syntax_diags = try db.syntaxDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, syntax_diags, debug_enabled);
+    for (package.modules.items) |current_module_id| {
+        const module = db.sources.module(current_module_id);
 
-    const ast_diags = try db.astDiagnostics(module.file_id);
-    try exitOnCompilerErrors(writer, &db.sources, ast_diags, debug_enabled);
+        const syntax_diags = try db.syntaxDiagnostics(module.file_id);
+        try exitOnCompilerErrors(writer, &db.sources, syntax_diags, debug_enabled);
 
-    const resolution_diags = try db.resolutionDiagnostics(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, resolution_diags, debug_enabled);
+        const ast_diags = try db.astDiagnostics(module.file_id);
+        try exitOnCompilerErrors(writer, &db.sources, ast_diags, debug_enabled);
 
-    const module_typecheck = try db.moduleTypeCheck(module_id);
-    try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
-    return module_typecheck;
+        const resolution_diags = try db.resolutionDiagnostics(current_module_id);
+        try exitOnCompilerErrors(writer, &db.sources, resolution_diags, debug_enabled);
+
+        const module_typecheck = try db.moduleTypeCheck(current_module_id);
+        try exitOnCompilerErrors(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
+
+        if (current_module_id == module_id) {
+            root_typecheck = module_typecheck;
+        }
+    }
+
+    return root_typecheck orelse error.ModuleNotFound;
 }
 
 fn writeJsonString(writer: anytype, text: []const u8) !void {
@@ -2288,11 +2552,18 @@ const ExtraScopeBinding = struct {
     is_folded: bool = false,
 };
 
-fn formatConstDebugValue(allocator: std.mem.Allocator, value: compiler.sema.ConstValue) ![]const u8 {
+fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstValue) ![]const u8 {
     return switch (value) {
         .integer => |integer| try integer.toString(allocator, 10, .lower),
         .boolean => |boolean| try allocator.dupe(u8, if (boolean) "true" else "false"),
         .address => |address| try std.fmt.allocPrint(allocator, "0x{x:0>40}", .{address}),
+        .fixed_bytes => |bytes| blk: {
+            var out = try std.ArrayList(u8).initCapacity(allocator, 2 + bytes.len * 2);
+            errdefer out.deinit(allocator);
+            try out.appendSlice(allocator, "0x");
+            for (bytes) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+            break :blk try out.toOwnedSlice(allocator);
+        },
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
         .tuple => |elements| blk: {
             var parts: std.ArrayList([]const u8) = .{};
@@ -3406,6 +3677,7 @@ fn buildExecutableLineMap(
 fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
     switch (ty) {
         .unknown => try writer.writeAll("unknown"),
+        .never => try writer.writeAll("never"),
         .void => try writer.writeAll("void"),
         .bool => try writer.writeAll("bool"),
         .string => try writer.writeAll("string"),
@@ -3413,7 +3685,11 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .bytes => try writer.writeAll("bytes"),
         .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
-        .integer => |integer| try writer.writeAll(integer.spelling orelse "int"),
+        .integer => |integer| if (integer.spelling) |spelling|
+            try writer.writeAll(spelling)
+        else
+            try writer.print("{c}{d}", .{ if (integer.signed) @as(u8, 'i') else @as(u8, 'u'), integer.bits }),
+        .comptime_integer => try writer.writeAll("integer"),
         .named => |named| try writer.writeAll(named.name),
         .contract => |named| try writer.writeAll(named.name),
         .struct_ => |named| try writer.writeAll(named.name),
@@ -3620,6 +3896,7 @@ fn runCompilerAstEmit(
     format: []const u8,
     include_types: bool,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
     m: *Metrics,
     debug_enabled: bool,
 ) !void {
@@ -3627,14 +3904,14 @@ fn runCompilerAstEmit(
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
-        m.end();
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChainWithMetrics(chain_id, m),
+    }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     const module = compilation.db.sources.module(compilation.root_module_id);
@@ -3668,19 +3945,21 @@ fn runCompilerMlirEmit(
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
-    m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
-        m.end();
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChainWithMetrics(mlir_options.chain_id, m),
+    }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -3731,6 +4010,118 @@ fn runCompilerTokenEmit(
     try stdout.flush();
 }
 
+fn emitCfgDot(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    ctx: @import("mlir_c_api").c.MlirContext,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    mode: @import("mlir/cfg.zig").Mode,
+    proven_guard_ids: ?*const std.StringHashMap(void),
+) !void {
+    const mlir_cfg = @import("mlir/cfg.zig");
+    const dot = try mlir_cfg.generateCFG(ctx, module, allocator, .{
+        .mode = mode,
+        .proven_guard_ids = proven_guard_ids,
+    });
+    defer allocator.free(dot);
+
+    if (output_dir) |dir| {
+        const basename = std.fs.path.stem(file_path);
+        const suffix = switch (mode) {
+            .ora => ".ora.dot",
+            .sir => ".sir.dot",
+        };
+
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
+        defer allocator.free(filename);
+        const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        defer allocator.free(output_file);
+        var dot_file = try std.fs.cwd().createFile(output_file, .{});
+        defer dot_file.close();
+        try dot_file.writeAll(dot);
+
+        if (mode == .sir) {
+            const graphs = try mlir_cfg.generateFunctionCFGs(ctx, module, allocator, .{ .mode = .sir });
+            defer {
+                for (graphs) |graph| graph.deinit(allocator);
+                allocator.free(graphs);
+            }
+
+            for (graphs) |graph| {
+                const safe_name = try safePathComponent(allocator, graph.name);
+                defer allocator.free(safe_name);
+                const per_function_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".", safe_name, ".sir.dot" });
+                defer allocator.free(per_function_filename);
+                const per_function_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, per_function_filename });
+                defer allocator.free(per_function_output);
+                var per_function_file = try std.fs.cwd().createFile(per_function_output, .{});
+                defer per_function_file.close();
+                try per_function_file.writeAll(graph.dot);
+            }
+        }
+    } else {
+        try stdout.print("{s}", .{dot});
+    }
+}
+
+fn safePathComponent(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var result = try allocator.alloc(u8, value.len);
+    errdefer allocator.free(result);
+    for (value, 0..) |ch, index| {
+        result[index] = if (std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '-' or ch == '.') ch else '_';
+    }
+    return result;
+}
+
+fn emitSirCfgOptimizationDiff(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    ctx: @import("mlir_c_api").c.MlirContext,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    debug_info: bool,
+) !void {
+    const mlir_cfg = @import("mlir/cfg.zig");
+    const diff = try mlir_cfg.generateSirOptimizationDiff(ctx, module, allocator, debug_info);
+    defer diff.deinit(allocator);
+
+    if (output_dir) |dir| {
+        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+
+        const basename = std.fs.path.stem(file_path);
+        const before_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.pre-opt.dot" });
+        defer allocator.free(before_filename);
+        const after_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.post-opt.dot" });
+        defer allocator.free(after_filename);
+
+        const before_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, before_filename });
+        defer allocator.free(before_output);
+        var before_file = try std.fs.cwd().createFile(before_output, .{});
+        defer before_file.close();
+        try before_file.writeAll(diff.before);
+
+        const after_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, after_filename });
+        defer allocator.free(after_output);
+        var after_file = try std.fs.cwd().createFile(after_output, .{});
+        defer after_file.close();
+        try after_file.writeAll(diff.after);
+    } else {
+        try stdout.print("// SIR CFG before framework canonicalizer\n{s}\n", .{diff.before});
+        try stdout.print("// SIR CFG after framework canonicalizer\n{s}", .{diff.after});
+    }
+}
+
 fn runMlirEmitAdvanced(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -3749,21 +4140,31 @@ fn runMlirEmitAdvanced(
     defer mlir_arena.deinit();
     const mlir_allocator = mlir_arena.allocator();
 
-    m.begin("compiler");
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
-        m.end();
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChainWithMetrics(mlir_options.chain_id, m),
+    }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
         std.process.exit(1);
     };
-    m.end();
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
 
     const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
+    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
+    const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
+    const cfg_mode_is_sir = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir") else false;
+    const cfg_mode_is_sir_diff = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "sir-diff") else false;
+    const needs_sir_conversion = mlir_options.emit_mlir_sir or
+        mlir_options.emit_sir_text or
+        mlir_options.emit_bytecode or
+        cfg_mode_is_sir;
+    const needs_refinement_cleanup = needs_sir_conversion or cfg_mode_is_sir_diff;
 
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, final_module, "Ora MLIR");
@@ -3778,7 +4179,6 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.verify_z3) {
-        m.begin("z3 verification");
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
@@ -3792,8 +4192,6 @@ fn runMlirEmitAdvanced(
                 return error.InvalidVerificationMode;
             }
         }
-        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
-        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setVerifyStats(mlir_options.verify_stats);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
@@ -3821,11 +4219,9 @@ fn runMlirEmitAdvanced(
         }
 
         verification_result_opt = verification_result;
-        m.end();
     }
 
     if (mlir_options.emit_smt_report and !mlir_options.verify_z3) {
-        m.begin("smt report");
         const z3_verification = @import("z3/verification.zig");
         var verifier = try z3_verification.VerificationPass.initWithProofs(mlir_allocator, mlir_options.z3_proofs);
         defer verifier.deinit();
@@ -3838,12 +4234,9 @@ fn runMlirEmitAdvanced(
                 return error.InvalidVerificationMode;
             }
         }
-        if (mlir_options.verify_calls) |enabled| verifier.setVerifyCalls(enabled);
-        if (mlir_options.verify_state) |enabled| verifier.setVerifyState(enabled);
         verifier.setExplainCores(mlir_options.explain_cores);
         verifier.setMinimizeCores(mlir_options.minimize_cores);
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
-        m.end();
     }
 
     // Write the FV proof sidecar before the canonicalize / cleanup
@@ -3867,24 +4260,12 @@ fn runMlirEmitAdvanced(
         return error.VerificationFailed;
     }
 
-    if (mlir_options.canonicalize and (mlir_options.emit_mlir or mlir_options.emit_mlir_sir)) {
+    if (mlir_options.canonicalize and (mlir_options.emit_mlir or needs_sir_conversion)) {
         m.begin("canonicalization");
         if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
-        }
-        m.end();
-    }
-
-    if (mlir_options.emit_mlir_sir) {
-        const refinement_guards = @import("mlir/refinement_guards.zig");
-        if (verification_result_opt) |*vr| {
-            refinement_guards.cleanupRefinementGuards(ctx, final_module, &vr.proven_guard_ids);
-        } else {
-            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
-            defer empty_guards.deinit();
-            refinement_guards.cleanupRefinementGuards(ctx, final_module, &empty_guards);
+            return error.OraMlirCanonicalizationFailed;
         }
     }
 
@@ -3924,11 +4305,51 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (mlir_options.emit_mlir_sir) {
+    if (cfg_mode_is_ora) {
+        try emitCfgDot(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            .ora,
+            if (verification_result_opt) |*vr| &vr.proven_guard_ids else null,
+        );
+    }
+
+    if (needs_refinement_cleanup) {
+        const refinement_guards = compiler.refinement_guards;
+        if (verification_result_opt) |*vr| {
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &vr.proven_guard_ids, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
+        } else {
+            var empty_guards = std.StringHashMap(void).init(mlir_allocator);
+            defer empty_guards.deinit();
+            refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
+                .keep_proved_checks = mlir_options.keep_proved_checks,
+            });
+        }
+    }
+
+    if (cfg_mode_is_sir_diff) {
+        try emitSirCfgOptimizationDiff(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            mlir_options.debug_info,
+        );
+    }
+
+    if (needs_sir_conversion) {
         if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraToSirConversionFailed;
         }
     }
 
@@ -3985,56 +4406,40 @@ fn runMlirEmitAdvanced(
         }
     }
 
-    if (mlir_options.emit_cfg_mode) |cfg_mode| {
-        const mlir_cfg = @import("mlir/cfg.zig");
-        const dot = try mlir_cfg.generateCFG(ctx, final_module, allocator);
-        defer allocator.free(dot);
-
-        if (mlir_options.output_dir) |output_dir| {
-            const basename = std.fs.path.stem(file_path);
-            const suffix = if (std.ascii.eqlIgnoreCase(cfg_mode, "sir")) ".sir.dot" else ".ora.dot";
-
-            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
-
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
-            defer allocator.free(filename);
-            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
-            defer allocator.free(output_file);
-            var dot_file = try std.fs.cwd().createFile(output_file, .{});
-            defer dot_file.close();
-            try dot_file.writeAll(dot);
-        } else {
-            try stdout.print("{s}", .{dot});
-        }
+    if (cfg_mode_is_sir) {
+        try emitCfgDot(
+            allocator,
+            stdout,
+            ctx,
+            final_module,
+            file_path,
+            mlir_options.output_dir,
+            .sir,
+            null,
+        );
     }
 
     if (mlir_options.emit_sir_text or mlir_options.emit_bytecode) {
         if (!c.oraBuildSIRDispatcher(ctx, final_module)) {
             try stdout.print("Error: SIR dispatcher build failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirDispatcherBuildFailed;
         }
         if (!c.oraLegalizeSIRText(ctx, final_module)) {
             try stdout.print("Error: SIR text legalizer failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.SirTextLegalizerFailed;
         }
 
-        m.begin("sir text emission");
         const sir_text_ref = c.oraEmitSIRText(ctx, final_module);
         defer if (sir_text_ref.data != null) {
             const mlir_c = @import("mlir_c_api");
             mlir_c.freeStringRef(sir_text_ref);
         };
         if (sir_text_ref.data == null or sir_text_ref.length == 0) {
-            m.end();
             try stdout.print("Failed to emit SIR text\n", .{});
-            return;
+            return error.SirTextEmissionFailed;
         }
-        m.end();
 
         // Extract source locations from SIR MLIR (sidecar to SIR text).
         // Op indices match the SIR text op ordering for later correlation
@@ -4116,9 +4521,7 @@ fn runMlirEmitAdvanced(
         }
         if (mlir_options.emit_bytecode) {
             if (mlir_options.emit_sir_text and mlir_options.output_dir == null) try stdout.print("\n", .{});
-            m.begin("bytecode generation");
-            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
-            m.end();
+            try emitBytecodeFromSirText(allocator, &compilation.db, compilation.root_module_id, &compilation.db.sources, sir_text, file_path, mlir_options.output_dir, mlir_options.output_file, sir_locations, sir_line_map, sir_debug_info, source_scopes, stdout, mlir_options.suppress_artifact_logs);
         }
     }
 
@@ -4372,21 +4775,37 @@ fn runAbiEmit(
     emit_abi_solidity: bool,
     emit_abi_extras: bool,
     resolver_options: import_graph.ResolverOptions,
+    chain_id: u64,
+    m: ?*Metrics,
     debug_enabled: bool,
+    allow_missing_contract: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
     var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    var compilation = compiler.driver.compilePackageWithResolverOptions(allocator, file_path, resolver_options) catch |err| {
+    var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
+        .resolver_options = resolver_options,
+        .compile_options = compileOptionsForChainWithMetrics(chain_id, m),
+    }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
-        return;
+        try stdout.flush();
+        std.process.exit(1);
     };
     defer compilation.deinit();
 
     _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
+    try exitIfCompilationNotArtifactEmittable(stdout, &compilation);
 
-    var contract_abi = try lib.abi.generateCompilerAbi(allocator, &compilation);
+    var contract_abi = lib.abi.generateCompilerAbi(allocator, &compilation) catch |err| switch (err) {
+        error.MissingContract => {
+            if (allow_missing_contract) return;
+            try stdout.print("error: ABI generation requires at least one contract declaration in '{s}'.\n", .{file_path});
+            try stdout.flush();
+            return err;
+        },
+        else => return err,
+    };
     defer contract_abi.deinit();
 
     const base_name = std.fs.path.stem(file_path);
@@ -4538,6 +4957,7 @@ fn emitBytecodeFromSirText(
     sir_text: []const u8,
     file_path: []const u8,
     output_dir: ?[]const u8,
+    output_file: ?[]const u8,
     sir_locations_json: ?[]const u8,
     sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
@@ -4654,38 +5074,35 @@ fn emitBytecodeFromSirText(
     var bytecode_output_path: ?[]const u8 = null;
     defer if (bytecode_output_path) |p| allocator.free(p);
 
-    if (output_dir) |out_dir| {
-        const out_is_file = std.mem.endsWith(u8, out_dir, ".hex") or
-            std.mem.endsWith(u8, out_dir, ".bytecode") or
-            std.mem.endsWith(u8, out_dir, ".bin");
+    if (output_file) |out_path| {
+        var out_file = if (std.fs.path.isAbsolute(out_path))
+            try std.fs.createFileAbsolute(out_path, .{})
+        else
+            try std.fs.cwd().createFile(out_path, .{});
+        defer out_file.close();
+        try out_file.writeAll(bytecode);
+        bytecode_output_path = try allocator.dupe(u8, out_path);
+        if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_path});
+    } else if (output_dir) |out_dir| {
+        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
 
-        if (out_is_file) {
-            var out_file = if (std.fs.path.isAbsolute(out_dir))
-                try std.fs.createFileAbsolute(out_dir, .{})
-            else
-                try std.fs.cwd().createFile(out_dir, .{});
-            defer out_file.close();
-            try out_file.writeAll(bytecode);
-            bytecode_output_path = try allocator.dupe(u8, out_dir);
-            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_dir});
-        } else {
-            std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+        const extension = ".hex";
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
+        defer allocator.free(filename);
+        const output_path = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
+        defer allocator.free(output_path);
 
-            const extension = ".hex";
-            const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
-            defer allocator.free(filename);
-            const output_file = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
-            defer allocator.free(output_file);
-
-            var out_file = try std.fs.cwd().createFile(output_file, .{});
-            defer out_file.close();
-            try out_file.writeAll(bytecode);
-            bytecode_output_path = try allocator.dupe(u8, output_file);
-            if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_file});
-        }
+        var out_file = if (std.fs.path.isAbsolute(output_path))
+            try std.fs.createFileAbsolute(output_path, .{})
+        else
+            try std.fs.cwd().createFile(output_path, .{});
+        defer out_file.close();
+        try out_file.writeAll(bytecode);
+        bytecode_output_path = try allocator.dupe(u8, output_path);
+        if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
         try stdout.print("{s}\n", .{bytecode});
     }
@@ -5538,7 +5955,7 @@ test "build config init_args: validates init parameters" {
         .{ .name = "enabled", .value = "true" },
     };
 
-    try validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]);
+    try validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]);
 }
 
 test "build config init_args: unknown init arg errors" {
@@ -5567,7 +5984,7 @@ test "build config init_args: unknown init arg errors" {
         .{ .name = "missing", .value = "10" },
     };
 
-    try std.testing.expectError(error.UnknownInitArg, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.UnknownInitArg, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "build config init_args: missing init function errors" {
@@ -5593,7 +6010,7 @@ test "build config init_args: missing init function errors" {
         .{ .name = "seed", .value = "10" },
     };
 
-    try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.InitArgsRequireInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "build config init_args: invalid constructor shape errors" {
@@ -5619,7 +6036,7 @@ test "build config init_args: invalid constructor shape errors" {
         .{ .name = "seed", .value = "10" },
     };
 
-    try std.testing.expectError(error.InvalidInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, init_args[0..]));
+    try std.testing.expectError(error.InvalidInitFunction, validateConfiguredInitArgs(allocator, entry_path, .{}, compiler.compile_options.default_chain_id, init_args[0..]));
 }
 
 test "init command: scaffolds new project layout" {

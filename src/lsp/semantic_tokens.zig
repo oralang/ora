@@ -1,7 +1,9 @@
 const std = @import("std");
 const lexer_mod = @import("ora_lexer");
+const refinements = @import("ora_refinements");
 const frontend = @import("frontend.zig");
 const semantic_index = @import("semantic_index.zig");
+const token_cache = @import("token_cache.zig");
 
 const Allocator = std.mem.Allocator;
 const TokenType = lexer_mod.TokenType;
@@ -78,25 +80,27 @@ pub const SemanticToken = struct {
     modifiers: u32,
 };
 
-/// Tokenize source into semantic tokens for LSP.
-pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
+/// Build semantic tokens from a retained normalized lexer token cache.
+pub fn tokenizeCached(
+    allocator: Allocator,
+    source: []const u8,
+    tokens: []const token_cache.Token,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ![]SemanticToken {
+    return tokenizeWithTokenSlice(allocator, source, tokens, maybe_index);
+}
+
+fn tokenizeWithTokenSlice(
+    allocator: Allocator,
+    source: []const u8,
+    tokens: anytype,
+    maybe_index: ?semantic_index.SemanticIndex,
+) ![]SemanticToken {
     var tokens_list = std.ArrayList(SemanticToken){};
     errdefer tokens_list.deinit(allocator);
 
-    // Phase 1: Lex source and classify tokens.
-    var lex = try lexer_mod.Lexer.initWithConfig(allocator, source, lexer_mod.LexerConfig.development());
-    defer lex.deinit();
-    const tokens = lex.scanTokens() catch return try tokens_list.toOwnedSlice(allocator);
-    defer allocator.free(tokens);
-
-    // Phase 2: Build semantic index for identifier enrichment.
-    var index = semantic_index.indexDocument(allocator, source) catch null;
-    defer if (index) |*idx| idx.deinit(allocator);
-
-    // Phase 3: Extract comment ranges from trivia.
     try extractComments(&tokens_list, allocator, tokens, source);
 
-    // Phase 4: Classify each lexer token.
     for (tokens) |token| {
         if (token.type == .Eof) continue;
         const len: u32 = @intCast(token.lexeme.len);
@@ -105,7 +109,7 @@ pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
         const tok_line = if (token.line > 0) token.line - 1 else 0;
         const tok_char = if (token.column > 0) token.column - 1 else 0;
 
-        if (classifyToken(token, index)) |classification| {
+        if (classifyToken(token, maybe_index)) |classification| {
             try tokens_list.append(allocator, .{
                 .line = tok_line,
                 .start_char = tok_char,
@@ -116,9 +120,7 @@ pub fn tokenize(allocator: Allocator, source: []const u8) ![]SemanticToken {
         }
     }
 
-    // Sort by position (line, then character).
     std.sort.heap(SemanticToken, tokens_list.items, {}, lessThanSemanticToken);
-
     return tokens_list.toOwnedSlice(allocator);
 }
 
@@ -127,8 +129,12 @@ const Classification = struct {
     modifiers: u32,
 };
 
-fn classifyToken(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
+fn classifyToken(token: anytype, maybe_index: ?semantic_index.SemanticIndex) ?Classification {
     const tt = token.type;
+
+    if (classifyKeywordLexeme(token)) |classification| {
+        return classification;
+    }
 
     // Keywords
     if (isVerificationKeyword(tt)) {
@@ -178,31 +184,47 @@ fn classifyToken(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIn
     return null;
 }
 
-fn classifyIdentifier(token: lexer_mod.Token, maybe_index: ?semantic_index.SemanticIndex) Classification {
+fn classifyKeywordLexeme(token: anytype) ?Classification {
+    _ = lexer_mod.keywords.get(token.lexeme) orelse return null;
+    if (token.type == .Comptime) {
+        return .{ .kind = .macro, .modifiers = 0 };
+    }
+    if (isTypeKeyword(token.type)) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+    return .{ .kind = .keyword, .modifiers = 0 };
+}
+
+fn classifyIdentifier(token: anytype, maybe_index: ?semantic_index.SemanticIndex) Classification {
+    if (refinements.entryForName(token.lexeme) != null) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+
     const idx = maybe_index orelse return .{ .kind = .variable, .modifiers = 0 };
     const tok_line = if (token.line > 0) token.line - 1 else 0;
     const tok_char = if (token.column > 0) token.column - 1 else 0;
     const tok_end = tok_char + @as(u32, @intCast(token.lexeme.len));
+    const token_range: frontend.Range = .{
+        .start = .{ .line = tok_line, .character = tok_char },
+        .end = .{ .line = tok_line, .character = tok_end },
+    };
 
     // Check if this identifier matches a symbol's selection range (declaration site).
-    for (idx.symbols) |symbol| {
-        const sel = symbol.selection_range;
-        if (sel.start.line == tok_line and sel.start.character == tok_char and sel.end.character == tok_end) {
-            return .{
-                .kind = symbolKindToTokenKind(symbol.kind),
-                .modifiers = symbolKindToModifiers(symbol.kind) | SemanticTokenModifier.mask(.declaration) | SemanticTokenModifier.mask(.definition),
-            };
-        }
+    if (semantic_index.symbolIndexWithSelectionRange(&idx, token_range)) |symbol_index| {
+        const symbol = idx.symbols[symbol_index];
+        return .{
+            .kind = symbolKindToTokenKind(symbol.kind),
+            .modifiers = symbolKindToModifiers(symbol.kind) | SemanticTokenModifier.mask(.declaration) | SemanticTokenModifier.mask(.definition),
+        };
     }
 
     // Not at declaration — try to match by name for type-level symbols.
-    for (idx.symbols) |symbol| {
-        if (std.mem.eql(u8, symbol.name, token.lexeme)) {
-            return .{
-                .kind = symbolKindToTokenKind(symbol.kind),
-                .modifiers = symbolKindToModifiers(symbol.kind),
-            };
-        }
+    if (semantic_index.symbolIndexNamed(&idx, token.lexeme)) |symbol_index| {
+        const symbol = idx.symbols[symbol_index];
+        return .{
+            .kind = symbolKindToTokenKind(symbol.kind),
+            .modifiers = symbolKindToModifiers(symbol.kind),
+        };
     }
 
     return .{ .kind = .variable, .modifiers = 0 };
@@ -239,7 +261,7 @@ fn symbolKindToModifiers(kind: semantic_index.SymbolKind) u32 {
 fn extractComments(
     tokens_list: *std.ArrayList(SemanticToken),
     allocator: Allocator,
-    tokens: []const lexer_mod.Token,
+    tokens: anytype,
     source: []const u8,
 ) !void {
     for (tokens) |token| {
@@ -373,21 +395,18 @@ fn isDeclarationKeyword(tt: TokenType) bool {
 
 fn isOtherKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .Immutable, .Storage, .Memory, .Tstore, .As, .Call, .Staticcall, .Void, .From, .To => true,
+        .Immutable, .Storage, .Memory, .Tstore, .As, .Call, .Staticcall, .From, .To => true,
         else => false,
     };
 }
 
 fn isTypeKeyword(tt: TokenType) bool {
-    return switch (tt) {
-        .U8, .U16, .U32, .U64, .U128, .U256, .I8, .I16, .I32, .I64, .I128, .I256, .Bool, .Address, .String, .Map, .Slice, .Bytes => true,
-        else => false,
-    };
+    return lexer_mod.isTypeKeyword(tt);
 }
 
 fn isOperator(tt: TokenType) bool {
     return switch (tt) {
-        .Plus, .Minus, .Star, .Slash, .Percent, .StarStar, .StarStarPercent, .Equal, .EqualEqual, .BangEqual, .Less, .LessEqual, .Greater, .GreaterEqual, .LessLess, .LessLessEqual, .GreaterGreater, .GreaterGreaterEqual, .Bang, .Tilde, .Ampersand, .AmpersandEqual, .AmpersandAmpersand, .Pipe, .PipeEqual, .PipePipe, .Caret, .CaretEqual, .PlusPercent, .PlusPercentEqual, .MinusPercent, .MinusPercentEqual, .StarPercent, .StarPercentEqual, .LessLessPercent, .GreaterGreaterPercent, .PlusEqual, .MinusEqual, .StarEqual, .SlashEqual, .PercentEqual, .StarStarEqual, .Arrow, .DotDot, .DotDotDot => true,
+        .Bang, .AmpersandAmpersand, .PipePipe => true,
         else => false,
     };
 }

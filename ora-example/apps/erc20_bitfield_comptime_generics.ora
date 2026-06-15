@@ -52,7 +52,9 @@ contract ERC20BitfieldComptimeGenerics {
         return value;
     }
 
-    pub fn init(initial_supply: u256) {
+    pub fn init(initial_supply: u256)
+        modifies total_supply, balances[msg.sender], token_flags, account_flags[msg.sender]
+    {
         let deployer: NonZeroAddress = std.msg.sender();
 
         total_supply = initial_supply;
@@ -79,31 +81,43 @@ contract ERC20BitfieldComptimeGenerics {
         log Transfer(std.constants.ZERO_ADDRESS, deployer, initial_supply);
     }
 
-    pub fn decimals() -> u8 {
+    pub fn decimals() -> u8
+        modifies()
+    {
         let f: TokenFlags = token_flags;
         return f.decimals;
     }
 
-    pub fn isPaused() -> bool {
+    pub fn isPaused() -> bool
+        modifies()
+    {
         let f: TokenFlags = token_flags;
         return f.paused;
     }
 
-    pub fn setPaused(next: bool) {
+    pub fn setPaused(next: bool)
+        modifies token_flags
+    {
         let f: TokenFlags = token_flags;
         f.paused = next;
         token_flags = f;
     }
 
-    pub fn balanceOf(owner: address) -> u256 {
+    pub fn balanceOf(owner: address) -> u256
+        modifies()
+    {
         return balances[owner];
     }
 
-    pub fn allowance(owner: address, spender: address) -> u256 {
+    pub fn allowance(owner: address, spender: address) -> u256
+        modifies()
+    {
         return allowances[owner][spender];
     }
 
-    pub fn approve(spender: NonZeroAddress, amount: u256) -> bool {
+    pub fn approve(spender: NonZeroAddress, amount: u256) -> bool
+        modifies allowances[msg.sender][spender]
+    {
         let owner: address = std.msg.sender();
         allowances[owner][spender] = amount;
         log Approval(owner, spender, amount);
@@ -111,6 +125,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn transfer(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        modifies balances[msg.sender], balances[to], account_flags[msg.sender]
         guard balances[to] <= std.constants.U256_MAX - amount
     {
         let sender: NonZeroAddress = std.msg.sender();
@@ -139,6 +154,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn transferFrom(from: NonZeroAddress, to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        modifies allowances[from][msg.sender], balances[from], balances[to]
         guard balances[to] <= std.constants.U256_MAX - amount
     {
         let spender: NonZeroAddress = std.msg.sender();
@@ -164,6 +180,7 @@ contract ERC20BitfieldComptimeGenerics {
     }
 
     pub fn mint(to: NonZeroAddress, amount: MinValue<u256, 1>) -> bool
+        modifies total_supply, balances[to]
         guard total_supply <= std.constants.U256_MAX - amount
         guard balances[to] <= std.constants.U256_MAX - amount
     {

@@ -1,0 +1,21 @@
+// Associated trait impl methods can be called through the implementing type.
+
+trait PriceDefaults {
+    fn base() -> u256;
+}
+
+struct Quote {
+    amount: u256,
+}
+
+impl PriceDefaults for Quote {
+    fn base() -> u256 {
+        return 7;
+    }
+}
+
+contract TraitAssociatedImplMethod {
+    pub fn default_base() -> u256 {
+        return Quote.base();
+    }
+}

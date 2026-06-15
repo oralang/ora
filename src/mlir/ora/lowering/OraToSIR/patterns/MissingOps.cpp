@@ -1,6 +1,7 @@
 #include "patterns/MissingOps.h"
 #include "patterns/AdtCarrierHelpers.h"
 #include "patterns/EVMConstants.h"
+#include "patterns/LoweringHelpers.h"
 #include "OraToSIRTypeConverter.h"
 #include "OraDebug.h"
 
@@ -20,34 +21,18 @@
 
 using namespace mlir;
 using namespace ora;
+using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::constU256;
+using mlir::ora::lowering::ensureU256;
 
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
-
-// Helper: ensure value is u256, inserting a bitcast if needed.
-static Value ensureU256(PatternRewriter &rewriter, Location loc, Value value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    if (llvm::isa<sir::U256Type>(value.getType()))
-        return value;
-    return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-}
 
 // Helper: convert a value to a non-zero boolean in u256 (double iszero).
 static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value v = ensureU256(rewriter, loc, value);
-    Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, v);
+    Value isZero = rewriter.create<sir::IsZeroOp>(loc, u256Type, value);
     return rewriter.create<sir::IsZeroOp>(loc, u256Type, isZero);
-}
-
-static bool isDebugInfoLoweringEnabled(Operation *op)
-{
-    if (!op)
-        return false;
-    if (auto module = op->getParentOfType<ModuleOp>())
-        return module->hasAttr("ora.debug_info");
-    return false;
 }
 
 static std::optional<uint64_t> lookupNamedRootSlot(Operation *op, StringRef rootName)
@@ -65,7 +50,7 @@ static std::optional<uint64_t> lookupNamedRootSlot(Operation *op, StringRef root
     return std::nullopt;
 }
 
-static Value buildDebugNamedMemoryPtr(
+static Value buildNamedMemoryPtr(
     PatternRewriter &rewriter,
     Location loc,
     Operation *op,
@@ -78,50 +63,16 @@ static Value buildDebugNamedMemoryPtr(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(ctx, evm::kU64Bits, mlir::IntegerType::Unsigned);
 
     Value base = rewriter.create<sir::CodeSizeOp>(loc, u256Type);
     const uint64_t byteOffset = slot.value() * evm::kWordBytes;
     Value addr = base;
     if (byteOffset != 0)
     {
-        Value offset = rewriter.create<sir::ConstOp>(
-            loc,
-            u256Type,
-            mlir::IntegerAttr::get(ui64Type, byteOffset));
+        Value offset = constU256(rewriter, loc, byteOffset);
         addr = rewriter.create<sir::AddOp>(loc, u256Type, base, offset);
     }
     return rewriter.create<sir::BitcastOp>(loc, ptrType, addr);
-}
-
-static FailureOr<Value> lowerAdtPayloadToCarrier(
-    PatternRewriter &rewriter,
-    Location loc,
-    Type payloadType,
-    Value payloadValue)
-{
-    if (!ora::adt_helpers::usesAggregateAdtPayloadHandle(payloadType))
-        return ensureU256(rewriter, loc, payloadValue);
-
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
-        return ensureU256(rewriter, loc, *ptr);
-
-    if (llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
-        return ensureU256(rewriter, loc, payloadValue);
-
-    if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
-        if (cast.getNumOperands() == 1 && llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
-            return ensureU256(rewriter, loc, cast.getOperand(0));
-
-    return failure();
-}
-
-static Value makeU256Const(PatternRewriter &rewriter, Location loc, uint64_t value)
-{
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    return rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(ui64Type, value));
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +86,9 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     auto loc = op.getLoc();
     Block *parentBlock = op->getBlock();
     Region *parentRegion = parentBlock->getParent();
+    Value condition = ensureU256(rewriter, loc, op.getOperation(), adaptor.getCondition(), "refinement guard condition");
+    if (!condition)
+        return failure();
 
     // Split the block: after the guard instruction, execution continues.
     auto *afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
@@ -142,20 +96,16 @@ LogicalResult ConvertRefinementGuardOp::matchAndRewrite(
     // Create a revert block.
     auto *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
     rewriter.setInsertionPointToStart(revertBlock);
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
     // revert(0, 0) — zero-length revert data.
-    Value zeroU256 = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroU256 = constU256(rewriter, loc, 0);
     Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
-    Value zeroLen = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, 0));
+    Value zeroLen = constU256(rewriter, loc, 0);
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
 
     // At the end of parentBlock, branch based on the guard condition.
     rewriter.setInsertionPointToEnd(parentBlock);
-    Value cond = toCondU256(rewriter, loc, adaptor.getCondition());
+    Value cond = toCondU256(rewriter, loc, condition);
     rewriter.create<sir::CondBrOp>(
         loc, cond,
         ValueRange{}, ValueRange{},
@@ -175,18 +125,16 @@ LogicalResult ConvertPowerOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    Value base = ensureU256(rewriter, loc, adaptor.getBase());
-    Value exp = ensureU256(rewriter, loc, adaptor.getExponent());
+    Value base = ensureU256(rewriter, loc, op.getOperation(), adaptor.getBase(), "power base");
+    Value exp = ensureU256(rewriter, loc, op.getOperation(), adaptor.getExponent(), "power exponent");
+    if (!base || !exp)
+        return failure();
     rewriter.replaceOpWithNewOp<sir::ExpOp>(op, u256Type, base, exp);
     return success();
 }
 
 // ---------------------------------------------------------------------------
-// ora.mload → sir.malloc + sir.load
-// Named memory variables: allocate a slot and load from it.
-// At SIR level, named variables are lowered to memory pointers that the
-// upstream alloc pass will resolve. For now, emit a sir.freeptr to get the
-// current free memory pointer and use it as the load address.
+// ora.mload → sir.load from the deterministic named memory slot.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertMLoadOp::matchAndRewrite(
     ora::MLoadOp op,
@@ -195,30 +143,18 @@ LogicalResult ConvertMLoadOp::matchAndRewrite(
 {
     auto loc = op.getLoc();
     auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
 
-    if (isDebugInfoLoweringEnabled(op.getOperation()))
-    {
-        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
-        {
-            Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
-            rewriter.replaceOp(op, result);
-            return success();
-        }
-    }
+    Value ptr = buildNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable());
+    if (!ptr)
+        return rewriter.notifyMatchFailure(op, "missing named memory slot metadata");
 
-    // Allocate a word-sized slot and load from it.
-    Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
-    Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
     Value result = rewriter.create<sir::LoadOp>(loc, u256Type, ptr);
     rewriter.replaceOp(op, result);
     return success();
 }
 
 // ---------------------------------------------------------------------------
-// ora.mstore → sir.malloc + sir.store
+// ora.mstore → sir.store to the deterministic named memory slot.
 // ---------------------------------------------------------------------------
 LogicalResult ConvertMStoreOp::matchAndRewrite(
     ora::MStoreOp op,
@@ -226,25 +162,14 @@ LogicalResult ConvertMStoreOp::matchAndRewrite(
     ConversionPatternRewriter &rewriter) const
 {
     auto loc = op.getLoc();
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
+    Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore value");
+    if (!val)
+        return failure();
 
-    if (isDebugInfoLoweringEnabled(op.getOperation()))
-    {
-        if (Value ptr = buildDebugNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable()))
-        {
-            Value val = ensureU256(rewriter, loc, adaptor.getValue());
-            rewriter.create<sir::StoreOp>(loc, ptr, val);
-            rewriter.eraseOp(op);
-            return success();
-        }
-    }
+    Value ptr = buildNamedMemoryPtr(rewriter, loc, op.getOperation(), op.getVariable());
+    if (!ptr)
+        return rewriter.notifyMatchFailure(op, "missing named memory slot metadata");
 
-    Value size = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, evm::kWordBytes));
-    Value ptr = rewriter.create<sir::MallocOp>(loc, ptrType, size);
-    Value val = ensureU256(rewriter, loc, adaptor.getValue());
     rewriter.create<sir::StoreOp>(loc, ptr, val);
     rewriter.eraseOp(op);
     return success();
@@ -266,9 +191,11 @@ LogicalResult ConvertMLoad8Op::matchAndRewrite(
     // If base is not a ptr, bitcast it.
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
-    Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mload8 offset");
+    if (!offset)
+        return failure();
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
-    Value zero = rewriter.create<sir::ConstOp>(loc, u256Type, mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    Value zero = constU256(rewriter, loc, 0);
     Value result = rewriter.create<sir::Load8Op>(loc, u256Type, addr, zero);
     rewriter.replaceOp(op, result);
     return success();
@@ -286,12 +213,14 @@ LogicalResult ConvertMStore8Op::matchAndRewrite(
     auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
 
     Value base = adaptor.getBase();
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "mstore8 offset");
+    Value val = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "mstore8 value");
+    if (!offset || !val)
+        return failure();
     if (!llvm::isa<sir::PtrType>(base.getType()))
         base = rewriter.create<sir::BitcastOp>(loc, ptrType, base);
-    Value offset = ensureU256(rewriter, loc, adaptor.getOffset());
-    Value val = ensureU256(rewriter, loc, adaptor.getValue());
     Value addr = rewriter.create<sir::AddPtrOp>(loc, ptrType, base, offset);
-    Value zero = rewriter.create<sir::ConstOp>(loc, val.getType(), mlir::IntegerAttr::get(mlir::IntegerType::get(rewriter.getContext(), 64, mlir::IntegerType::Unsigned), 0));
+    Value zero = constU256(rewriter, loc, 0);
     rewriter.create<sir::Store8Op>(loc, addr, zero, val);
     rewriter.eraseOp(op);
     return success();
@@ -327,11 +256,13 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
             return success();
         }
     }
-    auto u256Type = sir::U256Type::get(rewriter.getContext());
-    auto ui64Type = mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits, mlir::IntegerType::Unsigned);
-    int64_t discriminant = -1;
+    auto u256IntType = mlir::IntegerType::get(rewriter.getContext(), evm::kWordBits, mlir::IntegerType::Unsigned);
+    auto normalizeDiscriminant = [&](mlir::IntegerAttr attr) -> mlir::IntegerAttr {
+        return mlir::IntegerAttr::get(u256IntType, attr.getValue().zextOrTrunc(evm::kWordBits));
+    };
+    mlir::IntegerAttr discriminantAttr;
     if (auto ordinalAttr = op->getAttrOfType<mlir::IntegerAttr>("ora.enum_ordinal"))
-        discriminant = ordinalAttr.getInt();
+        discriminantAttr = normalizeDiscriminant(ordinalAttr);
 
     Operation *moduleOp = op->getParentOfType<mlir::ModuleOp>();
     if (!moduleOp)
@@ -339,7 +270,7 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
     if (moduleOp)
     {
         moduleOp->walk([&](ora::EnumDeclOp decl) {
-            if (discriminant >= 0 || decl.getName() != op.getEnumName())
+            if (discriminantAttr || decl.getName() != op.getEnumName())
                 return;
 
             auto variantNames = decl->getAttrOfType<mlir::ArrayAttr>("ora.variant_names");
@@ -357,28 +288,40 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
                     continue;
                 if (denseVariantValues)
                 {
-                    discriminant = denseVariantValues[i];
+                    auto denseAttr = mlir::IntegerAttr::get(
+                        mlir::IntegerType::get(rewriter.getContext(), evm::kU64Bits),
+                        denseVariantValues[i]);
+                    discriminantAttr = normalizeDiscriminant(denseAttr);
                     return;
                 }
                 auto valueAttr = llvm::dyn_cast<mlir::IntegerAttr>(arrayVariantValues[i]);
                 if (!valueAttr)
                     return;
-                discriminant = valueAttr.getInt();
+                discriminantAttr = normalizeDiscriminant(valueAttr);
                 return;
             }
         });
     }
-    if (discriminant < 0 && moduleOp)
+    if (!discriminantAttr && moduleOp)
     {
         if (auto enumDict = moduleOp->getAttrOfType<DictionaryAttr>("sir.enum_values"))
         {
             std::string key = op.getEnumName().str();
             key.push_back('.');
             key += op.getVariantName().str();
-            if (auto valueAttr = enumDict.get(key))
+            Attribute valueAttr;
+            for (NamedAttribute entry : enumDict)
+            {
+                if (entry.getName().strref() == key)
+                {
+                    valueAttr = entry.getValue();
+                    break;
+                }
+            }
+            if (valueAttr)
             {
                 if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(valueAttr))
-                    discriminant = intAttr.getInt();
+                    discriminantAttr = normalizeDiscriminant(intAttr);
                 else if (auto strAttr = llvm::dyn_cast<mlir::StringAttr>(valueAttr))
                 {
                     auto stringType = ora::StringType::get(rewriter.getContext());
@@ -397,11 +340,10 @@ LogicalResult ConvertEnumConstantOp::matchAndRewrite(
             }
         }
     }
-    if (discriminant < 0)
+    if (!discriminantAttr)
         return rewriter.notifyMatchFailure(op, "missing enum discriminant metadata");
 
-    Value result = rewriter.create<sir::ConstOp>(loc, u256Type,
-        mlir::IntegerAttr::get(ui64Type, static_cast<uint64_t>(discriminant)));
+    Value result = constU256(rewriter, loc, discriminantAttr);
     rewriter.replaceOp(op, result);
     return success();
 }
@@ -427,19 +369,16 @@ LogicalResult ConvertAdtConstructOp::matchAndRewrite(
     if (failed(variantIndex))
         return rewriter.notifyMatchFailure(op, "unknown ADT variant");
 
-    auto loc = op.getLoc();
-    Value tag = makeU256Const(rewriter, loc, *variantIndex);
-    Value payload = makeU256Const(rewriter, loc, 0);
-    if (!adaptor.getPayloadValues().empty())
-    {
-        if (adaptor.getPayloadValues().size() != 1)
-            return rewriter.notifyMatchFailure(op, "ADT construct expects zero or one payload operand");
-        auto carrier = lowerAdtPayloadToCarrier(rewriter, loc, adtType.getPayloadTypes()[*variantIndex], adaptor.getPayloadValues().front());
-        if (failed(carrier))
-            return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle carrier");
-        payload = *carrier;
-    }
-    rewriter.replaceOp(op, ValueRange{tag, payload});
+    ora::adt_helpers::AdtConstructCarrierOptions options;
+    options.acceptExistingAggregateCarrier = true;
+    options.acceptSingleOperandCarrierCast = true;
+
+    auto parts = ora::adt_helpers::materializeAdtConstructParts(
+        rewriter, op.getLoc(), adtType, op.getVariantName(), adaptor.getPayloadValues(), options);
+    if (failed(parts))
+        return rewriter.notifyMatchFailure(op, "aggregate ADT payload requires compiler-runtime handle carrier");
+
+    rewriter.replaceOp(op, ValueRange{parts->first, parts->second});
     return success();
 }
 

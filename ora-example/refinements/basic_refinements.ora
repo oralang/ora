@@ -49,10 +49,9 @@ contract TestRefinements {
     }
 
     // Test variable declarations
-    fn testVariables() {
+    fn testVariables(total_input: Exact<u256>) {
         let deposit: MinValue<u256, 1_000_000> = 1_000_000;
         let fee: BasisPoints<u256> = 250; // 2.5%
-        let total: Exact<u256> = 1000;
+        let total: Exact<u256> = total_input;
     }
 }
-

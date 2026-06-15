@@ -32,7 +32,7 @@ pub fn Handlers(FrameType: type) type {
             // Charge base + memory expansion for reading 32 bytes
             const end_bytes: u64 = @as(u64, off) + 32;
             const mem_cost = frame.memoryExpansionCost(end_bytes);
-            try frame.consumeGas(GasConstants.GasFastestStep + mem_cost);
+            try frame.consumeGas(GasConstants.GasFastestStep +| mem_cost);
             const aligned_size = wordAlignedSize(end_bytes);
             const aligned_size_u32 = std.math.cast(u32, aligned_size) orelse return error.OutOfBounds;
             if (aligned_size_u32 > frame.memory_size) frame.memory_size = aligned_size_u32;
@@ -59,7 +59,7 @@ pub fn Handlers(FrameType: type) type {
             // Charge base + memory expansion for writing 32 bytes
             const end_bytes: u64 = @as(u64, off) + 32;
             const mem_cost = frame.memoryExpansionCost(end_bytes);
-            try frame.consumeGas(GasConstants.GasFastestStep + mem_cost);
+            try frame.consumeGas(GasConstants.GasFastestStep +| mem_cost);
 
             // Update memory size after charging expansion (spec-compliant)
             const aligned_size = wordAlignedSize(end_bytes);
@@ -84,7 +84,7 @@ pub fn Handlers(FrameType: type) type {
             const off = std.math.cast(u32, offset) orelse return error.OutOfBounds;
             const end_bytes: u64 = @as(u64, off) + 1;
             const mem_cost = frame.memoryExpansionCost(end_bytes);
-            try frame.consumeGas(GasConstants.GasFastestStep + mem_cost);
+            try frame.consumeGas(GasConstants.GasFastestStep +| mem_cost);
 
             // Update memory size after charging expansion
             const aligned_size = wordAlignedSize(end_bytes);

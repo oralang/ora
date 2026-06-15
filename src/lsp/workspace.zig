@@ -2,6 +2,7 @@ const std = @import("std");
 const lexer = @import("ora_lexer");
 const compiler = @import("../compiler.zig");
 const frontend = @import("frontend.zig");
+const token_cache = @import("token_cache.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -18,6 +19,7 @@ pub const ResolvedImport = struct {
     specifier: []const u8,
     alias: ?[]const u8,
     resolved_path: []const u8,
+    specifier_range: ?compiler.TextRange = null,
 };
 
 pub const ResolutionResult = struct {
@@ -43,6 +45,7 @@ const ImportRef = struct {
     specifier: []const u8,
     alias: ?[]const u8,
     range: compiler.TextRange,
+    specifier_range: ?compiler.TextRange = null,
 };
 
 pub fn pathToFileUri(allocator: Allocator, path: []const u8) ![]u8 {
@@ -96,6 +99,30 @@ pub fn resolveDocumentImports(
     source: []const u8,
     options: ResolveOptions,
 ) !ResolutionResult {
+    const import_refs = try collectImports(allocator, source);
+    defer freeImportRefs(allocator, import_refs);
+    return resolveDocumentImportRefs(allocator, uri, source, options, import_refs);
+}
+
+pub fn resolveDocumentImportsFromTokens(
+    allocator: Allocator,
+    uri: []const u8,
+    source: []const u8,
+    tokens: []const token_cache.Token,
+    options: ResolveOptions,
+) !ResolutionResult {
+    const import_refs = try collectImportsFromCachedTokens(allocator, source, tokens);
+    defer freeImportRefs(allocator, import_refs);
+    return resolveDocumentImportRefs(allocator, uri, source, options, import_refs);
+}
+
+fn resolveDocumentImportRefs(
+    allocator: Allocator,
+    uri: []const u8,
+    source: []const u8,
+    options: ResolveOptions,
+    import_refs: []const ImportRef,
+) !ResolutionResult {
     var diagnostics = std.ArrayList(ImportResolutionDiagnostic){};
     errdefer {
         for (diagnostics.items) |diagnostic| {
@@ -127,9 +154,6 @@ pub fn resolveDocumentImports(
 
     const normalized_doc_path = try normalizePathAlloc(allocator, doc_path);
     defer allocator.free(normalized_doc_path);
-
-    const import_refs = try collectImports(allocator, source);
-    defer freeImportRefs(allocator, import_refs);
 
     for (import_refs) |import_ref| {
         if (!isRelativeSpecifier(import_ref.specifier)) continue;
@@ -185,6 +209,7 @@ pub fn resolveDocumentImports(
             .specifier = try allocator.dupe(u8, import_ref.specifier),
             .alias = alias_copy,
             .resolved_path = resolved_path,
+            .specifier_range = import_ref.specifier_range,
         });
     }
 
@@ -192,6 +217,25 @@ pub fn resolveDocumentImports(
         .diagnostics = try diagnostics.toOwnedSlice(allocator),
         .imports = try imports.toOwnedSlice(allocator),
     };
+}
+
+pub fn sourceImportsTargetPath(
+    allocator: Allocator,
+    uri: []const u8,
+    normalized_doc_path: []const u8,
+    source: []const u8,
+    options: ResolveOptions,
+    target_path: []const u8,
+) !bool {
+    switch (try scanSourceForTargetImport(allocator, normalized_doc_path, source, options, target_path)) {
+        .match => return true,
+        .no_match => return false,
+        .needs_full_resolution => {},
+    }
+
+    var resolution = try resolveDocumentImports(allocator, uri, source, options);
+    defer resolution.deinit(allocator);
+    return importsPath(resolution.imports, target_path);
 }
 
 fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
@@ -204,7 +248,7 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
         collected.deinit(allocator);
     }
 
-    var lex = try lexer.Lexer.initWithConfig(allocator, source, lexer.LexerConfig.development());
+    var lex = lexer.Lexer.initWithRecovery(allocator, source);
     defer lex.deinit();
 
     const tokens = lex.scanTokens() catch {
@@ -238,6 +282,7 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
             .string => |value| value,
             else => continue,
         };
+        const specifier_range = specifierTextRange(source, path_token.range, string_value);
         const specifier = try allocator.dupe(u8, string_value);
         errdefer allocator.free(specifier);
         const alias = try allocator.dupe(u8, alias_token.lexeme);
@@ -257,10 +302,165 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
                 .start = path_token.range.start_offset,
                 .end = end_offset,
             },
+            .specifier_range = specifier_range,
         });
     }
 
     return try collected.toOwnedSlice(allocator);
+}
+
+fn collectImportsFromCachedTokens(
+    allocator: Allocator,
+    source: []const u8,
+    tokens: []const token_cache.Token,
+) ![]ImportRef {
+    var collected = std.ArrayList(ImportRef){};
+    errdefer {
+        for (collected.items) |item| {
+            allocator.free(item.specifier);
+            if (item.alias) |a| allocator.free(a);
+        }
+        collected.deinit(allocator);
+    }
+
+    var index: usize = 0;
+    while (index < tokens.len) : (index += 1) {
+        const token = tokens[index];
+        if (token.type != .Const or index + 6 >= tokens.len) continue;
+
+        const alias_token = tokens[index + 1];
+        const equal_token = tokens[index + 2];
+        const at_token = tokens[index + 3];
+        const import_token = tokens[index + 4];
+        const left_paren_token = tokens[index + 5];
+        const path_token = tokens[index + 6];
+
+        if (alias_token.type != .Identifier or
+            equal_token.type != .Equal or
+            at_token.type != .At or
+            import_token.type != .Import or
+            left_paren_token.type != .LeftParen or
+            (path_token.type != .StringLiteral and path_token.type != .RawStringLiteral))
+        {
+            continue;
+        }
+
+        const string_value = path_token.string_value orelse continue;
+        const specifier_range = specifierTextRange(source, path_token.range, string_value);
+        const specifier = try allocator.dupe(u8, string_value);
+        errdefer allocator.free(specifier);
+        const alias = try allocator.dupe(u8, alias_token.lexeme);
+
+        var end_offset = path_token.range.end_offset;
+        if (index + 7 < tokens.len and tokens[index + 7].type == .RightParen) {
+            end_offset = tokens[index + 7].range.end_offset;
+        }
+        if (index + 8 < tokens.len and tokens[index + 8].type == .Semicolon) {
+            end_offset = tokens[index + 8].range.end_offset;
+        }
+
+        try collected.append(allocator, .{
+            .specifier = specifier,
+            .alias = alias,
+            .range = .{
+                .start = path_token.range.start_offset,
+                .end = end_offset,
+            },
+            .specifier_range = specifier_range,
+        });
+    }
+
+    return try collected.toOwnedSlice(allocator);
+}
+
+const TargetImportScan = enum {
+    no_match,
+    match,
+    needs_full_resolution,
+};
+
+const ParsedImportSpecifier = union(enum) {
+    none,
+    value: []const u8,
+    needs_full_resolution,
+};
+
+fn scanSourceForTargetImport(
+    allocator: Allocator,
+    normalized_doc_path: []const u8,
+    source: []const u8,
+    options: ResolveOptions,
+    target_path: []const u8,
+) !TargetImportScan {
+    var cursor: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, source, cursor, '@')) |at_index| {
+        cursor = at_index + 1;
+
+        var index = skipWhitespace(source, cursor);
+        if (!startsWithKeyword(source, index, "import")) continue;
+        index += "import".len;
+
+        index = skipWhitespace(source, index);
+        if (index >= source.len or source[index] != '(') continue;
+        index = skipWhitespace(source, index + 1);
+
+        switch (parseImportSpecifier(source, index)) {
+            .none => continue,
+            .needs_full_resolution => return .needs_full_resolution,
+            .value => |specifier| {
+                if (!isRelativeSpecifier(specifier)) continue;
+                if (!std.mem.endsWith(u8, specifier, ".ora")) continue;
+
+                const maybe_resolved_path = try resolveRelativeImportPathAlloc(allocator, normalized_doc_path, specifier);
+                const resolved_path = maybe_resolved_path orelse continue;
+                defer allocator.free(resolved_path);
+
+                const allowed = try isAllowedInWorkspace(allocator, resolved_path, options.workspace_roots);
+                if (!allowed) continue;
+                if (std.mem.eql(u8, resolved_path, target_path)) return .match;
+            },
+        }
+    }
+    return .no_match;
+}
+
+fn parseImportSpecifier(source: []const u8, start: usize) ParsedImportSpecifier {
+    if (start >= source.len) return .none;
+
+    if (source[start] == 'r' and start + 1 < source.len and source[start + 1] == '"') {
+        const value_start = start + 2;
+        const value_end = std.mem.indexOfScalarPos(u8, source, value_start, '"') orelse return .none;
+        return .{ .value = source[value_start..value_end] };
+    }
+
+    if (source[start] != '"') return .none;
+    const value_start = start + 1;
+    var index = value_start;
+    while (index < source.len) : (index += 1) {
+        switch (source[index]) {
+            '\\' => return .needs_full_resolution,
+            '"' => return .{ .value = source[value_start..index] },
+            else => {},
+        }
+    }
+    return .none;
+}
+
+fn skipWhitespace(source: []const u8, start: usize) usize {
+    var index = start;
+    while (index < source.len and std.ascii.isWhitespace(source[index])) : (index += 1) {}
+    return index;
+}
+
+fn startsWithKeyword(source: []const u8, start: usize, keyword: []const u8) bool {
+    if (start + keyword.len > source.len) return false;
+    if (!std.mem.eql(u8, source[start .. start + keyword.len], keyword)) return false;
+    const after = start + keyword.len;
+    return after >= source.len or !isIdentifierByte(source[after]);
+}
+
+fn isIdentifierByte(byte: u8) bool {
+    return std.ascii.isAlphanumeric(byte) or byte == '_';
 }
 
 fn freeImportRefs(allocator: Allocator, refs: []ImportRef) void {
@@ -269,6 +469,24 @@ fn freeImportRefs(allocator: Allocator, refs: []ImportRef) void {
         if (item.alias) |a| allocator.free(a);
     }
     allocator.free(refs);
+}
+
+fn specifierTextRange(source: []const u8, token_range: lexer.SourceRange, specifier: []const u8) ?compiler.TextRange {
+    if (token_range.start_offset >= source.len or token_range.end_offset > source.len) return null;
+    const token_text = source[token_range.start_offset..token_range.end_offset];
+    if (token_text.len == 0) return null;
+
+    const start_offset = if (std.mem.startsWith(u8, token_text, "r\""))
+        token_range.start_offset + 2
+    else if (token_text[0] == '"')
+        token_range.start_offset + 1
+    else
+        return null;
+    const end_offset = std.math.add(u32, start_offset, @as(u32, @intCast(specifier.len))) catch return null;
+    if (end_offset > token_range.end_offset or end_offset > source.len) return null;
+    if (!std.mem.eql(u8, source[start_offset..end_offset], specifier)) return null;
+
+    return .{ .start = start_offset, .end = end_offset };
 }
 
 fn spanToRange(allocator: Allocator, source_text: []const u8, range: compiler.TextRange) !frontend.Range {
@@ -293,6 +511,13 @@ fn spanToRange(allocator: Allocator, source_text: []const u8, range: compiler.Te
 
 fn isRelativeSpecifier(specifier: []const u8) bool {
     return std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../");
+}
+
+fn importsPath(imports: []const ResolvedImport, target_path: []const u8) bool {
+    for (imports) |import_item| {
+        if (std.mem.eql(u8, import_item.resolved_path, target_path)) return true;
+    }
+    return false;
 }
 
 fn resolveRelativeImportPathAlloc(allocator: Allocator, importer_path: []const u8, specifier: []const u8) !?[]u8 {

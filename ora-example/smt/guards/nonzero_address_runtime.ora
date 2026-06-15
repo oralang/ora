@@ -4,7 +4,7 @@
 // Tests that runtime guards are inserted when SMT cannot prove NonZeroAddress
 // constraints. Guards should remain in MLIR output.
 //
-// Run with: --verify --emit-mlir-sir
+// Run with: --verify --emit=mlir:sir
 // Expected: Guards remain in MLIR output (runtime check required)
 // ============================================================================
 
@@ -17,14 +17,14 @@ contract NonZeroAddressRuntime {
 
     // SMT cannot prove NonZeroAddress from storage
     pub fn runtimeNonZeroFromStorage() {
-        var stored_addr: address;
+        var stored_addr: address = 0x0;
         // Guard should remain - storage value unknown at compile time
         let owner: NonZeroAddress = stored_addr;
     }
 
     // SMT cannot prove NonZeroAddress from function call
     pub fn getAddress() -> address {
-        var addr: address;
+        var addr: address = 0x0;
         return addr;
     }
 
@@ -47,4 +47,3 @@ contract NonZeroAddressRuntime {
         // Guard should remain if this is valid
     }
 }
-

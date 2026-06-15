@@ -51,7 +51,7 @@ while IFS= read -r -d '' check; do
   tmp_stdout=$(mktemp)
   tmp_stderr=$(mktemp)
   tmp_filtered=$(mktemp)
-  if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit-mlir=sir "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
+  if ! "$ORA_BIN" "$ORA_VERIFY_FLAG" --emit=mlir:sir "$input" >"$tmp_stdout" 2>"$tmp_stderr"; then
     echo "error: ora failed for $input (check: $check)" >&2
     sed -n '1,80p' "$tmp_stderr" >&2 || true
     rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"
@@ -61,10 +61,11 @@ while IFS= read -r -d '' check; do
   fi
 
   awk '
-    /SIR MLIR \(after phase5\)/ {f=1; print; next}
+    { sub(/[[:space:]]+$/, "", $0) }
+    /SIR MLIR \(after phase5\)/ {f=1; next}
     /^module / {if (!f) f=1}
     /^"builtin.module"/ {if (!f) f=1}
-    f {print}
+    f && length($0) > 0 {print}
   ' "$tmp_stdout" > "$tmp_filtered"
 
   if [ ! -s "$tmp_filtered" ]; then
@@ -76,7 +77,7 @@ while IFS= read -r -d '' check; do
     continue
   fi
 
-  "$FILECHECK_BIN" "$effective_check" < "$tmp_filtered" || fail=1
+  "$FILECHECK_BIN" --implicit-check-not=builtin.unrealized_conversion_cast "$effective_check" < "$tmp_filtered" || fail=1
   rm -f "$tmp_stdout" "$tmp_stderr" "$tmp_filtered"
 
   if [ -n "$tmp_check" ]; then rm -f "$tmp_check"; fi

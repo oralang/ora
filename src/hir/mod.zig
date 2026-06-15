@@ -3,6 +3,12 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const sema_model = @import("../sema/model.zig");
+const ConstEvalResult = sema.ConstEvalResult;
+const ora_types = @import("ora_types");
+const refinements = ora_types.refinement_semantics;
+const compiler_query = @import("../compiler_query.zig");
+const diagnostics = @import("../diagnostics/mod.zig");
+const executable_fallbacks = @import("executable_fallbacks.zig");
 const source = @import("../source/mod.zig");
 const contract_lowering = @import("contract_lowering.zig");
 const control_flow = @import("control_flow.zig");
@@ -10,25 +16,126 @@ const expr_lowering = @import("expr_lowering.zig");
 const function_core = @import("function_core.zig");
 const hir_locals = @import("locals.zig");
 const module_lowering = @import("module_lowering.zig");
-const refinement_cleanup = @import("refinement_cleanup.zig");
+const refinement_guards = @import("../mlir/refinement_guards.zig");
 const support = @import("support.zig");
 const type_descriptors = @import("../sema/type_descriptors.zig");
+const abi_layout_context = @import("../abi/layout_context.zig");
+const RefinementArg = ora_types.RefinementArg;
 
 pub const abi = @import("abi.zig");
+pub const ExecutableFallbackViolation = executable_fallbacks.ExecutableFallbackViolation;
+pub const executable_fallback_attr_name = executable_fallbacks.executable_fallback_attr_name;
+pub const protocol_zero_attr_name = executable_fallbacks.protocol_zero_attr_name;
+pub const findExecutableFallback = executable_fallbacks.findExecutableFallback;
+pub const verifyNoExecutableFallbacks = executable_fallbacks.verifyNoExecutableFallbacks;
+pub const isAllowedProtocolZeroPurpose = executable_fallbacks.isAllowedProtocolZeroPurpose;
 
-pub const ModuleQuery = struct {
-    context: *anyopaque,
-    ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
-    item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult,
-    resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.NameResolutionResult,
-    module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.TypeCheckResult,
-    const_eval: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ConstEvalResult,
-    lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
-    resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
+pub const abi_layout_test_support = struct {
+    pub fn mixin(TestLowerer: type, TestContractLowerer: type, TestFunctionLowerer: type, TestHirSymbolKind: type) type {
+        const ModuleLowering = module_lowering.mixin(TestLowerer, TestContractLowerer, TestFunctionLowerer, TestHirSymbolKind);
+        return struct {
+            pub fn abiLayoutForType(self: *TestLowerer, ty: sema.Type) anyerror![]const u8 {
+                return ModuleLowering.abiLayoutForType(self, ty);
+            }
+
+            pub fn abiLayoutForTypeExpr(self: *TestLowerer, type_expr_id: ast.TypeExprId) anyerror![]const u8 {
+                return ModuleLowering.abiLayoutForTypeExpr(self, type_expr_id);
+            }
+
+            pub fn staticAbiWordCountForType(self: *TestLowerer, ty: sema.Type) ?usize {
+                return ModuleLowering.staticAbiWordCountForType(self, ty);
+            }
+
+            pub fn staticAbiWordCountForTypeExpr(self: *TestLowerer, type_expr_id: ast.TypeExprId) ?usize {
+                return ModuleLowering.staticAbiWordCountForTypeExpr(self, type_expr_id);
+            }
+        };
+    }
 };
 
 const descriptorFromPathName = sema.descriptorFromPathName;
 const appendSemaTypeMangleName = sema.appendTypeMangleName;
+
+const VerificationFactEntry = struct {
+    owner_index: usize,
+    fact_index: usize,
+};
+
+const VerificationTraitMethodFactEntry = struct {
+    trait_item_index: usize,
+    method_index: usize,
+    fact_index: usize,
+};
+
+const VerificationStatementFactEntry = struct {
+    item_index: usize,
+    stmt_index: usize,
+    fact_index: usize,
+};
+
+fn verificationFactEntryLessThan(_: void, lhs: VerificationFactEntry, rhs: VerificationFactEntry) bool {
+    if (lhs.owner_index != rhs.owner_index) return lhs.owner_index < rhs.owner_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn verificationTraitMethodFactEntryLessThan(_: void, lhs: VerificationTraitMethodFactEntry, rhs: VerificationTraitMethodFactEntry) bool {
+    if (lhs.trait_item_index != rhs.trait_item_index) return lhs.trait_item_index < rhs.trait_item_index;
+    if (lhs.method_index != rhs.method_index) return lhs.method_index < rhs.method_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn verificationStatementFactEntryLessThan(_: void, lhs: VerificationStatementFactEntry, rhs: VerificationStatementFactEntry) bool {
+    if (lhs.item_index != rhs.item_index) return lhs.item_index < rhs.item_index;
+    if (lhs.stmt_index != rhs.stmt_index) return lhs.stmt_index < rhs.stmt_index;
+    return lhs.fact_index < rhs.fact_index;
+}
+
+fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
+    var entries: std.ArrayList(VerificationFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.itemId() orelse continue;
+        try entries.append(allocator, .{
+            .owner_index = owner.index(),
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationFactEntry, entries.items, {}, verificationFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
+
+fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
+    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.traitMethod() orelse continue;
+        try entries.append(allocator, .{
+            .trait_item_index = owner.trait_item.index(),
+            .method_index = owner.method_index,
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationTraitMethodFactEntry, entries.items, {}, verificationTraitMethodFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
+
+fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
+    var entries: std.ArrayList(VerificationStatementFactEntry) = .{};
+    defer entries.deinit(allocator);
+
+    for (facts, 0..) |fact, fact_index| {
+        const owner = fact.owner.statementOwner() orelse continue;
+        try entries.append(allocator, .{
+            .item_index = owner.item.index(),
+            .stmt_index = owner.stmt.index(),
+            .fact_index = fact_index,
+        });
+    }
+    std.mem.sort(VerificationStatementFactEntry, entries.items, {}, verificationStatementFactEntryLessThan);
+    return entries.toOwnedSlice(allocator);
+}
 
 pub const HirSymbolKind = enum {
     contract,
@@ -82,7 +189,20 @@ pub const LoweringResult = struct {
     module: HirModuleHandle,
     items: []HirItemHandle,
     type_fallback_count: usize = 0,
+    placeholder_count: usize = 0,
+    default_value_count: usize = 0,
     type_fallbacks: []const TypeFallbackRecord = &.{},
+    diagnostics: diagnostics.DiagnosticList,
+
+    pub fn executableFallbackCount(self: *const LoweringResult) usize {
+        return self.type_fallback_count + self.placeholder_count + self.default_value_count;
+    }
+
+    pub fn isEmittable(self: *const LoweringResult) bool {
+        return self.type_fallback_count == 0 and
+            self.placeholder_count == 0 and
+            self.default_value_count == 0;
+    }
 
     pub fn deinit(self: *LoweringResult) void {
         if (!mlir.oraModuleIsNull(self.module.raw_module)) {
@@ -91,6 +211,7 @@ pub const LoweringResult = struct {
         if (self.context.ptr != null) {
             mlir.oraContextDestroy(self.context);
         }
+        self.diagnostics.deinit();
         self.arena.deinit();
     }
 
@@ -106,7 +227,7 @@ pub const LoweringResult = struct {
     }
 
     pub fn cleanupRefinementGuards(self: *LoweringResult, proven_guard_ids: *const std.StringHashMap(void)) void {
-        refinement_cleanup.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
+        refinement_guards.cleanupRefinementGuards(self.context, self.module.raw_module, proven_guard_ids);
     }
 };
 
@@ -117,9 +238,10 @@ pub fn lowerModule(
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
-    const_eval: *const sema.ConstEvalResult,
+    const_eval: *const ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
-    module_query: ?ModuleQuery,
+    verification_facts: *const sema.ModuleVerificationFactsResult,
+    module_query: ?compiler_query.HirView,
 ) !LoweringResult {
     var result = LoweringResult{
         .arena = std.heap.ArenaAllocator.init(allocator),
@@ -129,6 +251,7 @@ pub fn lowerModule(
         },
         .items = &[_]HirItemHandle{},
         .type_fallbacks = &.{},
+        .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.deinit();
 
@@ -141,8 +264,13 @@ pub fn lowerModule(
     result.module.raw_module = mlir.oraModuleCreateEmpty(support.locationFromRange(result.context, sources, file.file_id, root_range));
     if (mlir.oraModuleIsNull(result.module.raw_module)) return error.MlirModuleCreationFailed;
 
+    const arena = result.arena.allocator();
+    const verification_fact_lookup = try buildVerificationFactLookup(arena, verification_facts.facts);
+    const verification_trait_method_fact_lookup = try buildVerificationTraitMethodFactLookup(arena, verification_facts.facts);
+    const verification_statement_fact_lookup = try buildVerificationStatementFactLookup(arena, verification_facts.facts);
+
     var lowerer = Lowerer{
-        .allocator = result.arena.allocator(),
+        .allocator = arena,
         .context = result.context,
         .module_id = module_id,
         .sources = sources,
@@ -151,12 +279,19 @@ pub fn lowerModule(
         .resolution = resolution,
         .const_eval = const_eval,
         .typecheck = typecheck,
+        .verification_facts = verification_facts,
+        .verification_fact_lookup = verification_fact_lookup,
+        .verification_trait_method_fact_lookup = verification_trait_method_fact_lookup,
+        .verification_statement_fact_lookup = verification_statement_fact_lookup,
         .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .{},
         .type_fallbacks = .{},
-        .contract_body_blocks = try result.arena.allocator().alloc(mlir.MlirBlock, file.items.len),
-        .monomorphized_function_names = std.StringHashMap(void).init(result.arena.allocator()),
+        .placeholder_count = 0,
+        .default_value_count = 0,
+        .diagnostics = &result.diagnostics,
+        .contract_body_blocks = try arena.alloc(mlir.MlirBlock, file.items.len),
+        .monomorphized_function_names = std.StringHashMap(void).init(arena),
     };
     @memset(lowerer.contract_body_blocks, std.mem.zeroes(mlir.MlirBlock));
 
@@ -180,6 +315,8 @@ pub fn lowerModule(
     result.items = try lowerer.items.toOwnedSlice(result.arena.allocator());
     result.type_fallbacks = try lowerer.type_fallbacks.toOwnedSlice(result.arena.allocator());
     result.type_fallback_count = result.type_fallbacks.len;
+    result.placeholder_count = lowerer.placeholder_count;
+    result.default_value_count = lowerer.default_value_count;
     return result;
 }
 
@@ -210,16 +347,25 @@ const Lowerer = struct {
     file: *const ast.AstFile,
     item_index: *const sema.ItemIndexResult,
     resolution: *const sema.NameResolutionResult,
-    const_eval: *const sema.ConstEvalResult,
+    const_eval: *const ConstEvalResult,
     typecheck: *const sema.TypeCheckResult,
-    module_query: ?ModuleQuery,
+    verification_facts: *const sema.ModuleVerificationFactsResult,
+    verification_fact_lookup: []const VerificationFactEntry,
+    verification_trait_method_fact_lookup: []const VerificationTraitMethodFactEntry,
+    verification_statement_fact_lookup: []const VerificationStatementFactEntry,
+    module_query: ?compiler_query.HirView,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
+    placeholder_count: usize,
+    default_value_count: usize,
+    diagnostics: *diagnostics.DiagnosticList,
     guarded_storage_roots: ?*const std.StringHashMap(void) = null,
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
+    active_impl_contract_scope: ?ast.ItemId = null,
+    active_impl_self_type: ?sema.Type = null,
     current_statement_id: ?ast.StmtId = null,
     current_synthetic_index: ?u32 = null,
     current_synthetic_count: ?u32 = null,
@@ -301,6 +447,125 @@ const Lowerer = struct {
         self.current_synthetic_count = frame.count;
     }
 
+    pub fn itemVerificationFactEntries(self: *const Lowerer, item_id: ast.ItemId) []const VerificationFactEntry {
+        const owner_index = item_id.index();
+        var low: usize = 0;
+        var high = self.verification_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.verification_fact_lookup[mid].owner_index < owner_index) {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_fact_lookup.len and self.verification_fact_lookup[low].owner_index == owner_index) {
+            low += 1;
+        }
+        return self.verification_fact_lookup[start..low];
+    }
+
+    pub fn verificationFact(self: *const Lowerer, entry: VerificationFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn traitMethodVerificationFactEntries(self: *const Lowerer, owner: sema.VerificationTraitMethodOwner) []const VerificationTraitMethodFactEntry {
+        const trait_item_index = owner.trait_item.index();
+        var low: usize = 0;
+        var high = self.verification_trait_method_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry = self.verification_trait_method_fact_lookup[mid];
+            if (entry.trait_item_index < trait_item_index or
+                (entry.trait_item_index == trait_item_index and entry.method_index < owner.method_index))
+            {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_trait_method_fact_lookup.len) {
+            const entry = self.verification_trait_method_fact_lookup[low];
+            if (entry.trait_item_index != trait_item_index or entry.method_index != owner.method_index) break;
+            low += 1;
+        }
+        return self.verification_trait_method_fact_lookup[start..low];
+    }
+
+    pub fn traitMethodVerificationFact(self: *const Lowerer, entry: VerificationTraitMethodFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn statementVerificationFactEntries(self: *const Lowerer, owner: sema.VerificationStatementOwner) []const VerificationStatementFactEntry {
+        const item_index = owner.item.index();
+        const stmt_index = owner.stmt.index();
+        var low: usize = 0;
+        var high = self.verification_statement_fact_lookup.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            const entry = self.verification_statement_fact_lookup[mid];
+            if (entry.item_index < item_index or
+                (entry.item_index == item_index and entry.stmt_index < stmt_index))
+            {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        const start = low;
+        while (low < self.verification_statement_fact_lookup.len) {
+            const entry = self.verification_statement_fact_lookup[low];
+            if (entry.item_index != item_index or entry.stmt_index != stmt_index) break;
+            low += 1;
+        }
+        return self.verification_statement_fact_lookup[start..low];
+    }
+
+    pub fn statementVerificationFact(self: *const Lowerer, entry: VerificationStatementFactEntry) *const sema.VerificationFact {
+        return &self.verification_facts.facts[entry.fact_index];
+    }
+
+    pub fn traitMethodForVerificationOwner(self: *const Lowerer, owner: sema.VerificationTraitMethodOwner) ?ast.nodes.TraitMethod {
+        const trait_item = switch (self.file.item(owner.trait_item).*) {
+            .Trait => |trait_item| trait_item,
+            else => return null,
+        };
+        if (owner.method_index >= trait_item.methods.len) return null;
+        return trait_item.methods[owner.method_index];
+    }
+
+    pub fn makeVerificationFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
+        return buildVerificationFactLookup(self.allocator, facts);
+    }
+
+    pub fn makeVerificationTraitMethodFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
+        return buildVerificationTraitMethodFactLookup(self.allocator, facts);
+    }
+
+    pub fn makeVerificationStatementFactLookup(self: *const Lowerer, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
+        return buildVerificationStatementFactLookup(self.allocator, facts);
+    }
+
+    pub fn itemHasVerificationFact(self: *const Lowerer, item_id: ast.ItemId, kind: sema.VerificationFactKind) bool {
+        for (self.itemVerificationFactEntries(item_id)) |entry| {
+            if (self.verificationFact(entry).kind != kind) continue;
+            return true;
+        }
+        return false;
+    }
+
+    pub fn ghostDeclarationContextName(self: *const Lowerer, item_id: ast.ItemId) ?[]const u8 {
+        if (self.itemHasVerificationFact(item_id, .ghost_function)) return "ghost_function";
+        if (self.itemHasVerificationFact(item_id, .ghost_field)) return "ghost_variable";
+        if (self.itemHasVerificationFact(item_id, .ghost_constant)) return "ghost_constant";
+        return null;
+    }
+
     pub fn substitutedType(self: *const Lowerer, name: []const u8) ?sema.Type {
         for (self.active_type_bindings) |binding| {
             if (!std.mem.eql(u8, binding.name, name)) continue;
@@ -351,7 +616,11 @@ const Lowerer = struct {
                     if (field_types.items.len == 0) null else field_types.items.ptr,
                 );
             },
-            .Array => |array| support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), self.lowerArraySize(array.size) orelse 0),
+            .Array => |array| blk: {
+                const len = self.lowerArraySizeOrError(array.size) orelse
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, array.range);
+                break :blk support.arrayMemRefType(self.context, self.lowerTypeExpr(array.element), len);
+            },
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| blk: {
                 const payload_type = self.lowerTypeExpr(error_union.payload);
@@ -381,17 +650,44 @@ const Lowerer = struct {
         };
     }
 
+    fn lowerArraySizeOrError(self: *Lowerer, size: ast.TypeArraySize) ?u32 {
+        if (self.lowerArraySize(size)) |len| return len;
+        switch (size) {
+            .Integer => |literal| self.emitLoweringError(
+                literal.range,
+                "array length '{s}' does not fit in HIR array length type",
+                .{literal.text},
+            ) catch {},
+            .Name => |name| {
+                const trimmed = std.mem.trim(u8, name.name, " \t\n\r");
+                if (self.substitutedInteger(trimmed)) |text| {
+                    self.emitLoweringError(
+                        name.range,
+                        "array length '{s}' from '{s}' does not fit in HIR array length type",
+                        .{ text, trimmed },
+                    ) catch {};
+                } else {
+                    self.emitLoweringError(
+                        name.range,
+                        "array length '{s}' could not be resolved during HIR lowering",
+                        .{trimmed},
+                    ) catch {};
+                }
+            },
+        }
+        return null;
+    }
+
     pub fn lowerExprType(self: *Lowerer, expr_id: ast.ExprId) mlir.MlirType {
         return self.lowerSemaType(self.typecheck.exprType(expr_id), support.exprRange(self.file, expr_id));
     }
 
     pub fn errorTypeHasPayload(self: *const Lowerer, ty: sema.Type) bool {
-        const error_name = ty.name() orelse return false;
-        const item_id = self.item_index.lookup(error_name) orelse return false;
-        return switch (self.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => false,
+        const ctx = abi_layout_context.LayoutContext{
+            .allocator = self.allocator,
+            .provider = sema.abiLayoutProvider(self.file, self.item_index, self.typecheck),
         };
+        return ctx.errorTypeHasPayload(ty);
     }
 
     pub fn errorUnionRequiresWideCarrier(self: *const Lowerer, ty: sema.Type) bool {
@@ -408,21 +704,39 @@ const Lowerer = struct {
 
     pub fn lowerSemaType(self: *Lowerer, ty: sema.Type, range: source.TextRange) mlir.MlirType {
         return switch (ty) {
+            .never => support.reprIntegerType(self.context),
             .bool => support.boolType(self.context),
-            .integer => |integer| if (integer.spelling) |name| support.lowerPathType(self.context, name) else support.defaultIntegerType(self.context),
+            .integer => |integer| support.lowerIntegerType(self.context, integer),
+            .comptime_integer => self.recordTypeFallback(.unsupported_syntax_type, range),
             .address => support.addressType(self.context),
             .string => support.stringType(self.context),
             .bytes => support.bytesType(self.context),
-            .fixed_bytes => support.defaultIntegerType(self.context),
+            .fixed_bytes => support.reprIntegerType(self.context),
             .external_proxy => support.addressType(self.context),
             .void => mlir.oraNoneTypeCreate(self.context),
-            .array => |array| support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), array.len orelse 0),
+            .array => |array| blk: {
+                const len = array.len orelse {
+                    self.emitLoweringError(range, "array length must be resolved before HIR lowering", .{}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                };
+                if (len > std.math.maxInt(u32)) {
+                    self.emitLoweringError(range, "array length {d} does not fit in HIR array length type", .{len}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                }
+                break :blk support.arrayMemRefType(self.context, self.lowerSemaType(array.element_type.*, range), @intCast(len));
+            },
             .slice => |slice| support.sliceMemRefType(self.context, self.lowerSemaType(slice.element_type.*, range)),
-            .map => |map| mlir.oraMapTypeGet(
-                self.context,
-                if (map.key_type) |key| self.lowerSemaType(key.*, range) else support.defaultIntegerType(self.context),
-                if (map.value_type) |value| self.lowerSemaType(value.*, range) else support.defaultIntegerType(self.context),
-            ),
+            .map => |map| blk: {
+                const key_type = if (map.key_type) |key|
+                    self.lowerSemaType(key.*, range)
+                else
+                    self.recordTypeFallback(.unsupported_syntax_type, range);
+                const value_type = if (map.value_type) |value|
+                    self.lowerSemaType(value.*, range)
+                else
+                    self.recordTypeFallback(.unsupported_syntax_type, range);
+                break :blk mlir.oraMapTypeGet(self.context, key_type, value_type);
+            },
             .refinement => |refinement| blk: {
                 const base_type = refinement.base_type.*;
                 if (base_type == .named) {
@@ -440,7 +754,7 @@ const Lowerer = struct {
             .struct_ => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             .contract => |named| mlir.oraStructTypeGet(self.context, support.strRef(named.name)),
             // Bitfields are lowered as packed integer wire values with attrs carrying layout metadata.
-            .bitfield => support.defaultIntegerType(self.context),
+            .bitfield => support.reprIntegerType(self.context),
             .enum_ => |named| self.lowerEnumSemaType(named.name, range),
             .named => |named| if (self.substitutedType(named.name)) |substituted|
                 self.lowerSemaType(substituted, range)
@@ -508,15 +822,15 @@ const Lowerer = struct {
         if (self.typecheck.instantiatedEnumByName(name)) |instantiated| {
             if (enumInstHasPayload(instantiated)) return self.lowerInstantiatedEnumAdtType(instantiated, range);
             if (instantiated.repr_type) |repr| return self.lowerSemaType(repr, range);
-            return support.defaultIntegerType(self.context);
+            return support.reprIntegerType(self.context);
         }
-        const item_id = self.item_index.lookup(name) orelse return support.defaultIntegerType(self.context);
+        const item_id = self.item_index.lookup(name) orelse return self.recordTypeFallback(.unsupported_syntax_type, range);
         const enum_item = switch (self.file.item(item_id).*) {
             .Enum => |enum_item| enum_item,
-            else => return support.defaultIntegerType(self.context),
+            else => return self.recordTypeFallback(.unsupported_syntax_type, range),
         };
         if (enumItemHasPayload(enum_item)) return self.lowerEnumAdtType(enum_item, range);
-        const base_type = enum_item.base_type orelse return support.defaultIntegerType(self.context);
+        const base_type = enum_item.base_type orelse return support.reprIntegerType(self.context);
         const repr = type_descriptors.descriptorFromTypeExpr(self.allocator, self.file, self.item_index, base_type) catch
             return self.recordTypeFallback(.unsupported_syntax_type, range);
         return self.lowerSemaType(repr, range);
@@ -639,12 +953,12 @@ const Lowerer = struct {
         if (self.substitutedType(name)) |substituted| {
             return self.lowerSemaType(substituted, source.TextRange.empty(0));
         }
-        if (sema.refinements.isPathFormName(name)) {
+        if (refinements.isPathFormName(name)) {
             return mlir.oraNonZeroAddressTypeGet(self.context);
         }
         if (self.item_index.lookup(name)) |item_id| {
             switch (self.file.item(item_id).*) {
-                .Bitfield => return support.defaultIntegerType(self.context),
+                .Bitfield => return support.reprIntegerType(self.context),
                 else => {},
             }
         }
@@ -663,26 +977,26 @@ const Lowerer = struct {
         return self.typecheck.instantiatedBitfieldByName(name);
     }
 
-    pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) u32 {
+    pub fn bitfieldFieldWidth(self: *const Lowerer, type_expr_id: ast.TypeExprId) ?u32 {
         return switch (self.file.typeExpr(type_expr_id).*) {
             .Path => |path| blk: {
                 const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
                 if (std.mem.eql(u8, trimmed, "bool")) break :blk 1;
                 if (std.mem.eql(u8, trimmed, "address")) break :blk 160;
-                if (support.parseSignedIntegerType(trimmed)) |int_info| break :blk int_info.bits;
-                break :blk 256;
+                if (support.parseBitfieldIntegerType(trimmed)) |int_info| break :blk int_info.bits;
+                break :blk null;
             },
-            else => 256,
+            else => null,
         };
     }
 
-    pub fn bitfieldFieldWidthFromType(self: *const Lowerer, ty: sema.Type) u32 {
+    pub fn bitfieldFieldWidthFromType(self: *const Lowerer, ty: sema.Type) ?u32 {
         _ = self;
         return switch (ty) {
             .bool => 1,
             .address => 160,
-            .integer => |integer| integer.bits orelse 256,
-            else => 256,
+            .integer => |integer| integer.bits,
+            else => null,
         };
     }
 
@@ -694,45 +1008,70 @@ const Lowerer = struct {
         };
     }
 
-    pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) ?ResolvedBitfieldField {
+    pub fn resolveBitfieldField(self: *const Lowerer, bitfield_name: []const u8, field_name: []const u8) anyerror!?ResolvedBitfieldField {
         if (self.instantiatedBitfieldByName(bitfield_name)) |bitfield| {
             const template = self.file.item(bitfield.template_item_id).Bitfield;
+            const field_index = bitfield.fieldIndex(field_name) orelse return null;
+            if (field_index >= bitfield.fields.len or field_index >= template.fields.len) return null;
             var next_offset: u32 = 0;
-            for (bitfield.fields, 0..) |field, index| {
-                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty);
+            for (bitfield.fields[0..field_index]) |field| {
+                const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
-                const sign = self.bitfieldFieldSignFromType(field.ty);
-                if (std.mem.eql(u8, field.name, field_name)) {
-                    return .{
-                        .field = template.fields[index],
-                        .field_type = field.ty,
-                        .offset = offset,
-                        .width = width,
-                        .sign = sign,
-                    };
-                }
                 next_offset = offset + width;
             }
-            return null;
-        }
-        const bitfield = self.bitfieldItemByName(bitfield_name) orelse return null;
-        var next_offset: u32 = 0;
-        for (bitfield.fields) |field| {
-            const width = field.width orelse self.bitfieldFieldWidth(field.type_expr);
+            const field = bitfield.fields[field_index];
+            const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
             const offset = field.offset orelse next_offset;
-            const sign = self.bitfieldFieldSign(field.type_expr);
-            if (std.mem.eql(u8, field.name, field_name)) {
-                return .{
-                    .field = field,
-                    .field_type = null,
-                    .offset = offset,
-                    .width = width,
-                    .sign = sign,
-                };
-            }
+            return .{
+                .field = template.fields[field_index],
+                .field_type = field.ty,
+                .offset = offset,
+                .width = width,
+                .sign = self.bitfieldFieldSignFromType(field.ty),
+            };
+        }
+        const bitfield_item_id = self.item_index.lookup(bitfield_name) orelse return null;
+        const bitfield = switch (self.file.item(bitfield_item_id).*) {
+            .Bitfield => |bitfield| bitfield,
+            else => return null,
+        };
+        const field_index = self.item_index.lookupBitfieldFieldIndex(bitfield_item_id, field_name) orelse return null;
+        if (field_index >= bitfield.fields.len) return null;
+        var next_offset: u32 = 0;
+        for (bitfield.fields[0..field_index]) |field| {
+            const width = field.width orelse self.bitfieldFieldWidth(field.type_expr) orelse return error.InvalidBitfieldFieldType;
+            const offset = field.offset orelse next_offset;
             next_offset = offset + width;
         }
-        return null;
+        const field = bitfield.fields[field_index];
+        const width = field.width orelse self.bitfieldFieldWidth(field.type_expr) orelse return error.InvalidBitfieldFieldType;
+        const offset = field.offset orelse next_offset;
+        return .{
+            .field = field,
+            .field_type = null,
+            .offset = offset,
+            .width = width,
+            .sign = self.bitfieldFieldSign(field.type_expr),
+        };
+    }
+
+    pub fn lowerResolvedBitfieldFieldType(self: *Lowerer, resolved: ResolvedBitfieldField, range: source.TextRange) mlir.MlirType {
+        if (resolved.field_type) |field_type| {
+            if (field_type.kind() != .comptime_integer) {
+                return self.lowerSemaType(field_type, range);
+            }
+        }
+        switch (self.file.typeExpr(resolved.field.type_expr).*) {
+            .Path => |path| {
+                const trimmed = std.mem.trim(u8, path.name, " \t\n\r");
+                if (std.mem.eql(u8, trimmed, "bool")) return support.boolType(self.context);
+                if (support.parseBitfieldIntegerType(trimmed) != null) {
+                    return mlir.oraIntegerTypeCreate(self.context, @intCast(resolved.width));
+                }
+            },
+            else => {},
+        }
+        return self.lowerTypeExpr(resolved.field.type_expr);
     }
 
     pub fn isGenericTypeParameter(self: *const Lowerer, parameter: ast.Parameter) bool {
@@ -870,11 +1209,7 @@ const Lowerer = struct {
     }
 
     pub fn functionHasRuntimeSelf(self: *const Lowerer, function: ast.FunctionItem) bool {
-        for (function.parameters) |parameter| {
-            if (parameter.is_comptime) continue;
-            return std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self");
-        }
-        return false;
+        return sema_model.functionHasRuntimeSelf(self.file, function);
     }
 
     pub fn callSuppliesMethodReceiver(self: *const Lowerer, expr_id: ast.ExprId) bool {
@@ -1040,8 +1375,15 @@ const Lowerer = struct {
     }
 
     fn shouldDeferLiteralMangleBinding(existing: sema.Type, candidate: sema.Type) bool {
-        if (existing.kind() != .integer or candidate.kind() != .integer) return false;
-        return candidate.integer.spelling == null;
+        if (!hirTypeIsInteger(existing) or !hirTypeIsInteger(candidate)) return false;
+        return candidate.kind() == .comptime_integer;
+    }
+
+    fn hirTypeIsInteger(ty: sema.Type) bool {
+        return switch (ty.kind()) {
+            .integer, .comptime_integer => true,
+            else => false,
+        };
     }
 
     pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
@@ -1058,7 +1400,20 @@ const Lowerer = struct {
                 .range = range,
             },
         }) catch {};
-        return support.defaultIntegerType(self.context);
+        return support.unknownTypeFallbackI256(self.context);
+    }
+
+    pub fn recordPlaceholder(self: *Lowerer) void {
+        self.placeholder_count += 1;
+    }
+
+    pub fn emitLoweringError(self: *Lowerer, range: source.TextRange, comptime fmt: []const u8, args: anytype) !void {
+        const message = try std.fmt.allocPrint(self.allocator, fmt, args);
+        defer self.allocator.free(message);
+        try self.diagnostics.appendError(message, .{
+            .file_id = self.file.file_id,
+            .range = range,
+        });
     }
 
     fn typeExprRange(self: *const Lowerer, type_expr_id: ast.TypeExprId) source.TextRange {
@@ -1118,7 +1473,6 @@ const FunctionLowerer = struct {
     in_try_block: bool = false,
     in_ghost_context: bool = false,
     extra_verification_clauses: []const ExtraVerificationClause = &.{},
-    trait_ghost_self_pattern: ?ast.PatternId = null,
     current_scf_carried_locals: ?[]const hir_locals.LocalId = null,
     loop_context: ?*const support.LoopContext = null,
     block_context: ?*const support.BlockContext = null,
@@ -1136,12 +1490,15 @@ const FunctionLowerer = struct {
     pub const cloneLocals = FunctionCore.cloneLocals;
     pub const lowerBody = FunctionCore.lowerBody;
     pub const lowerStmt = FunctionCore.lowerStmt;
+    pub const lowerInvariantFact = FunctionCore.lowerInvariantFact;
+    pub const lowerStatementInvariants = FunctionCore.lowerStatementInvariants;
     pub const ensureDeferredReturnSlots = FunctionCore.ensureDeferredReturnSlots;
     pub const appendDeferredReturnTerminator = FunctionCore.appendDeferredReturnTerminator;
     pub const appendDeferredReturnCheck = FunctionCore.appendDeferredReturnCheck;
     pub const bindPatternValue = FunctionCore.bindPatternValue;
     pub const storePattern = FunctionCore.storePattern;
     pub const convertValueForFlow = FunctionCore.convertValueForFlow;
+    pub const convertValueForFlowWithSignedness = FunctionCore.convertValueForFlowWithSignedness;
     pub const convertValueForSemaFlow = FunctionCore.convertValueForSemaFlow;
     pub const lowerCheckedPower = FunctionCore.lowerCheckedPower;
     pub const lowerPowerWithOverflow = FunctionCore.lowerPowerWithOverflow;
@@ -1173,6 +1530,7 @@ const FunctionLowerer = struct {
     pub const switchPatternValue = ControlFlow.switchPatternValue;
 
     pub const lowerExpr = ExprLowering.lowerExpr;
+    pub const lowerExprForFlowTarget = ExprLowering.lowerExprForFlowTarget;
     pub const lowerNameExpr = ExprLowering.lowerNameExpr;
     pub const lowerUnary = ExprLowering.lowerUnary;
     pub const lowerBinary = ExprLowering.lowerBinary;
@@ -1211,7 +1569,7 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
         return mlir.oraErrorUnionTypeGetWithErrors(lowerer.context, payload_type, error_types.len, &error_types);
     }
     if (support.isRefinementTypeName(generic.name) and generic.args.len > 0) {
-        const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse generic.args;
+        const resolved_args = lowerRefinementArgs(lowerer, generic.args) orelse return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range);
         const base_type = switch (generic.args[0]) {
             .Type => |type_expr| lowerer.lowerTypeExpr(type_expr),
             else => return lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
@@ -1225,28 +1583,22 @@ fn lowerGenericType(lowerer: *Lowerer, generic: ast.GenericTypeExpr) mlir.MlirTy
             else => lowerer.recordTypeFallback(.invalid_generic_type_arg, generic.range),
         };
     }
-    if (sema.refinements.isPathFormName(generic.name)) {
+    if (refinements.isPathFormName(generic.name)) {
         return mlir.oraNonZeroAddressTypeGet(lowerer.context);
     }
     return support.lowerPathType(lowerer.context, generic.name);
 }
 
-fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const ast.TypeArg {
-    var changed = false;
-    const resolved = lowerer.allocator.alloc(ast.TypeArg, args.len) catch return null;
+fn lowerRefinementArgs(lowerer: *Lowerer, args: []const ast.TypeArg) ?[]const RefinementArg {
+    const resolved = lowerer.allocator.alloc(RefinementArg, args.len) catch return null;
     for (args, 0..) |arg, index| {
         resolved[index] = switch (arg) {
-            .Integer => arg,
+            .Integer => |literal| .{ .Integer = .{ .text = literal.text } },
             .Type => |type_expr| if (typeExprIntegerBinding(lowerer, type_expr)) |integer| blk: {
-                changed = true;
-                break :blk .{ .Integer = .{
-                    .range = lowerer.typeExprRange(type_expr),
-                    .text = integer,
-                } };
-            } else arg,
+                break :blk .{ .Integer = .{ .text = integer } };
+            } else .{ .Type = {} },
         };
     }
-    if (!changed) return null;
     return resolved;
 }
 

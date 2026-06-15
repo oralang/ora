@@ -1,8 +1,14 @@
 const std = @import("std");
 const frontend = @import("frontend.zig");
+const lexer = @import("ora_lexer");
+const refinements = @import("ora_refinements");
 const semantic_index = @import("semantic_index.zig");
+const keyword_docs = @import("keyword_docs.zig");
+const refinement_docs = @import("refinement_docs.zig");
 
 const Allocator = std.mem.Allocator;
+
+pub const refinement_entries = refinements.entries;
 
 pub const Kind = enum {
     keyword,
@@ -37,106 +43,13 @@ pub const Item = struct {
     }
 };
 
-const keyword_candidates = [_][]const u8{
-    // Declarations
-    "contract",
-    "struct",
-    "enum",
-    "bitfield",
-    "type",
-    "pub",
-    "fn",
-    "let",
-    "var",
-    "const",
-    "immutable",
-    "storage",
-    "tstore",
-    "memory",
-    "init",
-    "import",
-    "log",
-    "error",
-    "trait",
-    "impl",
-    "comptime",
-    // Control flow
-    "if",
-    "else",
-    "while",
-    "for",
-    "switch",
-    "match",
-    "return",
-    "break",
-    "continue",
-    "try",
-    "catch",
-    // Literals
-    "true",
-    "false",
-    // Formal verification
-    "requires",
-    "guard",
-    "ensures",
-    "invariant",
-    "modifies",
-    "decreases",
-    "increases",
-    "ghost",
-    "assert",
-    "assume",
-    "havoc",
-    "old",
-    "result",
-    "forall",
-    "exists",
-    "where",
-    // Primitive and collection types
-    "void",
-    "u8",
-    "u16",
-    "u32",
-    "u64",
-    "u128",
-    "u256",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "i256",
-    "bool",
-    "address",
-    "string",
-    "bytes",
-    "map",
-    "slice",
-    // Refinement types
-    "MinValue",
-    "MaxValue",
-    "InRange",
-    "NonZeroAddress",
-    // Builtins
-    "self",
-    "extern",
-    "call",
-    "staticcall",
-    "errors",
-    "as",
-    "from",
-    "to",
-};
-
-pub fn completionAt(
+pub fn completionAtIndex(
     allocator: Allocator,
     source: []const u8,
     position: frontend.Position,
     trigger_char: ?[]const u8,
+    index: *const semantic_index.SemanticIndex,
 ) ![]Item {
-    var index = try semantic_index.indexDocument(allocator, source);
-    defer index.deinit(allocator);
-
     // Dot-triggered member completion.
     if (isDotTrigger(trigger_char, source, position)) {
         return memberCompletion(allocator, source, position, index);
@@ -153,15 +66,25 @@ pub fn completionAt(
         items.deinit(allocator);
     }
 
-    for (keyword_candidates) |keyword| {
-        if (!matchesPrefix(keyword, prefix)) continue;
-        if (seen.contains(keyword)) continue;
+    const keyword_keys = lexer.keywords.kvs.keys[0..lexer.keywords.kvs.len];
+    for (keyword_keys) |keyword| {
+        try appendKeywordCompletion(allocator, &items, &seen, prefix, keyword);
+    }
+    for (keyword_docs.contextual_keywords) |keyword| {
+        try appendKeywordCompletion(allocator, &items, &seen, prefix, keyword);
+    }
 
-        try seen.put(keyword, {});
+    for (refinements.entries) |entry| {
+        if (!matchesPrefix(entry.name, prefix)) continue;
+        if (seen.contains(entry.name)) continue;
+
+        const docs = refinement_docs.entryForName(entry.name);
+        try seen.put(entry.name, {});
         try items.append(allocator, .{
-            .label = try allocator.dupe(u8, keyword),
-            .documentation = if (keywordDocumentation(keyword)) |doc| try allocator.dupe(u8, doc) else null,
-            .kind = .keyword,
+            .label = try allocator.dupe(u8, entry.name),
+            .detail = if (docs) |doc| try allocator.dupe(u8, doc.signature) else null,
+            .documentation = if (docs) |doc| try refinement_docs.markdownAlloc(allocator, doc) else null,
+            .kind = .type_alias,
         });
     }
 
@@ -183,7 +106,25 @@ pub fn completionAt(
     return items.toOwnedSlice(allocator);
 }
 
-fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
+fn appendKeywordCompletion(
+    allocator: Allocator,
+    items: *std.ArrayList(Item),
+    seen: *std.StringHashMap(void),
+    prefix: []const u8,
+    keyword: []const u8,
+) !void {
+    if (!matchesPrefix(keyword, prefix)) return;
+    if (seen.contains(keyword)) return;
+
+    try seen.put(keyword, {});
+    try items.append(allocator, .{
+        .label = try allocator.dupe(u8, keyword),
+        .documentation = if (keyword_docs.documentation(keyword)) |doc| try allocator.dupe(u8, doc) else null,
+        .kind = .keyword,
+    });
+}
+
+pub fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
     if (trigger_char) |tc| {
         if (std.mem.eql(u8, tc, ".")) return true;
     }
@@ -197,7 +138,7 @@ fn memberCompletion(
     allocator: Allocator,
     source: []const u8,
     position: frontend.Position,
-    index: semantic_index.SemanticIndex,
+    index: *const semantic_index.SemanticIndex,
 ) ![]Item {
     var items = std.ArrayList(Item){};
     errdefer {
@@ -296,12 +237,15 @@ fn findSymbolByName(symbols: []const semantic_index.Symbol, name: []const u8) ?u
     return null;
 }
 
-pub fn deinitItems(allocator: Allocator, items: []Item) void {
-    for (items) |*item| item.deinit(allocator);
-    allocator.free(items);
+pub fn deinitItems(allocator: Allocator, items: []const Item) void {
+    for (items) |item| {
+        var owned = item;
+        owned.deinit(allocator);
+    }
+    if (items.len != 0) allocator.free(@constCast(items));
 }
 
-fn symbolKindToCompletionKind(kind: semantic_index.SymbolKind) Kind {
+pub fn symbolKindToCompletionKind(kind: semantic_index.SymbolKind) Kind {
     return switch (kind) {
         .contract => .contract,
         .function => .function,
@@ -331,7 +275,7 @@ fn lessItemByLabel(_: void, a: Item, b: Item) bool {
     return std.mem.lessThan(u8, a.label, b.label);
 }
 
-fn identifierPrefixAtPosition(source: []const u8, position: frontend.Position) []const u8 {
+pub fn identifierPrefixAtPosition(source: []const u8, position: frontend.Position) []const u8 {
     const cursor = positionToByteOffsetOnLine(source, position);
 
     var start = cursor;
@@ -358,54 +302,6 @@ fn positionToByteOffsetOnLine(source: []const u8, position: frontend.Position) u
 
     const requested_col: usize = @intCast(position.character);
     return @min(line_start + requested_col, line_end);
-}
-
-fn keywordDocumentation(keyword: []const u8) ?[]const u8 {
-    const map = std.StaticStringMap([]const u8).initComptime(.{
-        .{ "contract", "Declares a smart contract type." },
-        .{ "struct", "Declares a named struct type." },
-        .{ "enum", "Declares an enumeration type." },
-        .{ "bitfield", "Declares a packed bitfield type for efficient storage." },
-        .{ "type", "Declares a type alias." },
-        .{ "fn", "Declares a function." },
-        .{ "pub", "Makes a declaration publicly visible." },
-        .{ "let", "Declares an immutable local binding." },
-        .{ "var", "Declares a mutable variable." },
-        .{ "const", "Declares a compile-time constant." },
-        .{ "immutable", "Declares immutable storage." },
-        .{ "storage", "Storage qualifier — persists on-chain between calls." },
-        .{ "tstore", "Transient storage qualifier — cleared after each transaction." },
-        .{ "memory", "Memory qualifier — temporary data within a call." },
-        .{ "init", "Declares a contract initializer." },
-        .{ "import", "Imports declarations from another module." },
-        .{ "log", "Declares an event (emits an EVM log)." },
-        .{ "error", "Declares a custom error type." },
-        .{ "trait", "Declares an interface trait." },
-        .{ "impl", "Implements a trait for a type." },
-        .{ "comptime", "Evaluates an expression at compile time." },
-        .{ "match", "Pattern match over values, enums, and Result/error unions." },
-        .{ "requires", "Precondition — must hold when the function is called." },
-        .{ "guard", "Runtime-enforced precondition — checked at runtime and assumed after it passes." },
-        .{ "ensures", "Postcondition — guaranteed to hold when the function returns." },
-        .{ "invariant", "Contract or loop invariant — preserved across state transitions." },
-        .{ "modifies", "Declares state locations a function may modify." },
-        .{ "decreases", "Declares a decreasing termination measure." },
-        .{ "increases", "Declares an increasing termination measure." },
-        .{ "ghost", "Ghost declaration — exists only for verification, not compiled." },
-        .{ "assert", "Verification assertion — checked by the prover." },
-        .{ "assume", "Verification assumption — taken as given by the prover." },
-        .{ "havoc", "Assigns an arbitrary value for verification." },
-        .{ "old", "Refers to the pre-state value of an expression in postconditions." },
-        .{ "result", "Refers to the return value in postconditions." },
-        .{ "forall", "Universal quantifier — for all values satisfying a predicate." },
-        .{ "exists", "Existential quantifier — there exists a value satisfying a predicate." },
-        .{ "where", "Type constraint or refinement clause." },
-        .{ "extern", "Declares an external contract interface." },
-        .{ "call", "Declares or invokes a state-changing external call." },
-        .{ "staticcall", "Declares or invokes a read-only external call." },
-        .{ "errors", "Declares the closed error set an extern trait method may return." },
-    });
-    return map.get(keyword);
 }
 
 fn isIdentifierStart(ch: u8) bool {

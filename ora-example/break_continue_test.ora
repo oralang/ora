@@ -19,6 +19,16 @@ contract BreakContinueTest {
         var i: u256 = 0;
         while (i < 10) // In this case, Ora will detect if is possible to finish the loop eg. i is increamented.
             invariant i <= 10
+            // Solver-friendly strengthening facts for the odd-number sum.
+            // Without these, `sum <= 25` is true for real executions but not
+            // inductive: the verifier may consider unreachable states such as
+            // `i == 6 && sum == 25`. Future verifier work should make this
+            // kind of example easier to express without threshold invariants.
+            invariant i >= 1 || sum == 0
+            invariant i >= 3 || sum <= 1
+            invariant i >= 5 || sum <= 4
+            invariant i >= 7 || sum <= 9
+            invariant i >= 9 || sum <= 16
             invariant sum <= 25
         {
             i = i + 1;

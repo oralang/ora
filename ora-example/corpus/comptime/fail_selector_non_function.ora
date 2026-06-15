@@ -1,0 +1,7 @@
+contract SelectorMisuseCorpus {
+    pub fn fail() -> bytes4 {
+        return comptime {
+            @selector(42);
+        };
+    }
+}

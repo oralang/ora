@@ -1,0 +1,10 @@
+fn interfaceId(comptime T: type) -> bytes4 {
+    return comptime {
+        const methods = @traitMethods(T);
+        var id: bytes4 = hex"00000000";
+        for (methods) |method| {
+            id = id ^ method.selector;
+        }
+        id;
+    };
+}

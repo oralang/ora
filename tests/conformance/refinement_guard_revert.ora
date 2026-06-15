@@ -1,0 +1,9 @@
+contract RefinementGuardRevert {
+    pub fn take_min(v: MinValue<u256, 100>) -> u256 {
+        return v;
+    }
+
+    pub fn take_range(v: InRange<u256, 10, 20>) -> u256 {
+        return v;
+    }
+}

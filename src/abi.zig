@@ -3,10 +3,14 @@
 // ============================================================================
 
 const std = @import("std");
-const crypto = std.crypto;
 const compiler = @import("compiler.zig");
 const compiler_abi = @import("hir/abi.zig");
+const compiler_abi_layout_context = @import("abi/layout_context.zig");
 const compiler_type_descriptors = @import("sema/type_descriptors.zig");
+const ora_types = @import("ora_types");
+const refinements = ora_types.refinement_semantics;
+const type_builtin = ora_types.builtin;
+const RefinementType = ora_types.RefinementType;
 
 const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
@@ -17,7 +21,6 @@ const CompilerVersion = "0.1.0";
 pub const AbiError = std.mem.Allocator.Error || error{
     MissingContract,
     DuplicateCallableId,
-    TypeHashCollision,
     UnsupportedAbiType,
     UnknownStructType,
     UnknownEnumType,
@@ -25,6 +28,23 @@ pub const AbiError = std.mem.Allocator.Error || error{
     InvalidEnumRepr,
     UnresolvedType,
 };
+
+pub const AbiTypePayloadContext = struct {
+    pub fn hash(_: @This(), payload: []const u8) u64 {
+        return std.hash.Wyhash.hash(0, payload);
+    }
+
+    pub fn eql(_: @This(), lhs: []const u8, rhs: []const u8) bool {
+        return std.mem.eql(u8, lhs, rhs);
+    }
+};
+
+const AbiTypePayloadLookup = std.HashMap(
+    []const u8,
+    usize,
+    AbiTypePayloadContext,
+    std.hash_map.default_max_load_percentage,
+);
 
 pub const AbiEffectKind = enum {
     reads,
@@ -89,7 +109,6 @@ const TypeNodeKind = enum {
     tuple,
     struct_,
     enum_,
-    alias,
     refinement,
 };
 
@@ -432,7 +451,6 @@ pub const ContractAbi = struct {
             .array, .slice, .tuple, .struct_ => {
                 return .{ .widget = "json" };
             },
-            else => return .{},
         }
     }
 
@@ -470,21 +488,12 @@ pub const ContractAbi = struct {
 
         try writeObjectKey(writer, &first, "types");
         try writer.writeByte('{');
-        if (self.types.len > 0) {
-            var sorted_ids = try allocator.alloc([]const u8, self.types.len);
-            defer allocator.free(sorted_ids);
-            for (self.types, 0..) |typ, i| {
-                sorted_ids[i] = typ.type_id.?;
-            }
-            sortStringSlices(sorted_ids);
-
-            for (sorted_ids, 0..) |type_id, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writeJsonString(writer, type_id);
-                try writer.writeByte(':');
-                const idx = self.type_lookup.get(type_id).?;
-                try writeTypeNodeObject(writer, &self.types[idx], true);
-            }
+        for (self.types, 0..) |*typ, i| {
+            if (i > 0) try writer.writeByte(',');
+            const type_id = typ.type_id.?;
+            try writeJsonString(writer, type_id);
+            try writer.writeByte(':');
+            try writeTypeNodeObject(writer, typ, true);
         }
         try writer.writeByte('}');
 
@@ -535,27 +544,16 @@ pub const ContractAbi = struct {
 
         try writeObjectKey(writer, &first, "types");
         try writer.writeByte('{');
-        if (self.types.len > 0) {
-            var sorted_ids = try allocator.alloc([]const u8, self.types.len);
-            defer allocator.free(sorted_ids);
-            for (self.types, 0..) |typ, i| {
-                sorted_ids[i] = typ.type_id.?;
-            }
-            sortStringSlices(sorted_ids);
+        var emitted_types: usize = 0;
+        for (self.types) |*typ| {
+            if (!typeHasUiMeta(typ)) continue;
 
-            var emitted_types: usize = 0;
-            for (sorted_ids) |type_id| {
-                const idx = self.type_lookup.get(type_id).?;
-                const typ = &self.types[idx];
-                if (!typeHasUiMeta(typ)) continue;
+            if (emitted_types > 0) try writer.writeByte(',');
+            emitted_types += 1;
 
-                if (emitted_types > 0) try writer.writeByte(',');
-                emitted_types += 1;
-
-                try writeJsonString(writer, type_id);
-                try writer.writeByte(':');
-                try ContractAbi.writeTypeExtras(writer, typ);
-            }
+            try writeJsonString(writer, typ.type_id.?);
+            try writer.writeByte(':');
+            try ContractAbi.writeTypeExtras(writer, typ);
         }
         try writer.writeByte('}');
 
@@ -691,13 +689,24 @@ pub fn generateCompilerAbi(
     return try generator.generate();
 }
 
+fn buildTypeIdLookup(allocator: std.mem.Allocator, types: []const AbiTypeNode) !std.StringHashMap(usize) {
+    var lookup = std.StringHashMap(usize).init(allocator);
+    errdefer lookup.deinit();
+
+    for (types, 0..) |typ, index| {
+        try lookup.put(typ.type_id.?, index);
+    }
+
+    return lookup;
+}
+
 const CompilerAbiGenerator = struct {
     allocator: std.mem.Allocator,
     compilation: *compiler.driver.Compilation,
 
     callables: std.ArrayList(AbiCallable),
     types: std.ArrayList(AbiTypeNode),
-    type_lookup: std.StringHashMap(usize),
+    payload_lookup: AbiTypePayloadLookup,
     callable_ids: std.StringHashMap(void),
 
     global_structs: std.StringHashMap(CompilerNamedTypeRef),
@@ -714,7 +723,7 @@ const CompilerAbiGenerator = struct {
             .compilation = compilation,
             .callables = .{},
             .types = .{},
-            .type_lookup = std.StringHashMap(usize).init(allocator),
+            .payload_lookup = AbiTypePayloadLookup.init(allocator),
             .callable_ids = std.StringHashMap(void).init(allocator),
             .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_bitfields = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
@@ -736,7 +745,7 @@ const CompilerAbiGenerator = struct {
         }
         self.types.deinit(self.allocator);
 
-        self.type_lookup.deinit();
+        self.payload_lookup.deinit();
         self.callable_ids.deinit();
         self.global_structs.deinit();
         self.global_bitfields.deinit();
@@ -775,12 +784,20 @@ const CompilerAbiGenerator = struct {
 
         const callables = try self.callables.toOwnedSlice(self.allocator);
         self.callables = .{};
+        errdefer {
+            for (callables) |*callable| callable.deinit();
+            self.allocator.free(callables);
+        }
 
         const types = try self.types.toOwnedSlice(self.allocator);
         self.types = .{};
+        errdefer {
+            for (types) |*typ| typ.deinit();
+            self.allocator.free(types);
+        }
 
-        const lookup = self.type_lookup;
-        self.type_lookup = std.StringHashMap(usize).init(self.allocator);
+        var type_lookup = try buildTypeIdLookup(self.allocator, types);
+        errdefer type_lookup.deinit();
 
         self.callable_ids.deinit();
         self.callable_ids = std.StringHashMap(void).init(self.allocator);
@@ -791,7 +808,7 @@ const CompilerAbiGenerator = struct {
             .contract_count = self.contract_count,
             .callables = callables,
             .types = types,
-            .type_lookup = lookup,
+            .type_lookup = type_lookup,
         };
     }
 
@@ -1053,8 +1070,7 @@ const CompilerAbiGenerator = struct {
         defer inputs.deinit(self.allocator);
 
         for (log_decl.fields) |field| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr);
-            const resolved = try self.resolveSemaType(ctx, field_type, &.{});
+            const resolved = try self.resolveTypeExpr(ctx, field.type_expr);
             try signature_types.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
             try inputs.append(self.allocator, .{
                 .name = field.name,
@@ -1063,14 +1079,15 @@ const CompilerAbiGenerator = struct {
             });
         }
 
-        const signature = try self.buildSignature(log_decl.name, signature_types.items);
+        const event_name = compiler_abi.eventWireNameFromLogDecl(ctx.file, log_decl) orelse log_decl.name;
+        const signature = try self.buildSignature(event_name, signature_types.items);
         const id = try self.buildCallableId(contract_name, signature);
         try self.ensureCallableIdUnique(id);
 
         try self.callables.append(self.allocator, .{
             .id = id,
             .kind = .event,
-            .name = log_decl.name,
+            .name = event_name,
             .signature = signature,
             .selector = null,
             .inputs = try inputs.toOwnedSlice(self.allocator),
@@ -1082,170 +1099,39 @@ const CompilerAbiGenerator = struct {
 
     fn buildEffects(self: *CompilerAbiGenerator, effect: compiler.sema.Effect, effects: *std.ArrayList(AbiEffect)) anyerror!void {
         switch (effect) {
-            .pure => {},
-            .external => try effects.append(self.allocator, .{ .kind = .calls }),
-            .side_effects => |side_effects| {
-                try self.appendEffectFlags(side_effects.has_external, side_effects.has_log, effects);
-            },
+            .pure, .external, .side_effects => {},
             .reads => |reads| {
                 try self.appendEffectSlots(.reads, reads.slots, effects);
-                try self.appendEffectFlags(reads.has_external, reads.has_log, effects);
             },
             .writes => |writes| {
                 try self.appendEffectSlots(.writes, writes.slots, effects);
-                try self.appendEffectFlags(writes.has_external, writes.has_log, effects);
             },
             .reads_writes => |rw| {
                 try self.appendEffectSlots(.reads, rw.reads, effects);
                 try self.appendEffectSlots(.writes, rw.writes, effects);
-                try self.appendEffectFlags(rw.has_external, rw.has_log, effects);
             },
         }
+        const flags = effect.flags();
+        try self.appendEffectFlags(flags.has_external, flags.has_log, effects);
     }
 
     fn resolvePublicResultInputType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) !ResolvedType {
-        const error_union = switch (ty) {
-            .error_union => |error_union| error_union,
-            else => return error.UnsupportedAbiType,
-        };
-        if (error_union.error_types.len != 1) return error.UnsupportedAbiType;
-        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.payload_type.*)) return error.UnsupportedAbiType;
-        const payload_words = self.publicAbiStaticWordCount(ctx, error_union.payload_type.*);
-
-        const payload = error_union.payload_type.*;
-        if (!self.publicAbiErrorTypeHasPayload(ctx, error_union.error_types[0])) {
-            return self.resolveTupleType(ctx, &.{ .bool, payload });
+        const layout_ctx = self.layoutContext(ctx);
+        const plan = layout_ctx.planResultCarrier(ty) orelse return error.UnsupportedAbiType;
+        const bool_ty: compiler.sema.Type = .bool;
+        if (plan.err) |err| {
+            const elements = [_]compiler.sema.Type{ bool_ty, plan.payload, err };
+            return self.resolveTupleType(ctx, &elements);
         }
-        if (!self.publicAbiSupportsResultCarrierType(ctx, error_union.error_types[0])) return error.UnsupportedAbiType;
-        const error_words = self.publicAbiStaticWordCount(ctx, error_union.error_types[0]);
-        if (payload_words == 1 and (error_words == null or error_words.? > 1)) return error.UnsupportedAbiType;
-        return self.resolveTupleType(ctx, &.{ .bool, payload, error_union.error_types[0] });
+        const elements = [_]compiler.sema.Type{ bool_ty, plan.payload };
+        return self.resolveTupleType(ctx, &elements);
     }
 
-    fn publicAbiSupportsResultCarrierType(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        if (self.publicAbiStaticWordCount(ctx, ty) != null) return true;
-        return switch (ty) {
-            .bytes, .string => true,
-            .slice => |slice| self.publicAbiSupportsResultDynamicArrayElement(ctx, slice.element_type.*),
-            .array => |array| array.len == null and self.publicAbiSupportsResultDynamicArrayElement(ctx, array.element_type.*),
-            .refinement => |refinement| self.publicAbiSupportsResultCarrierType(ctx, refinement.base_type.*),
-            else => false,
+    fn layoutContext(self: *CompilerAbiGenerator, ctx: CompilerModuleContext) compiler_abi_layout_context.LayoutContext {
+        return .{
+            .allocator = self.allocator,
+            .provider = compiler.sema.abiLayoutProvider(ctx.file, ctx.item_index, ctx.typecheck),
         };
-    }
-
-    fn publicAbiSupportsResultDynamicArrayElement(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => true,
-            .refinement => |refinement| self.publicAbiSupportsResultDynamicArrayElement(ctx, refinement.base_type.*),
-            .named => |named| blk: {
-                const item_id = ctx.item_index.lookup(named.name) orelse break :blk false;
-                break :blk switch (ctx.file.item(item_id).*) {
-                    .Enum, .Bitfield => true,
-                    else => false,
-                };
-            },
-            else => false,
-        };
-    }
-
-    fn publicAbiErrorTypeHasPayload(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) bool {
-        _ = self;
-        const name = ty.name() orelse return true;
-        const item_id = ctx.item_index.lookup(name) orelse return true;
-        return switch (ctx.file.item(item_id).*) {
-            .ErrorDecl => |error_decl| error_decl.parameters.len != 0,
-            else => true,
-        };
-    }
-
-    fn publicAbiStaticWordCount(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, ty: compiler.sema.Type) ?usize {
-        return switch (ty) {
-            .bool, .address, .fixed_bytes, .integer, .enum_, .bitfield => 1,
-            .refinement => |refinement| self.publicAbiStaticWordCount(ctx, refinement.base_type.*),
-            .tuple => |elements| blk: {
-                var total: usize = 0;
-                for (elements) |element| {
-                    total += self.publicAbiStaticWordCount(ctx, element) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .array => |array| blk: {
-                const len = array.len orelse break :blk null;
-                const element_words = self.publicAbiStaticWordCount(ctx, array.element_type.*) orelse break :blk null;
-                break :blk element_words * len;
-            },
-            .anonymous_struct => |struct_type| blk: {
-                var total: usize = 0;
-                for (struct_type.fields) |field| {
-                    total += self.publicAbiStaticWordCount(ctx, field.ty) orelse break :blk null;
-                }
-                break :blk total;
-            },
-            .struct_ => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
-            .contract => |named| self.publicAbiStaticWordCountForNamedStruct(ctx, named.name),
-            .named => |named| blk: {
-                if (std.mem.eql(u8, named.name, "bool") or std.mem.eql(u8, named.name, "address")) break :blk 1;
-                if (parseIntegerSpelling(named.name) != null) break :blk 1;
-                if (parseFixedBytesSpelling(named.name) != null) break :blk 1;
-                const item_id = ctx.item_index.lookup(named.name) orelse break :blk null;
-                break :blk switch (ctx.file.item(item_id).*) {
-                    .Enum, .Bitfield => 1,
-                    .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, named.name),
-                    .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, named.name),
-                    .ErrorDecl => |error_decl| blk2: {
-                        var total: usize = 0;
-                        for (error_decl.parameters) |parameter| {
-                            total += self.publicAbiStaticWordCount(ctx, ctx.typecheck.pattern_types[parameter.pattern.index()].type) orelse break :blk2 null;
-                        }
-                        break :blk2 total;
-                    },
-                    else => null,
-                };
-            },
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForNamedStruct(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        return switch (ctx.file.item(item_id).*) {
-            .Struct => self.publicAbiStaticWordCountForStructDecl(ctx, name),
-            .Contract => self.publicAbiStaticWordCountForContractDecl(ctx, name),
-            else => null,
-        };
-    }
-
-    fn publicAbiStaticWordCountForStructDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        const struct_item = switch (ctx.file.item(item_id).*) {
-            .Struct => |struct_item| struct_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (struct_item.fields) |field| {
-            total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, field.type_expr) catch return null) orelse return null;
-        }
-        return total;
-    }
-
-    fn publicAbiStaticWordCountForContractDecl(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, name: []const u8) ?usize {
-        const item_id = ctx.item_index.lookup(name) orelse return null;
-        const contract_item = switch (ctx.file.item(item_id).*) {
-            .Contract => |contract_item| contract_item,
-            else => return null,
-        };
-        var total: usize = 0;
-        for (contract_item.members) |member_id| {
-            switch (ctx.file.item(member_id).*) {
-                .Field => |field| {
-                    if (field.type_expr) |type_expr| {
-                        total += self.publicAbiStaticWordCount(ctx, compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, ctx.file, ctx.item_index, type_expr) catch return null) orelse return null;
-                    } else return null;
-                },
-                else => {},
-            }
-        }
-        return total;
     }
 
     fn appendEffectFlags(
@@ -1291,7 +1177,8 @@ const CompilerAbiGenerator = struct {
         _ = stack;
         switch (ty) {
             .bool, .address, .string, .bytes, .fixed_bytes, .integer => {
-                const wire = try compiler_abi.canonicalAbiType(self.allocator, ty);
+                const layout_ctx = self.layoutContext(ctx);
+                const wire = try layout_ctx.canonicalAbiTypeForType(ty);
                 errdefer self.allocator.free(wire);
                 var node = AbiTypeNode{
                     .kind = .primitive,
@@ -1308,9 +1195,8 @@ const CompilerAbiGenerator = struct {
                     .wire_type = wire,
                     .ui_widget = defaultWidgetForWireType(wire),
                 };
-                const type_id = try self.ensureTypeNode(&node);
-                const idx = self.type_lookup.get(type_id).?;
-                return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+                const idx = try self.ensureTypeNode(&node);
+                return self.resolvedTypeForIndex(idx);
             },
             .refinement => |refinement| return self.resolveRefinementType(ctx, refinement),
             .array => |array| return self.resolveArrayType(ctx, array),
@@ -1330,9 +1216,9 @@ const CompilerAbiGenerator = struct {
                 if (std.mem.eql(u8, named.name, "address")) return self.resolveSemaType(ctx, .address, &.{});
                 if (std.mem.eql(u8, named.name, "string")) return self.resolveSemaType(ctx, .string, &.{});
                 if (std.mem.eql(u8, named.name, "bytes")) return self.resolveSemaType(ctx, .bytes, &.{});
-                if (std.mem.eql(u8, named.name, "NonZeroAddress")) return self.resolveSemaType(ctx, .address, &.{});
+                if (refinements.isPathFormName(named.name)) return self.resolveSemaType(ctx, .address, &.{});
                 if (parseIntegerSpelling(named.name)) |integer_ty| return self.resolveSemaType(ctx, integer_ty, &.{});
-                if (parseFixedBytesSpelling(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
+                if (type_builtin.parseFixedBytesName(named.name)) |len| return self.resolveSemaType(ctx, .{ .fixed_bytes = .{ .len = len, .spelling = named.name } }, &.{});
                 return error.UnsupportedAbiType;
             },
             else => return error.UnsupportedAbiType,
@@ -1350,14 +1236,16 @@ const CompilerAbiGenerator = struct {
         return .{ .integer = .{ .bits = bits, .signed = signed, .spelling = name } };
     }
 
-    fn parseFixedBytesSpelling(name: []const u8) ?u8 {
-        if (!std.mem.startsWith(u8, name, "bytes")) return null;
-        if (name.len <= "bytes".len) return null;
-        const digits = name["bytes".len..];
-        if (digits.len > 1 and digits[0] == '0') return null;
-        const len = std.fmt.parseUnsigned(u8, digits, 10) catch return null;
-        if (len < 1 or len > 32) return null;
-        return len;
+    fn resolveTypeExpr(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        type_expr: compiler.ast.TypeExprId,
+    ) anyerror!ResolvedType {
+        var type_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer type_arena.deinit();
+
+        const ty = try compiler_type_descriptors.descriptorFromTypeExpr(type_arena.allocator(), ctx.file, ctx.item_index, type_expr);
+        return self.resolveSemaType(ctx, ty, &.{});
     }
 
     fn resolveArrayType(
@@ -1376,9 +1264,8 @@ const CompilerAbiGenerator = struct {
             .wire_type = wire,
             .ui_widget = "json",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveSliceType(
@@ -1395,9 +1282,8 @@ const CompilerAbiGenerator = struct {
             .wire_type = wire,
             .ui_widget = "json",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveTupleType(
@@ -1427,9 +1313,8 @@ const CompilerAbiGenerator = struct {
             .wire_type = wire,
             .ui_widget = "json",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveAnonymousStructType(
@@ -1461,9 +1346,8 @@ const CompilerAbiGenerator = struct {
             .ui_label = "anonymous struct",
             .ui_widget = "json",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveNamedStructType(
@@ -1500,9 +1384,8 @@ const CompilerAbiGenerator = struct {
                 .ui_label = template_name,
                 .ui_widget = "json",
             };
-            const type_id = try self.ensureTypeNode(&node);
-            const idx = self.type_lookup.get(type_id).?;
-            return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+            const idx = try self.ensureTypeNode(&node);
+            return self.resolvedTypeForIndex(idx);
         }
 
         const ref = self.global_structs.get(name) orelse return error.UnknownStructType;
@@ -1516,8 +1399,7 @@ const CompilerAbiGenerator = struct {
             wire_parts.deinit(self.allocator);
         }
         for (struct_item.fields, 0..) |field, index| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, field.type_expr);
-            const resolved = try self.resolveSemaType(owner_ctx, field_type, &.{});
+            const resolved = try self.resolveTypeExpr(owner_ctx, field.type_expr);
             fields[index] = .{ .name = field.name, .type_id = resolved.type_id };
             try wire_parts.append(self.allocator, try self.allocator.dupe(u8, resolved.wire_type));
         }
@@ -1533,9 +1415,8 @@ const CompilerAbiGenerator = struct {
             .ui_label = name,
             .ui_widget = "json",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveNamedEnumType(
@@ -1556,19 +1437,17 @@ const CompilerAbiGenerator = struct {
                 .ui_label = name,
                 .ui_widget = "select",
             };
-            const type_id = try self.ensureTypeNode(&node);
-            const idx = self.type_lookup.get(type_id).?;
-            return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+            const idx = try self.ensureTypeNode(&node);
+            return self.resolvedTypeForIndex(idx);
         }
 
         const ref = self.global_enums.get(name) orelse return error.UnknownEnumType;
         const owner_ctx = try self.moduleContext(ref.module_id);
         const enum_item = owner_ctx.file.item(ref.item_id).Enum;
-        const repr_type = if (enum_item.base_type) |base_type|
-            try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, base_type)
+        const repr = if (enum_item.base_type) |base_type|
+            try self.resolveTypeExpr(owner_ctx, base_type)
         else
-            defaultEnumReprType();
-        const repr = try self.resolveSemaType(owner_ctx, repr_type, &.{});
+            try self.resolveSemaType(owner_ctx, defaultEnumReprType(), &.{});
         var variants = try self.allocator.alloc(AbiEnumVariant, enum_item.variants.len);
         errdefer self.allocator.free(variants);
         for (enum_item.variants, 0..) |variant, index| {
@@ -1584,9 +1463,8 @@ const CompilerAbiGenerator = struct {
             .ui_label = name,
             .ui_widget = "select",
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn defaultEnumReprType() compiler.sema.Type {
@@ -1608,9 +1486,8 @@ const CompilerAbiGenerator = struct {
             .ui_label = name,
             .ui_widget = defaultWidgetForWireType(base.wire_type),
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn resolveNamedErrorType(
@@ -1653,8 +1530,7 @@ const CompilerAbiGenerator = struct {
         const owner_ctx = try self.moduleContext(ref.module_id);
         const bitfield_item = owner_ctx.file.item(ref.item_id).Bitfield;
         if (bitfield_item.base_type) |type_expr| {
-            const field_type = try compiler_type_descriptors.descriptorFromTypeExpr(self.allocator, owner_ctx.file, owner_ctx.item_index, type_expr);
-            return self.resolveSemaType(owner_ctx, field_type, &.{});
+            return self.resolveTypeExpr(owner_ctx, type_expr);
         }
         return self.resolveSemaType(owner_ctx, .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } }, &.{});
     }
@@ -1662,53 +1538,59 @@ const CompilerAbiGenerator = struct {
     fn resolveRefinementType(
         self: *CompilerAbiGenerator,
         ctx: CompilerModuleContext,
-        refinement: compiler.sema.RefinementType,
+        refinement: RefinementType,
     ) anyerror!ResolvedType {
         const base = try self.resolveSemaType(ctx, refinement.base_type.*, &.{});
 
         var predicate_json: []const u8 = try self.buildExactPredicate();
+        errdefer self.allocator.free(predicate_json);
         var ui_hints = UiHints{};
+        errdefer {
+            if (ui_hints.min) |min| self.allocator.free(min);
+            if (ui_hints.max) |max| self.allocator.free(max);
+        }
 
-        if (std.mem.eql(u8, refinement.name, "NonZeroAddress")) {
-            self.allocator.free(predicate_json);
-            predicate_json = try self.buildNonZeroAddressPredicate();
-            ui_hints.widget = "address";
-        } else if (std.mem.eql(u8, refinement.name, "Scaled")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const decimals = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildScaledPredicate(@intCast(decimals));
-                ui_hints.widget = "number";
-                ui_hints.decimals = @intCast(decimals);
+        if (refinements.kindForName(refinement.name)) |kind| {
+            switch (kind) {
+                .non_zero_address => {
+                    const next_predicate = try self.buildNonZeroAddressPredicate();
+                    self.allocator.free(predicate_json);
+                    predicate_json = next_predicate;
+                    ui_hints.widget = "address";
+                },
+                .non_zero => {
+                    const next_predicate = try self.buildNonZeroPredicate();
+                    self.allocator.free(predicate_json);
+                    predicate_json = next_predicate;
+                    ui_hints.widget = "number";
+                },
+                .scaled => {
+                    if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
+                        const decimals = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse return error.UnsupportedAbiType;
+                        const next_predicate = try self.buildScaledPredicate(@intCast(decimals));
+                        self.allocator.free(predicate_json);
+                        predicate_json = next_predicate;
+                        ui_hints.widget = "number";
+                        ui_hints.decimals = @intCast(decimals);
+                    }
+                },
+                .min_value, .max_value, .in_range, .basis_points => {
+                    const bounds = refinements.bounds(refinement) orelse return error.UnsupportedAbiType;
+                    const built = try buildBoundsBackedPredicate(self.allocator, bounds);
+                    self.allocator.free(predicate_json);
+                    predicate_json = built.predicate_json;
+                    ui_hints.widget = "number";
+                    if (built.min_value) |value| {
+                        ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+                    }
+                    if (built.max_value) |value| {
+                        ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+                    }
+                },
+                .exact => {
+                    ui_hints.widget = "number";
+                },
             }
-        } else if (std.mem.eql(u8, refinement.name, "MinValue")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildMinPredicate(min_value);
-                ui_hints.widget = "number";
-                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "MaxValue")) {
-            if (refinement.args.len >= 2 and refinement.args[1] == .Integer) {
-                const max_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildMaxPredicate(max_value);
-                ui_hints.widget = "number";
-                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "InRange")) {
-            if (refinement.args.len >= 3 and refinement.args[1] == .Integer and refinement.args[2] == .Integer) {
-                const min_value = parseUnsignedIntLiteral(refinement.args[1].Integer.text) orelse 0;
-                const max_value = parseUnsignedIntLiteral(refinement.args[2].Integer.text) orelse 0;
-                self.allocator.free(predicate_json);
-                predicate_json = try self.buildRangePredicate(min_value, max_value);
-                ui_hints.widget = "number";
-                ui_hints.min = try std.fmt.allocPrint(self.allocator, "{d}", .{min_value});
-                ui_hints.max = try std.fmt.allocPrint(self.allocator, "{d}", .{max_value});
-            }
-        } else if (std.mem.eql(u8, refinement.name, "Exact")) {
-            ui_hints.widget = "number";
         }
 
         var node = AbiTypeNode{
@@ -1723,9 +1605,8 @@ const CompilerAbiGenerator = struct {
             .ui_decimals = ui_hints.decimals,
             .ui_unit = ui_hints.unit,
         };
-        const type_id = try self.ensureTypeNode(&node);
-        const idx = self.type_lookup.get(type_id).?;
-        return .{ .type_id = self.types.items[idx].type_id.?, .wire_type = self.types.items[idx].wire_type.? };
+        const idx = try self.ensureTypeNode(&node);
+        return self.resolvedTypeForIndex(idx);
     }
 
     fn buildSignature(self: *CompilerAbiGenerator, name: []const u8, types: []const []const u8) anyerror![]const u8 {
@@ -1743,40 +1624,43 @@ const CompilerAbiGenerator = struct {
         try self.callable_ids.put(callable_id, {});
     }
 
-    fn ensureTypeNode(self: *CompilerAbiGenerator, node: *AbiTypeNode) anyerror![]const u8 {
-        const payload = try buildCanonicalTypePayload(self.allocator, node);
-        errdefer self.allocator.free(payload);
-        const type_id = try hashedTypeId(self.allocator, payload);
-        errdefer self.allocator.free(type_id);
-        if (self.type_lookup.get(type_id)) |idx| {
-            const existing = &self.types.items[idx];
-            if (!std.mem.eql(u8, existing.canonical_payload.?, payload)) {
-                node.deinit();
-                return error.TypeHashCollision;
-            }
-            self.allocator.free(payload);
-            self.allocator.free(type_id);
+    fn resolvedTypeForIndex(self: *const CompilerAbiGenerator, index: usize) ResolvedType {
+        const node = &self.types.items[index];
+        return .{ .type_id = node.type_id.?, .wire_type = node.wire_type.? };
+    }
+
+    fn ensureTypeNode(self: *CompilerAbiGenerator, node: *AbiTypeNode) anyerror!usize {
+        var payload: ?[]const u8 = try buildCanonicalTypePayload(self.allocator, node);
+        errdefer if (payload) |owned_payload| self.allocator.free(owned_payload);
+
+        if (self.payload_lookup.get(payload.?)) |idx| {
+            self.allocator.free(payload.?);
+            payload = null;
             node.deinit();
-            return existing.type_id.?;
+            return idx;
         }
-        node.canonical_payload = payload;
-        node.type_id = type_id;
+
+        const new_index = self.types.items.len;
+        var type_id: ?[]const u8 = try std.fmt.allocPrint(self.allocator, "t:{d}", .{new_index});
+        errdefer if (type_id) |owned_type_id| self.allocator.free(owned_type_id);
+
+        node.canonical_payload = payload.?;
+        node.type_id = type_id.?;
+        payload = null;
+        type_id = null;
+
+        var node_owns_allocations = true;
+        errdefer if (node_owns_allocations) node.deinit();
+
         try self.types.append(self.allocator, node.*);
-        const new_index = self.types.items.len - 1;
-        try self.type_lookup.put(self.types.items[new_index].type_id.?, new_index);
-        return self.types.items[new_index].type_id.?;
-    }
+        node_owns_allocations = false;
+        errdefer {
+            var stored = self.types.pop() orelse unreachable;
+            stored.deinit();
+        }
 
-    fn buildMinPredicate(self: *CompilerAbiGenerator, min_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"min\",\"value\":\"{d}\"}}", .{min_value});
-    }
-
-    fn buildMaxPredicate(self: *CompilerAbiGenerator, max_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"max\",\"value\":\"{d}\"}}", .{max_value});
-    }
-
-    fn buildRangePredicate(self: *CompilerAbiGenerator, min_value: u256, max_value: u256) anyerror![]const u8 {
-        return std.fmt.allocPrint(self.allocator, "{{\"kind\":\"range\",\"min\":\"{d}\",\"max\":\"{d}\"}}", .{ min_value, max_value });
+        try self.payload_lookup.put(self.types.items[new_index].canonical_payload.?, new_index);
+        return new_index;
     }
 
     fn buildScaledPredicate(self: *CompilerAbiGenerator, decimals: u32) anyerror![]const u8 {
@@ -1787,10 +1671,77 @@ const CompilerAbiGenerator = struct {
         return self.allocator.dupe(u8, "{\"kind\":\"exact\"}");
     }
 
+    fn buildNonZeroPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
+        return self.allocator.dupe(u8, "{\"kind\":\"nonZero\"}");
+    }
+
     fn buildNonZeroAddressPredicate(self: *CompilerAbiGenerator) anyerror![]const u8 {
         return self.allocator.dupe(u8, "{\"kind\":\"nonZeroAddress\"}");
     }
 };
+
+const BoundsBackedPredicate = struct {
+    predicate_json: []const u8,
+    min_value: ?u256 = null,
+    max_value: ?u256 = null,
+};
+
+fn buildBoundsBackedPredicate(allocator: std.mem.Allocator, bounds: refinements.Bounds) !BoundsBackedPredicate {
+    const min_value = if (bounds.min_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
+    const max_value = if (bounds.max_text) |text| parseUnsignedIntLiteral(text) orelse return error.UnsupportedAbiType else null;
+
+    const predicate_json = if (min_value != null and max_value != null)
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"range\",\"min\":\"{d}\",\"max\":\"{d}\"}}", .{ min_value.?, max_value.? })
+    else if (min_value) |value|
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"min\",\"value\":\"{d}\"}}", .{value})
+    else if (max_value) |value|
+        try std.fmt.allocPrint(allocator, "{{\"kind\":\"max\",\"value\":\"{d}\"}}", .{value})
+    else
+        return error.UnsupportedAbiType;
+
+    return .{
+        .predicate_json = predicate_json,
+        .min_value = min_value,
+        .max_value = max_value,
+    };
+}
+
+test "ABI bounds-backed predicates fail closed for malformed registry bounds" {
+    const base: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .min_text = "not-an-int",
+    }));
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .max_text = "not-an-int",
+    }));
+    try std.testing.expectError(error.UnsupportedAbiType, buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+    }));
+}
+
+test "ABI bounds-backed predicates preserve range metadata" {
+    const base: compiler.sema.Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const built = try buildBoundsBackedPredicate(std.testing.allocator, .{
+        .base_type = base,
+        .min_text = "0",
+        .max_text = "10000",
+    });
+    defer std.testing.allocator.free(built.predicate_json);
+
+    try std.testing.expectEqualStrings("{\"kind\":\"range\",\"min\":\"0\",\"max\":\"10000\"}", built.predicate_json);
+    try std.testing.expectEqual(@as(?u256, 0), built.min_value);
+    try std.testing.expectEqual(@as(?u256, 10000), built.max_value);
+}
+
+test "ABI default widgets use canonical fixed bytes parsing" {
+    try std.testing.expectEqualStrings("bytes", defaultWidgetForWireType("bytes32") orelse return error.TestUnexpectedResult);
+    try std.testing.expect(defaultWidgetForWireType("bytes01") == null);
+    try std.testing.expect(defaultWidgetForWireType("bytes+5") == null);
+    try std.testing.expect(defaultWidgetForWireType("bytes1_6") == null);
+}
 
 fn functionHasBareSelf(file: *const compiler.AstFile, function: compiler.ast.FunctionItem) bool {
     if (function.parameters.len == 0) return false;
@@ -1875,35 +1826,6 @@ fn sortStringSlices(values: [][]const u8) void {
             }
         }
     }
-}
-
-fn keccakSelectorHex(allocator: std.mem.Allocator, signature: []const u8) ![]const u8 {
-    var hash: [32]u8 = undefined;
-    crypto.hash.sha3.Keccak256.hash(signature, &hash, .{});
-    const selector = hash[0..4];
-
-    var hex: [8]u8 = undefined;
-    for (selector, 0..) |byte, i| {
-        hex[i * 2] = std.fmt.hex_charset[byte >> 4];
-        hex[i * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-    }
-
-    return std.fmt.allocPrint(allocator, "0x{s}", .{hex[0..]});
-}
-
-fn hashedTypeId(allocator: std.mem.Allocator, canonical_payload: []const u8) ![]const u8 {
-    var digest: [crypto.hash.Blake3.digest_length]u8 = undefined;
-    crypto.hash.Blake3.hash(canonical_payload, digest[0..], .{});
-
-    var hex = try allocator.alloc(u8, digest.len * 2);
-    defer allocator.free(hex);
-
-    for (digest, 0..) |byte, i| {
-        hex[i * 2] = std.fmt.hex_charset[byte >> 4];
-        hex[i * 2 + 1] = std.fmt.hex_charset[byte & 0x0f];
-    }
-
-    return std.fmt.allocPrint(allocator, "t:{s}", .{hex});
 }
 
 fn buildCanonicalTypePayload(allocator: std.mem.Allocator, node: *const AbiTypeNode) ![]const u8 {
@@ -1998,11 +1920,6 @@ fn writeTypeNodeObject(writer: anytype, node: *const AbiTypeNode, include_type_i
             try writeObjectKey(writer, &first, "wire");
             try writeWireType(writer, node.wire_type.?);
         },
-        .alias => {
-            if (node.name) |name| {
-                try writeObjectStringField(writer, &first, "name", name);
-            }
-        },
         .refinement => {
             try writeObjectStringField(writer, &first, "base", node.base.?);
 
@@ -2046,7 +1963,6 @@ fn typeKindString(kind: TypeNodeKind) []const u8 {
         .tuple => "tuple",
         .struct_ => "struct",
         .enum_ => "enum",
-        .alias => "alias",
         .refinement => "refinement",
     };
 }
@@ -2066,19 +1982,10 @@ fn defaultWidgetForWireType(wire_type: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, wire_type, "uint")) return "number";
     if (std.mem.startsWith(u8, wire_type, "int")) return "number";
     if (std.mem.eql(u8, wire_type, "address")) return "address";
-    if (std.mem.eql(u8, wire_type, "bytes") or isFixedBytesWireType(wire_type)) return "bytes";
+    if (std.mem.eql(u8, wire_type, "bytes") or type_builtin.parseFixedBytesName(wire_type) != null) return "bytes";
     if (std.mem.eql(u8, wire_type, "string")) return "text";
     if (std.mem.eql(u8, wire_type, "bool")) return "select";
     return null;
-}
-
-fn isFixedBytesWireType(wire_type: []const u8) bool {
-    if (!std.mem.startsWith(u8, wire_type, "bytes")) return false;
-    if (wire_type.len <= "bytes".len) return false;
-    const digits = wire_type["bytes".len..];
-    if (digits.len > 1 and digits[0] == '0') return false;
-    const len = std.fmt.parseUnsigned(u8, digits, 10) catch return false;
-    return len >= 1 and len <= 32;
 }
 
 fn writeWireType(writer: anytype, wire_type: []const u8) !void {

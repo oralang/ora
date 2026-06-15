@@ -42,10 +42,15 @@ include_directories(${PROJECT_SOURCE_DIR}/lowering/OraToSIR)
 get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_DIR} DIRECTORY)
 get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_INSTALL_PREFIX} DIRECTORY)
 get_filename_component(MLIR_INSTALL_PREFIX ${MLIR_INSTALL_PREFIX} DIRECTORY)
-# Check both possible locations
+# Check both possible locations. CMAKE_INSTALL_PREFIX is first so an opt-in
+# native-sanitized SIR dialect installed outside the normal MLIR prefix is used
+# by the matching Ora dialect build.
+set(SIR_INCLUDE_DIR0 ${CMAKE_INSTALL_PREFIX}/include/SIR)
 set(SIR_INCLUDE_DIR1 ${MLIR_INSTALL_PREFIX}/include/SIR)
 set(SIR_INCLUDE_DIR2 ${CMAKE_CURRENT_SOURCE_DIR}/../IR/include)
-if(EXISTS ${SIR_INCLUDE_DIR1})
+if(EXISTS ${SIR_INCLUDE_DIR0})
+  include_directories(${SIR_INCLUDE_DIR0})
+elseif(EXISTS ${SIR_INCLUDE_DIR1})
   include_directories(${SIR_INCLUDE_DIR1})
 else()
   include_directories(${SIR_INCLUDE_DIR2})
@@ -104,6 +109,10 @@ set(ORA_DIALECT_C_LINK_LIBS
 set(SIR_DIALECT_LINK "")
 if(TARGET MLIRSIRDialect)
   set(SIR_DIALECT_LINK MLIRSIRDialect)
+elseif(EXISTS "${CMAKE_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
+  set(SIR_DIALECT_LINK "${CMAKE_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
+elseif(EXISTS "${CMAKE_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  set(SIR_DIALECT_LINK "${CMAKE_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_STATIC_LIBRARY_SUFFIX}")
 elseif(EXISTS "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
   set(SIR_DIALECT_LINK "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_SHARED_LIBRARY_SUFFIX}")
 elseif(EXISTS "${MLIR_INSTALL_PREFIX}/lib/libMLIRSIRDialect${CMAKE_STATIC_LIBRARY_SUFFIX}")
@@ -161,6 +170,8 @@ add_mlir_dialect_library(MLIROraDialectC
   lowering/OraToSIR/patterns/Struct.cpp
   lowering/OraToSIR/patterns/Storage.cpp
   lowering/OraToSIR/patterns/MemRef.cpp
+  lowering/OraToSIR/patterns/AbiEncode.cpp
+  lowering/OraToSIR/patterns/AbiDecode.cpp
   lowering/OraToSIR/patterns/ControlFlow.cpp
   lowering/OraToSIR/patterns/EVM.cpp
   lowering/OraToSIR/patterns/Logs.cpp

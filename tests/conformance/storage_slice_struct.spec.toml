@@ -1,0 +1,86 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["[(1,2,3)]"]
+
+[[call]]
+fn = "get_middle(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [0]
+returns = { u256 = 2 }
+
+[[call]]
+fn = "set((uint256,uint256,uint256)[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["[(11,12,13),(21,22,23)]"]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 2
+
+[[call.storage]]
+slot = "keccak(0)"
+value = 11
+
+[[call.storage]]
+slot = "add(keccak(0),1)"
+value = 12
+
+[[call.storage]]
+slot = "add(keccak(0),2)"
+value = 13
+
+[[call.storage]]
+slot = "add(keccak(0),3)"
+value = 21
+
+[[call.storage]]
+slot = "add(keccak(0),4)"
+value = 22
+
+[[call.storage]]
+slot = "add(keccak(0),5)"
+value = 23
+
+[[call]]
+fn = "set_middle(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 99]
+returns = {}
+
+[[call.storage]]
+slot = "add(keccak(0),3)"
+value = 21
+
+[[call.storage]]
+slot = "add(keccak(0),4)"
+value = 99
+
+[[call.storage]]
+slot = "add(keccak(0),5)"
+value = 23
+
+[[call]]
+fn = "get_left(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 21 }
+
+[[call]]
+fn = "get_middle(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 99 }
+
+[[call]]
+fn = "get_right(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 23 }

@@ -1,0 +1,75 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "set_ok(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[5, 8, 13]]
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call.storage]]
+slot = 1
+value = 3
+
+[[call.storage]]
+slot = "keccak(1)"
+value = 5
+
+[[call.storage]]
+slot = "add(keccak(1),1)"
+value = 8
+
+[[call.storage]]
+slot = "add(keccak(1),2)"
+value = 13
+
+[[call.storage]]
+slot = 2
+value = 99
+
+[[call]]
+fn = "sum_or(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [77]
+returns = { u256 = 26 }
+
+[[call]]
+fn = "marker_value()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 99 }
+
+[[call]]
+fn = "set_err()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = {}
+
+[[call.storage]]
+slot = 0
+value = 1
+
+[[call.storage]]
+slot = 1
+value = "0xff7e9f57"
+
+[[call.storage]]
+slot = 2
+value = 99
+
+[[call]]
+fn = "sum_or(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [77]
+returns = { u256 = 77 }

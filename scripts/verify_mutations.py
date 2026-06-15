@@ -54,6 +54,269 @@ contract MutationVault {
 """
 
 
+BASE_SIGNED = """\
+contract MutationSigned {
+    pub fn addSigned(a: i256, b: i256) -> i256
+        requires(a >= 0)
+        requires(b >= 0)
+        requires(a <= 1000)
+        requires(b <= 1000)
+        ensures(result == a + b)
+    {
+        return a + b;
+    }
+}
+"""
+
+
+BASE_NARROW_MUL = """\
+contract MutationNarrowMul {
+    pub fn double(x: u8) -> u8
+        requires(x <= 127)
+        ensures(result == x * 2)
+    {
+        return x * 2;
+    }
+}
+"""
+
+
+BASE_SIGNED_NEG = """\
+contract MutationSignedNeg {
+    pub fn negate(x: i256) -> i256
+        requires(x > -57896044618658097711785492504343953926634992332820282019728792003956564819968)
+        ensures(result == -x)
+    {
+        return -x;
+    }
+}
+"""
+
+
+BASE_REFINEMENT = """\
+contract MutationRefinement {
+    pub fn atLeast(x: MinValue<u256, 100>) -> u256
+        ensures(result >= 100)
+    {
+        return x;
+    }
+}
+"""
+
+
+BASE_ERROR_UNION = """\
+contract MutationErrorUnion {
+    error E;
+
+    pub fn get(v: u256) -> !u256 | E
+        requires(v <= 1000)
+        ensures_ok(result == v)
+    {
+        return v;
+    }
+}
+"""
+
+
+BASE_ERROR_UNION_ERR = """\
+contract MutationErrorUnionErr {
+    error E;
+
+    pub fn fail(v: u256) -> !u256 | E
+        requires(v <= 1000)
+        ensures_err(v <= 1000)
+    {
+        return E;
+    }
+}
+"""
+
+
+BASE_BRANCH_CONDITION = """\
+contract MutationBranchCondition {
+    pub fn guarded_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        if (x / y == 0) {
+            return 0;
+        }
+        return x / y;
+    }
+}
+"""
+
+
+BASE_IF_CONDITION = """\
+contract MutationIfCondition {
+    pub fn branch_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        var out: u256 = 2;
+        if (x / y == 0) {
+            out = 1;
+        }
+        return out;
+    }
+}
+"""
+
+
+BASE_SWITCH_SCRUTINEE = """\
+contract MutationSwitchScrutinee {
+    pub fn switch_div(x: u256, y: u256) -> u256
+        requires(y != 0)
+    {
+        switch (x / y) {
+            0 => { return 0; }
+            else => { return 1; }
+        }
+    }
+}
+"""
+
+
+BASE_MAP_EFFECT = """\
+contract MutationMapEffect {
+    storage var balances: map<address, u256>;
+
+    pub fn set(who: address, amount: u256)
+        requires(amount <= 100)
+        ensures(balances[who] == amount)
+    {
+        balances[who] = amount;
+    }
+}
+"""
+
+
+BASE_MAP_FRAME = """\
+contract MutationMapFrame {
+    storage var balances: map<address, u256>;
+
+    pub fn setOther(who: address, other: address, amount: u256)
+        requires(who != other)
+        requires(amount <= 100)
+        ensures(balances[other] == old(balances[other]))
+    {
+        balances[who] = amount;
+    }
+}
+"""
+
+
+BASE_NESTED_MAP_EFFECT = """\
+contract MutationNestedMapEffect {
+    storage var allowances: map<address, map<address, u256>>;
+
+    pub fn approve(owner: address, spender: address, amount: u256)
+        requires(owner != spender)
+        requires(amount <= 100)
+        ensures(allowances[owner][spender] == amount)
+    {
+        allowances[owner][spender] = amount;
+    }
+}
+"""
+
+
+BASE_LOOP_INVARIANT = """\
+contract MutationLoopInvariant {
+    storage var counter: u256 = 0;
+
+    pub fn countTo(n: u256)
+        requires(n <= 1000)
+        requires(counter == 0)
+        ensures(counter == n)
+    {
+        while (counter < n)
+            invariant(counter <= n)
+        {
+            counter = counter + 1;
+        }
+    }
+}
+"""
+
+
+BASE_STATE_INVARIANT = """\
+contract MutationStateInvariant {
+    storage var x: u256 = 0;
+
+    invariant bounded(x <= 100);
+
+    pub fn set(v: u256)
+        requires(v <= 100)
+    {
+        x = v;
+    }
+}
+"""
+
+
+BASE_ASSERTION = """\
+contract MutationAssert {
+    pub fn assertBound(x: u256)
+        requires(x <= 100)
+    {
+        assert(x <= 100, "bound");
+    }
+}
+"""
+
+
+BASE_STORAGE_BRANCH = """\
+contract MutationStorageBranch {
+    storage var limit: u256;
+
+    pub fn set_limit(value: u256)
+        requires(value <= 20)
+    {
+        limit = value;
+    }
+
+    pub fn classify(x: u256) -> u256
+        requires(x <= 20)
+        ensures((x <= limit && result == 1) || (x > limit && result == 2))
+    {
+        if (x <= limit) {
+            return 1;
+        }
+        return 2;
+    }
+}
+"""
+
+
+BASE_CALLEE_REQUIRES = """\
+contract MutationCalleeRequires {
+    fn divide(x: u256) -> u256
+        requires(x != 0)
+        ensures(result == 100 / x)
+    {
+        return 100 / x;
+    }
+
+    pub fn use_divide(x: u256) -> u256
+        requires(x != 0)
+        ensures(result == 100 / x)
+    {
+        return divide(x);
+    }
+}
+"""
+
+
+BASE_QUANTIFIED = """\
+contract MutationQuantified {
+    pub fn check(x: u256) -> bool
+        ensures(forall i: u256 where i < x => i <= x)
+    {
+        return true;
+    }
+}
+"""
+
+
 @dataclasses.dataclass(frozen=True)
 class MutationCase:
     name: str
@@ -62,6 +325,26 @@ class MutationCase:
     find: str
     replace: str
     reason: str
+    covers: tuple[str, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class NegativeBuildCase:
+    name: str
+    source: str
+    reason: str
+    expected_fragment: str
+    covers: tuple[str, ...] = ()
+
+
+REQUIRED_S1_COVERAGE = {
+    "S1-1": "narrow-width const-mul overflow",
+    "S1-2": "condition/scrutinee arithmetic obligations",
+    "S1-NEW-A": "nested map-store state summary",
+    "S1-NEW-B": "signed unary negation overflow",
+    "S1-NEW-D": "callee precondition on fallback/inline paths",
+    "DEGRADED-NO-ARTIFACT": "degraded query must fail closed without bytecode",
+}
 
 
 CASES = (
@@ -97,6 +380,218 @@ CASES = (
         replace="requires(false)",
         reason="contradictory assumptions must fail vacuity checks",
     ),
+    # Per-construct mutants broaden coverage beyond the counter/vault shapes.
+    MutationCase(
+        name="narrow_mul_precondition_removed",
+        source=BASE_NARROW_MUL,
+        function="double",
+        find="requires(x <= 127)",
+        replace="requires(true)",
+        reason="weakened precondition permits u8 multiplication overflow at x=128",
+        covers=("S1-1",),
+    ),
+    MutationCase(
+        name="signed_postcondition_flip",
+        source=BASE_SIGNED,
+        function="addSigned",
+        find="ensures(result == a + b)",
+        replace="ensures(result == a - b)",
+        reason="signed-arithmetic postcondition no longer matches the body",
+    ),
+    MutationCase(
+        name="signed_body_corruption",
+        source=BASE_SIGNED,
+        function="addSigned",
+        find="return a + b;",
+        replace="return a - b;",
+        reason="signed body changed so it no longer proves the postcondition",
+    ),
+    MutationCase(
+        name="signed_neg_min_precondition_removed",
+        source=BASE_SIGNED_NEG,
+        function="negate",
+        find="requires(x > -57896044618658097711785492504343953926634992332820282019728792003956564819968)",
+        replace="requires(true)",
+        reason="weakened precondition permits negating i256.min",
+        covers=("S1-NEW-B",),
+    ),
+    MutationCase(
+        name="refinement_bound_overclaim",
+        source=BASE_REFINEMENT,
+        function="atLeast",
+        find="ensures(result >= 100)",
+        replace="ensures(result >= 200)",
+        reason="postcondition overclaims a tighter bound than the refinement gives",
+    ),
+    MutationCase(
+        name="error_union_ok_postcondition_flip",
+        source=BASE_ERROR_UNION,
+        function="get",
+        find="ensures_ok(result == v)",
+        replace="ensures_ok(result == v + 1)",
+        reason="error-union Ok postcondition no longer matches the returned value",
+    ),
+    MutationCase(
+        name="error_union_ok_body_corruption",
+        source=BASE_ERROR_UNION,
+        function="get",
+        find="return v;",
+        replace="return v + 1;",
+        reason="error-union Ok body changed so it no longer proves the postcondition",
+    ),
+    MutationCase(
+        name="error_union_err_postcondition_flip",
+        source=BASE_ERROR_UNION_ERR,
+        function="fail",
+        find="ensures_err(v <= 1000)",
+        replace="ensures_err(v > 1000)",
+        reason="error-union Err postcondition no longer follows from the precondition",
+    ),
+    MutationCase(
+        name="branch_condition_div_precondition_removed",
+        source=BASE_BRANCH_CONDITION,
+        function="guarded_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside a branch condition must still prove its non-zero divisor",
+        covers=("S1-2",),
+    ),
+    MutationCase(
+        name="if_condition_div_precondition_removed",
+        source=BASE_IF_CONDITION,
+        function="branch_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside an if condition must prove its non-zero divisor before branch facts apply",
+        covers=("S1-2",),
+    ),
+    MutationCase(
+        name="switch_scrutinee_div_precondition_removed",
+        source=BASE_SWITCH_SCRUTINEE,
+        function="switch_div",
+        find="requires(y != 0)",
+        replace="requires(true)",
+        reason="division inside a switch scrutinee must prove its non-zero divisor before case facts apply",
+        covers=("S1-2",),
+    ),
+    MutationCase(
+        name="callee_precondition_removed",
+        source=BASE_CALLEE_REQUIRES,
+        function="use_divide",
+        find="requires(x != 0)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
+        replace="requires(true)\n        ensures(result == 100 / x)\n    {\n        return divide(x);",
+        reason="caller must prove the callee's non-zero divisor precondition",
+        covers=("S1-NEW-D",),
+    ),
+    MutationCase(
+        name="map_store_postcondition_body_corruption",
+        source=BASE_MAP_EFFECT,
+        function="set",
+        find="balances[who] = amount;",
+        replace="balances[who] = amount + 1;",
+        reason="map storage postcondition no longer matches the stored value",
+    ),
+    MutationCase(
+        name="nested_map_store_postcondition_body_corruption",
+        source=BASE_NESTED_MAP_EFFECT,
+        function="approve",
+        find="allowances[owner][spender] = amount;",
+        replace="allowances[owner][spender] = amount + 1;",
+        reason="nested map storage postcondition no longer matches the stored value",
+        covers=("S1-NEW-A",),
+    ),
+    MutationCase(
+        name="map_frame_alias_precondition_removed",
+        source=BASE_MAP_FRAME,
+        function="setOther",
+        find="requires(who != other)",
+        replace="requires(true)",
+        reason="map frame postcondition no longer follows when keys may alias",
+    ),
+    MutationCase(
+        name="loop_invariant_postcondition_overclaim",
+        source=BASE_LOOP_INVARIANT,
+        function="countTo",
+        find="ensures(counter == n)",
+        replace="ensures(counter == n + 1)",
+        reason="loop-invariant-derived postcondition overclaims the final counter value",
+    ),
+    MutationCase(
+        name="loop_invariant_body_corruption",
+        source=BASE_LOOP_INVARIANT,
+        function="countTo",
+        find="counter = counter + 1;",
+        replace="counter = counter + 2;",
+        reason="loop body no longer preserves the invariant-derived postcondition",
+    ),
+    MutationCase(
+        name="state_invariant_precondition_removed",
+        source=BASE_STATE_INVARIANT,
+        function="set",
+        find="requires(v <= 100)",
+        replace="requires(true)",
+        reason="weakened precondition permits a storage write that violates the state invariant",
+    ),
+    MutationCase(
+        name="assert_requires_weakened",
+        source=BASE_ASSERTION,
+        function="assertBound",
+        find="requires(x <= 100)",
+        replace="requires(true)",
+        reason="assert obligation no longer follows from the weakened precondition",
+    ),
+    MutationCase(
+        name="storage_branch_body_corruption",
+        source=BASE_STORAGE_BRANCH,
+        function="classify",
+        find="return 1;",
+        replace="return 2;",
+        reason="storage-backed branch result no longer proves the conditional postcondition",
+    ),
+    MutationCase(
+        name="quantified_postcondition_flip",
+        source=BASE_QUANTIFIED,
+        function="check",
+        find="ensures(forall i: u256 where i < x => i <= x)",
+        replace="ensures(forall i: u256 where i < x => i > x)",
+        reason="quantified postcondition no longer follows for values below x",
+    ),
+)
+
+
+NEGATIVE_BUILD_CASES = (
+    NegativeBuildCase(
+        name="degraded_query_does_not_emit_artifact",
+        source="""\
+comptime const std = @import("std");
+
+contract DegradedMustNotSucceed {
+    storage var lock_count: u256 = 0;
+
+    pub fn incrementLock(n: u256)
+        requires n <= 32
+        ensures lock_count >= old(lock_count)
+    {
+        var acc: u256 = 1;
+        var i: u256 = 0;
+
+        while (i < n) {
+            if ((i % 3) == 0) {
+                acc = (acc * 2) + 1;
+            } else {
+                acc = acc + i;
+            }
+            i = i + 1;
+        }
+
+        lock_count = acc;
+    }
+}
+""",
+        reason="SMT degradation must fail closed and must not erase checks into bytecode",
+        expected_fragment="SMT encoding degraded",
+        covers=("DEGRADED-NO-ARTIFACT",),
+    ),
 )
 
 
@@ -124,8 +619,6 @@ def parse_args() -> argparse.Namespace:
 def compiler_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("ORA_Z3_TIMEOUT_MS", "10000")
-    env.pop("ORA_Z3_PARALLEL", None)
-    env.pop("ORA_Z3_WORKERS", None)
     return env
 
 
@@ -194,11 +687,88 @@ def run_case(case: MutationCase, compiler: pathlib.Path, tmpdir: pathlib.Path, t
     return True
 
 
+def emitted_hex_artifacts(artifact_dir: pathlib.Path) -> list[pathlib.Path]:
+    if not artifact_dir.exists():
+        return []
+    return sorted(artifact_dir.glob("**/*.hex"))
+
+
+def run_negative_build_case(
+    case: NegativeBuildCase,
+    compiler: pathlib.Path,
+    tmpdir: pathlib.Path,
+    timeout: int,
+) -> bool:
+    source_path = tmpdir / f"{case.name}.ora"
+    artifact_dir = tmpdir / f"{case.name}.artifacts"
+    source_path.write_text(case.source, encoding="utf-8")
+
+    result = run_verifier(compiler, source_path, artifact_dir, timeout)
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    if result.returncode == 0:
+        print(f"[fail] {case.name}: negative verification case unexpectedly built ({case.reason})", file=sys.stderr)
+        print(f"       file: {source_path}", file=sys.stderr)
+        return False
+    if case.expected_fragment not in combined_output:
+        print(f"[fail] {case.name}: failure did not mention {case.expected_fragment!r}", file=sys.stderr)
+        print_failure_output(result)
+        return False
+
+    hex_artifacts = emitted_hex_artifacts(artifact_dir)
+    if hex_artifacts:
+        print(f"[fail] {case.name}: failed verification still emitted hex artifacts", file=sys.stderr)
+        for artifact in hex_artifacts:
+            print(f"       artifact: {artifact}", file=sys.stderr)
+        return False
+
+    print(f"[pass] {case.name}: negative case rejected without bytecode")
+    return True
+
+
+def validate_required_s1_coverage(
+    cases: Iterable[MutationCase],
+    negative_cases: Iterable[NegativeBuildCase],
+) -> bool:
+    covered: dict[str, list[str]] = {key: [] for key in REQUIRED_S1_COVERAGE}
+    unknown: list[tuple[str, str]] = []
+
+    for case in cases:
+        for key in case.covers:
+            if key in covered:
+                covered[key].append(case.name)
+            else:
+                unknown.append((case.name, key))
+    for case in negative_cases:
+        for key in case.covers:
+            if key in covered:
+                covered[key].append(case.name)
+            else:
+                unknown.append((case.name, key))
+
+    ok = True
+    for case_name, key in unknown:
+        print(f"[fail] {case_name}: unknown required-S1 coverage key {key!r}", file=sys.stderr)
+        ok = False
+    for key, description in REQUIRED_S1_COVERAGE.items():
+        if not covered[key]:
+            print(f"[fail] missing required-S1 witness for {key}: {description}", file=sys.stderr)
+            ok = False
+
+    if ok:
+        joined = ", ".join(f"{key}={len(covered[key])}" for key in sorted(covered))
+        print(f"[pass] required S1 witness coverage: {joined}")
+    return ok
+
+
 def run_cases(cases: Iterable[MutationCase], compiler: pathlib.Path, timeout: int, keep_tmp: bool) -> int:
     if not compiler.exists() or not os.access(compiler, os.X_OK):
         print(f"error: compiler not found or not executable: {compiler}", file=sys.stderr)
         print("hint: run 'zig build' first", file=sys.stderr)
         return 2
+
+    cases = tuple(cases)
+    if not validate_required_s1_coverage(cases, NEGATIVE_BUILD_CASES):
+        return 1
 
     temp_context = tempfile.TemporaryDirectory(prefix="ora-mutation-")
     tmpdir = pathlib.Path(temp_context.name)
@@ -212,6 +782,10 @@ def run_cases(cases: Iterable[MutationCase], compiler: pathlib.Path, timeout: in
         for case in cases:
             total += 1
             if run_case(case, compiler, tmpdir, timeout):
+                passed += 1
+        for case in NEGATIVE_BUILD_CASES:
+            total += 1
+            if run_negative_build_case(case, compiler, tmpdir, timeout):
                 passed += 1
         failed = total - passed
         print()

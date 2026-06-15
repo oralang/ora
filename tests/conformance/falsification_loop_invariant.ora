@@ -1,0 +1,21 @@
+// Falsification pairing: the verifier discharges the loop postcondition
+// from the loop invariant, and this conformance spec executes the same path.
+contract FalsificationLoopInvariant {
+    storage var counter: u256 = 0;
+
+    pub fn countTo(n: u256)
+        requires(n <= 1000)
+        requires(counter == 0)
+        ensures(counter == n)
+    {
+        while (counter < n)
+            invariant(counter <= n)
+        {
+            counter = counter + 1;
+        }
+    }
+
+    pub fn get() -> u256 {
+        return counter;
+    }
+}

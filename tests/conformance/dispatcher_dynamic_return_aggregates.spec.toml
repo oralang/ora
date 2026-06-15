@@ -1,0 +1,18 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "echoValues(uint256[])"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [[5, 8, 13]]
+returns = { uint256[] = [5, 8, 13] }
+
+[[call]]
+fn = "echoQuote((uint256,string))"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["(7,ora)"]
+returns = { (uint256,string) = (7,ora) }

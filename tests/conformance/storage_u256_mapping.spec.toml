@@ -1,0 +1,60 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "get_score(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1]
+returns = { u256 = 0 }
+
+[[call.storage]]
+slot = "map(uint256,1,0)"
+value = 0
+
+[[call]]
+fn = "set_score(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 111]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint256,1,0)"
+value = 111
+
+[[call.storage]]
+slot = "map(uint256,0x100000000000000000000000000000000000000000000000007,0)"
+value = 0
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call]]
+fn = "set_score(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x100000000000000000000000000000000000000000000000007", 222]
+returns = {}
+
+[[call.storage]]
+slot = "map(uint256,1,0)"
+value = 111
+
+[[call.storage]]
+slot = "map(uint256,0x100000000000000000000000000000000000000000000000007,0)"
+value = 222
+
+[[call.storage]]
+slot = 0
+value = 0
+
+[[call]]
+fn = "get_score(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x100000000000000000000000000000000000000000000000007"]
+returns = { u256 = 222 }

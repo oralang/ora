@@ -1,0 +1,17 @@
+contract EventTopicCorpus {
+    log TransferV2(indexed from: address, indexed to: address, value: u256) {
+        pub const event_name = "Transfer";
+    }
+
+    pub fn transfer_topic() -> bytes32 {
+        return comptime {
+            @eventTopic(TransferV2);
+        };
+    }
+
+    pub fn transfer_topic_qualified() -> bytes32 {
+        return comptime {
+            @eventTopic(EventTopicCorpus.TransferV2);
+        };
+    }
+}

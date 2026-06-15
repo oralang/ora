@@ -111,8 +111,23 @@ zig build
 
 ### Testing
 
+The full pre-push bar is `zig build gate` (unit tests + tripwires + IR goldens +
+bytecode conformance + EVM tests + SMT corpus + LSP smoke). Every push must pass it
+**on the committed state** — install the hook that enforces this:
+
 ```bash
-# Run all tests
+ln -sf ../../scripts/pre-push-gate.sh .git/hooks/pre-push
+```
+
+The hook stashes uncommitted work, runs the gate against what you are actually
+pushing, and restores your tree. Bypassing it (`git push --no-verify`) is for
+emergencies only.
+
+```bash
+# Run the full pre-push bar
+zig build gate
+
+# Run all unit tests
 zig build test
 
 # Run compiler on an example

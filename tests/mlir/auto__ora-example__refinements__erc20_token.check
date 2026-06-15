@@ -18,4 +18,3 @@
 // CHECK-LABEL: func.func @getMinTransfer
 // CHECK-LABEL: func.func @getBalance
 // CHECK-LABEL: func.func @setBalance
-// CHECK-LABEL: func.func @executeTransfer

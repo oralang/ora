@@ -1,0 +1,29 @@
+struct Approval {
+    amount: u256;
+    nonce: u256;
+    flags: u256;
+}
+
+contract NestedMapStructStorageSmoke {
+    storage var approvals: map<address, map<address, Approval>>;
+
+    pub fn set(owner: address, spender: address, amount: u256, nonce: u256, flags: u256) {
+        approvals[owner][spender] = Approval { amount: amount, nonce: nonce, flags: flags };
+    }
+
+    pub fn set_nonce(owner: address, spender: address, nonce: u256) {
+        approvals[owner][spender].nonce = nonce;
+    }
+
+    pub fn get_amount(owner: address, spender: address) -> u256 {
+        return approvals[owner][spender].amount;
+    }
+
+    pub fn get_nonce(owner: address, spender: address) -> u256 {
+        return approvals[owner][spender].nonce;
+    }
+
+    pub fn get_flags(owner: address, spender: address) -> u256 {
+        return approvals[owner][spender].flags;
+    }
+}

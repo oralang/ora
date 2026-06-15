@@ -259,6 +259,17 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertAbiEncodeWithSelectorOp : public OpConversionPattern<ora::AbiEncodeWithSelectorOp>
+        {
+        public:
+            using OpConversionPattern<ora::AbiEncodeWithSelectorOp>::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::AbiEncodeWithSelectorOp op,
+                typename ora::AbiEncodeWithSelectorOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertExternalCallOp : public OpConversionPattern<ora::ExternalCallOp>
         {
         public:
@@ -588,16 +599,6 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
-        class FoldCondBrSameDestOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
         class NormalizeCondBrOperandsOp : public OpRewritePattern<sir::CondBrOp>
         {
         public:
@@ -605,36 +606,6 @@ namespace mlir
 
             LogicalResult matchAndRewrite(
                 sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldCondBrDoubleIsZeroOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldCondBrConstOp : public OpRewritePattern<sir::CondBrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::CondBrOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldBrToBrOp : public OpRewritePattern<sir::BrOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::BrOp op,
                 PatternRewriter &rewriter) const override;
         };
 

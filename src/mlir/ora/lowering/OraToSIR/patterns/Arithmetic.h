@@ -76,7 +76,7 @@ namespace mlir
         {
         public:
             ConvertLengthOp(const TypeConverter &converter, MLIRContext *ctx)
-                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 3, ctx) {}
 
             LogicalResult matchAndRewrite(
                 Operation *op,
@@ -88,6 +88,30 @@ namespace mlir
         {
         public:
             ConvertByteAtOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertConcatOp : public ConversionPattern
+        {
+        public:
+            ConvertConcatOp(const TypeConverter &converter, MLIRContext *ctx)
+                : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
+
+            LogicalResult matchAndRewrite(
+                Operation *op,
+                ArrayRef<Value> operands,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertSliceOp : public ConversionPattern
+        {
+        public:
+            ConvertSliceOp(const TypeConverter &converter, MLIRContext *ctx)
                 : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
 
             LogicalResult matchAndRewrite(
@@ -543,46 +567,6 @@ namespace mlir
                 mlir::arith::TruncIOp op,
                 typename mlir::arith::TruncIOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
-        };
-
-        class FoldRedundantBitcastOp : public OpRewritePattern<sir::BitcastOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::BitcastOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldEqSameOp : public OpRewritePattern<sir::EqOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::EqOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldIsZeroConstOp : public OpRewritePattern<sir::IsZeroOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::IsZeroOp op,
-                PatternRewriter &rewriter) const override;
-        };
-
-        class FoldEqConstOp : public OpRewritePattern<sir::EqOp>
-        {
-        public:
-            using OpRewritePattern::OpRewritePattern;
-
-            LogicalResult matchAndRewrite(
-                sir::EqOp op,
-                PatternRewriter &rewriter) const override;
         };
 
     } // namespace ora

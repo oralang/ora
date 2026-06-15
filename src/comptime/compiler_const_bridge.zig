@@ -1,34 +1,63 @@
 const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const comptime_eval = @import("mod.zig");
-const error_mod = @import("error.zig");
-const model = @import("../sema/model.zig");
+const ora_types = @import("ora_types");
+const units = @import("../units.zig");
 
 const BigInt = std.math.big.int.Managed;
-pub const ConstValue = model.ConstValue;
+const ConstValue = ora_types.ConstValue;
 pub const CtEnv = comptime_eval.CtEnv;
 pub const CtHeap = comptime_eval.CtHeap;
 pub const CtValue = comptime_eval.CtValue;
-const Evaluator = comptime_eval.Evaluator;
-const EvalResult = comptime_eval.EvalResult;
-const EvalMode = comptime_eval.EvalMode;
-const TryEvalPolicy = comptime_eval.TryEvalPolicy;
-const EvalBinaryOp = comptime_eval.BinaryOp;
-const EvalUnaryOp = comptime_eval.UnaryOp;
-const SourceSpan = error_mod.SourceSpan;
 
 pub fn parseIntegerLiteral(allocator: std.mem.Allocator, text: []const u8) !?ConstValue {
-    const base: u8 = if (std.mem.startsWith(u8, text, "0x")) 16 else if (std.mem.startsWith(u8, text, "0b")) 2 else 10;
-    const digits = if (base == 10) text else text[2..];
+    const parsed = (try parseIntegerLiteralParts(allocator, text)) orelse return null;
+    defer allocator.free(parsed.digits);
+
+    const base: u8 = if (std.mem.startsWith(u8, parsed.digits, "0x")) 16 else if (std.mem.startsWith(u8, parsed.digits, "0b")) 2 else 10;
+    if (parsed.unit_factor != 1 and base != 10) return null;
+    const digits = if (base == 10) parsed.digits else parsed.digits[2..];
     var value = BigInt.init(allocator) catch return null;
     value.setString(base, digits) catch return null;
+    if (parsed.unit_factor != 1) {
+        var factor = try BigInt.initSet(allocator, parsed.unit_factor);
+        var scaled = try BigInt.init(allocator);
+        try BigInt.mul(&scaled, &value, &factor);
+        value = scaled;
+    }
     return .{ .integer = value };
 }
 
-pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstValue) !?ConstValue {
-    if (value) |v| {
-        if (try tryEvalUnaryWithSharedEngine(allocator, op, v)) |shared| return shared;
+const IntegerLiteralParts = struct {
+    digits: []const u8,
+    unit_factor: u64,
+};
+
+fn parseIntegerLiteralParts(allocator: std.mem.Allocator, text: []const u8) !?IntegerLiteralParts {
+    var parts = std.mem.tokenizeAny(u8, std.mem.trim(u8, text, " \t\n\r"), " \t\n\r");
+    const digits_text = parts.next() orelse "";
+    const unit_text = parts.next();
+    if (parts.next() != null) return null;
+
+    const normalized = try removeUnderscores(allocator, digits_text);
+    errdefer allocator.free(normalized);
+    return .{
+        .digits = normalized,
+        .unit_factor = if (unit_text) |unit| units.etherUnitFactor(unit) orelse return null else 1,
+    };
+}
+
+fn removeUnderscores(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .{};
+    defer out.deinit(allocator);
+    for (text) |c| {
+        if (c == '_') continue;
+        try out.append(allocator, c);
     }
+    return out.toOwnedSlice(allocator);
+}
+
+pub fn evalUnary(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ?ConstValue) !?ConstValue {
     if (value) |v| {
         return switch (op) {
             .neg => switch (v) {
@@ -53,7 +82,6 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
     if (lhs == null or rhs == null) return null;
     const left = lhs.?;
     const right = rhs.?;
-    if (try tryEvalBinaryWithSharedEngine(allocator, op, left, right)) |shared| return shared;
     return switch (op) {
         .add => switch (left) {
             .string => |a| switch (right) {
@@ -86,22 +114,51 @@ pub fn evalBinary(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ?ConstVal
         }.apply),
         .bit_and => try evalIntInt(allocator, left, right, BigInt.bitAnd),
         .bit_or => try evalIntInt(allocator, left, right, BigInt.bitOr),
-        .bit_xor => try evalIntInt(allocator, left, right, BigInt.bitXor),
+        .bit_xor => switch (left) {
+            .fixed_bytes => try evalFixedBytesFixedBytes(allocator, left, right, xorByte),
+            else => try evalIntInt(allocator, left, right, BigInt.bitXor),
+        },
         .shl, .wrapping_shl => try evalShift(allocator, left, right, true),
         .shr, .wrapping_shr => try evalShift(allocator, left, right, false),
     };
 }
 
-pub fn wrapIntegerConstToType(allocator: std.mem.Allocator, value: ConstValue, integer: model.IntegerType) !?ConstValue {
+fn xorByte(a: u8, b: u8) u8 {
+    return a ^ b;
+}
+
+fn evalFixedBytesFixedBytes(
+    allocator: std.mem.Allocator,
+    lhs: ConstValue,
+    rhs: ConstValue,
+    comptime op: fn (u8, u8) u8,
+) !?ConstValue {
+    const left = switch (lhs) {
+        .fixed_bytes => |bytes| bytes,
+        else => return null,
+    };
+    const right = switch (rhs) {
+        .fixed_bytes => |bytes| bytes,
+        else => return null,
+    };
+    if (left.len != right.len) return null;
+    const out = try allocator.alloc(u8, left.len);
+    for (left, right, 0..) |a, b, index| {
+        out[index] = op(a, b);
+    }
+    return .{ .fixed_bytes = out };
+}
+
+pub fn wrapIntegerConstToType(allocator: std.mem.Allocator, value: ConstValue, integer: ora_types.IntegerType) !?ConstValue {
     return switch (value) {
         .integer => |integer_value| .{ .integer = try wrapIntegerToType(allocator, integer_value, integer) },
         else => null,
     };
 }
 
-pub fn wrapIntegerToType(allocator: std.mem.Allocator, value: BigInt, integer: model.IntegerType) !BigInt {
-    const bits = integer.bits orelse return cloneInteger(allocator, value);
-    const signed = integer.signed orelse return cloneInteger(allocator, value);
+pub fn wrapIntegerToType(allocator: std.mem.Allocator, value: BigInt, integer: ora_types.IntegerType) !BigInt {
+    const bits = integer.bits;
+    const signed = integer.signed;
     if (bits == 0) return BigInt.initSet(allocator, 0);
 
     var modulus = try BigInt.initSet(allocator, 1);
@@ -144,6 +201,10 @@ pub fn constEquals(lhs: ConstValue, rhs: ConstValue) bool {
             .address => |b| a == b,
             else => false,
         },
+        .fixed_bytes => |a| switch (rhs) {
+            .fixed_bytes => |b| std.mem.eql(u8, a, b),
+            else => false,
+        },
         .string => |a| switch (rhs) {
             .string => |b| std.mem.eql(u8, a, b),
             else => false,
@@ -165,13 +226,6 @@ fn negateInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
     var zero = try BigInt.initSet(allocator, 0);
     var result = try BigInt.init(allocator);
     try BigInt.sub(&result, &zero, &value);
-    return result;
-}
-
-fn cloneInteger(allocator: std.mem.Allocator, value: BigInt) !BigInt {
-    const zero = try BigInt.initSet(allocator, 0);
-    var result = try BigInt.init(allocator);
-    try BigInt.add(&result, &value, &zero);
     return result;
 }
 
@@ -299,69 +353,6 @@ pub fn positiveShiftAmount(value: BigInt) ?usize {
     return value.toInt(usize) catch null;
 }
 
-fn tryEvalUnaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.UnaryOp, value: ConstValue) !?ConstValue {
-    switch (op) {
-        .neg, .bit_not => switch (value) {
-            .integer => return null,
-            else => {},
-        },
-        else => {},
-    }
-
-    const eval_op = switch (op) {
-        .neg => EvalUnaryOp.neg,
-        .not_ => EvalUnaryOp.not,
-        .bit_not => EvalUnaryOp.bnot,
-        .try_ => return value,
-    };
-
-    const operand = try constToCtValue(value) orelse return null;
-    var env = CtEnv.init(allocator, .{});
-    defer env.deinit();
-    var evaluator = Evaluator.init(&env, EvalMode.must_eval, TryEvalPolicy.strict);
-    const result = evaluator.evalUnaryOp(eval_op, operand, zeroSpan());
-    return try evalResultToConstValue(allocator, result);
-}
-
-fn tryEvalBinaryWithSharedEngine(allocator: std.mem.Allocator, op: ast.BinaryOp, lhs: ConstValue, rhs: ConstValue) !?ConstValue {
-    const eval_op = switch (op) {
-        .add => EvalBinaryOp.add,
-        .sub => EvalBinaryOp.sub,
-        .mul => EvalBinaryOp.mul,
-        .pow => EvalBinaryOp.pow,
-        .div => EvalBinaryOp.div,
-        .mod => EvalBinaryOp.mod,
-        .wrapping_add => EvalBinaryOp.wadd,
-        .wrapping_sub => EvalBinaryOp.wsub,
-        .wrapping_mul => EvalBinaryOp.wmul,
-        .wrapping_pow => EvalBinaryOp.wpow,
-        .eq => EvalBinaryOp.eq,
-        .ne => EvalBinaryOp.neq,
-        .lt => EvalBinaryOp.lt,
-        .le => EvalBinaryOp.lte,
-        .gt => EvalBinaryOp.gt,
-        .ge => EvalBinaryOp.gte,
-        .bit_and => EvalBinaryOp.band,
-        .bit_or => EvalBinaryOp.bor,
-        .bit_xor => EvalBinaryOp.bxor,
-        .shl => EvalBinaryOp.shl,
-        .shr => EvalBinaryOp.shr,
-        .wrapping_shl => EvalBinaryOp.wshl,
-        .wrapping_shr => EvalBinaryOp.wshr,
-        .and_and => EvalBinaryOp.land,
-        .or_or => EvalBinaryOp.lor,
-    };
-
-    const left = try constToCtValue(lhs) orelse return null;
-    const right = try constToCtValue(rhs) orelse return null;
-
-    var env = CtEnv.init(allocator, .{});
-    defer env.deinit();
-    var evaluator = Evaluator.init(&env, EvalMode.must_eval, TryEvalPolicy.strict);
-    const result = evaluator.evalBinaryOp(eval_op, left, right, zeroSpan());
-    return try evalResultToConstValue(allocator, result);
-}
-
 pub fn constToCtValue(value: ConstValue) !?CtValue {
     return switch (value) {
         .integer => |integer| blk: {
@@ -371,26 +362,10 @@ pub fn constToCtValue(value: ConstValue) !?CtValue {
         },
         .boolean => |boolean| CtValue{ .boolean = boolean },
         .address => |address| CtValue{ .address = address },
+        .fixed_bytes => null,
         .string => null,
         .tuple => null,
     };
-}
-
-fn evalResultToConstValue(allocator: std.mem.Allocator, result: EvalResult) !?ConstValue {
-    return switch (result) {
-        .value => |value| switch (value) {
-            .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
-            .boolean => |boolean| .{ .boolean = boolean },
-            .address => |address| .{ .address = address },
-            else => null,
-        },
-        .runtime, .control => null,
-        .err => null,
-    };
-}
-
-fn zeroSpan() SourceSpan {
-    return .{ .line = 0, .column = 0, .length = 0 };
 }
 
 pub fn ctValueToConstValue(allocator: std.mem.Allocator, heap: ?*const CtHeap, value: CtValue) !?ConstValue {
@@ -398,6 +373,10 @@ pub fn ctValueToConstValue(allocator: std.mem.Allocator, heap: ?*const CtHeap, v
         .integer => |integer| .{ .integer = try BigInt.initSet(allocator, integer) },
         .boolean => |boolean| .{ .boolean = boolean },
         .address => |address| .{ .address = address },
+        .bytes_ref => |heap_id| blk: {
+            const actual_heap = heap orelse break :blk null;
+            break :blk .{ .fixed_bytes = try allocator.dupe(u8, actual_heap.getBytes(heap_id)) };
+        },
         .string_ref => |heap_id| blk: {
             const actual_heap = heap orelse break :blk null;
             break :blk .{ .string = try allocator.dupe(u8, actual_heap.getString(heap_id)) };

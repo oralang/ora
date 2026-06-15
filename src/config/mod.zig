@@ -34,6 +34,7 @@ pub const Target = struct {
     include_paths: []const []const u8,
     init_args: []InitArg,
     output_dir: ?[]const u8,
+    chain_id: ?u64,
 
     fn deinit(self: *Target, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
@@ -55,6 +56,7 @@ pub const Target = struct {
 pub const ProjectConfig = struct {
     schema_version: []const u8,
     compiler_output_dir: ?[]const u8,
+    compiler_chain_id: ?u64,
     compiler_init_args: []InitArg,
     targets: []Target,
 
@@ -102,6 +104,7 @@ const TargetBuilder = struct {
     include_paths: std.ArrayList([]const u8) = .{},
     init_args: std.ArrayList(InitArg) = .{},
     output_dir: ?[]const u8 = null,
+    chain_id: ?u64 = null,
 
     fn deinit(self: *TargetBuilder, allocator: std.mem.Allocator) void {
         if (self.name) |name| allocator.free(name);
@@ -130,6 +133,10 @@ const TargetBuilder = struct {
     fn setOutputDir(self: *TargetBuilder, allocator: std.mem.Allocator, output_dir: []const u8) void {
         if (self.output_dir) |old| allocator.free(old);
         self.output_dir = output_dir;
+    }
+
+    fn setChainId(self: *TargetBuilder, chain_id: u64) void {
+        self.chain_id = chain_id;
     }
 
     fn setIncludePaths(self: *TargetBuilder, allocator: std.mem.Allocator, include_paths: []const []const u8) ConfigError!void {
@@ -222,6 +229,7 @@ const TargetBuilder = struct {
             .include_paths = include_paths,
             .init_args = init_args,
             .output_dir = output_dir_copy,
+            .chain_id = self.chain_id,
         };
     }
 };
@@ -294,6 +302,16 @@ fn parseTomlStringArrayOwned(allocator: std.mem.Allocator, value: []const u8) Co
     }
     items.clearRetainingCapacity();
     return out;
+}
+
+fn parseTomlUnsigned(value: []const u8) ConfigError!u64 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return ConfigError.InvalidToml;
+    const digits = if (trimmed[0] == '"') blk: {
+        if (trimmed.len < 2 or trimmed[trimmed.len - 1] != '"') return ConfigError.InvalidToml;
+        break :blk trimmed[1 .. trimmed.len - 1];
+    } else trimmed;
+    return std.fmt.parseInt(u64, digits, 0) catch ConfigError.InvalidToml;
 }
 
 fn isAsciiIdentifierStart(ch: u8) bool {
@@ -391,6 +409,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
     errdefer if (schema_version) |schema| allocator.free(schema);
     var compiler_output_dir: ?[]const u8 = null;
     errdefer if (compiler_output_dir) |output_dir| allocator.free(output_dir);
+    var compiler_chain_id: ?u64 = null;
     var compiler_init_args = allocator.alloc(InitArg, 0) catch return ConfigError.OutOfMemory;
     errdefer {
         for (compiler_init_args) |*arg| arg.deinit(allocator);
@@ -521,6 +540,8 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                     const parsed = try parseTomlStringOwned(allocator, value);
                     if (compiler_output_dir) |old| allocator.free(old);
                     compiler_output_dir = parsed;
+                } else if (std.mem.eql(u8, key, "chain_id")) {
+                    compiler_chain_id = try parseTomlUnsigned(value);
                 } else if (std.mem.eql(u8, key, "init_args")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -569,6 +590,8 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
                 } else if (std.mem.eql(u8, key, "output_dir")) {
                     const parsed = try parseTomlStringOwned(allocator, value);
                     current.setOutputDir(allocator, parsed);
+                } else if (std.mem.eql(u8, key, "chain_id")) {
+                    current.setChainId(try parseTomlUnsigned(value));
                 } else if (std.mem.eql(u8, key, "include_paths")) {
                     const parsed = try parseTomlStringArrayOwned(allocator, value);
                     defer {
@@ -623,6 +646,7 @@ pub fn loadProjectConfigFile(allocator: std.mem.Allocator, config_path: []const 
     return .{
         .schema_version = schema,
         .compiler_output_dir = compiler_output_dir,
+        .compiler_chain_id = compiler_chain_id,
         .compiler_init_args = compiler_init_args,
         .targets = targets,
     };

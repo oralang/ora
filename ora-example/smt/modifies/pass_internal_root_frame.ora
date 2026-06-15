@@ -1,0 +1,17 @@
+contract V {
+    storage var stable: u256 = 7;
+    storage var touched: u256 = 0;
+
+    fn bump(next: u256)
+        modifies touched
+    {
+        touched = next;
+    }
+
+    pub fn f(next: u256) -> bool
+        ensures(stable == old(stable))
+    {
+        bump(next);
+        return true;
+    }
+}

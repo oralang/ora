@@ -10,6 +10,6 @@
 // CHECK-LABEL: func.func @provenInRange
 // CHECK-LABEL: func.func @runtimeInRange
 // CHECK-LABEL: func.func @provenExact
-// CHECK-LABEL: func.func @runtimeExact
+// CHECK-LABEL: func.func @checkedExact
 // CHECK-LABEL: func.func @scaledAdd
 // CHECK-LABEL: func.func @scaledMul

@@ -1,0 +1,13 @@
+contract ChainIdCorpus {
+    pub fn configured_chain() -> u256 {
+        return comptime {
+            @chainId();
+        };
+    }
+
+    pub fn local_only() -> bool {
+        return comptime {
+            @chainId() == 31337;
+        };
+    }
+}

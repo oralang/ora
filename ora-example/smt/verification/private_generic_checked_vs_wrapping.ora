@@ -5,11 +5,15 @@
 
 comptime const std = @import("std");
 contract PrivateGenericCheckedVsWrapping {
-    fn add(comptime T: type, a: T, b: T) -> T {
+    fn add(comptime T: type, a: T, b: T) -> T
+        requires a <= std.constants.U256_MAX - b
+    {
         return a + b;
     }
 
-    fn sub(comptime T: type, a: T, b: T) -> T {
+    fn sub(comptime T: type, a: T, b: T) -> T
+        requires a >= b
+    {
         return a - b;
     }
 

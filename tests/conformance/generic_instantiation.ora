@@ -1,0 +1,21 @@
+contract GenericInstantiation {
+    fn pick(comptime T: type, a: T, b: T) -> T {
+        if (a > b) {
+            return a;
+        } else {
+            return b;
+        }
+    }
+
+    pub fn max_u256(x: u256, y: u256) -> u256 {
+        return pick(u256, x, y);
+    }
+
+    pub fn max_u8(x: u8, y: u8) -> u8 {
+        return pick(u8, x, y);
+    }
+
+    pub fn folded() -> u256 {
+        return pick(u256, 10, 20);
+    }
+}

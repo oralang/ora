@@ -1,0 +1,11 @@
+comptime const std = @import("std");
+
+contract RequiresAsProofAssumption {
+    pub fn g(a: NonZeroAddress) -> bool
+        requires a == std.msg.sender()
+        ensures result == true
+    {
+        let s: NonZeroAddress = std.msg.sender();
+        return s == a;
+    }
+}

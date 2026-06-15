@@ -1,0 +1,7 @@
+contract AbiDecodeConstructorBoolSliceRevert {
+    storage var touched: u256 = 0;
+
+    pub fn init(flags: slice[bool]) {
+        touched = 9;
+    }
+}

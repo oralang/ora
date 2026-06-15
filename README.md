@@ -57,21 +57,22 @@ properties below and fails closed when it cannot model a proof soundly.
 
 ## Verification capabilities
 
-| Capability | Current status |
-|------------|----------------|
-| Checked arithmetic overflow/underflow | Proved for modeled paths |
-| Division/remainder by zero | Proved as explicit safety obligations |
-| Closed refinement lexicon | Proven or kept as runtime guards |
-| Function contracts | `requires`, `ensures`, `assert`, and contract invariants are SMT obligations |
-| `old()` | Function-entry snapshot, including loop invariants; call summaries rebind to call-site state |
-| Storage frames | Proved for resolved callees and known write sets |
-| Unresolved state-changing external calls | Fail closed / degrade; never silently preserve storage |
-| Unresolved `staticcall` | Modeled as no-write with opaque return values |
-| Effectful loops | Supported when supplied invariants prove body safety and post-state obligations |
-| Runtime `keccak256` | Deterministic uninterpreted function; no collision-resistance axiom |
-| Precompiles | Encoder boundary only; cryptographic semantics, gas, and failure behavior not proved |
-| Bytecode equivalence | Not yet proven end-to-end against emitted EVM bytecode |
-| Reentrancy | `@lock` is checked by sema/effects, separate from SMT |
+| Capability | Evidence | Boundary |
+|------------|----------|----------|
+| Checked arithmetic overflow/underflow | SMT-proved for modeled paths | Requires successful full verification |
+| Division/remainder by zero | SMT-proved as explicit safety obligations | Same modeled-path boundary |
+| Closed refinement lexicon | SMT-proved or kept as runtime guards | User-defined arbitrary predicates are not extensible refinements |
+| Function contracts | `requires`, `ensures`, `assert`, and invariants become SMT obligations | Proof strength depends on supplied specs and invariants |
+| `old()` | Function-entry snapshot, including loop invariants and call-summary rebinding | Not a loop-entry snapshot unless the program stores one explicitly |
+| Effectful loops | SMT-proved when invariants establish entry, step, body safety, and post-state use | Missing invariants fail proof instead of implying induction |
+| Storage frames for known code | SMT-proved for resolved callees and known write sets | Unknown writes are not silently ignored |
+| Trusted extern summaries | SMT uses explicit `staticcall fn` summaries and framed `call fn` summaries | Trusted boundary; unannotated state-changing calls fail closed |
+| Unresolved `staticcall` | SMT models no-write with opaque return values | No semantic facts about returned values without a summary |
+| Runtime `keccak256` in SMT | Deterministic uninterpreted function | No collision-resistance or cryptographic axiom |
+| Precompiles | Encoder boundary only | Cryptographic semantics, gas, failure, and exceptional behavior are not proved |
+| Storage-layout bytecode behavior | Nightly deployed-bytecode smoke covers common scalar, mapping, slice, struct, packed, nested, and multi-contract shapes | Not a formal proof that every SMT state transition matches emitted bytecode |
+| Multi-contract runtime behavior | Deployed-bytecode smoke covers namespace isolation, returns, catches, reverts, and OOG call failure slices | Caller SMT proof remains separate from unresolved concrete callee execution |
+| Reentrancy | `@lock` is checked by sema/effects | Separate from SMT theorem proving |
 
 See [`website/docs/compiler/what-ora-proves.md`](website/docs/compiler/what-ora-proves.md)
 for the full soundness model.
@@ -238,6 +239,11 @@ Environment variables for tuning:
 `--no-verify` are soundness-reducing escape hatches. Their reports must not be
 treated as fully verified.
 
+SMT reports expose structured `soundness_losses` and `precision_notes`.
+`soundness_loss_cap_exceeded` and `precision_note_cap_exceeded` are truncation
+markers, not additional independent findings: they mean the bounded report list
+filled and later entries were omitted.
+
 ## Advanced MLIR controls
 
 ```bash
@@ -268,22 +274,74 @@ Stage names: `lowering`, `custom-pipeline`, `canonicalize`, `ora-to-sir`, `sir-l
 
 ## Development
 
-Run tests:
-```bash
-zig build test
-```
+### Testing
 
-Validate examples:
-```bash
-./scripts/validate-examples.sh
-```
+`zig build gate` is the single bar — it runs the full pre-push suite in dependency
+order, and the pre-push hook runs it on your committed state. The tables below show
+what it's made of, the order to run things by hand, and how to regenerate the
+golden/baseline files.
 
-End-to-end CLI checks:
-```bash
-./scripts/run-cli-command-checks.sh
-```
+#### Test frameworks in use
 
-Generate Ora-to-SIR coverage report:
+| Framework | Used for | Requirement |
+|---|---|---|
+| **Zig test runner** (`zig build test*`) | Unit tests, compiler core, LSP suites, `lib/evm` | Zig 0.15.2 |
+| **Zig check binaries** (`zig build check-*`) | Static invariant tripwires (no-width-defaults, op-null fallbacks, coverage, etc.) | Zig |
+| **In-process `lib/evm`** (`test-conformance`) | Executing emitted bytecode against `.spec.toml` oracles | bundled (no external EVM) |
+| **LLVM `FileCheck`** (`check-mlir-*`, `check-sir-text`) | Golden MLIR/SIR snapshots | `FileCheck` on PATH or `FILECHECK=/path/to/FileCheck` |
+| **Python 3** (`scripts/*.py`) | Golden generation, coverage/ledger/corpus checks, metrics diff, differential | `python3` |
+| **Foundry** (`scripts/anvil-diff-corpus.sh`) | Anvil/revm differential (optional, nightly) | `anvil` + `cast` |
+
+> Append `-Dskip-mlir=true` to reuse prebuilt MLIR libs and skip the slow rebuild —
+> safe unless you changed `src/mlir/**` (`.cpp`/`.td`), which needs a full `zig build`.
+
+#### Run order (fast → comprehensive)
+
+Run top-to-bottom; stop at the first failure. `zig build gate` does all of this for you.
+
+| # | Step | Command | Framework |
+|---|---|---|---|
+| 1 | Build | `zig build -Dskip-mlir=true` (or full `zig build` if `src/mlir/**` changed) | Zig |
+| 2 | Format + lint | `zig fmt --check src/` · `zig build check-verifier-introspection check-refinement-registry-sync check-lock-guarding` | Zig |
+| 3 | Unit tests + static tripwires | `zig build test` | Zig |
+| 4 | Execution conformance + EVM | `zig build test-conformance test-evm` | Zig + `lib/evm` |
+| 5 | Golden snapshots | `zig build check-mlir-ora check-mlir-sir check-sir-text` | Zig + **FileCheck** |
+| 6 | Invariant corpora | `zig build check-negative-corpus check-findings-ledger check-verifier-mutations check-smt-modifies-corpus` | Zig + Python |
+| 7 | LSP smoke | `zig build lsp-smoke` | Zig |
+| 8 | **Everything (the bar)** | `zig build gate` | all of the above |
+
+#### Generating / updating check & baseline files
+
+Regenerate after an **intentional** change, and review the diff before committing.
+
+| Artifact | Regenerate with | Framework |
+|---|---|---|
+| Ora MLIR goldens (`tests/mlir/*.check`) | `python3 scripts/generate-mlir-auto-checks.py` | Python (+ ora binary) |
+| SIR MLIR goldens (`tests/mlir_sir/*.check`) | `python3 scripts/generate-sir-auto-checks.py --refresh` | Python (+ ora binary) |
+| Gas + bytecode-size baseline | `zig build metrics-snapshot` then `python3 scripts/metrics-check.py --update` | Zig + Python |
+| Compiler-speed baseline (frontend→HIR) | `zig build compile-metrics` then `python3 scripts/compile-metrics-check.py --update` | Zig + Python |
+
+#### Targeted / fast subsets
+
+| Command | What it runs |
+|---|---|
+| `zig build test-compiler -Dcompiler-test-filter="<substr>"` | Compiler core tests matching a name substring |
+| `zig build test-lexer` / `test-types` / `test-lsp` | Individual subsystem suites (lexer & lsp need no MLIR/Z3) |
+| `zig build conformance-one` then `./zig-out/bin/conformance-one <file.ora> <spec.toml>` | A single conformance spec on `lib/evm` |
+| `ora emit --metrics <file.ora>` | Per-phase compile-time metrics for one file |
+
+#### Metrics & differential (regression signals)
+
+| Command | What it does |
+|---|---|
+| `python3 scripts/metrics-check.py` | Gas/size diff vs baseline (per-category better/worse); `--check` exits 1 on drift |
+| `python3 scripts/compile-metrics-check.py` | Compiler-speed diff vs baseline (deterministic Tier-A); `--check` exits 1 on drift |
+| `bash scripts/anvil-diff-corpus.sh` | Cross-check `lib/evm` vs Anvil/revm over the corpus; fails only on a real divergence (needs Foundry) |
+
+### Other checks
+
 ```bash
-python3 scripts/generate_ora_to_sir_coverage.py
+./scripts/validate-examples.sh              # validate example programs
+./scripts/run-cli-command-checks.sh         # end-to-end CLI checks
+python3 scripts/generate_ora_to_sir_coverage.py   # Ora-to-SIR coverage report
 ```

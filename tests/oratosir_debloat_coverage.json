@@ -1,0 +1,407 @@
+{
+  "version": 1,
+  "description": "By-construction coverage map for OraToSIR conversion patterns. Every pattern listed here must have at least one executing test; high-churn patterns must also have at least one SIR golden.",
+  "ci_commands": [
+    "zig build check-oratosir-coverage",
+    "zig build check-mlir-sir",
+    "zig build check-sir-text",
+    "zig build test-conformance",
+    "zig build test-evm",
+    "zig build gate-oratosir-debloat"
+  ],
+  "patterns": [
+    {
+      "id": "dispatcher.selector_entry_and_public_decode",
+      "tier": "T5",
+      "area": "SIRDispatcher",
+      "conversion": "Public entry dispatcher construction, selector extraction/switch routing, calldata size/canonicality checks, public function icall, and return/revert routing",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/external_return_decode.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_refinement_e2e.check#fn main:",
+        "tests/sir_text/dispatcher_refinement_e2e.check#switch selector",
+        "tests/sir_text/dispatcher_refinement_e2e.check#icall @deposit a_deposit",
+        "tests/sir_text/dispatcher_refinement_e2e.check#abi_decode_revert_10"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_return_abi_encoding",
+      "tier": "T5",
+      "area": "SIRDispatcher",
+      "conversion": "Public dynamic return ABI encoding for string/bytes-style, dynamic array, and dynamic tuple dispatcher returns: offset word, length word, padded payload copy, tuple head/tail encoding, and returndata length",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/external_return_decode.spec.toml",
+        "tests/conformance/dispatcher_dynamic_return_aggregates.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_return.check#0x06FDDE03 => @name_",
+        "tests/sir_text/dispatcher_dynamic_return.check#mstore256 v[[RET_BUF]] v[[HEAD_OFFSET]]",
+        "tests/sir_text/dispatcher_dynamic_return.check#mcopy v[[DST]] v[[SRC]] v[[NAME_LEN]]",
+        "tests/sir_text/dispatcher_dynamic_return.check#return v[[RET_BUF]] v[[TOTAL_LEN]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#0xB09087C9 => @echoValues_",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#0x95987B51 => @echoQuote_",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mcopy v[[DST_PAYLOAD]] v[[SRC_PAYLOAD]] v[[PAYLOAD_BYTES]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mstore256 {{v[0-9]+}} v[[TUPLE_HEAD_BYTES]]",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mload256",
+        "tests/sir_text/dispatcher_dynamic_return_aggregates.check#mcopy {{v[0-9]+}} {{v[0-9]+}} v[[TAIL_PADDED_BYTES]]"
+      ]
+    },
+    {
+      "id": "dispatcher.fixed_bytes_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher fixed-bytes argument decode: left-aligned bytesN word mask, canonicality check, invalid-fixed-bytes revert, and payload passed to the user function",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata bool and address params before call",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#0x445D858C => @take_",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shr v4 a_take",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#shl v4 v5",
+        "tests/sir_text/dispatcher_fixed_bytes_arg_decode.check#abi_decode_revert_6"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_bytes_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher dynamic string/bytes argument decode: head offset, tail length, bounds checks, padded copy, null-padding validation, and user icall",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_string_arg.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#0x436A66E7 => @length_",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#large_const 0xFFFFFFFFFFFFFFFF",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#calldatacopy",
+        "tests/sir_text/dispatcher_dynamic_string_arg_decode.check#mload8"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_array_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher dynamic uint256[] argument decode: head offset, element count, max-count guard, byte-size calculation, bounds check, copy, and user icall",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_dynamic_array_arg.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#0x0194DB8E => @sum_",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#const 0x8000",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#mul v13",
+        "tests/sir_text/dispatcher_dynamic_array_arg_decode.check#calldatacopy"
+      ]
+    },
+    {
+      "id": "dispatcher.static_tuple_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher static tuple argument decode: tuple-sized calldata minimum, inline head copy into scratch storage, and tuple pointer passed to the user function",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#calldatacopy v5 selector_offset_0 v4"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#0xE18D95B8 => @first_",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#min_cdsize_2args_0 = const 0x43",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#sallocany 0x40",
+        "tests/sir_text/dispatcher_static_tuple_arg_decode.check#calldatacopy v5 selector_offset_0 v4"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_tuple_arg_decode",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher mixed dynamic tuple argument decode: outer tuple offset validation, nested dynamic string bounds/padding checks, pointer-backed tuple carrier materialization, and user call",
+      "high_churn": true,
+      "executing_tests": [
+        "src/compiler.test.oratosir.zig#compiler abiDecode N3b4 validates public calldata dynamic tuple params before call",
+        "tests/conformance/dispatcher_dynamic_tuple_arg.spec.toml",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#0x1B4C5F62 => @value_",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#calldatacopy",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#mstore256",
+        "tests/sir_text/dispatcher_dynamic_tuple_arg_decode.check#icall @value"
+      ]
+    },
+    {
+      "id": "dispatcher.error_union_revert_return",
+      "tier": "T4",
+      "area": "SIRDispatcher/ABI",
+      "conversion": "Public dispatcher error-union return conversion: internal error tag dispatch, ABI custom-error selector materialization, four-byte revert buffer, and revert",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/dispatcher_error_union_revert.spec.toml",
+        "tests/conformance/counter.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/dispatcher_error_union_revert_return.check#0xA9CC4718 => @fail_",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#const 0xFF7E9F57",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#large_const 0xFF7E9F5700000000000000000000000000000000000000000000000000000000",
+        "tests/sir_text/dispatcher_error_union_revert_return.check#sallocany 0x4"
+      ]
+    },
+    {
+      "id": "foundation.u256_boundary_and_bitcasts",
+      "tier": "T0",
+      "area": "LoweringHelpers",
+      "conversion": "U256 boundary coercion, redundant bitcast cleanup, SIR operand/result carrier normalization",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkAbiRoundtripProperty",
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check#sir.sdiv",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
+      ]
+    },
+    {
+      "id": "arithmetic.unsigned_wrapping",
+      "tier": "T1",
+      "area": "Arithmetic",
+      "conversion": "Unsigned wrapping add/sub/mul and word-width arithmetic lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__arithmetic_test.check#sir.add"
+      ]
+    },
+    {
+      "id": "arithmetic.signed_narrow",
+      "tier": "T1",
+      "area": "Arithmetic",
+      "conversion": "Signed narrow div/rem/compare/shr, sign extension, and truncation-preserving returns",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty",
+        "tests/conformance/storage_narrow_integer_mapping.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__signed_narrow_lowering.check#sir.sar",
+        "tests/mlir_sir/signed_arithmetic_lowering.check#sir.sdiv"
+      ]
+    },
+    {
+      "id": "abi.static_and_dynamic_values",
+      "tier": "T4",
+      "area": "AbiDecode/Encode",
+      "conversion": "Static scalar ABI words plus dynamic array and tuple head/tail encoding",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/root.zig#conformance arg encoder writes static ABI words",
+        "tests/conformance/root.zig#conformance arg encoder writes dynamic arrays and tuple aggregates",
+        "tests/conformance/properties.zig#checkAbiRoundtripProperty",
+        "tests/conformance/external_return_decode.spec.toml",
+        "tests/conformance/storage_dynamic_array.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
+      ]
+    },
+    {
+      "id": "abi.decode_wide_result_sink",
+      "tier": "T4",
+      "area": "AbiDecode",
+      "conversion": "Wide Result<T, AbiDecodeError> decode sink for full-word success payloads: explicit tag/payload carrier, Ok payload branch, and Err payload branch",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkSourceAbiEncodeRoundtripProperty",
+        "tests/conformance/external_return_decode.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/abi_decode_wide_result_sink.check#fn roundtrip:",
+        "tests/sir_text/abi_decode_wide_result_sink.check#v[[RT_OK_TAG]] = or",
+        "tests/sir_text/abi_decode_wide_result_sink.check#bb0 -> [[BAD_ONE]] [[BAD_ZERO]]",
+        "tests/sir_text/abi_decode_wide_result_sink.check#fn malformed:"
+      ]
+    },
+    {
+      "id": "error_union.storage_scalar_result_carrier",
+      "tier": "M4",
+      "area": "Storage/ErrorUnionEncoding",
+      "conversion": "Scalar Result storage carrier encoding: tag word at base slot, payload/error-id word at base+1, and storage-load tag/payload reconstruction",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/storage_result_scalar.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/storage_result_scalar.check#fn set_ok:",
+        "tests/sir_text/storage_result_scalar.check#const 0xFF7E9F57",
+        "tests/sir_text/storage_result_scalar.check#[[TAG:[A-Za-z_][A-Za-z0-9_]*]] = sload [[SAVED]]"
+      ]
+    },
+    {
+      "id": "error_union.memref_scalar_result_carrier",
+      "tier": "M4",
+      "area": "MemRef/ErrorUnionEncoding",
+      "conversion": "Scalar Result memref carrier encoding: two-word local carrier stores tag and payload separately, then reloads both words for match checks and payload extraction",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/result_memref_scalar.spec.toml",
+        "tests/conformance/result_memref_opaque.spec.toml",
+        "src/compiler.test.oratosir.zig#compiler stores opaque Result values into local Result memrefs through OraToSIR"
+      ],
+      "sir_goldens": [
+        "tests/sir_text/result_memref_scalar.check#fn run:",
+        "tests/sir_text/result_memref_scalar.check#alloc_size = const 0x80",
+        "tests/sir_text/result_memref_scalar.check#mstore256 elem5_ptr v1",
+        "tests/sir_text/result_memref_scalar.check#elem9 = mload256",
+        "tests/sir_text/result_memref_opaque.check#icall @choose",
+        "tests/sir_text/result_memref_opaque.check#mstore256 elem5_ptr v[[PAYLOAD]]",
+        "tests/sir_text/result_memref_opaque.check#elem9 = mload256"
+      ]
+    },
+    {
+      "id": "storage.scalar_map_nested",
+      "tier": "T0",
+      "area": "Storage",
+      "conversion": "Scalar storage, map keys, nested mappings, and storage slot derivation",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/storage_mapping.spec.toml",
+        "tests/conformance/storage_nested_mapping.spec.toml",
+        "tests/conformance/storage_triple_nested_mapping.spec.toml",
+        "tests/conformance/properties.zig#checkStorageProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check#ora.global_slots",
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_1.check#sir.sstore",
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_3.check#sir.keccak256"
+      ]
+    },
+    {
+      "id": "storage.struct_bitfield",
+      "tier": "T0",
+      "area": "Storage",
+      "conversion": "Struct, struct-in-map, bitfield, custom bitfield, and fixed-bytes map storage lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/storage_struct.spec.toml",
+        "tests/conformance/storage_map_struct.spec.toml",
+        "tests/conformance/storage_bitfield.spec.toml",
+        "tests/conformance/storage_custom_bitfield.spec.toml",
+        "tests/conformance/storage_map_bitfield.spec.toml",
+        "tests/conformance/storage_fixed_bytes_mapping.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__storage__storage_test_3.check#sir.sstore",
+        "tests/mlir_sir/auto__ora-example__expressions__fixed_bytes_return.check#ora.abi_return = \"bytes4\""
+      ]
+    },
+    {
+      "id": "memory.regions_memref",
+      "tier": "T0",
+      "area": "MemRef",
+      "conversion": "Memory, storage, tstore, calldata region coercions and MemRef-style pointer lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkStorageProperty",
+        "tests/conformance/storage_dynamic_array.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__memory__basic_memory.check#sir.malloc",
+        "tests/mlir_sir/auto__ora-example__regions__coercions__implicit_storage_to_stack.check#sir.sload",
+        "tests/mlir_sir/auto__ora-example__regions__region_ok_memory_to_storage.check#sir.sstore"
+      ]
+    },
+    {
+      "id": "evm.nullary_environment",
+      "tier": "T2",
+      "area": "EVM",
+      "conversion": "Nullary environment operations such as caller/sender and block context",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/environment_log.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log1"
+      ]
+    },
+    {
+      "id": "logs.events",
+      "tier": "T2",
+      "area": "Logs",
+      "conversion": "Event/log declaration and emission lowering, including zero-topic and indexed forms",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/environment_log.spec.toml"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__logs__log_smoke.check#sir.log1",
+        "tests/mlir_sir/auto__ora-example__logs__log_ok_indexed.check#sir.log1"
+      ]
+    },
+    {
+      "id": "control_flow.loops_switch",
+      "tier": "T3",
+      "area": "ControlFlow",
+      "conversion": "If/loop/break/continue/switch expression and case lowering",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkArithmeticProperty",
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__control_flow__basic_control_flow.check#func.func @testIf",
+        "tests/mlir_sir/auto__ora-example__control_flow__break_continue.check#func.func @test_breaks_continues",
+        "tests/mlir_sir/auto__ora-example__switch__switch_test.check#sir.cond_br"
+      ]
+    },
+    {
+      "id": "control_flow.error_union",
+      "tier": "T3",
+      "area": "ControlFlow",
+      "conversion": "Error-union pack/split/tag propagation, try/catch, and terminator normalization",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__errors__error_union_encoding.check#returns_error_union = true",
+        "tests/mlir_sir/auto__ora-example__errors__try_catch.check#func.func @test_try_catch"
+      ]
+    },
+    {
+      "id": "adt.enum_carrier",
+      "tier": "T3",
+      "area": "AdtCarrier",
+      "conversion": "Enum/ADT carrier construction, tag extraction, payload projection, and switch use",
+      "high_churn": true,
+      "executing_tests": [
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__enums__enum_usage_test.check#sir.load"
+      ]
+    },
+    {
+      "id": "naming.attributes_and_symbols",
+      "tier": "T0",
+      "area": "Naming",
+      "conversion": "Function names, selectors, ABI attributes, visibility, and generated symbol stability",
+      "high_churn": false,
+      "executing_tests": [
+        "tests/conformance/counter.spec.toml",
+        "tests/conformance/root.zig#conformance corpus specs execute"
+      ],
+      "sir_goldens": [
+        "tests/mlir_sir/auto__ora-example__storage__basic_storage.check#ora.global_slots"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+// Events depth: a multi-field event with topic0 plus ABI-packed data.
+contract EventsMultifield {
+    log Recorded(who: address, amount: u256);
+
+    pub fn record(who: address, amount: u256) {
+        log Recorded(who, amount);
+    }
+}

@@ -1,0 +1,78 @@
+# Requires are runtime-enforced.
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "add(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [1, 2]
+returns = { u256 = 3 }
+
+# Violated requires reverts.
+[[call]]
+fn = "add(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [2000000, 1]
+reverts = { any = true }
+
+[[call]]
+fn = "add(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 1]
+reverts = {}
+
+# Constant-like operands must keep the checked-add revert after canonicalization.
+[[call]]
+fn = "constant_add_overflow()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = {}
+
+# Violated requires reverts before EVM div-by-zero semantics.
+[[call]]
+fn = "div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 0]
+reverts = { any = true }
+
+[[call]]
+fn = "div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [7, 2]
+returns = { u256 = 3 }
+
+[[call]]
+fn = "call_private_div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [8, 2]
+returns = { u256 = 4 }
+
+[[call]]
+fn = "call_private_div(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [8, 0]
+reverts = { any = true }
+
+[[call]]
+fn = "ordered_requires(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [18, 2]
+returns = { u256 = 9 }
+
+[[call]]
+fn = "ordered_requires(uint256,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [18, 0]
+reverts = { any = true }

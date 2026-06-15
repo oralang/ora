@@ -74,8 +74,8 @@ namespace
                         std::string n = nameAttr.getValue().str();
                         if (!n.empty())
                         {
-                            // Allow consts to reuse explicit names across blocks
-                            // only if they share the same value attribute.
+                            // Sensei locals are block-scoped. Explicit const
+                            // names can only be reused within the same block.
                             if (auto cOp = dyn_cast<sir::ConstOp>(def))
                             {
                                 auto existing = constNames.find(n);
@@ -86,10 +86,16 @@ namespace
                                     usedNames.insert(n);
                                     return n;
                                 }
-                                // Same name already registered — reuse only if same value.
+                                // Same name already registered: reuse only for
+                                // an earlier const in this block. Sensei locals
+                                // are block-scoped, so sharing a const name
+                                // across blocks emits a reference to a local
+                                // that is not in scope.
                                 if (auto prevConst = existing->second.getDefiningOp<sir::ConstOp>())
                                 {
-                                    if (prevConst.getValueAttr() == cOp.getValueAttr())
+                                    if (prevConst.getValueAttr() == cOp.getValueAttr() &&
+                                        prevConst->getBlock() == def->getBlock() &&
+                                        prevConst->isBeforeInBlock(def))
                                     {
                                         valueNames[v] = n;
                                         return n;
@@ -528,17 +534,11 @@ namespace
             std::string t = names.allocateName("sel_t");
             std::string inv = names.allocateName("sel_inv");
             std::string f = names.allocateName("sel_f");
-            // Reuse existing zero const or emit one.
-            std::string zero;
-            std::string zeroKey = formatConstKey(APInt(256, 0));
-            auto zIt = names.constNames.find(zeroKey);
-            if (zIt != names.constNames.end())
-                zero = names.nameFor(zIt->second);
-            else
-            {
-                zero = names.allocateName("sel_zero");
-                os << zero << " = const 0x0\n" << ind;
-            }
+            // Select expansion may be emitted inside CFG blocks. Emit a local
+            // zero so the generated text never references a const from a
+            // sibling block that does not dominate this select.
+            std::string zero = names.allocateName("sel_zero");
+            os << zero << " = const 0x0\n" << ind;
             // mask = 0 - cond  (0→0, 1→0xFF..FF)
             os << mask << " = sub " << zero << " " << condN << "\n" << ind;
             os << t << " = and " << mask << " " << trueN << "\n" << ind;
@@ -662,7 +662,7 @@ namespace
         }
     }
 
-    static Value peelBitcast(Value v)
+    static Value peelBitcast(Value v, Block *scope = nullptr)
     {
         while (auto *def = v.getDefiningOp())
         {
@@ -670,7 +670,14 @@ namespace
             {
                 if (def->getNumOperands() == 1)
                 {
-                    v = bitcast.getOperand();
+                    Value operand = bitcast.getOperand();
+                    if (scope)
+                    {
+                        Operation *operandDef = operand.getDefiningOp();
+                        if (!operandDef || operandDef->getBlock() != scope)
+                            break;
+                    }
+                    v = operand;
                     continue;
                 }
             }
@@ -689,7 +696,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(br.getDestOperands().size());
             for (Value v : br.getDestOperands())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         if (auto br = dyn_cast<sir::CondBrOp>(term))
@@ -697,7 +704,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(br.getTrueOperands().size());
             for (Value v : br.getTrueOperands())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         if (auto iret = dyn_cast<sir::IRetOp>(term))
@@ -705,7 +712,7 @@ namespace
             SmallVector<Value, 8> out;
             out.reserve(iret.getValues().size());
             for (Value v : iret.getValues())
-                out.push_back(peelBitcast(v));
+                out.push_back(peelBitcast(v, &block));
             return out;
         }
         return {};
@@ -742,6 +749,9 @@ namespace
         SmallVector<Block *, 16> blocks;
         for (Block &block : func.getBlocks())
         {
+            const bool isFirstBlock = first;
+            first = false;
+
             std::string blockName;
             if (!block.empty())
             {
@@ -751,10 +761,9 @@ namespace
 
             if (blockName.empty())
             {
-                if (first)
+                if (isFirstBlock)
                 {
                     blockName = "entry";
-                    first = false;
                 }
                 else
                 {
@@ -1013,6 +1022,9 @@ namespace mlir
                 unsigned bbId = 0;
                 for (Block &block : func.getBlocks())
                 {
+                    const bool isFirstBlock = first;
+                    first = false;
+
                     std::string blockName;
                     if (!block.empty())
                     {
@@ -1021,10 +1033,9 @@ namespace mlir
                     }
                     if (blockName.empty())
                     {
-                        if (first)
+                        if (isFirstBlock)
                         {
                             blockName = "entry";
-                            first = false;
                         }
                         else
                         {
@@ -1119,9 +1130,10 @@ namespace mlir
 
                 if (isa<sir::SelectOp>(op))
                 {
-                    std::string zeroKey = formatConstKey(APInt(256, 0));
-                    bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                    uint32_t expandCount = needsZero ? 6 : 5;
+                    // emitOperationText always emits a local sel_zero for select expansion
+                    // so the source-map expansion count must remain six even if another
+                    // zero const already exists in the block.
+                    uint32_t expandCount = 6;
                     for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                     {
                         callback(opIndex, op, func, block, names, true, expandIdx, expandCount);
@@ -1213,7 +1225,7 @@ namespace mlir
             // CRITICAL: The op indexing must exactly match the serialized backend
             // execution order used by Sensei source-map emission. Skipped ops
             // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too,
-            // and expanded ops (SelectOp -> 5-6 SIR ops) must produce matching
+            // and expanded ops (SelectOp -> 6 SIR ops) must produce matching
             // synthetic indices. The separate line map ties these backend indices
             // back to textual .sir lines.
 
@@ -1499,9 +1511,9 @@ namespace mlir
 
                         if (isa<sir::SelectOp>(op))
                         {
-                            std::string zeroKey = formatConstKey(APInt(256, 0));
-                            bool needsZero = (names.constNames.find(zeroKey) == names.constNames.end());
-                            uint32_t expandCount = needsZero ? 6 : 5;
+                            // emitOperationText always emits a local sel_zero for select expansion
+                            // so textual line accounting must match that six-line shape.
+                            uint32_t expandCount = 6;
                             for (uint32_t expandIdx = 0; expandIdx < expandCount; ++expandIdx)
                             {
                                 textLineByOp[{&op, expandIdx}] = currentLine;

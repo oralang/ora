@@ -19,12 +19,16 @@ contract TryExpr {
         return x + 1;
     }
 
-    fn run(x: u256) -> !u256 {
+    fn run(x: u256) -> !u256
+        requires(x < std.constants.U256_MAX)
+    {
         let y: u256 = try mayFail(x);
         return y;
     }
 
-    pub fn main(x: u256) {
+    pub fn main(x: u256)
+        requires(x < std.constants.U256_MAX)
+    {
         try {
             run(x);
         } catch {

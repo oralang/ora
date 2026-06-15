@@ -1,3 +1,5 @@
+comptime const constants = @import("std/constants");
+
 error OutOfBounds;
 error InvalidLength;
 /// Returns true when the byte slice has length zero.
@@ -27,6 +29,28 @@ fn eq(a: bytes, b: bytes) -> bool {
         i += 1;
     }
     return true;
+}
+/// Concatenates two byte slices into a newly allocated byte slice.
+///
+/// Requires the combined payload plus the dynamic-bytes length header to fit in
+/// `u256`.
+fn concat(a: bytes, b: bytes) -> bytes
+    requires(b.len <= constants.U256_MAX - 32)
+    requires(a.len <= constants.U256_MAX - 32 - b.len)
+{
+    return @concat(a, b);
+}
+/// Copies `length` bytes from `data` starting at `start` into a new byte slice.
+///
+/// Requires `start <= data.len` and `length <= data.len - start`; the builtin
+/// emits a verifier/runtime assertion for this bound before copying.
+/// String slicing uses the same builtin at byte granularity; it does not
+/// preserve UTF-8 codepoint boundaries.
+fn slice(data: bytes, start: u256, length: u256) -> bytes
+    requires(start <= data.len)
+    requires(length <= data.len - start)
+{
+    return @slice(data, start, length);
 }
 /// Decodes a 32-byte big-endian slice into a `u256`.
 ///

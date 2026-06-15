@@ -20,10 +20,12 @@ const Solver = @import("solver.zig").Solver;
 const Encoder = @import("encoder.zig").Encoder;
 const errors = @import("errors.zig");
 const mlir_helpers = @import("mlir_helpers.zig");
+const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
 
 pub const AnnotationKind = enum {
     Requires, // Function precondition
+    CalleePrecondition, // Call-site proof of a callee precondition
     Ensures, // Function postcondition
     Guard, // Runtime-enforced precondition / guard clause
     LoopInvariant, // Loop invariant
@@ -106,6 +108,7 @@ pub const SmtReportArtifacts = struct {
 pub const VerificationPass = struct {
     pub const InitOptions = struct {
         proofs_enabled: ?bool = null,
+        max_summary_inline_depth: ?u32 = null,
     };
 
     const SwitchCaseMetadata = struct {
@@ -163,6 +166,11 @@ pub const VerificationPass = struct {
     current_function_name: ?[]const u8 = null,
     /// Whether the current function should produce top-level verification queries.
     current_function_verify_enabled: bool = true,
+    /// Function bodies that are reachable from runtime entrypoints in the
+    /// lowered artifact. Folded comptime-only helper bodies can still be present
+    /// in MLIR, but they are not runtime verification targets unless a reachable
+    /// function calls them.
+    runtime_reachable_function_names: std.StringHashMap(void),
 
     /// Encoded annotations collected from MLIR
     encoded_annotations: ManagedArrayList(EncodedAnnotation),
@@ -189,14 +197,7 @@ pub const VerificationPass = struct {
     }
 
     pub fn initWithOptions(allocator: std.mem.Allocator, options: InitOptions) !VerificationPass {
-        const proofs_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PROOFS") catch null;
-        defer if (proofs_env) |val| allocator.free(val);
-        const proofs_enabled = if (options.proofs_enabled) |enabled|
-            enabled
-        else if (proofs_env) |val|
-            try parseBoolEnv(val)
-        else
-            false;
+        const proofs_enabled = options.proofs_enabled orelse false;
 
         var context = try allocator.create(Context);
         errdefer allocator.destroy(context);
@@ -211,26 +212,11 @@ pub const VerificationPass = struct {
 
         var encoder = Encoder.init(context, allocator);
         const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
-        const debug_z3 = debug_env != null;
-        if (debug_env) |val| allocator.free(val);
-
-        const trace_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TRACE") catch null;
-        const trace_smt = if (trace_env) |val| blk: {
+        const debug_options = if (debug_env) |val| blk: {
             defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
-
-        const trace_smtlib_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TRACE_SMTLIB") catch null;
-        const trace_smtlib = if (trace_smtlib_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
-
-        const phase_debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PHASE_DEBUG") catch null;
-        const phase_debug = if (phase_debug_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
+            break :blk try parseZ3DebugEnv(val);
+        } else Z3DebugEnvOptions{};
+        encoder.setDebugAssertSimplify(debug_options.assert_simplify);
 
         const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
         var timeout_ms: ?u32 = 60_000;
@@ -246,56 +232,15 @@ pub const VerificationPass = struct {
             allocator.free(val);
         }
 
-        const parallel_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_PARALLEL") catch null;
-        if (parallel_env) |val| {
+        const summary_depth_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH") catch null;
+        const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
+            depth
+        else if (summary_depth_env) |val| blk: {
             defer allocator.free(val);
-            if (try parseBoolEnv(val)) return error.UnsupportedOperation;
-        }
+            break :blk try std.fmt.parseInt(u32, val, 10);
+        } else encoder.max_summary_inline_depth;
 
-        const workers_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_WORKERS") catch null;
-        if (workers_env) |val| {
-            allocator.free(val);
-            return error.UnsupportedOperation;
-        }
-
-        const verify_mode_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MODE") catch null;
-        const verify_mode = if (verify_mode_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseVerifyMode(val);
-        } else .Full;
-
-        const verify_calls_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_CALLS") catch null;
-        const verify_calls = if (verify_calls_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else true;
-
-        const verify_state_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_STATE") catch null;
-        const verify_state = if (verify_state_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else true;
-
-        const verify_stats_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_STATS") catch null;
-        const verify_stats = if (verify_stats_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
-
-        const explain_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_EXPLAIN") catch null;
-        const explain_cores = if (explain_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
-
-        const minimize_cores_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_MINIMIZE_CORES") catch null;
-        const minimize_cores = if (minimize_cores_env) |val| blk: {
-            defer allocator.free(val);
-            break :blk try parseBoolEnv(val);
-        } else false;
-
-        encoder.setVerifyCalls(verify_calls);
-        encoder.setVerifyState(verify_state);
+        encoder.max_summary_inline_depth = max_summary_inline_depth;
         try solver.setRandomSeed(random_seed);
         try qf_solver.setRandomSeed(random_seed);
 
@@ -310,19 +255,20 @@ pub const VerificationPass = struct {
             .qf_solver = qf_solver,
             .encoder = encoder,
             .allocator = allocator,
-            .debug_z3 = debug_z3,
-            .trace_smt = trace_smt,
-            .trace_smtlib = trace_smtlib,
-            .phase_debug = phase_debug,
+            .debug_z3 = debug_options.debug,
+            .trace_smt = debug_options.trace,
+            .trace_smtlib = debug_options.trace_smtlib,
+            .phase_debug = debug_options.phase,
             .random_seed = random_seed,
             .timeout_ms = timeout_ms,
-            .verify_mode = verify_mode,
-            .verify_calls = verify_calls,
-            .verify_state = verify_state,
-            .verify_stats = verify_stats,
-            .explain_cores = explain_cores,
+            .verify_mode = .Full,
+            .verify_calls = true,
+            .verify_state = true,
+            .verify_stats = false,
+            .explain_cores = false,
             .proofs_enabled = proofs_enabled,
-            .minimize_cores = minimize_cores,
+            .minimize_cores = false,
+            .runtime_reachable_function_names = std.StringHashMap(void).init(allocator),
             .encoded_annotations = ManagedArrayList(EncodedAnnotation).init(allocator),
             .active_path_assumptions = ManagedArrayList(ActivePathAssume).init(allocator),
             .function_name_storage = ManagedArrayList([]const u8).init(allocator),
@@ -338,14 +284,26 @@ pub const VerificationPass = struct {
         self.verify_mode = mode;
     }
 
+    // Internal test hook for reduced-trust report cases. Public CLI and build
+    // paths keep call reasoning enabled.
     pub fn setVerifyCalls(self: *VerificationPass, enabled: bool) void {
         self.verify_calls = enabled;
         self.encoder.setVerifyCalls(enabled);
     }
 
+    // Internal test hook for reduced-trust report cases. Public CLI and build
+    // paths keep storage/map state reasoning enabled.
     pub fn setVerifyState(self: *VerificationPass, enabled: bool) void {
         self.verify_state = enabled;
         self.encoder.setVerifyState(enabled);
+    }
+
+    pub fn setMaxSummaryInlineDepth(self: *VerificationPass, depth: u32) void {
+        self.encoder.max_summary_inline_depth = depth;
+    }
+
+    pub fn setSummaryOnlyImportedCalls(self: *VerificationPass, enabled: bool) void {
+        self.encoder.setSummaryOnlyImportedCalls(enabled);
     }
 
     pub fn setVerifyStats(self: *VerificationPass, enabled: bool) void {
@@ -378,6 +336,7 @@ pub const VerificationPass = struct {
         }
         self.label_storage.deinit();
         self.semantic_constraint_tags.deinit();
+        self.runtime_reachable_function_names.deinit();
         for (self.encoded_annotations.items) |ann| {
             if (ann.extra_constraints.len > 0) {
                 self.allocator.free(ann.extra_constraints);
@@ -396,6 +355,9 @@ pub const VerificationPass = struct {
             }
             if (ann.loop_step_body_extra_constraints.len > 0) {
                 self.allocator.free(ann.loop_step_body_extra_constraints);
+            }
+            if (ann.loop_step_backedge_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_backedge_extra_constraints);
             }
             if (ann.loop_step_body_obligations.len > 0) {
                 self.allocator.free(ann.loop_step_body_obligations);
@@ -482,18 +444,142 @@ pub const VerificationPass = struct {
     /// This walks MLIR operations looking for ora.requires, ora.ensures, ora.invariant
     pub fn extractAnnotationsFromMLIR(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
         self.semantic_constraint_tags.clearRetainingCapacity();
+        // Unfiltered full-contract verification checks every function body in
+        // the artifact once. Targeted verification intentionally narrows that
+        // set, so call summaries must replay callee-local obligations into the
+        // selected caller to remain sound.
+        self.encoder.setSeparateFunctionBodyVerification(self.filter_function_name == null);
         // get the module operation
         const module_op = mlir.oraModuleGetOperation(mlir_module);
 
         // Register all functions first so call summaries can resolve callees
         // regardless of definition order.
         try self.registerFunctionOps(module_op);
+        self.runtime_reachable_function_names.clearRetainingCapacity();
+        try self.collectRuntimeReachableFunctions(module_op);
 
         // walk all regions in the module
         const num_regions = mlir.oraOperationGetNumRegions(module_op);
         for (0..@intCast(num_regions)) |region_idx| {
             const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
             try self.walkMLIRRegion(region);
+        }
+    }
+
+    fn getStringAttrSlice(_: *VerificationPass, op: mlir.MlirOperation, name: []const u8) ?[]const u8 {
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        const value_ref = mlir.oraStringAttrGetValue(attr);
+        if (value_ref.data == null or value_ref.length == 0) return null;
+        return value_ref.data[0..value_ref.length];
+    }
+
+    fn functionNameSlice(self: *VerificationPass, op: mlir.MlirOperation) ?[]const u8 {
+        return self.getStringAttrSlice(op, "sym_name");
+    }
+
+    fn functionIsRuntimeEntrypoint(self: *VerificationPass, op: mlir.MlirOperation) bool {
+        const visibility = self.getStringAttrSlice(op, "ora.visibility") orelse return true;
+        return std.mem.eql(u8, visibility, "pub");
+    }
+
+    fn markRuntimeReachableFunction(self: *VerificationPass, name: []const u8) !bool {
+        if (self.runtime_reachable_function_names.contains(name)) return false;
+        const dup = try self.allocator.dupe(u8, name);
+        try self.function_name_storage.append(dup);
+        try self.runtime_reachable_function_names.put(dup, {});
+        return true;
+    }
+
+    fn resolveCallCalleeName(self: *VerificationPass, op: mlir.MlirOperation) !?[]u8 {
+        if (self.getStringAttrSlice(op, "callee")) |callee| {
+            return try self.allocator.dupe(u8, callee);
+        }
+
+        const printed = mlir.oraOperationPrintToString(op);
+        defer if (printed.data != null) {
+            const mlir_c = @import("mlir_c_api");
+            mlir_c.freeStringRef(printed);
+        };
+        if (printed.data == null or printed.length == 0) return null;
+
+        const text = printed.data[0..printed.length];
+        const at_pos = std.mem.indexOfScalar(u8, text, '@') orelse return null;
+        var end = at_pos + 1;
+        while (end < text.len) : (end += 1) {
+            const ch = text[end];
+            if (!(std.ascii.isAlphanumeric(ch) or ch == '_' or ch == '.' or ch == '$')) break;
+        }
+        if (end <= at_pos + 1) return null;
+        return try self.allocator.dupe(u8, text[at_pos + 1 .. end]);
+    }
+
+    fn collectRuntimeReachableFunctions(self: *VerificationPass, root: mlir.MlirOperation) anyerror!void {
+        const op_name_ref = self.getMLIROperationName(root);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "func.func") and self.functionIsRuntimeEntrypoint(root)) {
+            try self.markFunctionAndRuntimeCallees(root);
+            return;
+        }
+
+        const num_regions = mlir.oraOperationGetNumRegions(root);
+        for (0..@intCast(num_regions)) |region_idx| {
+            const region = mlir.oraOperationGetRegion(root, @intCast(region_idx));
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var op = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(op)) {
+                    try self.collectRuntimeReachableFunctions(op);
+                    op = mlir.oraOperationGetNextInBlock(op);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
+        }
+    }
+
+    fn markFunctionAndRuntimeCallees(self: *VerificationPass, func_op: mlir.MlirOperation) anyerror!void {
+        const name = self.functionNameSlice(func_op) orelse return;
+        if (!try self.markRuntimeReachableFunction(name)) return;
+        try self.collectRuntimeCalleesInOperation(func_op);
+    }
+
+    fn collectRuntimeCalleesInOperation(self: *VerificationPass, op: mlir.MlirOperation) anyerror!void {
+        const op_name_ref = self.getMLIROperationName(op);
+        defer @import("mlir_c_api").freeStringRef(op_name_ref);
+        const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+            ""
+        else
+            op_name_ref.data[0..op_name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "func.call") or std.mem.eql(u8, op_name, "call")) {
+            const callee = try self.resolveCallCalleeName(op);
+            defer if (callee) |owned| self.allocator.free(owned);
+            if (callee) |name| {
+                if (self.encoder.function_ops.get(name)) |callee_op| {
+                    try self.markFunctionAndRuntimeCallees(callee_op);
+                }
+            }
+        }
+
+        const num_regions = mlir.oraOperationGetNumRegions(op);
+        for (0..@intCast(num_regions)) |region_idx| {
+            const region = mlir.oraOperationGetRegion(op, @intCast(region_idx));
+            if (mlir.oraRegionIsNull(region)) continue;
+            var block = mlir.oraRegionGetFirstBlock(region);
+            while (!mlir.oraBlockIsNull(block)) {
+                var nested = mlir.oraBlockGetFirstOperation(block);
+                while (!mlir.oraOperationIsNull(nested)) {
+                    try self.collectRuntimeCalleesInOperation(nested);
+                    nested = mlir.oraOperationGetNextInBlock(nested);
+                }
+                block = mlir.oraBlockGetNextInRegion(block);
+            }
         }
     }
 
@@ -615,8 +701,12 @@ pub const VerificationPass = struct {
                     try self.walkScfIfRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.conditional_return")) {
                     try self.walkConditionalReturnRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "ora.try_stmt")) {
+                    try self.walkTryStmtRegions(current_op);
                 } else if (std.mem.eql(u8, op_name, "ora.switch")) {
                     try self.walkOraSwitchRegions(current_op);
+                } else if (std.mem.eql(u8, op_name, "scf.while")) {
+                    try self.walkScfWhileRegions(current_op);
                 } else {
                     // walk nested regions (for functions, loops, etc.)
                     const num_regions = mlir.oraOperationGetNumRegions(current_op);
@@ -627,6 +717,9 @@ pub const VerificationPass = struct {
                 }
 
                 if (std.mem.eql(u8, op_name, "func.func")) {
+                    if (self.current_function_verify_enabled) {
+                        try self.recordGlobalContractInvariantPostObligations();
+                    }
                     self.current_function_name = prev_function;
                     self.current_function_verify_enabled = prev_verify_enabled;
                 }
@@ -1272,6 +1365,42 @@ pub const VerificationPass = struct {
         }
     }
 
+    fn walkScfWhileRegions(self: *VerificationPass, while_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(while_op);
+        if (num_regions == 0) return;
+
+        const before_region = mlir.oraOperationGetRegion(while_op, 0);
+        try self.walkMLIRRegion(before_region);
+
+        if (num_regions < 2) return;
+
+        self.encoder.invalidateValueCaches();
+        const continue_condition = (try self.encodeScfWhileContinueCondition(while_op, false)) orelse {
+            const after_region = mlir.oraOperationGetRegion(while_op, 1);
+            try self.walkMLIRRegion(after_region);
+            return;
+        };
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(while_op);
+        const condition_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        defer if (condition_constraints.len > 0) self.allocator.free(condition_constraints);
+        const condition_obligations = try self.encoder.takeObligationRecords(self.allocator);
+        defer if (condition_obligations.len > 0) self.allocator.free(condition_obligations);
+        try self.preserveControlConditionObligations(while_op, condition_obligations);
+
+        const saved_len = self.active_path_assumptions.items.len;
+        const scoped_constraints = try self.cloneConstraintsWithObligations(condition_constraints, condition_obligations);
+        defer self.releaseActivePathAssumptionsFrom(saved_len);
+        try self.active_path_assumptions.append(.{
+            .condition = self.encoder.coerceBoolean(continue_condition),
+            .extra_constraints = scoped_constraints,
+            .owned_extra_constraints = true,
+        });
+
+        const after_region = mlir.oraOperationGetRegion(while_op, 1);
+        try self.walkMLIRRegion(after_region);
+    }
+
     fn walkScfIfRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
         const num_regions = mlir.oraOperationGetNumRegions(if_op);
         if (num_regions == 0) return;
@@ -1291,10 +1420,17 @@ pub const VerificationPass = struct {
         const condition = self.encoder.coerceBoolean(raw_condition);
         const function_name = self.current_function_name orelse "unknown";
         const loc = try self.getLocationInfo(if_op);
-        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        const branch_constraints = try self.encoder.takeConstraintRecordsForBranchMerge(self.allocator);
+        defer if (branch_constraints.records.len > 0) self.allocator.free(branch_constraints.records);
+        const leaked_constraints = try self.allocator.alloc(z3.Z3_ast, branch_constraints.records.len);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        for (branch_constraints.records, 0..) |record, idx| {
+            leaked_constraints[idx] = record.ast;
+            try registerSemanticConstraintTag(self, function_name, loc.file, loc.line, loc.column, record);
+        }
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
         defer base_state.deinit(self.allocator);
@@ -1308,7 +1444,7 @@ pub const VerificationPass = struct {
         if (num_regions >= 1) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
@@ -1328,7 +1464,7 @@ pub const VerificationPass = struct {
         if (num_regions >= 2) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
@@ -1346,6 +1482,12 @@ pub const VerificationPass = struct {
         }
 
         try self.mergeEncoderBranchState(condition, &base_state, &then_state, &else_state);
+        // Condition encoding can emit global facts, such as locked-call frame
+        // constraints from an external_call inside the condition expression.
+        // They are drained from normal pending constraints so branch walkers
+        // consume them once as local assumptions, then restored here for
+        // post-merge postconditions.
+        try self.encoder.restoreBranchMergeConstraintScope(branch_constraints);
     }
 
     fn walkConditionalReturnRegions(self: *VerificationPass, if_op: mlir.MlirOperation) anyerror!void {
@@ -1367,6 +1509,7 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, leaked_obligations);
 
         var base_state = try self.captureEncoderBranchState();
         defer base_state.deinit(self.allocator);
@@ -1380,7 +1523,7 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(then_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = condition,
@@ -1401,7 +1544,7 @@ pub const VerificationPass = struct {
         if (!mlir.oraBlockIsNull(else_block)) {
             try self.restoreEncoderBranchState(&base_state);
             const saved_len = self.active_path_assumptions.items.len;
-            const scoped_constraints = try self.cloneConstraintSlice(leaked_constraints);
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             const not_condition = self.encoder.encodeNot(condition);
             try self.active_path_assumptions.append(.{
@@ -1429,13 +1572,14 @@ pub const VerificationPass = struct {
         const fallthrough_condition = self.encoder.coerceBoolean(fallthrough_raw_condition);
         const fallthrough_leaked_constraints = try self.encoder.takeConstraints(self.allocator);
         defer if (fallthrough_leaked_constraints.len > 0) self.allocator.free(fallthrough_leaked_constraints);
-        const fallthrough_leaked_obligations = try self.encoder.takeObligations(self.allocator);
+        const fallthrough_leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (fallthrough_leaked_obligations.len > 0) self.allocator.free(fallthrough_leaked_obligations);
+        try self.preserveControlConditionObligations(if_op, fallthrough_leaked_obligations);
 
         const not_fallthrough = self.encoder.encodeNot(fallthrough_condition);
         if (astSimplifiesToBool(self.context.ctx, not_fallthrough)) |always_true| {
             if (!always_true) {
-                const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+                const fallthrough_constraints = try self.cloneConstraintsWithObligations(fallthrough_leaked_constraints, fallthrough_leaked_obligations);
                 try self.active_path_assumptions.append(.{
                     .condition = not_fallthrough,
                     .extra_constraints = fallthrough_constraints,
@@ -1443,13 +1587,84 @@ pub const VerificationPass = struct {
                 });
             }
         } else {
-            const fallthrough_constraints = try self.cloneConstraintSlice(fallthrough_leaked_constraints);
+            const fallthrough_constraints = try self.cloneConstraintsWithObligations(fallthrough_leaked_constraints, fallthrough_leaked_obligations);
             try self.active_path_assumptions.append(.{
                 .condition = not_fallthrough,
                 .extra_constraints = fallthrough_constraints,
                 .owned_extra_constraints = true,
             });
         }
+    }
+
+    fn walkTryStmtRegions(self: *VerificationPass, try_op: mlir.MlirOperation) anyerror!void {
+        const num_regions = mlir.oraOperationGetNumRegions(try_op);
+        if (num_regions < 2) {
+            for (0..@intCast(num_regions)) |region_idx| {
+                const nested_region = mlir.oraOperationGetRegion(try_op, @intCast(region_idx));
+                try self.walkMLIRRegion(nested_region);
+            }
+            return;
+        }
+
+        self.encoder.invalidateValueCaches();
+        const catch_predicate = (try self.encoder.tryExtractTryRegionCatchPredicate(try_op, .Current)) orelse {
+            self.encoder.noteSoundnessLossAtOp(
+                .inexact_state_summary,
+                try_op,
+                "ora.try_stmt annotation walk requires an exact catch predicate",
+            );
+            return;
+        };
+
+        const function_name = self.current_function_name orelse "unknown";
+        const loc = try self.getLocationInfo(try_op);
+        const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
+        const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
+        defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(try_op, leaked_obligations);
+
+        var base_state = try self.captureEncoderBranchState();
+        defer base_state.deinit(self.allocator);
+
+        var try_state = EncoderBranchState.init(self.allocator);
+        defer try_state.deinit(self.allocator);
+        var catch_state = EncoderBranchState.init(self.allocator);
+        defer catch_state.deinit(self.allocator);
+
+        try self.restoreEncoderBranchState(&base_state);
+        {
+            const saved_len = self.active_path_assumptions.items.len;
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = self.encoder.encodeNot(catch_predicate),
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
+            });
+            const try_region = mlir.oraOperationGetRegion(try_op, 0);
+            try self.walkMLIRRegion(try_region);
+            try_state.deinit(self.allocator);
+            try_state = try self.captureEncoderBranchState();
+        }
+
+        try self.restoreEncoderBranchState(&base_state);
+        {
+            const saved_len = self.active_path_assumptions.items.len;
+            const scoped_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations);
+            defer self.releaseActivePathAssumptionsFrom(saved_len);
+            try self.active_path_assumptions.append(.{
+                .condition = catch_predicate,
+                .extra_constraints = scoped_constraints,
+                .owned_extra_constraints = true,
+            });
+            const catch_region = mlir.oraOperationGetRegion(try_op, 1);
+            try self.walkMLIRRegion(catch_region);
+            catch_state.deinit(self.allocator);
+            catch_state = try self.captureEncoderBranchState();
+        }
+
+        try self.mergeEncoderBranchState(catch_predicate, &base_state, &catch_state, &try_state);
     }
 
     fn walkOraSwitchRegions(self: *VerificationPass, switch_op: mlir.MlirOperation) anyerror!void {
@@ -1472,6 +1687,7 @@ pub const VerificationPass = struct {
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
+        try self.preserveControlConditionObligations(switch_op, leaked_obligations);
 
         var metadata = try self.getSwitchCaseMetadata(switch_op, num_regions);
         defer metadata.deinit(self.allocator);
@@ -1513,7 +1729,7 @@ pub const VerificationPass = struct {
             defer self.releaseActivePathAssumptionsFrom(saved_len);
             try self.active_path_assumptions.append(.{
                 .condition = effective_predicate,
-                .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
+                .extra_constraints = try self.cloneConstraintsWithObligations(leaked_constraints, leaked_obligations),
                 .owned_extra_constraints = true,
             });
             const region = mlir.oraOperationGetRegion(switch_op, @intCast(region_idx));
@@ -1727,7 +1943,8 @@ pub const VerificationPass = struct {
             if (num_operands >= 1) {
                 const condition_value = mlir.oraOperationGetOperand(op, 0);
                 const guard_id = try self.getStringAttr(op, "ora.guard_id", &self.guard_id_storage);
-                _ = try self.recordEncodedAnnotation(op, .RefinementGuard, condition_value, guard_id);
+                const annotation_index = try self.recordEncodedAnnotation(op, .RefinementGuard, condition_value, guard_id);
+                self.encoded_annotations.items[annotation_index].verification_context = try self.getStringAttr(op, "ora.verification_context", &self.guard_id_storage);
             }
         } else if (std.mem.eql(u8, op_name, "ora.assume")) {
             const num_operands = mlir.oraOperationGetNumOperands(op);
@@ -1787,6 +2004,79 @@ pub const VerificationPass = struct {
         return null;
     }
 
+    fn preserveControlConditionObligations(
+        self: *VerificationPass,
+        source_op: mlir.MlirOperation,
+        leaked_obligations: []const Encoder.PendingObligation,
+    ) !void {
+        if (leaked_obligations.len == 0) return;
+
+        const function_name = self.current_function_name orelse "unknown";
+        if (self.filter_function_name) |target_fn| {
+            if (!std.mem.eql(u8, function_name, target_fn)) return;
+        }
+        const loc = try self.getLocationInfo(source_op);
+        const path_constraints = try self.captureActivePathConstraints();
+        defer if (path_constraints.len > 0) self.allocator.free(path_constraints);
+        const path_guard = if (path_constraints.len > 0)
+            self.encoder.encodeAnd(path_constraints)
+        else
+            null;
+
+        const loop_owner = if (self.findEnclosingLoopOp(source_op)) |loop_op| @as(?u64, @intFromPtr(loop_op.ptr)) else null;
+        var loop_step_condition: ?z3.Z3_ast = null;
+        var loop_step_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{};
+        defer if (loop_step_extra_constraints.len > 0) self.allocator.free(loop_step_extra_constraints);
+        if (loop_owner != null) {
+            loop_step_condition = try self.encodeLoopContinueCondition(source_op);
+            loop_step_extra_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
+        }
+
+        for (leaked_obligations) |obligation| {
+            const guarded_obligation = if (path_guard) |guard|
+                self.encoder.encodeImplies(guard, obligation.ast)
+            else
+                obligation.ast;
+            const annotation_kind = pendingObligationAnnotationKind(obligation);
+            const imported_source = if (obligation.imported_callee_name) |callee_name|
+                ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
+            else
+                null;
+            const obligation_label = if (imported_source) |source|
+                try self.importedObligationLabel(source)
+            else
+                null;
+            try appendEncodedAnnotationUnique(self, .{
+                .function_name = function_name,
+                .kind = annotation_kind,
+                .condition = guarded_obligation,
+                .source_op = source_op,
+                .extra_constraints = &[_]z3.Z3_ast{},
+                .path_constraints = try self.cloneConstraintSlice(path_constraints),
+                .old_condition = null,
+                .old_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_condition = loop_step_condition,
+                .loop_step_extra_constraints = try self.cloneConstraintSlice(loop_step_extra_constraints),
+                .loop_step_head_condition = null,
+                .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_condition = null,
+                .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_backedge_condition = null,
+                .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_exit_condition = null,
+                .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
+                .file = loc.file,
+                .line = loc.line,
+                .column = loc.column,
+                .label = obligation_label,
+                .verification_context = "control_condition_safety",
+                .imported_obligation_source = imported_source,
+                .guard_id = null,
+                .loop_owner = loop_owner,
+            });
+        }
+    }
+
     fn observeStateOperation(self: *VerificationPass, op: mlir.MlirOperation, op_name: []const u8) !void {
         const should_observe =
             std.mem.eql(u8, op_name, "memref.alloca") or
@@ -1798,15 +2088,13 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "ora.map_store");
         if (!should_observe) return;
 
-        _ = try self.encoder.encodeOperation(op);
-
         const function_name = self.current_function_name orelse "unknown";
         const loc = try self.getLocationInfo(op);
+        _ = try self.encoder.encodeOperation(op);
         const leaked_constraints = try takeConstraintRecordsAndRegisterTags(self, function_name, loc.file, loc.line, loc.column);
         defer if (leaked_constraints.len > 0) self.allocator.free(leaked_constraints);
         const leaked_obligations = try self.encoder.takeObligationRecords(self.allocator);
         defer if (leaked_obligations.len > 0) self.allocator.free(leaked_obligations);
-
         // Preserve obligations discovered while observing stateful ops (notably
         // call summaries) so public entrypoints with no explicit requires/asserts
         // still prove checked arithmetic safety in reachable callees.
@@ -1831,6 +2119,7 @@ pub const VerificationPass = struct {
                     self.encoder.encodeImplies(guard, obligation.ast)
                 else
                     obligation.ast;
+                const annotation_kind = pendingObligationAnnotationKind(obligation);
                 const imported_source = if (obligation.imported_callee_name) |callee_name|
                     ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
                 else
@@ -1841,7 +2130,7 @@ pub const VerificationPass = struct {
                     null;
                 try appendEncodedAnnotationUnique(self, .{
                     .function_name = function_name,
-                    .kind = .ContractInvariant,
+                    .kind = annotation_kind,
                     .condition = guarded_obligation,
                     .extra_constraints = try self.cloneConstraintSlice(leaked_constraints),
                     .path_constraints = try self.cloneConstraintSlice(path_constraints),
@@ -1871,6 +2160,66 @@ pub const VerificationPass = struct {
         self.encoder.invalidateValueCaches();
     }
 
+    fn recordGlobalContractInvariantPostObligations(self: *VerificationPass) !void {
+        const function_name = self.current_function_name orelse return;
+        const original_len = self.encoded_annotations.items.len;
+
+        for (0..original_len) |annotation_index| {
+            const ann = self.encoded_annotations.items[annotation_index];
+            if (!isGlobalContractInvariantAnnotation(ann)) continue;
+            const condition_value = ann.condition_value orelse continue;
+
+            // Re-encode the top-level invariant expression after the function
+            // body has updated the verifier's storage model. Without this, a
+            // global invariant is only checked against entry-state storage.
+            self.encoder.value_map.clearRetainingCapacity();
+            self.encoder.value_map_old.clearRetainingCapacity();
+            const encoded = try self.encoder.encodeValue(condition_value);
+            const extra_constraints = try takeConstraintRecordsAndRegisterTags(
+                self,
+                function_name,
+                ann.file,
+                ann.line,
+                ann.column,
+            );
+
+            try appendEncodedAnnotationUnique(self, .{
+                .function_name = function_name,
+                .kind = .ContractInvariant,
+                .condition = encoded,
+                .condition_value = condition_value,
+                .source_op = ann.source_op,
+                .extra_constraints = extra_constraints,
+                .path_constraints = &[_]z3.Z3_ast{},
+                .old_condition = null,
+                .old_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_entry_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_condition = null,
+                .loop_step_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_head_condition = null,
+                .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_condition = null,
+                .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_backedge_condition = null,
+                .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_body_obligations = &[_]z3.Z3_ast{},
+                .loop_post_condition = null,
+                .loop_post_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_exit_condition = null,
+                .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_snapshot_value_bindings = &[_]SnapshotValueBinding{},
+                .file = ann.file,
+                .line = ann.line,
+                .column = ann.column,
+                .label = ann.label,
+                .verification_context = ann.verification_context,
+                .imported_obligation_source = null,
+                .guard_id = null,
+                .loop_owner = null,
+            });
+        }
+    }
+
     /// Get MLIR operation name as string
     fn getMLIROperationName(_: *VerificationPass, op: mlir.MlirOperation) mlir.MlirStringRef {
         return mlir.oraOperationGetName(op);
@@ -1898,15 +2247,14 @@ pub const VerificationPass = struct {
         return dup;
     }
 
-    fn shouldVerifyFunctionOp(_: *VerificationPass, op: mlir.MlirOperation) bool {
-        const visibility_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("ora.visibility", 14));
-        if (mlir.oraAttributeIsNull(visibility_attr)) return true;
-        const visibility_ref = mlir.oraStringAttrGetValue(visibility_attr);
-        if (visibility_ref.data == null or visibility_ref.length == 0) return true;
-        const visibility = visibility_ref.data[0..visibility_ref.length];
-        return std.mem.eql(u8, visibility, "pub") or
-            std.mem.eql(u8, visibility, "public") or
-            std.mem.eql(u8, visibility, "external");
+    fn shouldVerifyFunctionOp(self: *VerificationPass, op: mlir.MlirOperation) bool {
+        // Full-contract verification checks the runtime call graph rooted at
+        // public entrypoints. Private helpers still verify modularly when a
+        // runtime path can call them. Folded comptime-only helpers can remain in
+        // MLIR for debug/emission purposes without becoming arbitrary symbolic
+        // runtime proof targets.
+        const name = self.functionNameSlice(op) orelse return true;
+        return self.runtime_reachable_function_names.contains(name);
     }
 
     fn recordEncodedAnnotation(
@@ -1925,17 +2273,19 @@ pub const VerificationPass = struct {
             op;
         var base_encoder_state = try self.captureEncoderBranchState();
         defer base_encoder_state.deinit(self.allocator);
-        defer self.restoreEncoderBranchState(&base_encoder_state) catch {};
+        defer self.restoreEncoderBranchState(&base_encoder_state) catch {
+            self.encoder.noteSoundnessLoss(.internal_encoding_failure, "failed to restore annotation encoder branch state");
+        };
 
         const encoded = blk: {
             if (self.encoder.tryEncodeAssertCondition(op, .Current) catch |err| {
-                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                self.encoder.noteSoundnessLossAtOp(.unsupported_operation, failing_op, "unsupported annotation condition");
                 return err;
             }) |specialized| {
                 break :blk specialized;
             }
             break :blk self.encoder.encodeValue(condition_value) catch |err| {
-                self.encoder.noteDegradationAtOp(failing_op, "unsupported annotation condition");
+                self.encoder.noteSoundnessLossAtOp(.unsupported_operation, failing_op, "unsupported annotation condition");
                 return err;
             };
         };
@@ -2054,6 +2404,8 @@ pub const VerificationPass = struct {
             .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
             .loop_step_body_condition = null,
             .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+            .loop_step_backedge_condition = null,
+            .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
             .loop_exit_condition = loop_exit_condition,
             .loop_exit_extra_constraints = loop_exit_extra_constraints,
             .loop_snapshot_value_bindings = loop_snapshot_value_bindings,
@@ -2073,6 +2425,7 @@ pub const VerificationPass = struct {
                 self.encoder.encodeImplies(guard, obligation.ast)
             else
                 obligation.ast;
+            const annotation_kind = pendingObligationAnnotationKind(obligation);
             const imported_source = if (obligation.imported_callee_name) |callee_name|
                 ImportedObligationSource{ .callee_name = callee_name, .kind = obligation.source_kind }
             else
@@ -2083,7 +2436,7 @@ pub const VerificationPass = struct {
                 annotation_label;
             try appendEncodedAnnotationUnique(self, .{
                 .function_name = function_name,
-                .kind = .ContractInvariant,
+                .kind = annotation_kind,
                 .condition = guarded_obligation,
                 .condition_value = null,
                 .source_op = null,
@@ -2097,6 +2450,8 @@ pub const VerificationPass = struct {
                 .loop_step_head_extra_constraints = &[_]z3.Z3_ast{},
                 .loop_step_body_condition = null,
                 .loop_step_body_extra_constraints = &[_]z3.Z3_ast{},
+                .loop_step_backedge_condition = null,
+                .loop_step_backedge_extra_constraints = &[_]z3.Z3_ast{},
                 .loop_exit_condition = null,
                 .loop_exit_extra_constraints = &[_]z3.Z3_ast{},
                 .file = loc.file,
@@ -2269,6 +2624,73 @@ pub const VerificationPass = struct {
         return try self.allocator.dupe(z3.Z3_ast, constraints);
     }
 
+    fn cloneConstraintsWithObligations(
+        self: *VerificationPass,
+        constraints: []const z3.Z3_ast,
+        obligations: []const Encoder.PendingObligation,
+    ) ![]const z3.Z3_ast {
+        const total_len = constraints.len + obligations.len;
+        if (total_len == 0) return &[_]z3.Z3_ast{};
+
+        var combined = try self.allocator.alloc(z3.Z3_ast, total_len);
+        @memcpy(combined[0..constraints.len], constraints);
+        for (obligations, 0..) |obligation, idx| {
+            combined[constraints.len + idx] = obligation.ast;
+        }
+        return combined;
+    }
+
+    fn encodeScfWhileContinueCondition(
+        self: *VerificationPass,
+        loop_op: mlir.MlirOperation,
+        rebind_before_args_to_after_args: bool,
+    ) !?z3.Z3_ast {
+        const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
+        if (mlir.oraBlockIsNull(before_block)) return null;
+        const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
+
+        var rebound_before_args: usize = 0;
+        if (rebind_before_args_to_after_args and !mlir.oraBlockIsNull(after_block)) {
+            const bind_count = @min(
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
+                @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
+            );
+            var i: usize = 0;
+            while (i < bind_count) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+                try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
+                rebound_before_args += 1;
+            }
+        }
+        defer {
+            var i: usize = 0;
+            while (i < rebound_before_args) : (i += 1) {
+                const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
+                _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
+            }
+        }
+
+        var op = mlir.oraBlockGetFirstOperation(before_block);
+        while (!mlir.oraOperationIsNull(op)) {
+            const op_name_ref = mlir.oraOperationGetName(op);
+            defer @import("mlir_c_api").freeStringRef(op_name_ref);
+            const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                ""
+            else
+                op_name_ref.data[0..op_name_ref.length];
+
+            if (std.mem.eql(u8, op_name, "scf.condition")) {
+                const num_operands = mlir.oraOperationGetNumOperands(op);
+                if (num_operands < 1) return null;
+                const continue_value = mlir.oraOperationGetOperand(op, 0);
+                return try self.encoder.encodeValue(continue_value);
+            }
+            op = mlir.oraOperationGetNextInBlock(op);
+        }
+        return null;
+    }
+
     fn encodeLoopEntryConstraints(self: *VerificationPass, invariant_op: mlir.MlirOperation) ![]const z3.Z3_ast {
         const loop_op = self.findEnclosingLoopOp(invariant_op) orelse return &[_]z3.Z3_ast{};
         const loop_name_ref = mlir.oraOperationGetName(loop_op);
@@ -2353,7 +2775,6 @@ pub const VerificationPass = struct {
             if (loop_writes_state) {
                 try self.seedFreshLoopGlobalState(parent_op, "post");
             }
-            self.encoder.memref_map.clearRetainingCapacity();
             self.encoder.value_map.clearRetainingCapacity();
             self.encoder.value_map_old.clearRetainingCapacity();
             self.encoder.value_bindings.clearRetainingCapacity();
@@ -2466,8 +2887,14 @@ pub const VerificationPass = struct {
             try extra_constraint_list.append(head_condition);
             try addExplicitOldLinkConstraintsForAst(self, &extra_constraint_list, body_condition);
 
+            const backedge_condition = try self.encodeLoopContinueCondition(source_op);
+            const backedge_constraints = try takeConstraintRecordsAndRegisterTags(self, ann.function_name, ann.file, ann.line, ann.column);
+
             if (ann.loop_step_body_extra_constraints.len > 0) {
                 self.allocator.free(ann.loop_step_body_extra_constraints);
+            }
+            if (ann.loop_step_backedge_extra_constraints.len > 0) {
+                self.allocator.free(ann.loop_step_backedge_extra_constraints);
             }
             if (ann.loop_step_body_obligations.len > 0) {
                 self.allocator.free(ann.loop_step_body_obligations);
@@ -2484,6 +2911,8 @@ pub const VerificationPass = struct {
             ann.loop_step_head_extra_constraints = try head_constraint_list.toOwnedSlice();
             ann.loop_step_body_condition = body_condition;
             ann.loop_step_body_extra_constraints = try extra_constraint_list.toOwnedSlice();
+            ann.loop_step_backedge_condition = backedge_condition;
+            ann.loop_step_backedge_extra_constraints = backedge_constraints;
             ann.loop_step_body_obligations = try body_obligation_list.toOwnedSlice();
         }
 
@@ -2504,50 +2933,11 @@ pub const VerificationPass = struct {
             loop_name_ref.data[0..loop_name_ref.length];
 
         if (std.mem.eql(u8, loop_name, "scf.while")) {
-            const before_block = mlir.oraScfWhileOpGetBeforeBlock(loop_op);
-            if (mlir.oraBlockIsNull(before_block)) return null;
             const after_block = mlir.oraScfWhileOpGetAfterBlock(loop_op);
-
-            var rebound_before_args: usize = 0;
-            if (!mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr) {
-                const bind_count = @min(
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
-                    @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
-                );
-                var i: usize = 0;
-                while (i < bind_count) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
-                    try self.encoder.bindValue(before_arg, try self.encoder.encodeValue(after_arg));
-                    rebound_before_args += 1;
-                }
-            }
-            defer {
-                var i: usize = 0;
-                while (i < rebound_before_args) : (i += 1) {
-                    const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
-                    _ = self.encoder.value_bindings.remove(@intFromPtr(before_arg.ptr));
-                }
-            }
-
-            var op = mlir.oraBlockGetFirstOperation(before_block);
-            while (!mlir.oraOperationIsNull(op)) {
-                const op_name_ref = mlir.oraOperationGetName(op);
-                defer @import("mlir_c_api").freeStringRef(op_name_ref);
-                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
-                    ""
-                else
-                    op_name_ref.data[0..op_name_ref.length];
-
-                if (std.mem.eql(u8, op_name, "scf.condition")) {
-                    const num_operands = mlir.oraOperationGetNumOperands(op);
-                    if (num_operands < 1) return null;
-                    const continue_value = mlir.oraOperationGetOperand(op, 0);
-                    return try self.encoder.encodeValue(continue_value);
-                }
-                op = mlir.oraOperationGetNextInBlock(op);
-            }
-            return null;
+            return try self.encodeScfWhileContinueCondition(
+                loop_op,
+                !mlir.oraBlockIsNull(after_block) and mlir.mlirOperationGetBlock(invariant_op).ptr == after_block.ptr,
+            );
         }
 
         if (std.mem.eql(u8, loop_name, "scf.for")) {
@@ -2565,7 +2955,10 @@ pub const VerificationPass = struct {
             const iv_ast = try self.encoder.encodeValue(induction_var);
             const ub_ast = try self.encoder.encodeValue(upper_bound);
 
-            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op);
+            const unsigned_cmp = mlir_helpers.getScfForUnsignedCmp(loop_op) catch {
+                self.encoder.noteSoundnessLossAtOp(.missing_control_flow_summary, loop_op, "scf.for missing unsignedCmp metadata");
+                return error.UnsupportedOperation;
+            };
 
             return self.buildNumericLt(iv_ast, ub_ast, unsigned_cmp);
         }
@@ -3397,6 +3790,8 @@ pub const VerificationPass = struct {
         summary.degradation_reason = self.encoder.degradationReason();
         summary.degradation_reasons = self.encoder.degradationReasons();
         summary.soundness_losses = self.encoder.soundnessLosses();
+        summary.precision_notes = self.encoder.precisionNotes();
+        summary.precision_note_events = self.encoder.precisionNoteEvents();
         var kind_counts = ReportKindCounts{};
 
         var proven_guard_ids = std.StringHashMap(void).init(self.allocator);
@@ -3549,6 +3944,8 @@ pub const VerificationPass = struct {
             .encoding_degraded = false,
             .degradation_reason = self.encoder.degradationReason(),
             .soundness_losses = self.encoder.soundnessLosses(),
+            .precision_notes = self.encoder.precisionNotes(),
+            .precision_note_events = self.encoder.precisionNoteEvents(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3593,6 +3990,8 @@ pub const VerificationPass = struct {
             .degradation_reason = self.encoder.degradationReason(),
             .degradation_reasons = self.encoder.degradationReasons(),
             .soundness_losses = self.encoder.soundnessLosses(),
+            .precision_notes = self.encoder.precisionNotes(),
+            .precision_note_events = self.encoder.precisionNoteEvents(),
         };
         const kind_counts = ReportKindCounts{};
 
@@ -3686,6 +4085,15 @@ pub const VerificationPass = struct {
                 try writer.print("  - `{s}`\n", .{Encoder.soundnessLossLabel(loss)});
             }
         }
+        if (summary.precision_notes.len > 0) {
+            try writer.writeAll("- Precision notes:\n");
+            for (summary.precision_notes) |note| {
+                try writer.print("  - `{s}`: {s}\n", .{
+                    Encoder.precisionNoteLabel(note),
+                    precisionNoteDescription(note),
+                });
+            }
+        }
         try writer.writeAll("\n");
 
         try writer.writeAll("## 3. Query Kind Counts\n");
@@ -3712,10 +4120,40 @@ pub const VerificationPass = struct {
                 try writer.writeAll("- No verification findings.\n");
             } else {
                 for (vr.errors.items, 0..) |err, idx| {
+                    const matched_query_idx = findQueryIndexForError(err, queries, runs);
+                    const matched_function_name = if (matched_query_idx) |qidx| queries[qidx].function_name else null;
+                    const attributed_precision_event_count = countPrecisionEventsForFunction(summary.precision_note_events, matched_function_name);
                     try writer.print("### Error {d}\n", .{idx + 1});
                     try writer.print("- Type: `{s}`\n", .{@tagName(err.error_type)});
                     try writer.print("- Message: {s}\n", .{err.message});
                     try writer.print("- Location: `{s}:{d}:{d}`\n", .{ err.file, err.line, err.column });
+                    if (summary.precision_notes.len > 0) {
+                        try writer.writeAll("- Precision context:\n");
+                        try writer.print("  - {s}\n", .{precisionContextHint()});
+                        if (attributed_precision_event_count > 0) {
+                            try writer.print("  - Scope: {s}\n", .{precisionContextFunctionScopeDescription()});
+                            for (summary.precision_note_events) |event| {
+                                if (!precisionEventMatchesFunction(event, matched_function_name)) continue;
+                                try writer.print("  - `{s}`: {s}", .{
+                                    Encoder.precisionNoteLabel(event.kind),
+                                    precisionNoteEventDescription(event),
+                                });
+                                if (event.callee) |callee| try writer.print("; callee `{s}`", .{callee});
+                                if (event.storage_root) |root| try writer.print("; storage root `{s}`", .{root});
+                                if (event.declared_path) |path| try writer.print("; declared path `{s}`", .{path});
+                                if (event.location) |location| try writer.print("; location `{s}`", .{location});
+                                try writer.writeByte('\n');
+                            }
+                        } else {
+                            try writer.print("  - Scope: {s}\n", .{precisionContextGlobalScopeDescription()});
+                            for (summary.precision_notes) |note| {
+                                try writer.print("  - `{s}`: {s}\n", .{
+                                    Encoder.precisionNoteLabel(note),
+                                    precisionNoteDescription(note),
+                                });
+                            }
+                        }
+                    }
                     if (err.counterexample) |ce| {
                         try writer.writeAll("- Counterexample:\n");
                         try writeCounterexampleMarkdown(writer, self.allocator, ce);
@@ -3859,6 +4297,24 @@ pub const VerificationPass = struct {
             try writeJsonStringEscaped(writer, Encoder.soundnessLossLabel(loss));
         }
         try writer.writeByte(']');
+        try writer.writeAll(",\"precision_notes\":[");
+        for (summary.precision_notes, 0..) |note, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
+        }
+        try writer.writeByte(']');
+        try writer.writeAll(",\"precision_note_hint\":");
+        if (summary.precision_notes.len > 0) {
+            try writeJsonStringEscaped(writer, precisionContextHint());
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"precision_note_events\":[");
+        for (summary.precision_note_events, 0..) |event, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writePrecisionNoteEventJson(writer, event);
+        }
+        try writer.writeByte(']');
         try writer.writeByte('}');
         try writer.writeByte(',');
 
@@ -3903,6 +4359,7 @@ pub const VerificationPass = struct {
                     classifyQueryFailure(queries[qidx], runs[qidx])
                 else
                     FailureClassification{};
+                const matched_function_name = if (matched_query_idx) |qidx| queries[qidx].function_name else null;
                 try writer.writeByte('{');
                 try writer.writeAll("\"type\":");
                 try writeJsonStringEscaped(writer, @tagName(err.error_type));
@@ -3918,6 +4375,21 @@ pub const VerificationPass = struct {
                 } else {
                     try writer.writeAll("null");
                 }
+                try writer.writeAll(",\"precision_context\":[");
+                for (summary.precision_notes, 0..) |note, idx| {
+                    if (idx != 0) try writer.writeByte(',');
+                    try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(note));
+                }
+                try writer.writeByte(']');
+                try writer.writeAll(",\"precision_context_events\":[");
+                var first_precision_event = true;
+                for (summary.precision_note_events) |event| {
+                    if (!precisionEventMatchesFunction(event, matched_function_name)) continue;
+                    if (!first_precision_event) try writer.writeByte(',');
+                    first_precision_event = false;
+                    try writePrecisionNoteEventJson(writer, event);
+                }
+                try writer.writeByte(']');
                 try writer.writeAll(",\"subtype\":");
                 if (classification.subtype) |subtype| {
                     try writeJsonStringEscaped(writer, subtype);
@@ -4495,7 +4967,72 @@ pub const VerificationPass = struct {
                                 .log_prefix = body_log_prefix,
                             });
                         }
+                        try addConstraintSlice(&step_constraints, ann.loop_step_backedge_extra_constraints);
+                        try appendTrackedSemanticConstraintsForSlice(self, &tracked_step_assumptions, ann.loop_step_backedge_extra_constraints);
                         const step_body_condition = ann.loop_step_body_condition orelse ann.condition;
+                        if (ensure_annotations.items.len > 0) {
+                            if (ann.loop_step_backedge_condition) |backedge_condition| {
+                                var exit_constraints = ManagedArrayList(z3.Z3_ast).init(self.allocator);
+                                defer exit_constraints.deinit();
+                                var tracked_exit_assumptions = ManagedArrayList(TrackedAssumption).init(self.allocator);
+                                defer tracked_exit_assumptions.deinit();
+
+                                try addConstraintSlice(&exit_constraints, step_constraints.items);
+                                for (tracked_step_assumptions.items) |tracked| {
+                                    try tracked_exit_assumptions.append(tracked);
+                                }
+
+                                const negated_backedge = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(backedge_condition));
+                                try exit_constraints.append(negated_backedge);
+                                try appendTrackedAssumption(
+                                    &tracked_exit_assumptions,
+                                    negated_backedge,
+                                    makeTrackedAssumptionTag(.loop_invariant, ann),
+                                );
+                                const negated_exit_invariant = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
+                                try exit_constraints.append(negated_exit_invariant);
+                                try appendGoalTrackedAssumption(&tracked_exit_assumptions, fn_name, ann, negated_exit_invariant);
+                                try materializeTrackedAssumptionProxies(self, &tracked_exit_assumptions);
+
+                                const exit_fragment = inferQueryFragment(self.context.ctx, exit_constraints.items);
+                                const exit_solver_logic = solverLogicForFragment(exit_fragment);
+                                const exit_query = try buildSmtlibForConstraints(self.allocator, &self.solver, exit_constraints.items, exit_solver_logic);
+                                const exit_smtlib = exit_query.smtlib_z;
+                                const exit_hash = std.hash.Wyhash.hash(0, exit_smtlib);
+                                const exit_tag = try formatQueryTag(self.allocator, exit_constraints.items.len, exit_hash);
+                                defer self.allocator.free(exit_tag);
+                                const exit_log_prefix = try std.fmt.allocPrint(
+                                    self.allocator,
+                                    "{s} [invariant-exit]{s}",
+                                    .{ fn_name, exit_tag },
+                                );
+                                try appendPreparedQueryUnique(&queries, self.allocator, .{
+                                    .kind = .LoopInvariantStep,
+                                    .fragment = exit_fragment,
+                                    .solver_logic = exit_solver_logic,
+                                    .function_name = fn_name,
+                                    .obligation_kind = .LoopInvariant,
+                                    .file = ann.file,
+                                    .line = ann.line,
+                                    .column = ann.column,
+                                    .constraints = try cloneConstraintAstSlice(self.allocator, exit_constraints.items),
+                                    .tracked_assumptions = try cloneTrackedAssumptionSlice(self.allocator, tracked_exit_assumptions.items),
+                                    .smtlib_z = exit_smtlib,
+                                    .constraint_count = exit_constraints.items.len,
+                                    .smtlib_bytes = exit_smtlib.len,
+                                    .smtlib_hash = exit_hash,
+                                    .log_prefix = exit_log_prefix,
+                                });
+                            }
+                        }
+                        if (ann.loop_step_backedge_condition) |backedge_condition| {
+                            try step_constraints.append(backedge_condition);
+                            try appendTrackedAssumption(
+                                &tracked_step_assumptions,
+                                backedge_condition,
+                                makeTrackedAssumptionTag(.loop_invariant, ann),
+                            );
+                        }
                         const negated_step = z3.Z3_mk_not(self.context.ctx, self.encoder.coerceBoolean(step_body_condition));
                         try step_constraints.append(negated_step);
                         try appendGoalTrackedAssumption(&tracked_step_assumptions, fn_name, ann, negated_step);
@@ -4622,7 +5159,13 @@ pub const VerificationPass = struct {
 
                 var guard_base = ManagedArrayList(z3.Z3_ast).init(self.allocator);
                 defer guard_base.deinit();
-                try addConstraintSlice(&guard_base, assumption_constraints.items);
+                // Function-entry parameter refinement guards are the runtime
+                // boundary for user input. A matching `requires` clause is a
+                // verification assumption, not proof that the external caller
+                // supplied a refined value, so it must not remove the guard.
+                if (!isParameterRefinementGuard(ann)) {
+                    try addConstraintSlice(&guard_base, assumption_constraints.items);
+                }
                 try addApplicablePathAssumptionsToConstraintList(self, &guard_base, path_assumption_annotations.items, ann, &relevant_symbols);
                 try addRelevantConstraintSlice(self, &guard_base, ann.path_constraints, &relevant_symbols);
 
@@ -4750,6 +5293,7 @@ pub const VerificationPass = struct {
 
     fn importedObligationLabel(self: *VerificationPass, source: ImportedObligationSource) ![]const u8 {
         const prefix = switch (source.kind) {
+            .callee_precondition => "callee precondition",
             .imported_callee_ensures => "imported callee ensures",
             .imported_callee_obligation, .local => "imported callee obligation",
         };
@@ -4757,6 +5301,13 @@ pub const VerificationPass = struct {
         errdefer self.allocator.free(label);
         try self.label_storage.append(label);
         return label;
+    }
+
+    fn pendingObligationAnnotationKind(obligation: Encoder.PendingObligation) AnnotationKind {
+        return switch (obligation.source_kind) {
+            .callee_precondition => .CalleePrecondition,
+            else => .ContractInvariant,
+        };
     }
 
     fn annotationLogSuffix(self: *VerificationPass, ann: EncodedAnnotation) ![]const u8 {
@@ -5288,6 +5839,8 @@ const EncodedAnnotation = struct {
     loop_step_head_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_step_body_condition: ?z3.Z3_ast = null,
     loop_step_body_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
+    loop_step_backedge_condition: ?z3.Z3_ast = null,
+    loop_step_backedge_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_step_body_obligations: []const z3.Z3_ast = &[_]z3.Z3_ast{},
     loop_post_condition: ?z3.Z3_ast = null,
     loop_post_extra_constraints: []const z3.Z3_ast = &[_]z3.Z3_ast{},
@@ -5313,7 +5866,7 @@ fn isAssumptionKind(kind: AnnotationKind) bool {
 
 fn isObligationKind(kind: AnnotationKind) bool {
     return switch (kind) {
-        .Guard, .Ensures, .LoopInvariant, .ContractInvariant => true,
+        .CalleePrecondition, .Guard, .Ensures, .LoopInvariant, .ContractInvariant => true,
         else => false,
     };
 }
@@ -5336,9 +5889,15 @@ fn isImportedCalleeObligationAnnotation(ann: EncodedAnnotation) bool {
         ann.imported_obligation_source.?.kind == .imported_callee_obligation;
 }
 
+fn isParameterRefinementGuard(ann: EncodedAnnotation) bool {
+    return ann.kind == .RefinementGuard and
+        ann.verification_context != null and
+        std.mem.eql(u8, ann.verification_context.?, "parameter_refinement");
+}
+
 fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
     return switch (kind) {
-        .Guard, .Requires => .PreconditionViolation,
+        .CalleePrecondition, .Guard, .Requires => .PreconditionViolation,
         .Ensures => .PostconditionViolation,
         .LoopInvariant, .ContractInvariant => .InvariantViolation,
         else => .Unknown,
@@ -5347,6 +5906,7 @@ fn obligationErrorType(kind: AnnotationKind) errors.VerificationErrorType {
 
 fn obligationKindLabel(kind: AnnotationKind) []const u8 {
     return switch (kind) {
+        .CalleePrecondition => "callee precondition",
         .Guard => "guard",
         .Ensures => "ensures",
         .LoopInvariant => "invariant",
@@ -5419,13 +5979,14 @@ fn annotationLocationPrecedes(lhs: EncodedAnnotation, rhs: EncodedAnnotation) bo
 fn annotationKindSortKey(kind: AnnotationKind) u8 {
     return switch (kind) {
         .Requires => 0,
-        .Assume => 1,
-        .PathAssume => 2,
-        .Guard => 3,
-        .RefinementGuard => 4,
-        .Ensures => 5,
-        .LoopInvariant => 6,
-        .ContractInvariant => 7,
+        .CalleePrecondition => 1,
+        .Assume => 2,
+        .PathAssume => 3,
+        .Guard => 4,
+        .RefinementGuard => 5,
+        .Ensures => 6,
+        .LoopInvariant => 7,
+        .ContractInvariant => 8,
     };
 }
 
@@ -5484,6 +6045,15 @@ fn pathAssumeAppliesToAnnotation(
     path_assume: EncodedAnnotation,
     ann: EncodedAnnotation,
 ) bool {
+    if (ann.verification_context) |context| {
+        if (std.mem.eql(u8, context, "control_condition_safety") and
+            std.mem.eql(u8, path_assume.file, ann.file) and
+            path_assume.line == ann.line and
+            path_assume.column == ann.column)
+        {
+            return false;
+        }
+    }
     if (!annotationLocationPrecedes(path_assume, ann)) return false;
     return pathConstraintsCompatible(self, path_assume.path_constraints, ann.path_constraints);
 }
@@ -5591,6 +6161,14 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if (lhs.loop_step_head_condition) |lhs_step_head| {
         if (!astEquivalent(self, lhs_step_head, rhs.loop_step_head_condition.?)) return false;
     }
+    if ((lhs.loop_step_body_condition == null) != (rhs.loop_step_body_condition == null)) return false;
+    if (lhs.loop_step_body_condition) |lhs_step_body| {
+        if (!astEquivalent(self, lhs_step_body, rhs.loop_step_body_condition.?)) return false;
+    }
+    if ((lhs.loop_step_backedge_condition == null) != (rhs.loop_step_backedge_condition == null)) return false;
+    if (lhs.loop_step_backedge_condition) |lhs_backedge| {
+        if (!astEquivalent(self, lhs_backedge, rhs.loop_step_backedge_condition.?)) return false;
+    }
     if ((lhs.loop_post_condition == null) != (rhs.loop_post_condition == null)) return false;
     if (lhs.loop_post_condition) |lhs_post| {
         if (!astEquivalent(self, lhs_post, rhs.loop_post_condition.?)) return false;
@@ -5606,6 +6184,8 @@ fn encodedAnnotationEquivalent(self: *VerificationPass, lhs: EncodedAnnotation, 
     if (!constraintSlicesEquivalent(self, lhs.loop_entry_extra_constraints, rhs.loop_entry_extra_constraints)) return false;
     if (!constraintSlicesEquivalent(self, lhs.loop_step_extra_constraints, rhs.loop_step_extra_constraints)) return false;
     if (!constraintSlicesEquivalent(self, lhs.loop_step_head_extra_constraints, rhs.loop_step_head_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_step_body_extra_constraints, rhs.loop_step_body_extra_constraints)) return false;
+    if (!constraintSlicesEquivalent(self, lhs.loop_step_backedge_extra_constraints, rhs.loop_step_backedge_extra_constraints)) return false;
     if (!constraintSlicesEquivalent(self, lhs.loop_step_body_obligations, rhs.loop_step_body_obligations)) return false;
     if (!constraintSlicesEquivalent(self, lhs.loop_post_extra_constraints, rhs.loop_post_extra_constraints)) return false;
     if (!constraintSlicesEquivalent(self, lhs.loop_exit_extra_constraints, rhs.loop_exit_extra_constraints)) return false;
@@ -5621,6 +6201,7 @@ fn freeEncodedAnnotationOwnedSlices(self: *VerificationPass, ann: EncodedAnnotat
     if (ann.loop_step_extra_constraints.len > 0) self.allocator.free(ann.loop_step_extra_constraints);
     if (ann.loop_step_head_extra_constraints.len > 0) self.allocator.free(ann.loop_step_head_extra_constraints);
     if (ann.loop_step_body_extra_constraints.len > 0) self.allocator.free(ann.loop_step_body_extra_constraints);
+    if (ann.loop_step_backedge_extra_constraints.len > 0) self.allocator.free(ann.loop_step_backedge_extra_constraints);
     if (ann.loop_step_body_obligations.len > 0) self.allocator.free(ann.loop_step_body_obligations);
     if (ann.loop_post_extra_constraints.len > 0) self.allocator.free(ann.loop_post_extra_constraints);
     if (ann.loop_exit_extra_constraints.len > 0) self.allocator.free(ann.loop_exit_extra_constraints);
@@ -5925,6 +6506,8 @@ const ReportSummary = struct {
     degradation_reason: ?[]const u8 = null,
     degradation_reasons: []const []const u8 = &.{},
     soundness_losses: []const Encoder.SoundnessLoss = &.{},
+    precision_notes: []const Encoder.PrecisionNoteKind = &.{},
+    precision_note_events: []const Encoder.PrecisionNoteEvent = &.{},
     fragment_counts: ReportFragmentCounts = .{},
 };
 
@@ -6034,29 +6617,40 @@ fn classifyGuardId(guard_id: []const u8, violatable: bool) FailureClassification
         .refinement_kind = kind,
     };
 
-    if (violatable) {
-        classification.subtype = if (kind) |k|
-            if (std.mem.eql(u8, k, "non_zero_address"))
-                "GuardViolation.NonZeroAddress"
-            else if (std.mem.eql(u8, k, "min_value"))
-                "GuardViolation.MinValue"
-            else
-                "GuardViolation"
+    classification.subtype = if (kind) |k|
+        if (refinements.kindForGuardText(k)) |registry_kind|
+            refinements.guardFailureSubtype(registry_kind, violatable)
+        else if (violatable)
+            "GuardViolation"
         else
-            "GuardViolation";
-    } else {
-        classification.subtype = if (kind) |k|
-            if (std.mem.eql(u8, k, "non_zero_address"))
-                "GuardUnsatisfiable.NonZeroAddress"
-            else if (std.mem.eql(u8, k, "min_value"))
-                "GuardUnsatisfiable.MinValue"
-            else
-                "GuardUnsatisfiable"
-        else
-            "GuardUnsatisfiable";
-    }
+            "GuardUnsatisfiable"
+    else if (violatable)
+        "GuardViolation"
+    else
+        "GuardUnsatisfiable";
 
     return classification;
+}
+
+test "guard failure classification uses refinement registry labels" {
+    for (refinements.entries) |entry| {
+        const guard_id = try std.fmt.allocPrint(std.testing.allocator, "guard:test.ora:1:2:3:{s}:value", .{entry.name});
+        defer std.testing.allocator.free(guard_id);
+
+        const violation = classifyGuardId(guard_id, true);
+        try std.testing.expectEqualStrings(refinements.guardFailureSubtype(entry.kind, true), violation.subtype.?);
+        try std.testing.expectEqualStrings(entry.name, violation.refinement_kind.?);
+
+        const unsatisfiable = classifyGuardId(guard_id, false);
+        try std.testing.expectEqualStrings(refinements.guardFailureSubtype(entry.kind, false), unsatisfiable.subtype.?);
+        try std.testing.expectEqualStrings(entry.name, unsatisfiable.refinement_kind.?);
+    }
+
+    const legacy = classifyGuardId("guard:test.ora:1:2:3:non_zero_address:value", true);
+    try std.testing.expectEqualStrings(refinements.guardFailureSubtype(.non_zero_address, true), legacy.subtype.?);
+
+    const unknown = classifyGuardId("guard:test.ora:1:2:3:UnknownRefinement:value", true);
+    try std.testing.expectEqualStrings("GuardViolation", unknown.subtype.?);
 }
 
 fn inferNarrowingBitsFromSmtlib(smtlib: []const u8) ?u32 {
@@ -6171,6 +6765,7 @@ fn classifyQueryFailure(query: PreparedQuery, run: ReportQueryRun) FailureClassi
             if (arithmetic.subtype != null) break :blk arithmetic;
             break :blk .{
                 .subtype = switch (query.obligation_kind orelse .ContractInvariant) {
+                    .CalleePrecondition => "PreconditionViolation",
                     .Guard => "GuardViolation",
                     .Requires => "PreconditionViolation",
                     .Ensures => "PostconditionViolation",
@@ -6235,6 +6830,71 @@ fn findQueryIndexForDiagnostic(
         return idx;
     }
     return null;
+}
+
+fn precisionContextHint() []const u8 {
+    return "The verifier stayed sound, but one or more precision fallbacks used coarser facts; this global context can explain proof failures that depend on path-precise modifies framing.";
+}
+
+fn precisionContextGlobalScopeDescription() []const u8 {
+    return "global encoder precision context, attached to this error as a possible explanation rather than as proof-local attribution";
+}
+
+fn precisionContextFunctionScopeDescription() []const u8 {
+    return "function-level encoder precision context matched to this error's prepared query";
+}
+
+fn precisionNoteDescription(note: Encoder.PrecisionNoteKind) []const u8 {
+    return switch (note) {
+        .path_precise_modifies_fallback_unavailable => "path-precise modifies metadata framing was unavailable, so the verifier used a root-precise opaque state summary",
+        .precision_note_cap_exceeded => "additional precision notes were omitted after the report cap was reached",
+    };
+}
+
+fn precisionEventMatchesFunction(event: Encoder.PrecisionNoteEvent, function_name: ?[]const u8) bool {
+    const expected = function_name orelse return false;
+    const actual = event.function_name orelse return false;
+    return std.mem.eql(u8, actual, expected);
+}
+
+fn countPrecisionEventsForFunction(events: []const Encoder.PrecisionNoteEvent, function_name: ?[]const u8) usize {
+    var count: usize = 0;
+    for (events) |event| {
+        if (precisionEventMatchesFunction(event, function_name)) count += 1;
+    }
+    return count;
+}
+
+fn precisionNoteEventDescription(event: Encoder.PrecisionNoteEvent) []const u8 {
+    return switch (event.kind) {
+        .path_precise_modifies_fallback_unavailable => "path-precise modifies metadata framing was unavailable at this call site, so the verifier used a root-precise opaque state summary",
+        .precision_note_cap_exceeded => "additional precision-note events were omitted after the report cap was reached",
+    };
+}
+
+fn writeOptionalJsonString(writer: anytype, value: ?[]const u8) !void {
+    if (value) |text| {
+        try writeJsonStringEscaped(writer, text);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn writePrecisionNoteEventJson(writer: anytype, event: Encoder.PrecisionNoteEvent) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"kind\":");
+    try writeJsonStringEscaped(writer, Encoder.precisionNoteLabel(event.kind));
+    try writer.writeAll(",\"function\":");
+    try writeOptionalJsonString(writer, event.function_name);
+    try writer.writeAll(",\"callee\":");
+    try writeOptionalJsonString(writer, event.callee);
+    try writer.writeAll(",\"storage_root\":");
+    try writeOptionalJsonString(writer, event.storage_root);
+    try writer.writeAll(",\"declared_path\":");
+    try writeOptionalJsonString(writer, event.declared_path);
+    try writer.writeAll(",\"location\":");
+    try writeOptionalJsonString(writer, event.location);
+    try writer.writeByte('}');
 }
 
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
@@ -6502,6 +7162,81 @@ fn parseBoolEnv(value: []const u8) !bool {
     return error.InvalidEnvironmentValue;
 }
 
+const Z3DebugEnvOptions = struct {
+    debug: bool = false,
+    trace: bool = false,
+    trace_smtlib: bool = false,
+    phase: bool = false,
+    assert_simplify: bool = false,
+};
+
+fn parseZ3DebugEnv(value: []const u8) !Z3DebugEnvOptions {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return Z3DebugEnvOptions{};
+
+    if (parseBoolEnv(trimmed)) |enabled| {
+        return Z3DebugEnvOptions{ .debug = enabled };
+    } else |_| {}
+
+    var options = Z3DebugEnvOptions{};
+    var iter = std.mem.splitScalar(u8, trimmed, ',');
+    while (iter.next()) |raw_token| {
+        const token = std.mem.trim(u8, raw_token, " \t\r\n");
+        if (token.len == 0) return error.InvalidEnvironmentValue;
+
+        if (std.ascii.eqlIgnoreCase(token, "debug")) {
+            options.debug = true;
+        } else if (std.ascii.eqlIgnoreCase(token, "trace")) {
+            options.trace = true;
+        } else if (std.ascii.eqlIgnoreCase(token, "smtlib") or
+            std.ascii.eqlIgnoreCase(token, "trace-smtlib") or
+            std.ascii.eqlIgnoreCase(token, "trace_smtlib"))
+        {
+            options.trace_smtlib = true;
+        } else if (std.ascii.eqlIgnoreCase(token, "phase") or
+            std.ascii.eqlIgnoreCase(token, "phase-debug") or
+            std.ascii.eqlIgnoreCase(token, "phase_debug"))
+        {
+            options.phase = true;
+        } else if (std.ascii.eqlIgnoreCase(token, "assert-simplify") or
+            std.ascii.eqlIgnoreCase(token, "assert_simplify"))
+        {
+            options.assert_simplify = true;
+        } else if (std.ascii.eqlIgnoreCase(token, "all")) {
+            options = .{
+                .debug = true,
+                .trace = true,
+                .trace_smtlib = true,
+                .phase = true,
+                .assert_simplify = true,
+            };
+        } else {
+            return error.InvalidEnvironmentValue;
+        }
+    }
+    return options;
+}
+
+test "parse Z3 debug env list" {
+    const parsed = try parseZ3DebugEnv("debug,trace,smtlib,phase,assert-simplify");
+    try std.testing.expect(parsed.debug);
+    try std.testing.expect(parsed.trace);
+    try std.testing.expect(parsed.trace_smtlib);
+    try std.testing.expect(parsed.phase);
+    try std.testing.expect(parsed.assert_simplify);
+
+    const bool_true = try parseZ3DebugEnv("true");
+    try std.testing.expect(bool_true.debug);
+    try std.testing.expect(!bool_true.trace);
+
+    const bool_false = try parseZ3DebugEnv("0");
+    try std.testing.expect(!bool_false.debug);
+    try std.testing.expect(!bool_false.trace);
+
+    try std.testing.expectError(error.InvalidEnvironmentValue, parseZ3DebugEnv("trace,,phase"));
+    try std.testing.expectError(error.InvalidEnvironmentValue, parseZ3DebugEnv("unknown"));
+}
+
 fn parseVerifyMode(value: []const u8) !VerificationPass.VerifyMode {
     if (std.ascii.eqlIgnoreCase(value, "full")) return .Full;
     if (std.ascii.eqlIgnoreCase(value, "basic")) return .Basic;
@@ -6573,67 +7308,6 @@ fn collectFunctionNamesInRegion(
         }
         current_block = mlir.oraBlockGetNextInRegion(current_block);
     }
-}
-
-fn mergeVerificationResults(
-    allocator: std.mem.Allocator,
-    dest: *errors.VerificationResult,
-    src: *errors.VerificationResult,
-) !void {
-    if (!src.success) {
-        dest.success = false;
-    }
-
-    for (src.errors.items) |err| {
-        const cloned = try cloneVerificationError(allocator, err);
-        try dest.addError(cloned);
-    }
-
-    var it = src.proven_guard_ids.iterator();
-    while (it.next()) |entry| {
-        const key = entry.key_ptr.*;
-        if (!dest.proven_guard_ids.contains(key)) {
-            const key_copy = try allocator.dupe(u8, key);
-            try dest.proven_guard_ids.put(key_copy, {});
-        }
-    }
-
-    for (src.z3_proofs.items) |proof| {
-        try dest.z3_proofs.append(allocator, .{
-            .file = try allocator.dupe(u8, proof.file),
-            .line = proof.line,
-            .column = proof.column,
-            .query = try allocator.dupe(u8, proof.query),
-            .proof = try allocator.dupe(u8, proof.proof),
-        });
-    }
-}
-
-fn cloneVerificationError(allocator: std.mem.Allocator, err: errors.VerificationError) !errors.VerificationError {
-    const message = try allocator.dupe(u8, err.message);
-    errdefer allocator.free(message);
-    const file = try allocator.dupe(u8, err.file);
-    errdefer allocator.free(file);
-    const counterexample = if (err.counterexample) |ce| try cloneCounterexample(allocator, ce) else null;
-
-    return errors.VerificationError{
-        .error_type = err.error_type,
-        .message = message,
-        .file = file,
-        .line = err.line,
-        .column = err.column,
-        .counterexample = counterexample,
-        .allocator = allocator,
-    };
-}
-
-fn cloneCounterexample(allocator: std.mem.Allocator, ce: errors.Counterexample) !errors.Counterexample {
-    var copy = errors.Counterexample.init(allocator);
-    var it = ce.variables.iterator();
-    while (it.next()) |entry| {
-        try copy.addVariable(entry.key_ptr.*, entry.value_ptr.*);
-    }
-    return copy;
 }
 
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {
@@ -8725,13 +9399,16 @@ fn buildPublicCallsPrivateCheckedSubGuardedModule(mlir_ctx: mlir.MlirContext) ml
     const underflow = mlir.oraOperationGetResult(underflow_op, 0);
     const true_op = mlir.oraArithConstantOpCreate(mlir_ctx, loc, i1_ty, mlir.oraIntegerAttrCreateI64FromType(i1_ty, 1));
     const ok_op = mlir.oraArithXorIOpCreate(mlir_ctx, loc, underflow, mlir.oraOperationGetResult(true_op, 0));
+    const precond_assert = mlir.oraCfAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(ok_op, 0), testStringRef("private checked subtraction precondition"));
+    mlir.oraOperationSetAttributeByName(precond_assert, testStringRef("ora.requires"), mlir.oraBoolAttrCreate(mlir_ctx, true));
     const assert_op = mlir.oraAssertOpCreate(mlir_ctx, loc, mlir.oraOperationGetResult(ok_op, 0), testStringRef("checked subtraction overflow"));
     const private_ret = mlir.oraReturnOpCreate(mlir_ctx, loc, &[_]mlir.MlirValue{sub_val}, 1);
 
-    mlir.oraBlockAppendOwnedOperation(private_body, sub_op);
     mlir.oraBlockAppendOwnedOperation(private_body, underflow_op);
     mlir.oraBlockAppendOwnedOperation(private_body, true_op);
     mlir.oraBlockAppendOwnedOperation(private_body, ok_op);
+    mlir.oraBlockAppendOwnedOperation(private_body, precond_assert);
+    mlir.oraBlockAppendOwnedOperation(private_body, sub_op);
     mlir.oraBlockAppendOwnedOperation(private_body, assert_op);
     mlir.oraBlockAppendOwnedOperation(private_body, private_ret);
 
@@ -9167,7 +9844,7 @@ fn buildMalformedAnnotationModule(mlir_ctx: mlir.MlirContext) mlir.MlirModule {
     const i256_ty = mlir.oraIntegerTypeCreate(mlir_ctx, 256);
     const attrs = [_]mlir.MlirNamedAttribute{
         testNamedAttr(mlir_ctx, "sym_name", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("broken_ensures"))),
-        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("public"))),
+        testNamedAttr(mlir_ctx, "ora.visibility", mlir.oraStringAttrCreate(mlir_ctx, testStringRef("pub"))),
     };
     const func = mlir.oraFuncFuncOpCreate(mlir_ctx, loc, &attrs, attrs.len, &[_]mlir.MlirType{i256_ty}, &[_]mlir.MlirLocation{loc}, 1);
     const func_body = mlir.oraFuncOpGetBodyBlock(func);
@@ -9828,10 +10505,10 @@ test "basic verify mode ignores untagged ora.assert as obligation" {
     }
 }
 
-test "private callee assert is enforced through reachable public call path" {
+test "private callee assert is verified in private helper body" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
-    pass.setVerifyMode(.Basic);
+    pass.setVerifyMode(.Full);
 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -9850,20 +10527,15 @@ test "private callee assert is enforced through reachable public call path" {
         queries.deinit();
     }
 
-    var saw_public_obligation = false;
-    var saw_imported_label = false;
+    var saw_private_obligation = false;
     for (queries.items) |q| {
-        if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
+        if (!std.mem.eql(u8, q.function_name, "private_helper")) continue;
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
-            saw_public_obligation = true;
-            if (std.mem.indexOf(u8, q.log_prefix, "imported callee obligation (private_helper)") != null) {
-                saw_imported_label = true;
-            }
+            saw_private_obligation = true;
             break;
         }
     }
-    try testing.expect(saw_public_obligation);
-    try testing.expect(saw_imported_label);
+    try testing.expect(saw_private_obligation);
 
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
@@ -9904,10 +10576,10 @@ test "private callee ensures is preserved as imported caller-side provenance" {
     try testing.expect(saw_public_imported_ensures);
 }
 
-test "private result callee assert is enforced through reachable public call path" {
+test "private result callee assert is verified in private helper body" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
-    pass.setVerifyMode(.Basic);
+    pass.setVerifyMode(.Full);
 
     const mlir_ctx = mlir.oraContextCreate();
     defer mlir.oraContextDestroy(mlir_ctx);
@@ -9924,15 +10596,15 @@ test "private result callee assert is enforced through reachable public call pat
         queries.deinit();
     }
 
-    var saw_public_obligation = false;
+    var saw_private_obligation = false;
     for (queries.items) |q| {
-        if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
+        if (!std.mem.eql(u8, q.function_name, "private_helper_ret")) continue;
         if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
-            saw_public_obligation = true;
+            saw_private_obligation = true;
             break;
         }
     }
-    try testing.expect(saw_public_obligation);
+    try testing.expect(saw_private_obligation);
 
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
@@ -10097,7 +10769,7 @@ test "many-branch merge degrades partial memref initialization" {
     try testing.expect(pass.encoder.memref_map.get(777) != null);
 }
 
-test "private callee obligations are guarded by callee requires in public summaries" {
+test "private callee requires are caller-side precondition obligations" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setVerifyMode(.Full);
@@ -10119,23 +10791,24 @@ test "private callee obligations are guarded by callee requires in public summar
         queries.deinit();
     }
 
-    var saw_public_obligation = false;
+    var saw_callee_precondition = false;
     for (queries.items) |q| {
         if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
-        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
-            saw_public_obligation = true;
-            break;
+        if (q.kind != .Obligation) continue;
+        if (q.obligation_kind == .CalleePrecondition) {
+            saw_callee_precondition = true;
         }
     }
-    try testing.expect(saw_public_obligation);
+    try testing.expect(saw_callee_precondition);
 
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, result.errors.items[0].error_type);
 }
 
-test "private result callee obligations are guarded by callee requires in public summaries" {
+test "private result callee requires are caller-side precondition obligations" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setVerifyMode(.Full);
@@ -10155,20 +10828,21 @@ test "private result callee obligations are guarded by callee requires in public
         queries.deinit();
     }
 
-    var saw_public_obligation = false;
+    var saw_callee_precondition = false;
     for (queries.items) |q| {
         if (!std.mem.eql(u8, q.function_name, "public_entry")) continue;
-        if (q.kind == .Obligation and q.obligation_kind == .ContractInvariant) {
-            saw_public_obligation = true;
-            break;
+        if (q.kind != .Obligation) continue;
+        if (q.obligation_kind == .CalleePrecondition) {
+            saw_callee_precondition = true;
         }
     }
-    try testing.expect(saw_public_obligation);
+    try testing.expect(saw_callee_precondition);
 
     var result = try pass.runVerificationPass(module);
     defer result.deinit();
-    try testing.expect(result.success);
-    try testing.expectEqual(@as(usize, 0), result.errors.items.len);
+    try testing.expect(!result.success);
+    try testing.expectEqual(@as(usize, 1), result.errors.items.len);
+    try testing.expectEqual(errors.VerificationErrorType.PreconditionViolation, result.errors.items[0].error_type);
 }
 
 test "public callee obligations stay on the callee instead of bubbling to caller" {
@@ -10565,7 +11239,7 @@ test "prepared queries do not assume evm caller is non-zero" {
     try testing.expect(!saw_caller_nonzero);
 }
 
-test "prepared queries track frame conditions from map-store summaries" {
+test "direct map-store safety obligations avoid redundant quantified frame constraints" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
     pass.setExplainCores(true);
@@ -10585,16 +11259,17 @@ test "prepared queries track frame conditions from map-store summaries" {
         queries.deinit();
     }
 
-    var saw_frame = false;
+    var saw_contract_obligation = false;
     for (queries.items) |q| {
         if (!std.mem.eql(u8, q.function_name, "conditional_return_map_store_div_test")) continue;
+        if (q.kind != .Obligation or q.obligation_kind != .ContractInvariant) continue;
+        saw_contract_obligation = true;
         for (q.tracked_assumptions) |tracked| {
             if (tracked.tag.kind != .frame) continue;
-            saw_frame = true;
-            try testing.expectEqualStrings("frame condition", tracked.tag.label);
+            return error.TestUnexpectedResult;
         }
     }
-    try testing.expect(saw_frame);
+    try testing.expect(saw_contract_obligation);
 }
 
 test "semantic constraint tags preserve binding provenance" {
@@ -10938,9 +11613,6 @@ test "prepared queries route quantifier-free and quantified formulas to differen
 
     const qf_module = buildUserAssumeEnsuresModule(mlir_ctx, 1, 1);
     defer mlir.oraModuleDestroy(qf_module);
-    const quantified_module = buildConditionalReturnMapStoreDivModule(mlir_ctx);
-    defer mlir.oraModuleDestroy(quantified_module);
-
     var qf_pass = try VerificationPass.init(testing.allocator);
     defer qf_pass.deinit();
     try qf_pass.extractAnnotationsFromMLIR(qf_module);
@@ -10957,7 +11629,30 @@ test "prepared queries route quantifier-free and quantified formulas to differen
 
     var quantified_pass = try VerificationPass.init(testing.allocator);
     defer quantified_pass.deinit();
-    try quantified_pass.extractAnnotationsFromMLIR(quantified_module);
+    const bv8_sort = z3.Z3_mk_bv_sort(quantified_pass.context.ctx, 8);
+    const x = z3.Z3_mk_const(quantified_pass.context.ctx, z3.Z3_mk_string_symbol(quantified_pass.context.ctx, "prepared_quant_x"), bv8_sort);
+    const seven = z3.Z3_mk_numeral(quantified_pass.context.ctx, "7", bv8_sort);
+    const body = z3.Z3_mk_eq(quantified_pass.context.ctx, x, seven);
+    const bound = [_]z3.Z3_ast{x};
+    const quantified_assumption = z3.Z3_mk_forall_const(quantified_pass.context.ctx, 0, 1, @ptrCast(&bound), 0, null, body);
+    try quantified_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_test",
+        .kind = .Requires,
+        .condition = quantified_assumption,
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 1,
+        .column = 1,
+    });
+    try quantified_pass.encoded_annotations.append(.{
+        .function_name = "prepared_quantified_test",
+        .kind = .Ensures,
+        .condition = z3.Z3_mk_true(quantified_pass.context.ctx),
+        .extra_constraints = &.{},
+        .file = "test.ora",
+        .line = 2,
+        .column = 1,
+    });
     var quantified_queries = try quantified_pass.buildPreparedQueries();
     defer {
         for (quantified_queries.items) |*q| q.deinit(testing.allocator);
@@ -11498,6 +12193,87 @@ test "prepared query result collection taints function on unknown base" {
     try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, "verification assumptions are unknown in f"));
 }
 
+test "prepared query result collection fails closed on unknown for every query kind" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    // Pillar 4.5 self-introspection: every prepared solver-query kind must
+    // surface Z3 UNKNOWN as a user-visible Unknown verification error.
+    inline for (std.meta.fields(QueryKind)) |field| {
+        const kind: QueryKind = @enumFromInt(field.value);
+        const obligation_kind: ?AnnotationKind = switch (kind) {
+            .Obligation => .Ensures,
+            .LoopInvariantStep => .LoopInvariant,
+            .LoopBodySafety => .ContractInvariant,
+            .LoopInvariantPost => .Ensures,
+            else => null,
+        };
+        const guard_id: ?[]const u8 = switch (kind) {
+            .GuardSatisfy, .GuardViolate => "guard:test:unknown",
+            else => null,
+        };
+        var queries = [_]PreparedQuery{.{
+            .kind = kind,
+            .function_name = field.name,
+            .guard_id = guard_id,
+            .obligation_kind = obligation_kind,
+            .file = "/tmp/test.ora",
+            .line = @intCast(field.value + 1),
+            .column = 3,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: {s} [{s}]", .{ field.name, queryKindLabel(kind) }),
+        }};
+        defer queries[0].deinit(testing.allocator);
+
+        const results = [_]PreparedQueryResult{.{ .status = z3.Z3_L_UNDEF }};
+
+        var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+        defer collected.deinit();
+
+        try testing.expect(!collected.success);
+        try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, field.name));
+    }
+
+    const routed_cases = [_]struct {
+        kind: QueryKind,
+        obligation_kind: ?AnnotationKind = null,
+        guard_id: ?[]const u8 = null,
+        expected_message_fragment: []const u8,
+    }{
+        .{ .kind = .Obligation, .obligation_kind = .ContractInvariant, .expected_message_fragment = "contract invariant" },
+        .{ .kind = .Obligation, .obligation_kind = .Guard, .guard_id = "guard:obligation:unknown", .expected_message_fragment = "guard" },
+        .{ .kind = .GuardSatisfy, .guard_id = "guard:satisfy:unknown", .expected_message_fragment = "guard:satisfy:unknown" },
+        .{ .kind = .GuardViolate, .guard_id = "guard:violate:unknown", .expected_message_fragment = "guard:violate:unknown" },
+    };
+
+    for (routed_cases, 0..) |case, idx| {
+        var queries = [_]PreparedQuery{.{
+            .kind = case.kind,
+            .function_name = "routed_unknown",
+            .guard_id = case.guard_id,
+            .obligation_kind = case.obligation_kind,
+            .file = "/tmp/test.ora",
+            .line = @intCast(100 + idx),
+            .column = 5,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try std.fmt.allocPrint(testing.allocator, "verification: routed-{d} [{s}]", .{ idx, queryKindLabel(case.kind) }),
+        }};
+        defer queries[0].deinit(testing.allocator);
+
+        const results = [_]PreparedQueryResult{.{ .status = z3.Z3_L_UNDEF }};
+
+        var collected = try pass.collectPreparedQueryResults(queries[0..], results[0..]);
+        defer collected.deinit();
+
+        try testing.expect(!collected.success);
+        try testing.expectEqual(@as(usize, 1), collected.errors.items.len);
+        try testing.expectEqual(errors.VerificationErrorType.Unknown, collected.errors.items[0].error_type);
+        try testing.expect(std.mem.containsAtLeast(u8, collected.errors.items[0].message, 1, case.expected_message_fragment));
+    }
+}
+
 test "result collection fails closed on inconclusive vacuity check" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
@@ -11686,11 +12462,25 @@ test "rendered SMT report json includes degradation metadata" {
     var pass = try VerificationPass.init(testing.allocator);
     defer pass.deinit();
 
+    // Pillar 4.5 self-introspection: every typed soundness-loss reason must
+    // surface exactly once through the report JSON metadata path.
+    const soundness_loss_fields = std.meta.fields(Encoder.SoundnessLoss);
+    var soundness_losses: [soundness_loss_fields.len]Encoder.SoundnessLoss = undefined;
+    inline for (soundness_loss_fields, 0..) |field, idx| {
+        soundness_losses[idx] = @enumFromInt(field.value);
+    }
+    const precision_note_fields = std.meta.fields(Encoder.PrecisionNoteKind);
+    var precision_notes: [precision_note_fields.len]Encoder.PrecisionNoteKind = undefined;
+    inline for (precision_note_fields, 0..) |field, idx| {
+        precision_notes[idx] = @enumFromInt(field.value);
+    }
+
     const summary = ReportSummary{
         .encoding_degraded = true,
         .degradation_reason = "test degradation",
         .degradation_reasons = &.{ "test degradation", "follow-on degradation" },
-        .soundness_losses = &.{ .user_disabled_state_verification, .unresolved_callee },
+        .soundness_losses = &soundness_losses,
+        .precision_notes = &precision_notes,
     };
     const kind_counts = ReportKindCounts{};
 
@@ -11708,7 +12498,242 @@ test "rendered SMT report json includes degradation metadata" {
     try testing.expect(std.mem.indexOf(u8, json, "\"encoding_degraded\":true") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reason\":\"test degradation\"") != null);
     try testing.expect(std.mem.indexOf(u8, json, "\"degradation_reasons\":[\"test degradation\",\"follow-on degradation\"]") != null);
-    try testing.expect(std.mem.indexOf(u8, json, "\"soundness_losses\":[\"user_disabled_state_verification\",\"unresolved_callee\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_note_hint\":\"The verifier stayed sound, but one or more precision fallbacks used coarser facts; this global context can explain proof failures that depend on path-precise modifies framing.\"") != null);
+    const notes_prefix = "\"precision_notes\":[";
+    const notes_start = std.mem.indexOf(u8, json, notes_prefix) orelse return error.MissingPrecisionNotesArray;
+    const notes_body_start = notes_start + notes_prefix.len;
+    const notes_body_end = notes_body_start + (std.mem.indexOfScalar(u8, json[notes_body_start..], ']') orelse return error.MissingPrecisionNotesArrayEnd);
+    const notes_body = json[notes_body_start..notes_body_end];
+    try testing.expectEqual(precision_note_fields.len * 2, std.mem.count(u8, notes_body, "\""));
+    inline for (precision_note_fields) |field| {
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        defer testing.allocator.free(needle);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
+    }
+    const losses_prefix = "\"soundness_losses\":[";
+    const losses_start = std.mem.indexOf(u8, json, losses_prefix) orelse return error.MissingSoundnessLossesArray;
+    const losses_body_start = losses_start + losses_prefix.len;
+    const losses_body_end = losses_body_start + (std.mem.indexOfScalar(u8, json[losses_body_start..], ']') orelse return error.MissingSoundnessLossesArrayEnd);
+    const losses_body = json[losses_body_start..losses_body_end];
+    try testing.expectEqual(soundness_loss_fields.len * 2, std.mem.count(u8, losses_body, "\""));
+    inline for (soundness_loss_fields) |field| {
+        const needle = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{field.name});
+        defer testing.allocator.free(needle);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, json, needle));
+    }
+}
+
+test "rendered SMT report connects precision notes to proof errors" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const precision_notes = [_]Encoder.PrecisionNoteKind{
+        .path_precise_modifies_fallback_unavailable,
+        .precision_note_cap_exceeded,
+    };
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+        .precision_notes = &precision_notes,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .PostconditionViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove ensures"),
+        .file = try testing.allocator.dupe(u8, "/tmp/test.ora"),
+        .line = 12,
+        .column = 3,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[\"path_precise_modifies_fallback_unavailable\",\"precision_note_cap_exceeded\"]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_note_hint\":\"The verifier stayed sound, but one or more precision fallbacks used coarser facts; this global context can explain proof failures that depend on path-precise modifies framing.\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\"") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\"") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "The verifier stayed sound, but one or more precision fallbacks used coarser facts") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "Scope: global encoder precision context") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`path_precise_modifies_fallback_unavailable`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "path-precise modifies metadata framing was unavailable") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`precision_note_cap_exceeded`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "additional precision notes were omitted") != null);
+}
+
+test "rendered SMT report omits markdown precision context when there are no precision notes" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .InvariantViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove invariant"),
+        .file = try testing.allocator.dupe(u8, "/tmp/test.ora"),
+        .line = 14,
+        .column = 5,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_note_hint\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_hint\"") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\"") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/test.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
+}
+
+test "rendered SMT report attributes precision events to matching proof errors" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    const precision_notes = [_]Encoder.PrecisionNoteKind{
+        .path_precise_modifies_fallback_unavailable,
+    };
+    const precision_events = [_]Encoder.PrecisionNoteEvent{
+        .{
+            .kind = .path_precise_modifies_fallback_unavailable,
+            .function_name = "caller",
+            .callee = "set_balance",
+            .storage_root = "balances",
+            .declared_path = "balances[param#0]",
+            .location = "loc(\"test.ora\":10:5)",
+        },
+        .{
+            .kind = .path_precise_modifies_fallback_unavailable,
+            .function_name = "other",
+            .callee = "set_total",
+            .storage_root = "total",
+            .declared_path = "total",
+            .location = "loc(\"test.ora\":20:5)",
+        },
+    };
+    const summary = ReportSummary{
+        .verification_success = false,
+        .verification_errors = 1,
+        .precision_notes = &precision_notes,
+        .precision_note_events = &precision_events,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const query = PreparedQuery{
+        .kind = .Obligation,
+        .function_name = "caller",
+        .obligation_kind = .Ensures,
+        .file = "test.ora",
+        .line = 12,
+        .column = 3,
+        .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+        .log_prefix = try testing.allocator.dupe(u8, "caller [ensures]"),
+    };
+    defer {
+        var mutable_query = query;
+        mutable_query.deinit(testing.allocator);
+    }
+    const run = ReportQueryRun{
+        .status = z3.Z3_L_TRUE,
+        .elapsed_ms = 1,
+    };
+
+    var verification_result = errors.VerificationResult.init(testing.allocator);
+    defer verification_result.deinit();
+    try verification_result.addError(.{
+        .error_type = .PostconditionViolation,
+        .message = try testing.allocator.dupe(u8, "failed to prove ensures"),
+        .file = try testing.allocator.dupe(u8, "test.ora"),
+        .line = 12,
+        .column = 3,
+        .counterexample = null,
+        .allocator = testing.allocator,
+    });
+
+    const json = try pass.renderSmtReportJson(
+        "test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_scope\"") == null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"precision_context_events\":[{\"kind\":\"path_precise_modifies_fallback_unavailable\",\"function\":\"caller\",\"callee\":\"set_balance\",\"storage_root\":\"balances\",\"declared_path\":\"balances[param#0]\",\"location\":\"loc(\\\"test.ora\\\":10:5)\"}]") != null);
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "test.ora",
+        0,
+        (&[_]PreparedQuery{query})[0..],
+        (&[_]ReportQueryRun{run})[0..],
+        summary,
+        kind_counts,
+        &verification_result,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "Scope: function-level encoder precision context") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "path-precise modifies metadata framing was unavailable at this call site") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "callee `set_balance`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "declared path `balances[param#0]`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "set_total") == null);
 }
 
 test "rendered SMT report json includes query fragment metadata" {

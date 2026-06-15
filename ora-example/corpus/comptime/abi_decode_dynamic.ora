@@ -1,0 +1,102 @@
+struct AbiDecodeProfile {
+    id: u256,
+    name: string,
+}
+
+contract AbiDecodeDynamicCorpus {
+    pub fn string_first_byte() -> u256 {
+        return comptime {
+            let decoded = @abiDecode(string, @abiEncode("hello"));
+            let out = match (decoded) {
+                Ok(value) => @cast(u256, @abiEncode(value)[64]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn bytes_edge_sum() -> u256 {
+        return comptime {
+            const payload: bytes = hex"deadbeef";
+            let decoded = @abiDecode(bytes, @abiEncode(payload));
+            let out = match (decoded) {
+                Ok(value) => @cast(u256, @abiEncode(value)[64]) + @cast(u256, @abiEncode(value)[67]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn mixed_tuple_sum() -> u256 {
+        return comptime {
+            const value: (u256, string) = (7, "hello");
+            let decoded = @abiDecode((u256, string), @abiEncode(value));
+            let out = match (decoded) {
+                Ok(roundtrip) => roundtrip.0 + @cast(u256, @abiEncode(roundtrip.1)[64]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn dynamic_array_sum() -> u256 {
+        return comptime {
+            const values = @cast(slice[u256], [1, 2, 3]);
+            let decoded = @abiDecode(slice[u256], @abiEncode(values));
+            let out = match (decoded) {
+                Ok(roundtrip) => roundtrip[0] + roundtrip[1] + roundtrip[2],
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn dynamic_string_array_sum() -> u256 {
+        return comptime {
+            const values = @cast(slice[string], ["a", "bb"]);
+            let decoded = @abiDecode(slice[string], @abiEncode(values));
+            let out = match (decoded) {
+                Ok(roundtrip) => @cast(u256, @abiEncode(roundtrip[0])[64]) + @cast(u256, @abiEncode(roundtrip[1])[64]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn nested_dynamic_array_sum() -> u256 {
+        return comptime {
+            const first = @cast(slice[u256], [1, 2]);
+            const second = @cast(slice[u256], [3]);
+            const values = @cast(slice[slice[u256]], [first, second]);
+            let decoded = @abiDecode(slice[slice[u256]], @abiEncode(values));
+            let out = match (decoded) {
+                Ok(roundtrip) => roundtrip[0][1] + roundtrip[1][0],
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn dynamic_struct_sum() -> u256 {
+        return comptime {
+            const value: AbiDecodeProfile = AbiDecodeProfile { id: 1, name: "hello" };
+            let decoded = @abiDecode(AbiDecodeProfile, @abiEncode(value));
+            let out = match (decoded) {
+                Ok(roundtrip) => roundtrip.id + @cast(u256, @abiEncode(roundtrip.name)[64]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn malformed_offset_is_err() -> u256 {
+        return comptime {
+            let decoded = @abiDecode(string, hex"0000000000000000000000000000000000000000000000000000000000000000");
+            let out = match (decoded) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            };
+            out;
+        };
+    }
+}

@@ -1,0 +1,10 @@
+contract Vault {
+    storage total: u256 = 0;
+    storage balances: map<address, u256>;
+
+    pub fn ok(user: address) -> u256
+        modifies()
+    {
+        return balances[user];
+    }
+}

@@ -162,7 +162,9 @@ contract MultiErrorContract {
         }
     }
 
-    pub fn safe_create_item(id: u256, value: u256, deadline: u256) -> bool {
+    pub fn safe_create_item(id: u256, value: u256, deadline: u256) -> bool
+        requires(item_count < std.constants.U256_MAX)
+    {
         try {
             let _count: u256 = try create_item(id, value, deadline);
             return true;

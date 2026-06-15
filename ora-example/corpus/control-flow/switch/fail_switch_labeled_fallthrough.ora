@@ -1,0 +1,15 @@
+contract SwitchLabeledFallthrough {
+    pub fn run(x: u256) -> u256 {
+        outer: switch (x) {
+            0 => {
+                return 0;
+            }
+            1...10 => {
+                continue :outer (x - 1);
+            }
+            else => {
+                let ignored: u256 = 0;
+            }
+        }
+    }
+}

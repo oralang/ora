@@ -5,6 +5,9 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "OraDialect.h"
 #include "SIR/SIRDialect.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Hashing.h"
+#include <cstdint>
 #include <optional>
 
 namespace mlir
@@ -14,6 +17,54 @@ namespace mlir
 
         // Forward declarations
         class OraToSIRTypeConverter;
+
+        struct MapHashKey
+        {
+            void *func = nullptr;
+            const void *keyVal = nullptr;
+            const void *mapVal = nullptr;
+            uint64_t mapConst = 0;
+            bool mapIsConst = false;
+        };
+
+        struct MapHashKeyInfo
+        {
+            static inline MapHashKey getEmptyKey()
+            {
+                return MapHashKey{reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), reinterpret_cast<void *>(-1), 0, false};
+            }
+
+            static inline MapHashKey getTombstoneKey()
+            {
+                return MapHashKey{reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), reinterpret_cast<void *>(-2), 0, false};
+            }
+
+            static unsigned getHashValue(const MapHashKey &k)
+            {
+                uintptr_t h1 = reinterpret_cast<uintptr_t>(k.func);
+                uintptr_t h2 = reinterpret_cast<uintptr_t>(k.keyVal);
+                uintptr_t h3 = k.mapIsConst ? static_cast<uintptr_t>(k.mapConst) : reinterpret_cast<uintptr_t>(k.mapVal);
+                return static_cast<unsigned>(llvm::hash_combine(h1, h2, h3, k.mapIsConst));
+            }
+
+            static bool isEqual(const MapHashKey &a, const MapHashKey &b)
+            {
+                if (a.func != b.func)
+                    return false;
+                if (a.keyVal != b.keyVal)
+                    return false;
+                if (a.mapIsConst != b.mapIsConst)
+                    return false;
+                if (a.mapIsConst)
+                    return a.mapConst == b.mapConst;
+                return a.mapVal == b.mapVal;
+            }
+        };
+
+        struct MapHashCache
+        {
+            llvm::DenseMap<MapHashKey, Value, MapHashKeyInfo> hashes;
+        };
 
         // -----------------------------------------------------------------------------
         // Utility: Lookup global slot index from ora.global operation
@@ -179,23 +230,37 @@ namespace mlir
         class ConvertMapGetOp : public OpConversionPattern<ora::MapGetOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertMapGetOp(const TypeConverter &typeConverter, MLIRContext *context,
+                            MapHashCache &mapHashCache,
+                            PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
 
             LogicalResult matchAndRewrite(
                 ora::MapGetOp op,
                 typename ora::MapGetOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
         };
 
         class ConvertMapStoreOp : public OpConversionPattern<ora::MapStoreOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertMapStoreOp(const TypeConverter &typeConverter, MLIRContext *context,
+                              MapHashCache &mapHashCache,
+                              PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
 
             LogicalResult matchAndRewrite(
                 ora::MapStoreOp op,
                 typename ora::MapStoreOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
         };
 
         class ConvertTensorExtractOp : public OpConversionPattern<mlir::tensor::ExtractOp>
@@ -233,6 +298,3 @@ namespace mlir
 
     } // namespace ora
 } // namespace mlir
-
-/// Clear the static map hash cache between pass invocations.
-void clearMapHashCache();

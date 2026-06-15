@@ -1,0 +1,27 @@
+comptime const std = @import("std");
+
+contract LockGuardRevert {
+    storage var balances: map<address, u256>;
+
+    fn write_balance(user: address, amount: u256) {
+        balances[user] = amount;
+    }
+
+    pub fn safe_other_slot(locked_user: address, target: address, amount: u256) -> bool {
+        @lock(balances[locked_user]);
+        write_balance(target, amount);
+        @unlock(balances[locked_user]);
+        return true;
+    }
+
+    pub fn conflict_same_slot(user: address, amount: u256) -> bool {
+        @lock(balances[user]);
+        write_balance(user, amount);
+        @unlock(balances[user]);
+        return true;
+    }
+
+    pub fn balance_of(user: address) -> u256 {
+        return balances[user];
+    }
+}

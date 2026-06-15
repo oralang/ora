@@ -1,0 +1,11 @@
+contract NestedMappingStorageSmoke {
+    storage var allowances: map<address, map<address, u256>>;
+
+    pub fn set_allowance(owner: address, spender: address, amount: u256) {
+        allowances[owner][spender] = amount;
+    }
+
+    pub fn get_allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+}

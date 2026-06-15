@@ -1,4 +1,5 @@
 #include "patterns/AdtCarrierHelpers.h"
+#include "patterns/LoweringHelpers.h"
 
 #include "OraDialect.h"
 #include "OraMaterializationKinds.h"
@@ -10,20 +11,8 @@
 #include "llvm/Support/Casting.h"
 
 using namespace mlir;
-
-namespace
-{
-    // Local copy of ensureU256 — the per-pattern translation units each carry
-    // their own static version. Folding those into a shared helper is a
-    // separate cleanup; this keeps C1 scoped to the ADT-helper dedup.
-    Value ensureU256Local(PatternRewriter &rewriter, Location loc, Value value)
-    {
-        auto u256Type = sir::U256Type::get(rewriter.getContext());
-        if (llvm::isa<sir::U256Type>(value.getType()))
-            return value;
-        return rewriter.create<sir::BitcastOp>(loc, u256Type, value);
-    }
-} // namespace
+using mlir::ora::lowering::coerceToU256;
+using mlir::ora::lowering::constU256;
 
 namespace mlir
 {
@@ -32,15 +21,29 @@ namespace mlir
         namespace adt_helpers
         {
 
-            Value materializeAdtHandle(OpBuilder &builder,
-                                       Location loc,
-                                       Value tag,
-                                       Value payload)
+            Value adtCarrierSizeConst(OpBuilder &builder, Location loc)
+            {
+                return constU256(builder, loc, kAdtCarrierSize);
+            }
+
+            Value adtPayloadOffsetConst(OpBuilder &builder, Location loc)
+            {
+                return constU256(builder, loc, kAdtPayloadOffset);
+            }
+
+            Value adtStoragePayloadSlotOffsetConst(OpBuilder &builder, Location loc)
+            {
+                return constU256(builder, loc, kAdtStoragePayloadSlotOffset);
+            }
+
+            AdtHandle materializeAdtHandleWithSize(OpBuilder &builder,
+                                                   Location loc,
+                                                   Value tag,
+                                                   Value payload)
             {
                 auto *ctx = builder.getContext();
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
                 Value tagU256 = llvm::isa<sir::U256Type>(tag.getType())
                                     ? tag
@@ -49,15 +52,21 @@ namespace mlir
                                         ? payload
                                         : builder.create<sir::BitcastOp>(loc, u256Type, payload).getResult();
 
-                Value sizeVal = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtCarrierSize));
+                Value sizeVal = adtCarrierSizeConst(builder, loc);
                 Value basePtr = builder.create<sir::MallocOp>(loc, ptrType, sizeVal);
                 builder.create<sir::StoreOp>(loc, basePtr, tagU256);
-                Value payloadOffset = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+                Value payloadOffset = adtPayloadOffsetConst(builder, loc);
                 Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, payloadOffset);
                 builder.create<sir::StoreOp>(loc, payloadPtr, payloadU256);
-                return basePtr;
+                return {basePtr, sizeVal};
+            }
+
+            Value materializeAdtHandle(OpBuilder &builder,
+                                       Location loc,
+                                       Value tag,
+                                       Value payload)
+            {
+                return materializeAdtHandleWithSize(builder, loc, tag, payload).basePtr;
             }
 
             std::pair<Value, Value> loadAdtPartsFromHandle(OpBuilder &builder,
@@ -67,18 +76,49 @@ namespace mlir
                 auto *ctx = builder.getContext();
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
-                auto ui64Type = mlir::IntegerType::get(ctx, 64, mlir::IntegerType::Unsigned);
 
                 Value basePtr = handle;
                 if (llvm::isa<sir::U256Type>(basePtr.getType()))
                     basePtr = builder.create<sir::BitcastOp>(loc, ptrType, basePtr);
 
                 Value tag = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                Value payloadOffset = builder.create<sir::ConstOp>(
-                    loc, u256Type, mlir::IntegerAttr::get(ui64Type, kAdtPayloadOffset));
+                Value payloadOffset = adtPayloadOffsetConst(builder, loc);
                 Value payloadPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, payloadOffset);
                 Value payload = builder.create<sir::LoadOp>(loc, u256Type, payloadPtr);
                 return {tag, payload};
+            }
+
+            Value adtStoragePayloadSlot(OpBuilder &builder,
+                                        Location loc,
+                                        Value baseSlot)
+            {
+                auto u256Type = sir::U256Type::get(builder.getContext());
+                Value offset = adtStoragePayloadSlotOffsetConst(builder, loc);
+                return builder.create<sir::AddOp>(loc, u256Type, baseSlot, offset);
+            }
+
+            std::pair<Value, Value> loadAdtPartsFromStorageRoot(OpBuilder &builder,
+                                                                Location loc,
+                                                                Value baseSlot)
+            {
+                auto *ctx = builder.getContext();
+                auto u256Type = sir::U256Type::get(ctx);
+
+                Value payloadSlot = adtStoragePayloadSlot(builder, loc, baseSlot);
+                Value tag = builder.create<sir::SLoadOp>(loc, u256Type, baseSlot);
+                Value payload = builder.create<sir::SLoadOp>(loc, u256Type, payloadSlot);
+                return {tag, payload};
+            }
+
+            void storeAdtPartsToStorageRoot(OpBuilder &builder,
+                                            Location loc,
+                                            Value baseSlot,
+                                            Value tag,
+                                            Value payload)
+            {
+                Value payloadSlot = adtStoragePayloadSlot(builder, loc, baseSlot);
+                builder.create<sir::SStoreOp>(loc, baseSlot, tag);
+                builder.create<sir::SStoreOp>(loc, payloadSlot, payload);
             }
 
             bool usesAggregateAdtPayloadHandle(Type type)
@@ -96,6 +136,106 @@ namespace mlir
                 return failure();
             }
 
+            static FailureOr<Value> materializeAdtPayloadCarrier(
+                PatternRewriter &rewriter,
+                Location loc,
+                Type payloadType,
+                Value payloadValue,
+                AdtConstructCarrierOptions options)
+            {
+                if (!usesAggregateAdtPayloadHandle(payloadType))
+                {
+                    if (options.requireExistingScalarCarrier)
+                    {
+                        Value existing = lowering::existingU256Value(payloadValue);
+                        if (!existing)
+                            return failure();
+                        return existing;
+                    }
+                    return coerceToU256(rewriter, loc, payloadValue);
+                }
+
+                auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+                if (auto ptr = ora::materializePtrCarrierFromOraValue(rewriter, loc, ptrType, payloadValue))
+                    return coerceToU256(rewriter, loc, *ptr);
+
+                if (options.acceptExistingAggregateCarrier &&
+                    llvm::isa<sir::PtrType, sir::U256Type>(payloadValue.getType()))
+                {
+                    return coerceToU256(rewriter, loc, payloadValue);
+                }
+
+                if (options.acceptSingleOperandCarrierCast)
+                {
+                    if (auto cast = payloadValue.getDefiningOp<mlir::UnrealizedConversionCastOp>())
+                    {
+                        if (cast.getNumOperands() == 1 &&
+                            llvm::isa<sir::PtrType, sir::U256Type>(cast.getOperand(0).getType()))
+                        {
+                            return coerceToU256(rewriter, loc, cast.getOperand(0));
+                        }
+                    }
+                }
+
+                return failure();
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            materializeAdtConstructParts(PatternRewriter &rewriter,
+                                         Location loc,
+                                         ora::AdtType adtType,
+                                         StringRef variantName,
+                                         ValueRange payloadValues,
+                                         AdtConstructCarrierOptions options)
+            {
+                auto variantIndex = getAdtVariantIndex(adtType, variantName);
+                if (failed(variantIndex))
+                    return failure();
+
+                Value tag = constU256(rewriter, loc, *variantIndex);
+                Value payload = constU256(rewriter, loc, 0);
+
+                if (!payloadValues.empty())
+                {
+                    if (payloadValues.size() != 1)
+                        return failure();
+
+                    auto carrier = materializeAdtPayloadCarrier(
+                        rewriter, loc, adtType.getPayloadTypes()[*variantIndex],
+                        payloadValues.front(), options);
+                    if (failed(carrier))
+                        return failure();
+                    payload = *carrier;
+                }
+
+                return std::make_pair(tag, payload);
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            materializeAdtConstructParts(PatternRewriter &rewriter,
+                                         Location loc,
+                                         ora::AdtConstructOp constructOp,
+                                         AdtConstructCarrierOptions options)
+            {
+                auto adtType = llvm::dyn_cast<ora::AdtType>(constructOp.getResult().getType());
+                if (!adtType)
+                    return failure();
+                return materializeAdtConstructParts(
+                    rewriter, loc, adtType, constructOp.getVariantName(),
+                    constructOp.getPayloadValues(), options);
+            }
+
+            FailureOr<std::pair<Value, Value>>
+            getAdtPartsFromConstructOrNormalized(PatternRewriter &rewriter,
+                                                 Location loc,
+                                                 Value value,
+                                                 AdtConstructCarrierOptions options)
+            {
+                if (auto constructOp = value.getDefiningOp<ora::AdtConstructOp>())
+                    return materializeAdtConstructParts(rewriter, loc, constructOp, options);
+                return getNormalizedAdtPartsFromValue(rewriter, loc, value);
+            }
+
             FailureOr<std::pair<Value, Value>>
             getNormalizedAdtPartsFromOperands(PatternRewriter &rewriter,
                                               Location loc,
@@ -104,8 +244,8 @@ namespace mlir
                 if (operands.size() != 2)
                     return failure();
                 return std::make_pair(
-                    ensureU256Local(rewriter, loc, operands[0]),
-                    ensureU256Local(rewriter, loc, operands[1]));
+                    coerceToU256(rewriter, loc, operands[0]),
+                    coerceToU256(rewriter, loc, operands[1]));
             }
 
             FailureOr<std::pair<Value, Value>>
@@ -119,8 +259,8 @@ namespace mlir
                 if (cast.getNumOperands() != 2)
                     return failure();
                 return std::make_pair(
-                    ensureU256Local(rewriter, loc, cast.getOperand(0)),
-                    ensureU256Local(rewriter, loc, cast.getOperand(1)));
+                    coerceToU256(rewriter, loc, cast.getOperand(0)),
+                    coerceToU256(rewriter, loc, cast.getOperand(1)));
             }
 
             LogicalResult decodeAdtPayloadFromCarrier(Operation *op,
@@ -136,7 +276,7 @@ namespace mlir
                         return rewriter.notifyMatchFailure(
                             op, "aggregate ADT payload requires compiler-runtime handle lowering");
                     payload = rewriter.create<sir::BitcastOp>(
-                        loc, loweredType, ensureU256Local(rewriter, loc, payload));
+                        loc, loweredType, coerceToU256(rewriter, loc, payload));
                     return success();
                 }
 
@@ -144,13 +284,13 @@ namespace mlir
                     return success();
                 if (llvm::isa<sir::U256Type>(loweredType))
                 {
-                    payload = ensureU256Local(rewriter, loc, payload);
+                    payload = coerceToU256(rewriter, loc, payload);
                     return success();
                 }
                 if (llvm::isa<mlir::IntegerType>(loweredType))
                 {
                     payload = rewriter.create<sir::BitcastOp>(
-                        loc, loweredType, ensureU256Local(rewriter, loc, payload));
+                        loc, loweredType, coerceToU256(rewriter, loc, payload));
                     return success();
                 }
                 return rewriter.notifyMatchFailure(op, "unsupported lowered ADT payload result type");

@@ -177,7 +177,7 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(original_source, rebuilt_before);
 
     const graph_before = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), graph_before.modules.len);
+    try testing.expectEqual(@as(usize, 6), graph_before.modules.len);
     const root_before = for (graph_before.modules) |summary| {
         if (summary.module_id == compilation.root_module_id) break summary;
     } else return error.TestUnexpectedResult;
@@ -195,7 +195,7 @@ test "compiler invalidates cached queries after source update" {
     try testing.expectEqualStrings(updated_source, rebuilt_after);
 
     const graph_after = try compilation.db.moduleGraph(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), graph_after.modules.len);
+    try testing.expectEqual(@as(usize, 6), graph_after.modules.len);
     const root_after = for (graph_after.modules) |summary| {
         if (summary.module_id == compilation.root_module_id) break summary;
     } else return error.TestUnexpectedResult;
@@ -378,13 +378,16 @@ test "compiler evaluates division builtins with distinct semantics" {
         \\    let trunc = @divTrunc(@cast(i256, -7), @cast(i256, 3));
         \\    let floor = @divFloor(@cast(i256, -7), @cast(i256, 3));
         \\    let ceil = @divCeil(@cast(i256, -7), @cast(i256, 3));
-        \\    let exact = @divExact(12, 4);
+        \\    let exact = @divExact(@cast(i256, 12), @cast(i256, 4));
         \\    return trunc + floor + ceil + exact;
         \\}
     ;
 
     var compilation = try compileText(source_text);
     defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);

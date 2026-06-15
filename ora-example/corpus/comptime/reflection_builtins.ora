@@ -1,0 +1,62 @@
+trait ReflectionErc20 {
+    fn balanceOf(self, owner: address) -> u256;
+    fn transfer(self, to: address, value: u256) -> bool;
+}
+
+contract ReflectionBuiltinCorpus {
+    struct Permit {
+        owner: address,
+        spender: address,
+        value: u256,
+        nonce: u256,
+        deadline: u256,
+    }
+
+    pub fn field_count() -> u256 {
+        return comptime {
+            @structFields(Permit).len;
+        };
+    }
+
+    pub fn first_field_name() -> string {
+        return comptime {
+            @structFields(Permit)[0].name;
+        };
+    }
+
+    pub fn first_field_type_is_address() -> bool {
+        return comptime {
+            @structFields(Permit)[0].type == address;
+        };
+    }
+
+    pub fn address_type_name() -> string {
+        return comptime {
+            @typeName(address);
+        };
+    }
+
+    pub fn address_size() -> u256 {
+        return comptime {
+            @sizeOf(address);
+        };
+    }
+
+    pub fn method_count() -> u256 {
+        return comptime {
+            @traitMethods(ReflectionErc20).len;
+        };
+    }
+
+    pub fn transfer_param_count() -> u256 {
+        return comptime {
+            @traitMethods(ReflectionErc20)[1].params.len;
+        };
+    }
+
+    pub fn transfer_returns_bool() -> bool {
+        return comptime {
+            @traitMethods(ReflectionErc20)[1].return_type == bool;
+        };
+    }
+}

@@ -1,0 +1,60 @@
+enum Status: u8 {
+    Active,
+    Paused,
+}
+
+bitfield Flags: u8 {
+    enabled: u1,
+    mode: u7,
+}
+
+struct Pair {
+    amount: u256,
+    ok: bool,
+}
+
+contract AbiEncodeStaticCorpus {
+    pub fn scalar_tuple_len() -> u256 {
+        return comptime {
+            @abiEncode((@cast(u256, 1), true)).len;
+        };
+    }
+
+    pub fn scalar_tuple_byte_sum() -> u256 {
+        return comptime {
+            const encoded = @abiEncode((@cast(u256, 1), true));
+            encoded[31] + encoded[63];
+        };
+    }
+
+    pub fn signed_negative_first_byte() -> u256 {
+        return comptime {
+            @abiEncode(@cast(i256, -1))[0];
+        };
+    }
+
+    pub fn static_struct_len() -> u256 {
+        return comptime {
+            const value: Pair = Pair { amount: 7, ok: true };
+            @abiEncode(value).len;
+        };
+    }
+
+    pub fn enum_value_last_byte() -> u256 {
+        return comptime {
+            @abiEncode(Status.Paused)[31];
+        };
+    }
+
+    pub fn bitfield_value_last_byte() -> u256 {
+        return comptime {
+            @abiEncode(@cast(Flags, 3))[31];
+        };
+    }
+
+    pub fn empty_tuple_len() -> u256 {
+        return comptime {
+            @abiEncode(()).len;
+        };
+    }
+}

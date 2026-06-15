@@ -62,19 +62,6 @@ pub const CtAggregate = struct {
         field_id: FieldId,
         value: CtValue,
     };
-
-    /// Convert to CtValue (for enum payloads)
-    pub fn toCtValue(self: *const CtAggregate) CtValue {
-        return switch (self.data) {
-            .bytes => unreachable, // bytes don't convert to CtValue directly
-            .string => unreachable,
-            .array => |a| .{ .array_ref = @intCast(@intFromPtr(self) - @intFromPtr(a.elems.ptr)) }, // placeholder
-            .slice => unreachable,
-            .map => unreachable,
-            .tuple => unreachable,
-            .struct_val => unreachable,
-        };
-    }
 };
 
 /// Comptime heap for managing aggregates with COW semantics

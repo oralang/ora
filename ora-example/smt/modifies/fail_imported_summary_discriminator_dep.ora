@@ -1,0 +1,8 @@
+storage var balances: map<address, u256>;
+
+fn set_balance_with_bad_body(user: address, value: u256)
+    modifies balances[user]
+{
+    assert(false);
+    balances[user] = value;
+}

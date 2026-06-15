@@ -1,0 +1,16 @@
+contract Vault {
+    fn external_name(caller_storage: map<address, u256>, owner: address)
+        modifies caller_storage[owner]
+    {
+    }
+
+    fn callee_name(callee_storage: map<address, u256>, owner: address)
+        modifies callee_storage[owner]
+    {
+    }
+
+    fn external_storage_name(external_storage: map<address, u256>, owner: address)
+        modifies external_storage[owner]
+    {
+    }
+}

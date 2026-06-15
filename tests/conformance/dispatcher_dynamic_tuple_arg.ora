@@ -1,0 +1,5 @@
+contract DispatcherDynamicTupleArg {
+    pub fn value(t: (u256, string)) -> u256 {
+        return t.0 + t.1.len;
+    }
+}

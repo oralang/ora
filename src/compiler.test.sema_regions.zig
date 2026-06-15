@@ -335,6 +335,86 @@ test "compiler lowers sema effect summaries onto HIR functions" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"transient:pending\""));
 }
 
+test "compiler does not report root locks as persistent storage reads" {
+    const source_text =
+        \\contract Locked {
+        \\    storage var guard: u256 = 0;
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn guarded(value: u256) {
+        \\        @lock(guard);
+        \\        total = value;
+        \\        @unlock(guard);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const guarded = item_index.lookup("guarded").?;
+
+    switch (typecheck.itemEffect(guarded)) {
+        .writes => |effect| {
+            try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.sload \"guard\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"guard\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.write_slots = [\"total\"]"));
+}
+
+test "compiler includes guard clause reads in effect summaries" {
+    const source_text =
+        \\struct Flags {
+        \\    paused: bool;
+        \\}
+        \\
+        \\contract Guarded {
+        \\    storage var flags: Flags;
+        \\
+        \\    pub fn guarded() -> bool
+        \\        guard !flags.paused
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const guarded = item_index.lookup("guarded").?;
+
+    switch (typecheck.itemEffect(guarded)) {
+        .reads => |effect| try testing.expect(containsEffectSlot(effect.slots, "flags", .storage)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.read_slots = [\"flags\"]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.effect = \"reads\""));
+}
+
 test "compiler composes callee effects into caller summaries" {
     const source_text =
         \\contract Effects {
@@ -533,6 +613,31 @@ test "compiler allows writes after unlock" {
     try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
+test "compiler allows external calls while lock is held for runtime reentrancy guards" {
+    const source_text =
+        \\extern trait Observer {
+        \\    call fn observe(self, target: address) -> u256;
+        \\}
+        \\
+        \\contract Locked {
+        \\    storage total: u256;
+        \\
+        \\    pub fn guarded(observer: address, target: address) {
+        \\        @lock(total);
+        \\        let observed = external<Observer>(observer, gas: 50000).observe(target);
+        \\        _ = observed;
+        \\        @unlock(total);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!diagnosticMessagesContain(&typecheck.diagnostics, "unresolved call may write locked storage slot"));
+}
+
 test "compiler allows writes after a conditional lock on only one path" {
     const source_text =
         \\contract Locked {
@@ -607,7 +712,7 @@ test "compiler rejects writes when all branches keep a slot locked" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked storage slot 'total'"));
 }
 
-test "compiler rejects writes to locked transient slots" {
+test "compiler rejects transient lock paths until runtime lowering supports them" {
     const source_text =
         \\contract Locked {
         \\    tstore var pending: u256;
@@ -626,7 +731,35 @@ test "compiler rejects writes to locked transient slots" {
     const ast_file = try compilation.db.astFile(root_file_id);
     const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
 
-    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write locked transient slot 'pending'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`@lock` v1 only supports current-contract storage paths"));
+}
+
+test "compiler rejects lock paths that runtime lowering cannot represent yet" {
+    const source_text =
+        \\struct Config {
+        \\    owner: address,
+        \\}
+        \\
+        \\contract Locked {
+        \\    storage config: Config;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn guarded(owner: address, spender: address) {
+        \\        @lock(config.owner);
+        \\        @lock(allowances[owner][spender]);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const root_file_id = compilation.db.sources.module(compilation.root_module_id).file_id;
+    const ast_file = try compilation.db.astFile(root_file_id);
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[1] });
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "struct-field locks are not runtime-lowered yet"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`@lock` v1 only supports storage roots or single-key indexed storage paths"));
 }
 
 test "compiler composes contract member call effects into caller summaries" {
@@ -833,13 +966,13 @@ test "compiler tracks log and havoc effect kinds" {
             try testing.expect(effect.has_havoc);
         },
         .writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -851,13 +984,13 @@ test "compiler tracks log and havoc effect kinds" {
             try testing.expect(effect.has_havoc);
         },
         .writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
-            try testing.expect(effect.has_havoc);
+            try testing.expect(effect.flags.has_log);
+            try testing.expect(effect.flags.has_havoc);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -891,13 +1024,13 @@ test "compiler tracks lock and unlock effect kinds" {
             try testing.expect(effect.has_unlock);
         },
         .reads => |effect| {
-            try testing.expect(effect.has_lock);
-            try testing.expect(effect.has_unlock);
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_lock);
-            try testing.expect(effect.has_unlock);
+            try testing.expect(effect.flags.has_lock);
+            try testing.expect(effect.flags.has_unlock);
             try testing.expect(containsEffectSlot(effect.reads, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -939,11 +1072,11 @@ test "compiler composes effects to a fixpoint across mutual recursion" {
 
     switch (typecheck.itemEffect(ping)) {
         .writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -951,11 +1084,11 @@ test "compiler composes effects to a fixpoint across mutual recursion" {
 
     switch (typecheck.itemEffect(pong)) {
         .writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.slots, "total", .storage));
         },
         .reads_writes => |effect| {
-            try testing.expect(effect.has_log);
+            try testing.expect(effect.flags.has_log);
             try testing.expect(containsEffectSlot(effect.writes, "total", .storage));
         },
         else => return error.TestUnexpectedResult,
@@ -1103,6 +1236,7 @@ test "compiler lowers lock and unlock statements through syntax AST and HIR path
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.unlock_placeholder"));
 }
 
+// SENTINEL: docs/formal-specs/user-locks.md section 5 cites this test name.
 test "compiler emits tstore guard before guarded storage writes" {
     const source_text =
         \\contract GuardedWrites {
@@ -1124,10 +1258,13 @@ test "compiler emits tstore guard before guarded storage writes" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "key = \"balances\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, ", \"balances\""));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock_placeholder"));
 }
 
+// SENTINEL: docs/formal-specs/user-locks.md section 5 cites this test name.
 test "compiler emits keyed tstore guard before guarded indexed storage writes" {
     const source_text =
         \\contract GuardedWrites {
@@ -1153,7 +1290,73 @@ test "compiler emits keyed tstore guard before guarded indexed storage writes" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
-    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"history[]\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "key = \"history[]\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, ", \"history[]\""));
+}
+
+test "compiler emits keyed tstore guard before guarded map storage writes" {
+    const source_text =
+        \\contract GuardedWrites {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    fn write_balance(user: address, value: u256) {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn touch(user: address, value: u256) {
+        \\        @lock(balances[user]);
+        \\        write_balance(user, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "guarded-map-write.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.map_store"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "key = \"balances[]\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, ", \"balances[]\""));
+}
+
+test "compiler emits root tstore guard before guarded struct root writes" {
+    const source_text =
+        \\struct Config {
+        \\    owner: address,
+        \\    limit: u256,
+        \\}
+        \\
+        \\contract GuardedWrites {
+        \\    storage config: Config;
+        \\
+        \\    fn write_limit(value: u256) {
+        \\        config.limit = value;
+        \\    }
+        \\
+        \\    pub fn touch(value: u256) {
+        \\        @lock(config);
+        \\        write_limit(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compiler.compileSource(testing.allocator, "guarded-struct-root-write.ora", source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.lock"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.tstore.guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "key = \"config\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, ", \"config\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.sstore"));
 }
 
 test "compiler lowers grouped lock paths through real lock ops" {

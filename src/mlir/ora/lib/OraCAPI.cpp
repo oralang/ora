@@ -41,16 +41,19 @@
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Casting.h"
 #include <sstream>
-#include "mlir/Transforms/ViewOpGraph.h"
-#include "mlir/Transforms/Passes.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdlib>
 #include <cstring>
+#include <functional>
+#include <iterator>
 
 namespace
 {
@@ -250,6 +253,11 @@ extern "C"
     void oraContextLoadAllAvailableDialects(MlirContext ctx)
     {
         unwrap(ctx)->loadAllAvailableDialects();
+    }
+
+    void oraContextLoadSIRDialect(MlirContext ctx)
+    {
+        unwrap(ctx)->getOrLoadDialect<sir::SIRDialect>();
     }
 
     MlirModule oraModuleCreateEmpty(MlirLocation loc)
@@ -756,16 +764,6 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
             {
                 ORA_DEBUG_PREFIX("OraCAPI", "ERROR: operation is null!");
                 return {nullptr, 0};
-            }
-
-            // Check if DCE left the IR in an invalid state
-            if (auto moduleOp = llvm::dyn_cast<mlir::ModuleOp>(operation))
-            {
-                if (moduleOp->hasAttr("ora.dce_invalid"))
-                {
-                    ORA_DEBUG_PREFIX("OraCAPI", "  This would cause a segfault if we tried to print");
-                    return {nullptr, 0};
-                }
             }
 
             ORA_DEBUG_PREFIX("OraCAPI", "Operation: " << operation->getName());
@@ -3581,6 +3579,36 @@ MlirOperation oraMemrefAllocaOpCreate(MlirContext ctx, MlirLocation loc, MlirTyp
     }
 }
 
+MlirOperation oraMemrefAllocaDynamicOpCreate(MlirContext ctx, MlirLocation loc, MlirType resultType, const MlirValue *dynamicSizes, size_t numDynamicSizes)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        Type memrefType = unwrap(resultType);
+        auto memrefTy = llvm::dyn_cast<mlir::MemRefType>(memrefType);
+        if (!memrefTy)
+        {
+            return {nullptr};
+        }
+
+        SmallVector<Value, 4> sizes;
+        sizes.reserve(numDynamicSizes);
+        for (size_t i = 0; i < numDynamicSizes; ++i)
+        {
+            sizes.push_back(unwrap(dynamicSizes[i]));
+        }
+
+        OpBuilder builder(context);
+        auto op = builder.create<memref::AllocaOp>(location, memrefTy, sizes);
+        return wrap(op.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraMemrefLoadOpCreate(MlirContext ctx, MlirLocation loc, MlirValue memref, const MlirValue *indices, size_t numIndices, MlirType resultType)
 {
     try
@@ -4112,7 +4140,10 @@ MlirOperation oraScfForOpCreate(MlirContext ctx, MlirLocation loc, MlirValue low
 
         OpBuilder builder(context);
         auto op = builder.create<scf::ForOp>(location, lb, ub, st, init, nullptr, unsignedCmp);
-
+        if (!unsignedCmp)
+        {
+            op->setAttr("ora.signedCmp", builder.getBoolAttr(true));
+        }
 
         return wrap(op.getOperation());
     }
@@ -5181,7 +5212,7 @@ MlirOperation oraMethodCallOpCreate(MlirContext ctx, MlirLocation loc, MlirStrin
     }
 }
 
-MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute selector, MlirAttribute argTypes, const MlirValue *operands, size_t numOperands, MlirType resultType)
+MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute layout, const MlirValue *operands, size_t numOperands, MlirType resultType)
 {
     try
     {
@@ -5194,8 +5225,33 @@ MlirOperation oraAbiEncodeOpCreate(MlirContext ctx, MlirLocation loc, MlirAttrib
             state.addOperands(unwrap(operands[i]));
         }
         state.addTypes(resultTy);
+        state.addAttribute("layout", unwrap(layout));
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraAbiEncodeWithSelectorOpCreate(MlirContext ctx, MlirLocation loc, MlirAttribute selector, MlirAttribute argTypes, MlirAttribute layout, const MlirValue *operands, size_t numOperands, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.abi_encode_with_selector");
+        for (size_t i = 0; i < numOperands; ++i)
+        {
+            state.addOperands(unwrap(operands[i]));
+        }
+        state.addTypes(resultTy);
         state.addAttribute("selector", unwrap(selector));
         state.addAttribute("arg_types", unwrap(argTypes));
+        state.addAttribute("layout", unwrap(layout));
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -6116,6 +6172,54 @@ MlirOperation oraByteAtOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
     }
 }
 
+MlirOperation oraConcatOpCreate(MlirContext ctx, MlirLocation loc, MlirValue lhs, MlirValue rhs, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value lhsValue = unwrap(lhs);
+        Value rhsValue = unwrap(rhs);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.concat");
+        state.addOperands(lhsValue);
+        state.addOperands(rhsValue);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraSliceOpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirValue start, MlirValue length, MlirType resultType)
+{
+    try
+    {
+        Location location = unwrap(loc);
+        Value val = unwrap(value);
+        Value startValue = unwrap(start);
+        Value lengthValue = unwrap(length);
+        Type resultTy = unwrap(resultType);
+
+        OperationState state(location, "ora.slice");
+        state.addOperands(val);
+        state.addOperands(startValue);
+        state.addOperands(lengthValue);
+        state.addTypes(resultTy);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
 MlirOperation oraKeccak256OpCreate(MlirContext ctx, MlirLocation loc, MlirValue value, MlirType resultType)
 {
     try
@@ -6944,88 +7048,601 @@ void oraSwitchOpSetCasePatterns(
 // CFG Generation with Registered Dialect
 //===----------------------------------------------------------------------===//
 
-//===----------------------------------------------------------------------===//
-// CFG Generation Implementation
-//===----------------------------------------------------------------------===//
+static MlirStringRef allocateStringRef(const std::string &text)
+{
+    char *result = static_cast<char *>(malloc(text.size() + 1));
+    if (!result)
+        return {nullptr, 0};
+    memcpy(result, text.data(), text.size());
+    result[text.size()] = '\0';
+    return {result, text.size()};
+}
 
-MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeControlFlow)
+static void printDotQuoted(llvm::raw_ostream &os, llvm::StringRef text)
+{
+    os << "\"";
+    for (char ch : text)
+    {
+        switch (ch)
+        {
+        case '\\':
+            os << "\\\\";
+            break;
+        case '"':
+            os << "\\\"";
+            break;
+        case '\n':
+            os << "\\n";
+            break;
+        case '\r':
+            break;
+        default:
+            os << ch;
+            break;
+        }
+    }
+    os << "\"";
+}
+
+static std::string attributeToString(Attribute attr)
+{
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    attr.print(os);
+    os.flush();
+    return text;
+}
+
+static std::string locationToString(Location loc)
+{
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    loc.print(os);
+    os.flush();
+    return text;
+}
+
+static std::string operationName(Operation *op)
+{
+    if (!op)
+        return "<none>";
+    return op->getName().getStringRef().str();
+}
+
+static bool isSirRevertLikeTerminator(Operation *op)
+{
+    if (!op)
+        return false;
+    llvm::StringRef name = op->getName().getStringRef();
+    return name == "sir.revert" || name == "sir.invalid" || name == "sir.selfdestruct";
+}
+
+static std::string sirBlockEffects(Block *block)
+{
+    bool memoryRead = false;
+    bool memoryWrite = false;
+    bool storageRead = false;
+    bool storageWrite = false;
+    bool transientRead = false;
+    bool transientWrite = false;
+    bool reverts = false;
+    for (Operation &op : *block)
+    {
+        llvm::StringRef name = op.getName().getStringRef();
+        memoryRead |= name == "sir.mload" || name == "sir.mload8" || name == "sir.load";
+        memoryWrite |= name == "sir.mstore" || name == "sir.mstore8" || name == "sir.store";
+        storageRead |= name == "sir.sload";
+        storageWrite |= name == "sir.sstore";
+        transientRead |= name == "sir.tload";
+        transientWrite |= name == "sir.tstore";
+        reverts |= name == "sir.revert" || name == "sir.invalid";
+    }
+
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    bool first = true;
+    auto append = [&](llvm::StringRef item)
+    {
+        if (!first)
+            os << ",";
+        os << item;
+        first = false;
+    };
+    if (memoryRead)
+        append("memory_read");
+    if (memoryWrite)
+        append("memory_write");
+    if (storageRead)
+        append("storage_read");
+    if (storageWrite)
+        append("storage_write");
+    if (transientRead)
+        append("transient_read");
+    if (transientWrite)
+        append("transient_write");
+    if (reverts)
+        append("revert");
+    os.flush();
+    return text;
+}
+
+static std::string sirEdgeLabel(Operation *terminator, unsigned succIndex)
+{
+    if (!terminator)
+        return "";
+    llvm::StringRef name = terminator->getName().getStringRef();
+    if (name == "sir.cond_br" || name == "cf.cond_br")
+        return succIndex == 0 ? "true" : "false";
+    if (name == "sir.switch")
+    {
+        if (succIndex == 0)
+            return "default";
+        DenseI64ArrayAttr cases = terminator->getAttrOfType<DenseI64ArrayAttr>("caseValues");
+        if (!cases)
+            cases = terminator->getAttrOfType<DenseI64ArrayAttr>("case_values");
+        if (cases && succIndex - 1 < cases.size())
+        {
+            std::string text;
+            llvm::raw_string_ostream os(text);
+            os << "case " << cases[succIndex - 1];
+            os.flush();
+            return text;
+        }
+        return "case";
+    }
+    if (name == "sir.br" || name == "cf.br")
+        return "branch";
+    return "";
+}
+
+static void collectReachableBlocks(ArrayRef<Block *> blocks, llvm::DenseSet<Block *> &reachable)
+{
+    if (blocks.empty())
+        return;
+    SmallVector<Block *, 16> worklist;
+    reachable.insert(blocks.front());
+    worklist.push_back(blocks.front());
+    while (!worklist.empty())
+    {
+        Block *block = worklist.pop_back_val();
+        Operation *terminator = block->getTerminator();
+        if (!terminator)
+            continue;
+        for (unsigned i = 0, e = terminator->getNumSuccessors(); i < e; ++i)
+        {
+            Block *successor = terminator->getSuccessor(i);
+            if (reachable.insert(successor).second)
+                worklist.push_back(successor);
+        }
+    }
+}
+
+static uint64_t cfgEdgeKey(unsigned srcIndex, unsigned dstIndex)
+{
+    return (static_cast<uint64_t>(srcIndex) << 32) | static_cast<uint64_t>(dstIndex);
+}
+
+static void collectBackedgeKeys(ArrayRef<Block *> blocks,
+                                const llvm::DenseMap<Block *, unsigned> &blockIndex,
+                                const llvm::DenseSet<Block *> &reachable,
+                                llvm::DenseSet<uint64_t> &backedgeKeys)
+{
+    llvm::DenseMap<Block *, unsigned> color;
+    std::function<void(Block *)> visit = [&](Block *block)
+    {
+        color[block] = 1; // active
+        Operation *terminator = block->getTerminator();
+        if (terminator)
+        {
+            const unsigned srcIndex = blockIndex.lookup(block);
+            for (unsigned i = 0, e = terminator->getNumSuccessors(); i < e; ++i)
+            {
+                Block *successor = terminator->getSuccessor(i);
+                if (!reachable.contains(successor))
+                    continue;
+                auto succIt = blockIndex.find(successor);
+                if (succIt == blockIndex.end())
+                    continue;
+                const unsigned succColor = color.lookup(successor);
+                if (succColor == 1)
+                    backedgeKeys.insert(cfgEdgeKey(srcIndex, succIt->second));
+                else if (succColor == 0)
+                    visit(successor);
+            }
+        }
+        color[block] = 2; // done
+    };
+
+    if (!blocks.empty() && reachable.contains(blocks.front()))
+        visit(blocks.front());
+}
+
+struct SirCfgEdge
+{
+    unsigned srcIndex;
+    unsigned dstIndex;
+    std::string label;
+    bool backedge = false;
+};
+
+static std::string functionAttributeSummary(func::FuncOp func)
+{
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    bool first = true;
+    auto appendAttr = [&](llvm::StringRef name)
+    {
+        if (Attribute attr = func->getAttr(name))
+        {
+            if (!first)
+                os << "\\n";
+            os << name << "=" << attributeToString(attr);
+            first = false;
+        }
+    };
+    appendAttr("ora.effect");
+    appendAttr("ora.effects");
+    appendAttr("ora.write_slots");
+    appendAttr("ora.read_slots");
+    os.flush();
+    return text;
+}
+
+static void emitSirGraphHeader(llvm::raw_ostream &os, llvm::StringRef label)
+{
+    os << "digraph \"ora_sir_cfg\" {\n";
+    os << "  graph [label=";
+    printDotQuoted(os, label);
+    os << ", labelloc=t, fontname=\"Menlo\"];\n";
+    os << "  rankdir=TB;\n";
+    os << "  node [shape=box, fontname=\"Menlo\", style=\"rounded,filled\", fillcolor=\"#ffffff\"];\n";
+    os << "  edge [fontname=\"Menlo\"];\n";
+}
+
+static void emitSirFunctionCFG(func::FuncOp func, unsigned funcIndex, llvm::raw_ostream &os)
+{
+    Region &body = func.getBody();
+    if (body.empty())
+        return;
+
+    SmallVector<Block *, 16> blocks;
+    llvm::DenseMap<Block *, unsigned> blockIndex;
+    for (Block &block : body.getBlocks())
+    {
+        blockIndex[&block] = blocks.size();
+        blocks.push_back(&block);
+    }
+
+    llvm::DenseSet<Block *> reachable;
+    collectReachableBlocks(blocks, reachable);
+    llvm::DenseSet<uint64_t> backedgeKeys;
+    collectBackedgeKeys(blocks, blockIndex, reachable, backedgeKeys);
+
+    SmallVector<SirCfgEdge, 32> edges;
+    for (unsigned i = 0, e = blocks.size(); i < e; ++i)
+    {
+        Operation *terminator = blocks[i]->getTerminator();
+        if (!terminator)
+            continue;
+        for (unsigned succ = 0, succEnd = terminator->getNumSuccessors(); succ < succEnd; ++succ)
+        {
+            Block *successor = terminator->getSuccessor(succ);
+            auto it = blockIndex.find(successor);
+            if (it == blockIndex.end())
+                continue;
+            SirCfgEdge edge;
+            edge.srcIndex = i;
+            edge.dstIndex = it->second;
+            edge.label = sirEdgeLabel(terminator, succ);
+            edge.backedge = backedgeKeys.contains(cfgEdgeKey(edge.srcIndex, edge.dstIndex));
+            edges.push_back(std::move(edge));
+        }
+    }
+
+    std::string clusterLabel;
+    llvm::raw_string_ostream clusterOs(clusterLabel);
+    clusterOs << "function " << func.getSymName();
+    std::string attrSummary = functionAttributeSummary(func);
+    if (!attrSummary.empty())
+        clusterOs << "\\n" << attrSummary;
+    clusterOs.flush();
+
+    os << "  subgraph cluster_f" << funcIndex << " {\n";
+    os << "    label=";
+    printDotQuoted(os, clusterLabel);
+    os << ";\n";
+
+    for (unsigned i = 0, e = blocks.size(); i < e; ++i)
+    {
+        Block *block = blocks[i];
+        Operation *terminator = block->getTerminator();
+        std::string label;
+        llvm::raw_string_ostream labelOs(label);
+        labelOs << func.getSymName() << "\\nbb" << i;
+        labelOs << "\\nargs=" << block->getNumArguments();
+        labelOs << "\\nops=" << std::distance(block->begin(), block->end());
+        labelOs << "\\nterm=" << operationName(terminator);
+        std::string effects = sirBlockEffects(block);
+        if (!effects.empty())
+            labelOs << "\\neffects=" << effects;
+        if (terminator)
+            labelOs << "\\nloc=" << locationToString(terminator->getLoc());
+        labelOs.flush();
+
+        os << "    f" << funcIndex << "_bb" << i << " [label=";
+        printDotQuoted(os, label);
+        if (!reachable.contains(block))
+            os << ", fillcolor=\"#eeeeee\", unreachable=\"true\"";
+        else if (isSirRevertLikeTerminator(terminator))
+            os << ", fillcolor=\"#ffe5e5\", revert=\"true\"";
+        else if (i == 0)
+            os << ", fillcolor=\"#e7f0ff\", entry=\"true\"";
+        os << "];\n";
+    }
+
+    for (const SirCfgEdge &edge : edges)
+    {
+        os << "    f" << funcIndex << "_bb" << edge.srcIndex << " -> f" << funcIndex << "_bb" << edge.dstIndex << " [";
+        bool wrote = false;
+        if (!edge.label.empty())
+        {
+            os << "label=";
+            printDotQuoted(os, edge.label);
+            wrote = true;
+        }
+        if (edge.backedge)
+        {
+            if (wrote)
+                os << ", ";
+            os << "color=\"#1f77b4\", penwidth=2, backedge=\"true\"";
+        }
+        os << "];\n";
+    }
+
+    os << "  }\n";
+}
+
+static SmallVector<func::FuncOp, 16> collectCfgFunctions(ModuleOp moduleOp)
+{
+    SmallVector<func::FuncOp, 16> functions;
+    moduleOp.walk([&](func::FuncOp func)
+                  {
+        if (!func.getBody().empty())
+            functions.push_back(func); });
+    return functions;
+}
+
+static void emitSirBlockCFG(ModuleOp moduleOp, llvm::raw_ostream &os)
+{
+    emitSirGraphHeader(os, "SIR block CFG");
+
+    SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+    for (auto [index, func] : llvm::enumerate(functions))
+        emitSirFunctionCFG(func, static_cast<unsigned>(index), os);
+
+    os << "}\n";
+}
+
+static void emitSirSingleFunctionCFG(func::FuncOp func, unsigned funcIndex, llvm::raw_ostream &os)
+{
+    std::string label;
+    llvm::raw_string_ostream labelOs(label);
+    labelOs << "SIR block CFG: " << func.getSymName();
+    labelOs.flush();
+
+    emitSirGraphHeader(os, label);
+    emitSirFunctionCFG(func, funcIndex, os);
+    os << "}\n";
+}
+
+static bool isVerificationLikeOp(Operation *op)
+{
+    llvm::StringRef name = op->getName().getStringRef();
+    return name == "ora.refinement_guard" ||
+           name == "ora.requires" ||
+           name == "ora.ensures" ||
+           name == "ora.assert" ||
+           name == "ora.invariant" ||
+           name == "cf.assert";
+}
+
+static std::string guardIdForOp(Operation *op)
+{
+    if (auto attr = op->getAttrOfType<StringAttr>("ora.guard_id"))
+        return attr.getValue().str();
+    if (auto attr = op->getAttrOfType<StringAttr>("guard_id"))
+        return attr.getValue().str();
+    return "";
+}
+
+static void emitOraStructuredOp(Operation *op,
+                                llvm::raw_ostream &os,
+                                unsigned &nextNodeId,
+                                int parentNodeId,
+                                const llvm::StringSet<> &provenGuardIds)
+{
+    const bool interesting = llvm::isa<ModuleOp>(op) ||
+                             llvm::isa<func::FuncOp>(op) ||
+                             op->getNumRegions() > 0 ||
+                             isVerificationLikeOp(op);
+    int currentNodeId = parentNodeId;
+    if (interesting)
+    {
+        currentNodeId = static_cast<int>(nextNodeId++);
+        llvm::StringRef name = op->getName().getStringRef();
+        std::string guardId = guardIdForOp(op);
+        const bool verification = isVerificationLikeOp(op);
+        const bool proven = !guardId.empty() && provenGuardIds.contains(guardId);
+
+        std::string label;
+        llvm::raw_string_ostream labelOs(label);
+        labelOs << name;
+        if (auto func = llvm::dyn_cast<func::FuncOp>(op))
+            labelOs << "\\n@" << func.getSymName();
+        if (!guardId.empty())
+            labelOs << "\\nguard_id=" << guardId;
+        if (verification)
+            labelOs << "\\nproof=" << (proven ? "proven-erased" : "runtime");
+        labelOs << "\\nloc=" << locationToString(op->getLoc());
+        labelOs.flush();
+
+        os << "  n" << currentNodeId << " [label=";
+        printDotQuoted(os, label);
+        if (proven)
+            os << ", fillcolor=\"#dff5df\", proof=\"proven-erased\"";
+        else if (verification)
+            os << ", fillcolor=\"#fff1cc\", proof=\"runtime\"";
+        else if (op->getNumRegions() > 0)
+            os << ", fillcolor=\"#e7f0ff\"";
+        os << "];\n";
+
+        if (parentNodeId >= 0)
+            os << "  n" << parentNodeId << " -> n" << currentNodeId << ";\n";
+    }
+
+    for (Region &region : op->getRegions())
+    {
+        for (Block &block : region.getBlocks())
+        {
+            for (Operation &nested : block)
+                emitOraStructuredOp(&nested, os, nextNodeId, currentNodeId, provenGuardIds);
+        }
+    }
+}
+
+static void emitOraStructuredCFG(ModuleOp moduleOp,
+                                 llvm::raw_ostream &os,
+                                 const llvm::StringSet<> &provenGuardIds)
+{
+    os << "digraph \"ora_structured_cfg\" {\n";
+    os << "  graph [label=\"Ora structured control and FV overlay\", labelloc=t, fontname=\"Menlo\", proven_guard_count=\""
+       << provenGuardIds.size() << "\"];\n";
+    os << "  rankdir=TB;\n";
+    os << "  node [shape=box, fontname=\"Menlo\", style=\"rounded,filled\", fillcolor=\"#ffffff\"];\n";
+    os << "  edge [fontname=\"Menlo\"];\n";
+    unsigned nextNodeId = 0;
+    emitOraStructuredOp(moduleOp.getOperation(), os, nextNodeId, -1, provenGuardIds);
+    os << "}\n";
+}
+
+MlirStringRef oraGenerateCFGWithOptions(
+    MlirContext ctx,
+    MlirModule module,
+    MlirStringRef mode,
+    const MlirStringRef *provenGuardIds,
+    size_t provenGuardIdCount)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
-        (void)context; // Context is used implicitly by mlirPassManagerCreate
         ModuleOp moduleOp = unwrap(module);
 
-        // Register both Ora and SIR dialects (needed for SIR MLIR)
         if (!oraDialectRegister(ctx))
-        {
             return {nullptr, 0};
-        }
-
-        // Register SIR dialect for CFG generation from SIR MLIR
         context->getOrLoadDialect<sir::SIRDialect>();
 
-        // Verify the module has content
         if (moduleOp.getBodyRegion().empty() || moduleOp.getBodyRegion().front().empty())
-        {
-            // Module is empty, nothing to graph
             return {nullptr, 0};
+
+        llvm::StringSet<> provenSet;
+        for (size_t i = 0; i < provenGuardIdCount; ++i)
+        {
+            if (provenGuardIds[i].data)
+                provenSet.insert(llvm::StringRef(provenGuardIds[i].data, provenGuardIds[i].length));
         }
 
-        // Create a string stream to capture the DOT output from the pass
         std::string dotContent;
         llvm::raw_string_ostream dotStream(dotContent);
-
-        // Create the view-op-graph pass with our custom output stream and control flow edges
-        // The pass will write Graphviz DOT format to dotStream
-        // Control flow edges (dashed lines) show dominance relationships
-        auto graphPass = createPrintOpGraphPass(dotStream);
-
-        // Note: createPrintOpGraphPass doesn't expose options directly
-        // We'll use the default configuration which includes data flow edges
-        // Control flow edges would need to be enabled via pass options if available
-        // For now, the CFG shows operation structure and data dependencies
-        (void)includeControlFlow; // Reserved for future use when API supports it
-
-        // OperationPass<> works on any operation type, so add it directly to PassManager
-        PassManager pm(context);
-        pm.addPass(std::move(graphPass));
-
-        // Run the pass on the module
-        if (failed(pm.run(moduleOp)))
-        {
+        llvm::StringRef modeRef(mode.data ? mode.data : "", mode.length);
+        if (modeRef == "sir")
+            emitSirBlockCFG(moduleOp, dotStream);
+        else if (modeRef == "ora" || modeRef.empty())
+            emitOraStructuredCFG(moduleOp, dotStream, provenSet);
+        else
             return {nullptr, 0};
-        }
-
-        // Flush the stream to ensure all content is written
-        // The raw_string_ostream should have buffered all writes
         dotStream.flush();
 
-        // Check if we got any content
-        // If empty, the pass might have written to a different stream
-        // or the module might not have any operations to graph
         if (dotContent.empty())
-        {
-            // The pass ran but produced no output
-            // This could mean the module is empty or the pass isn't writing to our stream
             return {nullptr, 0};
-        }
-
-        // Allocate memory for the result (caller must free)
-        char *result = (char *)malloc(dotContent.size() + 1);
-        if (!result)
-        {
-            return {nullptr, 0};
-        }
-        memcpy(result, dotContent.c_str(), dotContent.size());
-        result[dotContent.size()] = '\0';
-
-        return {result, dotContent.size()};
+        return allocateStringRef(dotContent);
     }
     catch (...)
     {
         return {nullptr, 0};
     }
+}
+
+size_t oraCFGFunctionCount(MlirModule module)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        return collectCfgFunctions(moduleOp).size();
+    }
+    catch (...)
+    {
+        return 0;
+    }
+}
+
+MlirStringRef oraCFGFunctionName(MlirModule module, size_t functionIndex)
+{
+    try
+    {
+        ModuleOp moduleOp = unwrap(module);
+        SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+        if (functionIndex >= functions.size())
+            return {nullptr, 0};
+        return allocateStringRef(functions[functionIndex].getSymName().str());
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+MlirStringRef oraGenerateCFGForFunctionWithOptions(
+    MlirContext ctx,
+    MlirModule module,
+    MlirStringRef mode,
+    size_t functionIndex)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        ModuleOp moduleOp = unwrap(module);
+
+        if (!oraDialectRegister(ctx))
+            return {nullptr, 0};
+        context->getOrLoadDialect<sir::SIRDialect>();
+
+        llvm::StringRef modeRef(mode.data ? mode.data : "", mode.length);
+        if (modeRef != "sir")
+            return {nullptr, 0};
+
+        SmallVector<func::FuncOp, 16> functions = collectCfgFunctions(moduleOp);
+        if (functionIndex >= functions.size())
+            return {nullptr, 0};
+
+        std::string dotContent;
+        llvm::raw_string_ostream dotStream(dotContent);
+        emitSirSingleFunctionCFG(functions[functionIndex], static_cast<unsigned>(functionIndex), dotStream);
+        dotStream.flush();
+        if (dotContent.empty())
+            return {nullptr, 0};
+        return allocateStringRef(dotContent);
+    }
+    catch (...)
+    {
+        return {nullptr, 0};
+    }
+}
+
+MlirStringRef oraGenerateCFG(MlirContext ctx, MlirModule module, bool includeControlFlow)
+{
+    (void)includeControlFlow;
+    MlirStringRef mode = {"ora", 3};
+    return oraGenerateCFGWithOptions(ctx, module, mode, nullptr, 0);
 }
 
 static bool oraMlirVerifierOptOutEnabled()
@@ -7076,23 +7693,24 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-canonicalize");
 
+        auto addOraFunctionOptimizationPipeline = [&]()
+        {
+            pm.addPass(mlir::ora::createOraFunctionCanonicalizerPass());
+            pm.addPass(mlir::ora::createOraFunctionCSEPass());
+            pm.addPass(mlir::ora::createOraStorageReadCSEPass());
+        };
+
         // Run Ora optimizations in order:
-        // 1. Constant deduplication and constant folding (fallback)
-        pm.addPass(mlir::ora::createOraOptimizationPass());
+        // 1. Canonicalize/CSE Ora functions and storage reads.
+        addOraFunctionOptimizationPipeline();
 
-        // 2. Canonicalization on Ora MLIR functions
-        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
-
-        // 3. Cleanup unused Ora operations
-        pm.addPass(mlir::ora::createOraCleanupPass());
-
-        // 4. Inline functions marked with ora.inline attribute
+        // 2. Inline functions marked with ora.inline attribute.
         pm.addPass(mlir::ora::createOraInliningPass());
 
-        // 5. Re-run simple Ora optimization after inlining so constant control
+        // 3. Re-run Ora optimization after inlining so constant control
         // flow introduced or preserved across earlier passes is folded before
         // Ora emission / Ora->SIR conversion.
-        pm.addPass(mlir::ora::createSimpleOraOptimizationPass());
+        addOraFunctionOptimizationPipeline();
 
         LogicalResult result = pm.run(moduleOp);
 
@@ -7120,6 +7738,8 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
         const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
+        const bool enablePhase0SIRFrameworkCanonicalizer =
+            moduleOp->hasAttr("ora.phase0.run_sir_framework_canonicalizer");
         if (debugInfo && !hadDebugInfoAttr)
         {
             moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
@@ -7150,22 +7770,22 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         pm.addPass(mlir::ora::createOraInliningPass());
         ORA_DEBUG_PREFIX("OraCAPI", "Added Ora inlining pass");
 
-        // Add the Ora to SIR conversion pass
-        // Use addPass instead of addNestedPass since this is a ModuleOp pass
-        const bool enable_ora_to_sir = true;
-        if (enable_ora_to_sir)
+        // Add the Ora to SIR conversion pass. Use addPass instead of
+        // addNestedPass since this is a ModuleOp pass.
+        pm.addPass(createOraToSIRPass());
+        // Run narrow deterministic SIR hygiene in every mode. The pass set is
+        // deliberately limited to location-preserving, production-accepted
+        // canonicalization so debug/source-map artifacts share release behavior.
+        pm.addPass(createSIROptimizationPass());
+        // Cleanup removes dead pure ops after the deterministic hygiene pass.
+        pm.addPass(createSIRCleanupPass());
+        if (enablePhase0SIRFrameworkCanonicalizer)
         {
-            pm.addPass(createOraToSIRPass());
-        }
-        const bool enable_post_sir_passes = !debugInfo;
-        if (enable_post_sir_passes)
-        {
-            // Add optimization pass (for SIR-specific optimizations like constant folding)
-            pm.addPass(createSIROptimizationPass());
-            // Add cleanup pass to remove unused memref operations
-            // Cleanup runs BEFORE nested passes to clean up any remaining memref operations
-            pm.addPass(createSIRCleanupPass());
-
+            // Phase 0 framework-first spike: let MLIR canonicalization exercise
+            // dialect folders on SIR after conversion. This is opt-in
+            // so normal builds remain byte-identical while the spike measures
+            // framework behavior against the existing manual cleanup baseline.
+            pm.addPass(createSIRFrameworkCanonicalizerPass());
         }
 
         // Run the pass

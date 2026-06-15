@@ -1,0 +1,32 @@
+comptime const std = @import("std");
+
+contract Counter {
+    error Rejected;
+
+    storage var counter: u256 = 0;
+    storage var balances: map<address, u256>;
+
+    pub fn init(seed: u256) {
+        counter = seed;
+    }
+
+    pub fn increment() requires(counter < std.constants.U256_MAX) {
+        counter += 1;
+    }
+
+    pub fn get() -> u256 {
+        return counter;
+    }
+
+    pub fn credit(account: address, amount: u256) {
+        balances[account] = amount;
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn fail() -> !u256 | Rejected {
+        return Rejected;
+    }
+}

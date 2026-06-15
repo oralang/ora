@@ -1,0 +1,25 @@
+contract U256LiteralBoundaries {
+    pub fn max_hex() -> u256 {
+        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        return value;
+    }
+
+    pub fn max_decimal() -> u256 {
+        let value: u256 = 115792089237316195423570985008687907853269984665640564039457584007913129639935;
+        return value;
+    }
+
+    pub fn max_is_positive() -> bool {
+        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        return value > 0;
+    }
+
+    pub fn parameter_max_is_positive(value: u256) -> bool {
+        return value > 0;
+    }
+
+    pub fn wraps_to_zero() -> u256 {
+        let value: u256 = 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff;
+        return value +% 1;
+    }
+}

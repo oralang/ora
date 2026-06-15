@@ -7,7 +7,7 @@
 // 2) Keep precondition facts for SMT via ora.assume
 //
 // Inspect with:
-//   ./zig-out/bin/ora emit --emit-mlir=ora --no-verify ora-example/smt/verification/nonzero_requires_dedup.ora
+//   ./zig-out/bin/ora emit --emit=mlir:ora --no-verify ora-example/smt/verification/nonzero_requires_dedup.ora
 //
 // Expected in @initRedundant:
 // - ora.refinement_guard for each NonZeroAddress arg

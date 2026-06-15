@@ -4,7 +4,7 @@
 // Tests that runtime guards are inserted when SMT cannot prove Exact division
 // constraints. Guards should remain in MLIR output.
 //
-// Run with: --verify --emit-mlir-sir
+// Run with: --verify --emit=mlir:sir
 // Expected: Guards remain in MLIR output (runtime check required)
 // ============================================================================
 

@@ -18,9 +18,44 @@ EXPECTED_PASS_EXCEPTIONS = {
     "ora-example/refinements/negative_tests/fail_refinement_bounds.ora",
 }
 
+TYPE_FALLBACK_RE = re.compile(
+    r"^debug: HIR type fallback: (?P<reason>[a-z_]+)(?: at (?P<file>.*):(?P<line>\d+):(?P<column>\d+))?$"
+)
 
-def find_ora_files(base_dir="ora-example", subdir_filter=None):
-    """Find all .ora files in the project, optionally filtered by subdirectory."""
+
+def extract_type_fallbacks(*texts):
+    """Extract debug type-fallback records emitted by ORA_REPORT_TYPE_FALLBACKS."""
+    records = []
+    for text in texts:
+        for line in text.splitlines():
+            match = TYPE_FALLBACK_RE.match(line.strip())
+            if not match:
+                continue
+            records.append({
+                "reason": match.group("reason"),
+                "file": match.group("file") or "",
+                "line": int(match.group("line") or 0),
+                "column": int(match.group("column") or 0),
+            })
+    return records
+
+
+def find_ora_files(base_dir="ora-example", subdir_filter=None, paths=None):
+    """Find all .ora files in the project, optionally filtered by path/subdirectory."""
+    if paths:
+        files = []
+        for raw_path in paths:
+            path = Path(raw_path)
+            if path.is_file():
+                if path.suffix == ".ora":
+                    files.append(path)
+                continue
+            if path.is_dir():
+                files.extend(path.rglob("*.ora"))
+                continue
+            print(f"warning: path not found, skipping: {raw_path}", file=sys.stderr)
+        return sorted(set(files))
+
     all_files = sorted(Path(base_dir).rglob("*.ora"))
     
     if subdir_filter:
@@ -73,12 +108,37 @@ def get_ora_operations(ops_file="src/mlir/ora/td/OraOps.td"):
     return ops
 
 
-def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
-    """Test a single .ora file and return results."""
+def expected_failure_for(file_path, emit_mode):
     stem = Path(file_path).stem
     stem_lower = stem.lower()
     normalized_path = str(Path(file_path))
-    expected_failure = "fail" in stem_lower and normalized_path not in EXPECTED_PASS_EXCEPTIONS
+    if emit_mode == "build":
+        return "fail" in stem_lower and normalized_path not in EXPECTED_PASS_EXCEPTIONS
+    return "fail" in stem_lower
+
+
+def compiler_command(compiler_path, emit_mode, file_path):
+    if emit_mode == "build":
+        return [compiler_path, str(file_path)]
+    if emit_mode in ("ora", "mlir"):
+        return [compiler_path, "--verify", "--emit=mlir:ora", str(file_path)]
+    if emit_mode == "sir":
+        return [compiler_path, "--verify", "--emit=mlir:sir", str(file_path)]
+    if emit_mode == "sir-text":
+        return [compiler_path, "--emit=sir-text", str(file_path)]
+    if emit_mode == "bytecode":
+        return [compiler_path, "--emit=bytecode", str(file_path)]
+    if emit_mode == "abi":
+        return [compiler_path, "--emit=abi", str(file_path)]
+    if emit_mode == "abi-extras":
+        return [compiler_path, "--emit=abi:extras", str(file_path)]
+    raise ValueError(f"unsupported emit mode: {emit_mode}")
+
+
+def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40):
+    """Test a single .ora file and return results."""
+    normalized_path = str(Path(file_path))
+    expected_failure = expected_failure_for(normalized_path, emit_mode)
     try:
         source_text = Path(file_path).read_text()
     except OSError:
@@ -90,12 +150,17 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     stdout_raw = b""
     stderr_raw = b""
     mlir_stdout = ""
+    env = None
+    if report_type_fallbacks:
+        env = os.environ.copy()
+        env["ORA_REPORT_TYPE_FALLBACKS"] = "1"
 
     try:
         result = subprocess.run(
-            [compiler_path, str(file_path)],
+            compiler_command(compiler_path, emit_mode, file_path),
             capture_output=True,
-            timeout=timeout_s
+            timeout=timeout_s,
+            env=env,
         )
         return_code = result.returncode
         stdout_raw = result.stdout or b""
@@ -115,6 +180,8 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     except (UnicodeDecodeError, AttributeError):
         stdout = stdout_raw.decode('utf-8', errors='ignore') if stdout_raw else ""
         stderr = stderr_raw.decode('utf-8', errors='ignore') if stderr_raw else ""
+
+    type_fallbacks = extract_type_fallbacks(stdout, stderr)
 
     if timeout_note:
         if stderr:
@@ -171,12 +238,12 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
     else:
         status = "❌ FAILED" if has_error else "✅ SUCCESS"
 
-    if not has_error and not timed_out:
+    if emit_mode == "build" and not has_error and not timed_out:
         try:
             mlir_result = subprocess.run(
-                [compiler_path, "--verify", "--emit-mlir", str(file_path)],
+                [compiler_path, "--verify", "--emit=mlir:ora", str(file_path)],
                 capture_output=True,
-                timeout=timeout_s
+                timeout=timeout_s,
             )
             mlir_stdout = (mlir_result.stdout or b"").decode('utf-8', errors='replace')
         except subprocess.TimeoutExpired:
@@ -195,15 +262,16 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
         if return_code is not None:
             parts.append(f"exit_code: {return_code}")
         if stderr_lines:
-            tail = "\n".join(stderr_lines[-40:])
+            tail = "\n".join(stderr_lines[-max_error_lines:])
             parts.append(f"stderr (tail):\n{tail}")
         elif stdout_lines:
-            tail = "\n".join(stdout_lines[-40:])
+            tail = "\n".join(stdout_lines[-max_error_lines:])
             parts.append(f"stdout (tail):\n{tail}")
         error_output = "\n\n".join(parts) if parts else None
 
     return {
         "file": str(file_path),
+        "emit": emit_mode,
         "status": status,
         "error": error_output,
         "mlir": "\n".join(mlir_output) if not has_error else None,
@@ -211,7 +279,8 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30):
         "stderr": stderr,
         "return_code": return_code,
         "timed_out": timed_out,
-        "expected_failure": expected_failure
+        "expected_failure": expected_failure,
+        "type_fallbacks": type_fallbacks,
     }
 
 
@@ -406,7 +475,52 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
         f.write("| Move Statement | ❌ | Removed feature |\n")
 
 
-def main():
+def write_type_fallback_report(results, output_file):
+    """Write a focused report for detect-only HIR type fallbacks."""
+    records = []
+    for result in results:
+        for record in result.get("type_fallbacks", []):
+            records.append({
+                "contract": result["file"],
+                **record,
+            })
+
+    by_reason = {}
+    by_contract = {}
+    for record in records:
+        by_reason[record["reason"]] = by_reason.get(record["reason"], 0) + 1
+        by_contract[record["contract"]] = by_contract.get(record["contract"], 0) + 1
+
+    with open(output_file, "w") as f:
+        f.write("# HIR Type Fallback Worklist\n\n")
+        f.write(f"- **Contracts with fallbacks:** {len(by_contract)}\n")
+        f.write(f"- **Fallback records:** {len(records)}\n\n")
+
+        f.write("## By Reason\n\n")
+        f.write("| Reason | Count |\n")
+        f.write("|--------|------:|\n")
+        for reason, count in sorted(by_reason.items(), key=lambda item: (-item[1], item[0])):
+            f.write(f"| `{reason}` | {count} |\n")
+        f.write("\n")
+
+        f.write("## By Contract\n\n")
+        f.write("| Contract | Count |\n")
+        f.write("|----------|------:|\n")
+        for contract, count in sorted(by_contract.items(), key=lambda item: (-item[1], item[0])):
+            f.write(f"| `{contract}` | {count} |\n")
+        f.write("\n")
+
+        f.write("## Records\n\n")
+        f.write("| Reason | Location | Contract |\n")
+        f.write("|--------|----------|----------|\n")
+        for record in sorted(records, key=lambda item: (item["reason"], item["contract"], item["line"], item["column"])):
+            location = record["file"]
+            if record["line"] != 0:
+                location = f"{location}:{record['line']}:{record['column']}"
+            f.write(f"| `{record['reason']}` | `{location}` | `{record['contract']}` |\n")
+
+
+def main(default_emit="build", default_output="docs/ORA_FEATURE_TEST_REPORT.md"):
     parser = argparse.ArgumentParser(
         description="Test all Ora example files and generate a report",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -427,6 +541,9 @@ Examples:
   # Test with custom compiler and timeout
   python3 scripts/test_ora_features.py --subdir type-system --compiler ./zig-out/bin/ora --timeout 120
 
+  # Test SIR emission through the same sweeper
+  python3 scripts/test_ora_features.py --emit sir --subdir corpus
+
   # Test one file and print exactly what the script captured
   python3 scripts/test_ora_features.py --file ora-example/apps/erc20_bitfield_comptime_generics.ora
 
@@ -434,12 +551,14 @@ Examples:
   python3 scripts/test_ora_features.py --list-subdirs
         """
     )
-    parser.add_argument("--output", default="docs/ORA_FEATURE_TEST_REPORT.md",
-                       help="Output file for the test report")
+    parser.add_argument("--output", default=default_output,
+                       help="Output file for the test report (default: %(default)s; omit in compatibility wrappers)")
     parser.add_argument("--compiler", default=os.environ.get("ora", "./zig-out/bin/ora"),
                        help="Path to the Ora compiler binary")
     parser.add_argument("--timeout", type=int, default=30,
                        help="Per-file timeout in seconds")
+    parser.add_argument("--emit", choices=["build", "ora", "mlir", "sir", "sir-text", "bytecode", "abi", "abi-extras"], default=default_emit,
+                       help="Compiler path to exercise (default: %(default)s)")
     parser.add_argument("--base-dir", default="ora-example",
                        help="Base directory containing .ora files")
     parser.add_argument("--file",
@@ -451,6 +570,18 @@ Examples:
                        help="List all available subdirectories and exit")
     parser.add_argument("--show-all-output", action="store_true",
                        help="Print stderr/stdout snippets for all tests (success and failure)")
+    parser.add_argument("--failures-only", action="store_true",
+                       help="Print only failing tests during sweeps")
+    parser.add_argument("--quiet", action="store_true",
+                       help="Alias for --failures-only plus quieter sweep headers")
+    parser.add_argument("--fail-fast", action="store_true",
+                       help="Stop after the first failing file")
+    parser.add_argument("--max-error-lines", type=int, default=40,
+                       help="Max stderr/stdout lines retained per failure")
+    parser.add_argument("--fallback-report",
+                       help="Write a HIR type-fallback worklist and enable ORA_REPORT_TYPE_FALLBACKS for compiler runs")
+    parser.add_argument("paths", nargs="*",
+                       help="Optional .ora files or directories to test instead of --base-dir")
     
     args = parser.parse_args()
     
@@ -463,8 +594,9 @@ Examples:
         return
 
     if args.file:
-        result = test_file(args.file, args.compiler, args.timeout)
+        result = test_file(args.file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
         print(f"File: {result['file']}")
+        print(f"Emit: {result['emit']}")
         print(f"Status: {result['status']}")
         print(f"Return code: {result['return_code']}")
         print(f"Timed out: {result['timed_out']}")
@@ -474,40 +606,65 @@ Examples:
         print("\n[stderr]")
         print(result["stderr"], end="" if result["stderr"].endswith("\n") else "\n")
         print("[/stderr]")
+        if args.fallback_report:
+            write_type_fallback_report([result], args.fallback_report)
+            print(f"\nType fallback report: {args.fallback_report}")
         if result["status"].startswith("❌"):
             sys.exit(1)
         return
     
-    print(f"Finding .ora files in {args.base_dir}...")
-    if args.subdirs:
+    quiet = args.quiet
+    failures_only = args.failures_only or quiet
+
+    if not quiet:
+        if args.paths:
+            print(f"Finding .ora files in {', '.join(args.paths)}...")
+        else:
+            print(f"Finding .ora files in {args.base_dir}...")
+    if args.subdirs and not quiet:
         print(f"Filtering by subdirectory(ies): {', '.join(args.subdirs)}")
-    ora_files = find_ora_files(args.base_dir, args.subdirs)
-    print(f"Found {len(ora_files)} files")
+    ora_files = find_ora_files(args.base_dir, args.subdirs, args.paths)
+    if not quiet:
+        print(f"Found {len(ora_files)} files")
     
-    print(f"Extracting Ora operations...")
+    if not quiet:
+        print(f"Extracting Ora operations...")
     ops = get_ora_operations()
-    print(f"Found {len(ops)} operations")
+    if not quiet:
+        print(f"Found {len(ops)} operations")
     
-    print(f"Testing {len(ora_files)} files...")
+    if not quiet:
+        print(f"Testing {len(ora_files)} files...")
     results = []
     for i, file in enumerate(ora_files, 1):
-        print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
-        result = test_file(file, args.compiler, args.timeout)
+        if not failures_only:
+            print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
+        result = test_file(file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
         results.append(result)
-        print(result["status"])
+        if not failures_only or result["status"].startswith("❌"):
+            if failures_only:
+                print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
+            print(result["status"])
         if args.show_all_output:
             snippet = result["stderr"].strip() or result["stdout"].strip()
             if snippet:
                 lines = snippet.splitlines()[-30:]
                 print("\n".join(lines))
+        if args.fail_fast and result["status"].startswith("❌"):
+            break
     
-    print(f"\nGenerating report: {args.output}")
-    generate_report(results, ops, args.output)
+    if args.output:
+        print(f"\nGenerating report: {args.output}")
+        generate_report(results, ops, args.output)
+    if args.fallback_report:
+        print(f"Generating type fallback report: {args.fallback_report}")
+        write_type_fallback_report(results, args.fallback_report)
     
     success_count = sum(1 for r in results if r["status"].startswith("✅"))
     failed_count = sum(1 for r in results if r["status"].startswith("❌"))
     
-    print(f"\n✅ Report generated: {args.output}")
+    if args.output:
+        print(f"\n✅ Report generated: {args.output}")
     print(f"Summary: {success_count} success, {failed_count} failed out of {len(results)}")
     
     # Exit with non-zero code if any tests failed

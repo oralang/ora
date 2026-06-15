@@ -18,6 +18,9 @@ const expectVerificationProbeEquivalent = h.expectVerificationProbeEquivalent;
 const verifyExampleWithoutDegradation = h.verifyExampleWithoutDegradation;
 const verifyTextWithoutDegradation = h.verifyTextWithoutDegradation;
 const verifyTextWithoutDegradationWithTimeout = h.verifyTextWithoutDegradationWithTimeout;
+const verifyTextWithoutDegradationWithSummaryInlineDepth = h.verifyTextWithoutDegradationWithSummaryInlineDepth;
+const verifyPackageWithoutDegradation = h.verifyPackageWithoutDegradation;
+const verifyPackageWithoutDegradationWithImportedSummaryMode = h.verifyPackageWithoutDegradationWithImportedSummaryMode;
 const firstChildNodeOfKind = h.firstChildNodeOfKind;
 const nthChildNodeOfKind = h.nthChildNodeOfKind;
 const containsNodeOfKind = h.containsNodeOfKind;
@@ -30,6 +33,137 @@ const containsEffectSlot = h.containsEffectSlot;
 const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
+
+test "verification keeps public parameter refinement guards for untrusted public input" {
+    const source_text =
+        \\contract C {
+        \\    pub fn accept(
+        \\        min_value: MinValue<u256, 1>,
+        \\        max_value: MaxValue<u256, 100>,
+        \\        in_range: InRange<u256, 1, 100>,
+        \\        basis_points: BasisPoints<u256>,
+        \\        non_zero: NonZero<u256>,
+        \\        target: NonZeroAddress,
+        \\    ) -> bool {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "accept");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 6), result.diagnostics_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+}
+
+test "verification applies ensures_ok and ensures_err only to matching error-union exits" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract C {
+        \\    pub fn choose(flag: bool, value: u256) -> !u256 | Rejected
+        \\        ensures_ok(result == value)
+        \\        ensures_err(value == value)
+        \\    {
+        \\        if (!flag) {
+        \\            return Rejected;
+        \\        }
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn fail_only() -> !bool | Rejected
+        \\        ensures_ok(false)
+        \\        ensures_err(true)
+        \\    {
+        \\        return Rejected;
+        \\    }
+        \\
+        \\    pub fn ok_only() -> !bool | Rejected
+        \\        ensures_ok(result == true)
+        \\        ensures_err(false)
+        \\    {
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var choose = try verifyTextWithoutDegradation(source_text, "choose");
+    defer choose.deinit(testing.allocator);
+    try testing.expect(choose.success);
+    try testing.expect(!choose.degraded);
+    try testing.expectEqual(@as(usize, 0), choose.errors_len);
+
+    var fail_only = try verifyTextWithoutDegradation(source_text, "fail_only");
+    defer fail_only.deinit(testing.allocator);
+    try testing.expect(fail_only.success);
+    try testing.expect(!fail_only.degraded);
+    try testing.expectEqual(@as(usize, 0), fail_only.errors_len);
+
+    var ok_only = try verifyTextWithoutDegradation(source_text, "ok_only");
+    defer ok_only.deinit(testing.allocator);
+    try testing.expect(ok_only.success);
+    try testing.expect(!ok_only.degraded);
+    try testing.expectEqual(@as(usize, 0), ok_only.errors_len);
+}
+
+test "verification reports failing ensures_ok and ensures_err on matching exits" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract C {
+        \\    pub fn bad_ok() -> !bool | Rejected
+        \\        ensures_ok(false)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn bad_err() -> !bool | Rejected
+        \\        ensures_err(false)
+        \\    {
+        \\        return Rejected;
+        \\    }
+        \\}
+    ;
+
+    var bad_ok = try verifyTextWithoutDegradation(source_text, "bad_ok");
+    defer bad_ok.deinit(testing.allocator);
+    try testing.expect(bad_ok.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", bad_ok.error_kinds);
+
+    var bad_err = try verifyTextWithoutDegradation(source_text, "bad_err");
+    defer bad_err.deinit(testing.allocator);
+    try testing.expect(bad_err.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", bad_err.error_kinds);
+}
+
+test "verification loop invariant step excludes break exit paths" {
+    const source_text =
+        \\contract C {
+        \\    pub fn f() -> u256 {
+        \\        var counter: u256 = 0;
+        \\        while (true)
+        \\            invariant counter <= 6
+        \\        {
+        \\            counter = counter + 1;
+        \\            if (counter > 5) {
+        \\                break;
+        \\            }
+        \\        }
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.error_kinds);
+}
 
 test "verification supports enum constants in stored struct fields without degradation" {
     const source_text =
@@ -255,6 +389,96 @@ test "verification supports native string and bytes index access when length pre
     try testing.expect(!result.degraded);
 }
 
+test "verification requires byte slice bounds before using projected length" {
+    const source_text =
+        \\pub fn cut_unchecked(data: bytes) -> bytes
+        \\{
+        \\    return @slice(data, 0, 1);
+        \\}
+        \\
+        \\pub fn cut_checked(data: bytes) -> bytes
+        \\    requires(data.len >= 4)
+        \\    ensures(result.len == 3)
+        \\{
+        \\    return @slice(data, 1, 3);
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "cut_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "cut_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
+test "verification requires byte concat bounds before using projected length" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\pub fn join_unchecked(a: bytes, b: bytes) -> bytes
+        \\{
+        \\    return a + b;
+        \\}
+        \\
+        \\pub fn join_checked(a: bytes, b: bytes) -> bytes
+        \\    requires(b.len <= std.constants.U256_MAX - 32)
+        \\    requires(a.len <= std.constants.U256_MAX - 32 - b.len)
+        \\    ensures(result.len == a.len + b.len)
+        \\{
+        \\    return @concat(a, b);
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "join_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "join_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
+test "verification checks safety obligations from branch conditions" {
+    const source_text =
+        \\pub fn branch_div_unchecked(x: u256) -> u256
+        \\{
+        \\    if (1 / x == 0) {
+        \\        return 1;
+        \\    }
+        \\    return 2;
+        \\}
+        \\
+        \\pub fn branch_div_checked(x: u256) -> u256
+        \\    requires(x != 0)
+        \\{
+        \\    if (1 / x == 0) {
+        \\        return 1;
+        \\    }
+        \\    return 2;
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithTimeout(source_text, "branch_div_unchecked", 5_000);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", unchecked.error_kinds);
+    try testing.expect(!unchecked.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "branch_div_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
 test "verification proves checked power for a bounded safe case without degradation" {
     const source_text =
         \\pub fn square_ten(x: u8) -> u8
@@ -321,6 +545,60 @@ test "verification rejects symbolic checked power overflow without degradation" 
     try testing.expect(!result.degraded);
 }
 
+test "verification ignores folded-only private helpers but keeps runtime comptime specializations" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    fn add(a: u256, b: u256) -> u256 { return a + b; }
+        \\    fn mul(a: u256, b: u256) -> u256 { return a * b; }
+        \\
+        \\    fn sum_of_squares(a: u256, b: u256) -> u256 {
+        \\        return add(mul(a, a), mul(b, b));
+        \\    }
+        \\
+        \\    pub fn folded_only() -> u256 {
+        \\        const value: u256 = sum_of_squares(3, 4);
+        \\        return value;
+        \\    }
+        \\
+        \\    fn align_up(comptime alignment: u256, value: u256) -> u256
+        \\        requires(alignment > 0)
+        \\        requires(value <= std.constants.U256_MAX - (alignment - 1))
+        \\    {
+        \\        const mask: u256 = alignment - 1;
+        \\        return (value + mask) - ((value + mask) % alignment);
+        \\    }
+        \\
+        \\    pub fn runtime_specialized(x: u256) -> u256 {
+        \\        return align_up(32, x);
+        \\    }
+        \\
+        \\    pub fn runtime_specialized_checked(x: u256) -> u256
+        \\        requires(x <= std.constants.U256_MAX - 31)
+        \\    {
+        \\        return align_up(32, x);
+        \\    }
+        \\}
+    ;
+
+    var folded = try verifyTextWithoutDegradationWithTimeout(source_text, "folded_only", 5_000);
+    defer folded.deinit(testing.allocator);
+    try testing.expect(folded.success);
+    try testing.expect(!folded.degraded);
+
+    var specialized = try verifyTextWithoutDegradationWithTimeout(source_text, "runtime_specialized", 5_000);
+    defer specialized.deinit(testing.allocator);
+    try testing.expect(!specialized.success);
+    try testing.expect(std.mem.indexOf(u8, specialized.error_kinds, "PreconditionViolation") != null);
+    try testing.expect(!specialized.degraded);
+
+    var checked = try verifyTextWithoutDegradationWithTimeout(source_text, "runtime_specialized_checked", 5_000);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+}
+
 test "verification accepts requires helper calls that read storage without degradation" {
     const source_text =
         \\contract Sample {
@@ -344,6 +622,404 @@ test "verification accepts requires helper calls that read storage without degra
     try testing.expect(result.success);
     try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expect(!result.degraded);
+}
+
+test "verification frames storage outside internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var touched: u256 = 0;
+        \\
+        \\    fn bump(next: u256)
+        \\        modifies touched
+        \\    {
+        \\        touched = next;
+        \\    }
+        \\
+        \\    pub fn f(next: u256) -> bool
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        bump(next);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames distinct map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame possibly aliased map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses opaque modifies metadata when internal summary inlining is disabled" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, other: address, value: u256) -> bool
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification opaque modifies metadata does not frame declared written key" {
+    const source_text =
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    fn set_balance(user: address, value: u256)
+        \\        modifies balances[user]
+        \\    {
+        \\        balances[user] = value;
+        \\    }
+        \\
+        \\    pub fn f(user: address, value: u256) -> bool
+        \\        ensures(balances[user] == old(balances[user]))
+        \\    {
+        \\        set_balance(user, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "compiler marks imported-module calls as summary-boundary candidates" {
+    var compilation = try compilePackage("ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora");
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.imported_call"));
+}
+
+test "verification uses imported-module opaque modifies metadata by default" {
+    var result = try verifyPackageWithoutDegradation(
+        "ora-example/smt/modifies/pass_imported_summary_map_key_frame.ora",
+        "f",
+    );
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification imported-summary mode is discriminated from exact imported body inlining" {
+    var exact = try verifyPackageWithoutDegradationWithImportedSummaryMode(
+        "ora-example/smt/modifies/fail_imported_summary_discriminator.ora",
+        "f",
+        false,
+    );
+    defer exact.deinit(testing.allocator);
+    try testing.expect(!exact.success);
+    try testing.expectEqualStrings("InvariantViolation", exact.error_kinds);
+    try testing.expect(!exact.degraded);
+
+    var summary_only = try verifyPackageWithoutDegradation(
+        "ora-example/smt/modifies/fail_imported_summary_discriminator.ora",
+        "f",
+    );
+    defer summary_only.deinit(testing.allocator);
+    try testing.expect(summary_only.success);
+    try testing.expect(!summary_only.degraded);
+    try testing.expectEqual(@as(usize, 0), summary_only.errors_len);
+    try testing.expectEqualStrings("", summary_only.soundness_losses);
+    try testing.expectEqualStrings("", summary_only.precision_notes);
+}
+
+test "verification frames distinct nested map keys across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    fn set_allowance(owner: address, spender: address, value: u256)
+        \\        modifies allowances[owner][spender]
+        \\    {
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\
+        \\    pub fn f(
+        \\        owner: address,
+        \\        spender: address,
+        \\        other_owner: address,
+        \\        other_spender: address,
+        \\        value: u256,
+        \\    ) -> bool
+        \\        requires(owner != other_owner)
+        \\        ensures(allowances[other_owner][other_spender] == old(allowances[other_owner][other_spender]))
+        \\    {
+        \\        set_allowance(owner, spender, value);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames distinct struct fields across internal callee modifies set" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.admin == old(config.admin))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves callee requires when summary inlining falls back" {
+    const source_text =
+        \\contract V {
+        \\    fn require_nonzero(x: u256)
+        \\        requires(x != 0)
+        \\    {
+        \\    }
+        \\
+        \\    pub fn unchecked(x: u256) -> u256 {
+        \\        require_nonzero(x);
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn checked(x: u256) -> u256
+        \\        requires(x != 0)
+        \\    {
+        \\        require_nonzero(x);
+        \\        return 1;
+        \\    }
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "unchecked", 0);
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(!unchecked.degraded);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, unchecked.error_kinds, "PreconditionViolation") != null);
+
+    var checked = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "checked", 0);
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+    try testing.expectEqual(@as(usize, 0), checked.errors_len);
+}
+
+test "verification uses opaque modifies metadata for struct fields when internal summary inlining is disabled" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.admin == old(config.admin))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification opaque modifies metadata does not frame declared written struct field" {
+    const source_text =
+        \\contract V {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage var config: Config;
+        \\
+        \\    fn set_owner(next_owner: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.owner = next_owner;
+        \\    }
+        \\
+        \\    pub fn f(next_owner: address) -> bool
+        \\        ensures(config.owner == old(config.owner))
+        \\    {
+        \\        set_owner(next_owner);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithSummaryInlineDepth(source_text, "f", 0);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.precision_notes);
+}
+
+test "verification does not let internal modifies hide unresolved external calls" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\
+        \\    fn helper(target: address) -> !bool | ExternalCallFailed
+        \\        modifies()
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        return helper(target);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.degraded);
+    try testing.expect(std.mem.containsAtLeast(u8, result.soundness_losses, 1, "unresolved_callee"));
 }
 
 test "verification rejects unresolved external call preserving storage" {
@@ -400,6 +1076,244 @@ test "verification frames storage across unresolved staticcall" {
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+test "verification frames storage across staticcall inside modifies empty function" {
+    const source_text =
+        \\extern trait External {
+        \\    staticcall fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 0;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        modifies()
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames locked storage across unresolved external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var other: u256 = 11;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        @lock(stable);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame unlocked storage across locked external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var other: u256 = 11;
+        \\
+        \\    pub fn f(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(other == old(other))
+        \\    {
+        \\        @lock(stable);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames locked map key across unresolved external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn f(target: address, user: address) -> !bool | ExternalCallFailed
+        \\        ensures(balances[user] == old(balances[user]))
+        \\    {
+        \\        @lock(balances[user]);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification does not frame unlocked map key across locked external call" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn x(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn f(target: address, user: address, other: address) -> !bool | ExternalCallFailed
+        \\        requires(user != other)
+        \\        ensures(balances[other] == old(balances[other]))
+        \\    {
+        \\        @lock(balances[user]);
+        \\        return external<External>(target, gas: 50000).x();
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification corpus covers smt modifies framing matrix" {
+    const Probe = struct {
+        path: []const u8,
+        expect_success: bool,
+        expect_degraded: bool = false,
+        expected_loss: []const u8 = "",
+        expected_error_kinds: []const u8 = "",
+    };
+
+    const probes = [_]Probe{
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_root_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_map_key_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_internal_map_key_alias.ora",
+            .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_nested_map_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_internal_struct_field_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_staticcall_modifies_empty_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_modifies_empty_unresolved_call.ora",
+            .expect_success = false,
+            .expect_degraded = true,
+            .expected_loss = "unresolved_callee",
+            .expected_error_kinds = "EncodingDegraded",
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_locked_call_root_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_locked_call_unlocked_root.ora",
+            .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
+        },
+        .{
+            .path = "ora-example/smt/modifies/pass_locked_call_map_key_frame.ora",
+            .expect_success = true,
+        },
+        .{
+            .path = "ora-example/smt/modifies/fail_locked_call_unlocked_map_key.ora",
+            .expect_success = false,
+            .expected_error_kinds = "PostconditionViolation",
+        },
+    };
+
+    for (probes) |probe| {
+        var seq_result = try verifyExampleWithoutDegradation(probe.path, "f", false, 5_000);
+        defer seq_result.deinit(testing.allocator);
+
+        var par_result = try verifyExampleWithoutDegradation(probe.path, "f", true, 5_000);
+        defer par_result.deinit(testing.allocator);
+
+        try testing.expectEqual(probe.expect_success, seq_result.success);
+        try testing.expectEqual(probe.expect_success, par_result.success);
+        try testing.expectEqual(probe.expect_degraded, seq_result.degraded);
+        try testing.expectEqual(probe.expect_degraded, par_result.degraded);
+        if (probe.expected_loss.len != 0) {
+            try testing.expect(std.mem.containsAtLeast(u8, seq_result.soundness_losses, 1, probe.expected_loss));
+            try testing.expect(std.mem.containsAtLeast(u8, par_result.soundness_losses, 1, probe.expected_loss));
+        } else {
+            try testing.expectEqualStrings("", seq_result.soundness_losses);
+            try testing.expectEqualStrings("", par_result.soundness_losses);
+        }
+        if (probe.expect_success) {
+            try testing.expectEqual(@as(usize, 0), seq_result.errors_len);
+            try testing.expectEqual(@as(usize, 0), par_result.errors_len);
+        } else {
+            try testing.expect(seq_result.errors_len > 0);
+            try testing.expect(par_result.errors_len > 0);
+            try testing.expectEqualStrings(probe.expected_error_kinds, seq_result.error_kinds);
+            try testing.expectEqualStrings(probe.expected_error_kinds, par_result.error_kinds);
+        }
+        try testing.expectEqualStrings("", seq_result.precision_notes);
+        try testing.expectEqualStrings("", par_result.precision_notes);
+        try expectVerificationProbeEquivalent(&seq_result, &par_result);
+    }
+}
+
 test "verification does not assume unresolved staticcall return value" {
     const source_text =
         \\extern trait External {
@@ -453,6 +1367,469 @@ test "verification treats unresolved staticcall return as deterministic" {
     ;
 
     var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses trusted extern trait scalar ensures summary" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(observed == 42)
+        \\    {
+        \\        let q: u256 = try external<Oracle>(target, gas: 50000).quote();
+        \\        observed = q;
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification uses trusted extern trait struct ensures summary" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(observed_current == 42)
+        \\        ensures(observed_tag == 7)
+        \\    {
+        \\        let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\        observed_current = snapshot.current;
+        \\        observed_tag = snapshot.tag;
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait scalar summary through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote();
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification proves trusted extern trait requires through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self, amount: u256) -> u256
+        \\        requires(amount == 42)
+        \\        ensures(result == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        requires(amount == 42)
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote(amount);
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects unproven trusted extern trait requires through try catch" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self, amount: u256) -> u256
+        \\        requires(amount == 42)
+        \\        ensures(result == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        ensures(!result or observed == amount)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<Oracle>(target, gas: 50000).quote(amount);
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+}
+
+test "verification carries trusted extern trait struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_current == 42)
+        \\        ensures(!result or observed_tag == 7)
+        \\    {
+        \\        try {
+        \\            let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\            observed_current = snapshot.current;
+        \\            observed_tag = snapshot.tag;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "extern trait requires cannot reference result" {
+    const source_text =
+        \\extern trait Oracle {
+        \\    staticcall fn quote(self) -> u256
+        \\        requires(result == 42);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const type_diags = try compilation.db.typeCheckDiagnostics(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expect(diagnosticMessagesContain(type_diags, "`result` is only available in ensures clauses"));
+}
+
+test "verification carries trusted extern trait tuple summary through try catch" {
+    const source_text =
+        \\extern trait Target {
+        \\    staticcall fn quote(self) -> (u256, bool)
+        \\        ensures(result.0 == 42)
+        \\        ensures(result.1);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let quote: (u256, bool) = try external<Target>(target, gas: 50000).quote();
+        \\            observed = quote.0;
+        \\            return quote.1;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait bytes length summary through try catch" {
+    const source_text =
+        \\extern trait Target {
+        \\    staticcall fn payload(self) -> bytes
+        \\        ensures(result.len == 4);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_len: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_len == 4)
+        \\    {
+        \\        try {
+        \\            let payload: bytes = try external<Target>(target, gas: 50000).payload();
+        \\            observed_len = payload.len;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradationWithTimeout(source_text, "pull", 5_000);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait three-field struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    tag: u256,
+        \\    nonce: u256,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn snapshot(self) -> Snapshot
+        \\        ensures(result.current == 42)
+        \\        ensures(result.tag == 7)
+        \\        ensures(result.nonce == 99);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed_current: u256 = 0;
+        \\    storage var observed_tag: u256 = 0;
+        \\    storage var observed_nonce: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or observed_current == 42)
+        \\        ensures(!result or observed_tag == 7)
+        \\        ensures(!result or observed_nonce == 99)
+        \\    {
+        \\        try {
+        \\            let snapshot: Snapshot = try external<Target>(target, gas: 50000).snapshot();
+        \\            observed_current = snapshot.current;
+        \\            observed_tag = snapshot.tag;
+        \\            observed_nonce = snapshot.nonce;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification carries trusted extern trait nested tuple struct summary through try catch" {
+    const source_text =
+        \\struct Snapshot {
+        \\    current: u256,
+        \\    ok: bool,
+        \\}
+        \\
+        \\extern trait Target {
+        \\    staticcall fn quote(self, amount: u256) -> (Snapshot, u256)
+        \\        ensures(result.0.current == amount)
+        \\        ensures(result.0.ok)
+        \\        ensures(result.1 == amount);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var observed: u256 = 0;
+        \\    storage var mirror: u256 = 0;
+        \\
+        \\    pub fn pull(target: address, amount: u256) -> bool
+        \\        ensures(!result or observed == amount)
+        \\        ensures(!result or mirror == amount)
+        \\    {
+        \\        try {
+        \\            let quote: (Snapshot, u256) = try external<Target>(target, gas: 50000).quote(amount);
+        \\            observed = quote.0.current;
+        \\            mirror = quote.1;
+        \\            return quote.0.ok;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames caller storage through trusted extern call summary" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\    storage var observed: u256 = 0;
+        \\
+        \\    pub fn pull(target: address) -> bool
+        \\        ensures(!result or stable == old(stable))
+        \\        ensures(!result or observed == 42)
+        \\    {
+        \\        try {
+        \\            let q: u256 = try external<External>(target, gas: 50000).quote();
+        \\            observed = q;
+        \\            return true;
+        \\        } catch {
+        \\            return false;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames caller storage through trusted extern call summary in helper" {
+    const source_text =
+        \\extern trait External {
+        \\    call fn quote(self) -> u256
+        \\        ensures(result == 42);
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract V {
+        \\    storage var stable: u256 = 7;
+        \\
+        \\    fn observe(target: address) -> !u256 | ExternalCallFailed {
+        \\        return external<External>(target, gas: 50000).quote();
+        \\    }
+        \\
+        \\    pub fn pull(target: address) -> !bool | ExternalCallFailed
+        \\        ensures(stable == old(stable))
+        \\    {
+        \\        let ignored: u256 = try observe(target);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "pull");
     defer result.deinit(testing.allocator);
     try testing.expect(result.success);
     try testing.expect(!result.degraded);
@@ -1541,6 +2918,184 @@ test "verification does not vacuously prove branch-local Result unwrap and get_e
     try testing.expect(!result.success);
     try testing.expect(result.errors_len > 0);
     try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification uses scf while body condition for callee preconditions" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract Sample {
+        \\    fn needs_positive(amount: u256) -> !bool | Rejected
+        \\        requires(amount > 0)
+        \\    {
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn batch(amounts: [u256; 5]) -> u256
+        \\        requires(amounts[0] > 0)
+        \\        requires(amounts[1] > 0)
+        \\        requires(amounts[2] > 0)
+        \\        requires(amounts[3] > 0)
+        \\        requires(amounts[4] > 0)
+        \\    {
+        \\        var success_count: u256 = 0;
+        \\        var i: u256 = 0;
+        \\        while (i < 5)
+        \\            invariant i <= 5
+        \\            invariant success_count <= i
+        \\        {
+        \\            try {
+        \\                var ok: bool = try needs_positive(amounts[i]);
+        \\                if (ok) {
+        \\                    success_count += 1;
+        \\                }
+        \\            } catch (err) {
+        \\                let _ignored = err;
+        \\            }
+        \\            i = i +% 1;
+        \\        }
+        \\        return success_count;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "batch");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects concrete signed min negation overflow" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn negate_min() -> i8 {
+        \\        let x: i8 = std.constants.I8_MIN;
+        \\        return -x;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "negate_min");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("InvariantViolation", result.error_kinds);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects requires-only unreachable branch obligations" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn g(a: NonZeroAddress) -> bool
+        \\        requires a == std.msg.sender()
+        \\        ensures a == std.msg.sender()
+        \\    {
+        \\        let s: NonZeroAddress = std.msg.sender();
+        \\
+        \\        if (s == a) {
+        \\            return true;
+        \\        } else {
+        \\            let z: u256 = 0;
+        \\            let q: u256 = 1 / z;
+        \\            return q == 1;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "g");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
+    try testing.expect(!result.degraded);
+}
+
+test "verification rejects reachable obligations in catch switch and fallthrough paths" {
+    const source_text =
+        \\error Rejected;
+        \\
+        \\contract Sample {
+        \\    fn maybe(flag: bool) -> !u256 | Rejected {
+        \\        if (flag) {
+        \\            return Rejected;
+        \\        }
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn catch_path(flag: bool) -> u256 {
+        \\        try {
+        \\            return try maybe(flag);
+        \\        } catch {
+        \\            assert(false);
+        \\            return 0;
+        \\        }
+        \\    }
+        \\
+        \\    pub fn switch_path(tag: u256) -> u256 {
+        \\        switch (tag) {
+        \\            0 => {
+        \\                assert(false);
+        \\                return 0;
+        \\            }
+        \\            else => {
+        \\                return 1;
+        \\            }
+        \\        }
+        \\    }
+        \\
+        \\    pub fn fallthrough_path(flag: bool) -> u256 {
+        \\        if (flag) {
+        \\            return 1;
+        \\        }
+        \\        assert(false);
+        \\        return 0;
+        \\    }
+        \\}
+    ;
+
+    var catch_result = try verifyTextWithoutDegradation(source_text, "catch_path");
+    defer catch_result.deinit(testing.allocator);
+    try testing.expect(!catch_result.success);
+    try testing.expectEqualStrings("InvariantViolation", catch_result.error_kinds);
+    try testing.expect(!catch_result.degraded);
+
+    var switch_result = try verifyTextWithoutDegradation(source_text, "switch_path");
+    defer switch_result.deinit(testing.allocator);
+    try testing.expect(!switch_result.success);
+    try testing.expectEqualStrings("InvariantViolation", switch_result.error_kinds);
+    try testing.expect(!switch_result.degraded);
+
+    var fallthrough_result = try verifyTextWithoutDegradation(source_text, "fallthrough_path");
+    defer fallthrough_result.deinit(testing.allocator);
+    try testing.expect(!fallthrough_result.success);
+    try testing.expectEqualStrings("InvariantViolation", fallthrough_result.error_kinds);
+    try testing.expect(!fallthrough_result.degraded);
+}
+
+test "verification treats msg.sender as nonzero address" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Sample {
+        \\    pub fn fromBuiltinSender() {
+        \\        let caller: NonZeroAddress = std.msg.sender();
+        \\        assert(caller != std.constants.ZERO_ADDRESS, "refinement fact must hold");
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "fromBuiltinSender");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
     try testing.expect(!result.degraded);
 }
 

@@ -5,6 +5,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "OraToSIR.h"
+#include "patterns/AdtCarrierLayout.h"
+#include "patterns/AbiLoweringCommon.h"
+#include "patterns/ErrorUnionCarrierHelpers.h"
+#include "patterns/LoweringHelpers.h"
 
 #include "SIR/SIRDialect.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -14,13 +18,13 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/DenseSet.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <functional>
 #include <string>
-#include <vector>
 
 using namespace mlir;
 
@@ -30,6 +34,22 @@ namespace mlir
     {
         namespace
         {
+            using abi_lowering::AbiLayoutKind;
+            using abi_lowering::AbiLayoutNode;
+            using abi_lowering::AbiStaticKind;
+            using abi_lowering::canonicalAbiLayoutHeadSlots;
+            using abi_lowering::canonicalAbiLayoutIsDynamic;
+            using abi_lowering::canonicalAbiLayoutIsTupleLike;
+            using abi_lowering::canonicalAbiLayoutStaticElementWordCount;
+            using abi_lowering::canonicalAbiLayoutSupportsDynamicArray;
+            using abi_lowering::isDynamicAddressArrayAbiNode;
+            using abi_lowering::isDynamicBoolArrayAbiNode;
+            using abi_lowering::isDynamicFixedBytesArrayAbiNode;
+            using abi_lowering::isDynamicU256ArrayAbiNode;
+            using abi_lowering::isStaticBoolAbiNode;
+            using abi_lowering::AbiLayoutSyntax;
+            using abi_lowering::parseAbiLayout;
+
             static std::optional<uint32_t> extractTaggedStmtId(Location loc, StringRef prefix)
             {
                 if (loc == nullptr)
@@ -90,6 +110,37 @@ namespace mlir
                 return loc;
             }
 
+            static std::optional<uint32_t> parseErrorSelector(StringRef selector)
+            {
+                if (!selector.starts_with("0x") || selector.size() != 10)
+                    return std::nullopt;
+
+                uint32_t value = 0;
+                for (char c : selector.drop_front(2))
+                {
+                    value <<= 4;
+                    if (c >= '0' && c <= '9')
+                        value |= (c - '0');
+                    else if (c >= 'a' && c <= 'f')
+                        value |= (c - 'a' + 10);
+                    else if (c >= 'A' && c <= 'F')
+                        value |= (c - 'A' + 10);
+                    else
+                        return std::nullopt;
+                }
+                return value;
+            }
+
+            static Attribute lookupDictionaryAttr(DictionaryAttr dict, StringRef name)
+            {
+                if (!dict)
+                    return {};
+                for (NamedAttribute entry : dict)
+                    if (entry.getName() == name)
+                        return entry.getValue();
+                return {};
+            }
+
             static Location makeSyntheticOriginOnlyLoc(Location loc, StringRef syntheticKind)
             {
                 MLIRContext *ctx = loc.getContext();
@@ -117,126 +168,9 @@ namespace mlir
                 return func.getLoc();
             }
 
-            enum class AbiBase
+            static uint64_t computeNamedMemoryReserveBytes(ModuleOp module)
             {
-                Uint,
-                Int,
-                Bool,
-                Address,
-                FixedBytes,
-                BytesDyn,
-                String,
-                Unknown,
-                Tuple
-            };
-
-            struct AbiType
-            {
-                AbiBase base = AbiBase::Unknown;
-                SmallVector<int64_t, 2> dims; // -1 for dynamic []
-
-                bool isArray() const { return !dims.empty(); }
-                bool baseIsDynamic() const { return base == AbiBase::BytesDyn || base == AbiBase::String || base == AbiBase::Tuple; }
-                bool isDynamic() const
-                {
-                    if (baseIsDynamic())
-                        return true;
-                    for (int64_t d : dims)
-                        if (d < 0)
-                            return true;
-                    return false;
-                }
-                bool isStaticBase() const
-                {
-                    return base == AbiBase::Uint || base == AbiBase::Int || base == AbiBase::Bool || base == AbiBase::Address || base == AbiBase::FixedBytes;
-                }
-                bool supportsStaticArray() const
-                {
-                    return isStaticBase() && isArray() && dims.size() == 1 && dims.front() >= 0;
-                }
-                bool supportsDynamicArray() const
-                {
-                    return isStaticBase() && isArray() && dims.size() == 1 && dims.front() < 0;
-                }
-                bool supportsNestedDynamicArray() const
-                {
-                    return isStaticBase() && isArray() && dims.size() == 2 && dims[0] < 0 && dims[1] < 0;
-                }
-                int64_t headSlots() const
-                {
-                    if (isDynamic())
-                        return 1;
-                    if (!isArray())
-                        return 1;
-                    if (!supportsStaticArray())
-                        return -1;
-                    return dims.front();
-                }
-            };
-
-            static bool parseAbiType(StringRef s, AbiType &out)
-            {
-                out = AbiType();
-                if (s.empty())
-                    return false;
-                if (s.front() == '(' || s == "tuple")
-                {
-                    out.base = AbiBase::Tuple;
-                    return true;
-                }
-
-                size_t baseEnd = s.find('[');
-                StringRef base = (baseEnd == StringRef::npos) ? s : s.take_front(baseEnd);
-                if (base.starts_with("uint"))
-                    out.base = AbiBase::Uint;
-                else if (base.starts_with("int"))
-                    out.base = AbiBase::Int;
-                else if (base == "bool")
-                    out.base = AbiBase::Bool;
-                else if (base == "address")
-                    out.base = AbiBase::Address;
-                else if (base == "bytes")
-                    out.base = AbiBase::BytesDyn;
-                else if (base == "string")
-                    out.base = AbiBase::String;
-                else
-                    out.base = AbiBase::Unknown;
-
-                if (out.base == AbiBase::Unknown && base.starts_with("bytes") && base.size() > 5)
-                {
-                    StringRef bytesDigits = base.drop_front(5);
-                    unsigned bytesLen = 0;
-                    if (!(bytesDigits.size() > 1 && bytesDigits.front() == '0') &&
-                        !bytesDigits.getAsInteger(10, bytesLen) && bytesLen >= 1 && bytesLen <= 32)
-                        out.base = AbiBase::FixedBytes;
-                }
-
-                size_t pos = baseEnd;
-                while (pos != StringRef::npos && pos < s.size() && s[pos] == '[')
-                {
-                    size_t close = s.find(']', pos);
-                    if (close == StringRef::npos)
-                        return false;
-                    StringRef inner = s.slice(pos + 1, close);
-                    if (inner.empty())
-                    {
-                        out.dims.push_back(-1);
-                    }
-                    else
-                    {
-                        int64_t val = 0;
-                        if (inner.getAsInteger(10, val))
-                            return false;
-                        out.dims.push_back(val);
-                    }
-                    pos = close + 1;
-                }
-                return out.base != AbiBase::Unknown;
-            }
-
-            static uint64_t computeDebugNamedMemoryReserveBytes(ModuleOp module)
-            {
-                if (!module || !module->hasAttr("ora.debug_info"))
+                if (!module)
                     return 0;
                 auto slotsAttr = module->getAttrOfType<DictionaryAttr>("ora.global_slots");
                 if (!slotsAttr || slotsAttr.empty())
@@ -257,162 +191,478 @@ namespace mlir
                 return (maxSlot + 1) * 32;
             }
 
-            struct AbiLayout
+            struct CalldataStaticDecode
             {
-                AbiType abi;
-                std::vector<AbiLayout> fields;
-
-                bool isTupleLike() const { return !fields.empty(); }
-                bool hasDynamicArrayDim() const
-                {
-                    return abi.dims.size() == 1 && abi.dims.front() < 0;
-                }
-                int64_t staticElementWordCount() const
-                {
-                    if (isTupleLike())
-                    {
-                        int64_t total = 0;
-                        for (const AbiLayout &field : fields)
-                        {
-                            if (field.isDynamic())
-                                return -1;
-                            int64_t slots = field.headSlots();
-                            if (slots <= 0)
-                                return -1;
-                            total += slots;
-                        }
-                        return total;
-                    }
-                    if (!abi.isStaticBase())
-                        return -1;
-                    if (abi.dims.empty())
-                        return 1;
-                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
-                        return abi.dims.front();
-                    return -1;
-                }
-                bool supportsDynamicArray() const
-                {
-                    return hasDynamicArrayDim() && staticElementWordCount() > 0;
-                }
-                bool isDynamic() const
-                {
-                    if (supportsDynamicArray())
-                        return true;
-                    if (isTupleLike())
-                    {
-                        return llvm::any_of(fields, [](const AbiLayout &field) { return field.isDynamic(); });
-                    }
-                    return abi.isDynamic();
-                }
-                int64_t headSlots() const
-                {
-                    if (supportsDynamicArray())
-                        return 1;
-                    if (abi.dims.size() == 1 && abi.dims.front() >= 0)
-                    {
-                        int64_t elemWords = staticElementWordCount();
-                        if (elemWords <= 0)
-                            return -1;
-                        return elemWords * abi.dims.front();
-                    }
-                    if (isTupleLike())
-                    {
-                        int64_t total = 0;
-                        for (const AbiLayout &field : fields)
-                        {
-                            int64_t slots = field.isDynamic() ? 1 : field.headSlots();
-                            if (slots < 0)
-                                return -1;
-                            total += slots;
-                        }
-                        return total;
-                    }
-                    return abi.headSlots();
-                }
+                Value payload;
+                Value canonicalWord;
+                SmallVector<std::pair<Value, lowering::AbiDecodeError>, 2> checks;
             };
 
-            static bool parseAbiLayout(StringRef text, size_t &pos, AbiLayout &out)
+            struct StrictDynamicCalldataValue
             {
-                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                    ++pos;
-                if (pos >= text.size())
-                    return false;
+                Value payload;
+                Value nextExpectedOffset;
+            };
 
-                if (text[pos] == '(')
+            struct StrictDynamicBoundsBase
+            {
+                Value payloadBase;
+                Value lengthOffset;
+            };
+
+            struct StrictDynamicBounds
+            {
+                Value wordSize;
+                Value payloadBase;
+                Value dynamicLen;
+                Value padded;
+                Value total;
+                Value nextExpectedOffset;
+            };
+
+            enum class StrictDynamicCalldataKind
+            {
+                BytesLike,
+                U256Array,
+                AddressArray,
+                BoolArray,
+                FixedBytesArray,
+            };
+
+            static uint64_t strictDynamicCalldataCap(StrictDynamicCalldataKind kind)
+            {
+                return kind == StrictDynamicCalldataKind::BytesLike ? 1024 * 1024 : 32768;
+            }
+
+            static bool isFullWordStaticAggregateAbiLayout(const AbiLayoutNode &node)
+            {
+                if (node.kind == AbiLayoutKind::Static)
                 {
-                    ++pos;
-                    out = AbiLayout{};
-                    out.abi.base = AbiBase::Tuple;
-                    while (pos < text.size() && text[pos] != ')')
-                    {
-                        AbiLayout child;
-                        if (!parseAbiLayout(text, pos, child))
+                    return (node.staticKind == AbiStaticKind::Uint || node.staticKind == AbiStaticKind::Int) &&
+                           node.width == 256;
+                }
+                if (node.kind == AbiLayoutKind::FixedArray)
+                {
+                    return node.children.size() == 1 &&
+                           isFullWordStaticAggregateAbiLayout(*node.children.front());
+                }
+                if (canonicalAbiLayoutIsTupleLike(node))
+                {
+                    for (const auto &child : node.children)
+                        if (!isFullWordStaticAggregateAbiLayout(*child))
                             return false;
-                        out.fields.push_back(std::move(child));
-                        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                            ++pos;
-                        if (pos < text.size() && text[pos] == ',')
-                            ++pos;
+                    return true;
+                }
+                return false;
+            }
+
+            static std::optional<uint64_t> fullWordStaticArrayElementWords(const AbiLayoutNode &node)
+            {
+                if (!canonicalAbiLayoutSupportsDynamicArray(node) || node.children.size() != 1)
+                    return std::nullopt;
+                const AbiLayoutNode &element = *node.children.front();
+                if (!isFullWordStaticAggregateAbiLayout(element))
+                    return std::nullopt;
+                int64_t elementWords = canonicalAbiLayoutStaticElementWordCount(element);
+                if (elementWords <= 1)
+                    return std::nullopt;
+                return static_cast<uint64_t>(elementWords);
+            }
+
+            static std::optional<uint64_t> dynamicTupleArrayElementHeadWords(const AbiLayoutNode &node)
+            {
+                if (node.kind != AbiLayoutKind::DynamicArray || node.children.size() != 1)
+                    return std::nullopt;
+                const AbiLayoutNode &element = *node.children.front();
+                if (!canonicalAbiLayoutIsTupleLike(element) || !canonicalAbiLayoutIsDynamic(element))
+                    return std::nullopt;
+
+                for (const auto &child : element.children)
+                    if (canonicalAbiLayoutIsDynamic(*child))
+                    {
+                        if (!isDynamicU256ArrayAbiNode(*child))
+                            return std::nullopt;
                     }
-                    if (pos >= text.size() || text[pos] != ')')
-                        return false;
-                    ++pos;
+                    else if (!isFullWordStaticAggregateAbiLayout(*child))
+                    {
+                        return std::nullopt;
+                    }
+
+                int64_t headWords = canonicalAbiLayoutHeadSlots(element);
+                if (headWords <= 1)
+                    return std::nullopt;
+                return static_cast<uint64_t>(headWords);
+            }
+
+            static lowering::AbiDecodeError strictDynamicCalldataCapError(StrictDynamicCalldataKind kind)
+            {
+                return kind == StrictDynamicCalldataKind::BytesLike
+                           ? lowering::AbiDecodeError::StringLengthExceeded
+                           : lowering::AbiDecodeError::ArrayLengthExceeded;
+            }
+
+            static bool strictDynamicCalldataValidatesWordElements(StrictDynamicCalldataKind kind)
+            {
+                return kind == StrictDynamicCalldataKind::AddressArray ||
+                       kind == StrictDynamicCalldataKind::BoolArray ||
+                       kind == StrictDynamicCalldataKind::FixedBytesArray;
+            }
+
+            static FailureOr<lowering::AbiDecodeError> strictDynamicCalldataInvalidElementError(StrictDynamicCalldataKind kind)
+            {
+                switch (kind)
+                {
+                case StrictDynamicCalldataKind::AddressArray:
+                    return lowering::AbiDecodeError::InvalidAddress;
+                case StrictDynamicCalldataKind::BoolArray:
+                    return lowering::AbiDecodeError::InvalidBoolValue;
+                case StrictDynamicCalldataKind::FixedBytesArray:
+                    return lowering::AbiDecodeError::InvalidFixedBytes;
+                case StrictDynamicCalldataKind::BytesLike:
+                case StrictDynamicCalldataKind::U256Array:
+                    return failure();
+                }
+                return failure();
+            }
+
+            template <typename AddBlock, typename GetRevertBlock, typename GetBufferSize, typename MaterializeBase, typename ReadDynamicLen>
+            static StrictDynamicBounds emitStrictDynamicBoundsPrefix(
+                OpBuilder &builder,
+                Location loc,
+                Type u256Type,
+                Value offsetWord,
+                Value expectedOffset,
+                StrictDynamicCalldataKind kind,
+                AddBlock addBlock,
+                GetRevertBlock getRevertBlock,
+                GetBufferSize getBufferSize,
+                MaterializeBase materializeBase,
+                ReadDynamicLen readDynamicLen,
+                bool permissive = false,
+                uint64_t arrayElementWords = 1)
+            {
+                Block *offsetOkBlock = addBlock();
+                Block *lengthBlock = addBlock();
+                Block *capBlock = addBlock();
+                Block *sizeBlock = addBlock();
+
+                if (permissive)
+                {
+                    builder.create<sir::BrOp>(loc, ValueRange{}, offsetOkBlock);
                 }
                 else
                 {
-                    size_t start = pos;
-                    while (pos < text.size() && text[pos] != ',' && text[pos] != ')' && text[pos] != '[')
-                        ++pos;
-                    if (start == pos)
-                        return false;
-                    AbiType abi;
-                    if (!parseAbiType(text.substr(start, pos - start), abi))
-                        return false;
-                    out = AbiLayout{};
-                    out.abi = abi;
+                    Value offsetOk = builder.create<sir::EqOp>(loc, u256Type, offsetWord, expectedOffset);
+                    builder.create<sir::CondBrOp>(
+                        loc,
+                        offsetOk,
+                        ValueRange{},
+                        ValueRange{},
+                        offsetOkBlock,
+                        getRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
                 }
 
-                while (pos < text.size() && text[pos] == '[')
+                builder.setInsertionPointToEnd(offsetOkBlock);
+                Value wordSize = lowering::constU256(builder, loc, 32);
+                StrictDynamicBoundsBase base = materializeBase(wordSize);
+                Value bufferSize = getBufferSize();
+                Value lengthEnd = builder.create<sir::AddOp>(loc, u256Type, base.lengthOffset, wordSize);
+                Value lengthMissing = builder.create<sir::LtOp>(loc, u256Type, bufferSize, lengthEnd);
+                Value lengthPresent = builder.create<sir::IsZeroOp>(loc, u256Type, lengthMissing);
+                builder.create<sir::CondBrOp>(
+                    loc,
+                    lengthPresent,
+                    ValueRange{},
+                    ValueRange{},
+                    lengthBlock,
+                    getRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                builder.setInsertionPointToEnd(lengthBlock);
+                Value dynamicLen = readDynamicLen(base.payloadBase);
+                Value exceedsUsize = builder.create<sir::GtOp>(
+                    loc,
+                    u256Type,
+                    dynamicLen,
+                    lowering::constU256(builder, loc, llvm::APInt::getLowBitsSet(256, 64)));
+                Value lenFits = builder.create<sir::IsZeroOp>(loc, u256Type, exceedsUsize);
+                builder.create<sir::CondBrOp>(
+                    loc,
+                    lenFits,
+                    ValueRange{},
+                    ValueRange{},
+                    capBlock,
+                    getRevertBlock(lowering::AbiDecodeError::LengthOverflow));
+
+                builder.setInsertionPointToEnd(capBlock);
+                const uint64_t capValue = strictDynamicCalldataCap(kind);
+                const lowering::AbiDecodeError capError = strictDynamicCalldataCapError(kind);
+                Value tooLong = builder.create<sir::GtOp>(
+                    loc,
+                    u256Type,
+                    dynamicLen,
+                    lowering::constU256(builder, loc, capValue));
+                Value withinCap = builder.create<sir::IsZeroOp>(loc, u256Type, tooLong);
+                builder.create<sir::CondBrOp>(
+                    loc,
+                    withinCap,
+                    ValueRange{},
+                    ValueRange{},
+                    sizeBlock,
+                    getRevertBlock(capError));
+
+                builder.setInsertionPointToEnd(sizeBlock);
+                Value padded = nullptr;
+                Value total = nullptr;
+                if (kind == StrictDynamicCalldataKind::BytesLike)
                 {
-                    size_t close = text.find(']', pos);
-                    if (close == StringRef::npos)
+                    padded = lowering::ceil32(builder, loc, dynamicLen);
+                    total = builder.create<sir::AddOp>(loc, u256Type, padded, wordSize);
+                }
+                else
+                {
+                    Value elementStrideBytes = wordSize;
+                    if (arrayElementWords > 1)
+                        elementStrideBytes = lowering::constU256(builder, loc, arrayElementWords * 32ULL);
+                    Value elementBytes = builder.create<sir::MulOp>(loc, u256Type, dynamicLen, elementStrideBytes);
+                    total = builder.create<sir::AddOp>(loc, u256Type, elementBytes, wordSize);
+                }
+
+                return StrictDynamicBounds{
+                    wordSize,
+                    base.payloadBase,
+                    dynamicLen,
+                    padded,
+                    total,
+                    builder.create<sir::AddOp>(loc, u256Type, offsetWord, total),
+                };
+            }
+
+            struct DynamicTupleChild
+            {
+                int64_t headByteOffset = 0;
+                StrictDynamicCalldataKind kind = StrictDynamicCalldataKind::BytesLike;
+                unsigned fixedBytesWidth = 0;
+            };
+
+            struct CalldataRefinementSpec
+            {
+                bool isSigned = false;
+                bool hasMin = false;
+                bool hasMax = false;
+                bool nonZeroAddress = false;
+                llvm::APInt min = llvm::APInt(256, 0);
+                llvm::APInt max = llvm::APInt(256, 0);
+            };
+
+            static bool isPtrWordResultRepair(Type from, Type to)
+            {
+                return (isa<sir::PtrType>(from) && isa<sir::U256Type>(to)) ||
+                       (isa<sir::U256Type>(from) && isa<sir::PtrType>(to));
+            }
+
+            static bool parseRefinementBoundToken(StringRef token, StringRef prefix, bool &isSigned, llvm::APInt &bound)
+            {
+                if (!token.starts_with(prefix))
+                    return false;
+                SmallVector<StringRef, 6> parts;
+                token.split(parts, ':');
+                if (parts.size() != 6)
+                    return false;
+                if (parts[1] == "s")
+                    isSigned = true;
+                else if (parts[1] == "u")
+                    isSigned = false;
+                else
+                    return false;
+
+                uint64_t limbs[4] = {};
+                for (size_t i = 0; i < 4; ++i)
+                {
+                    if (parts[i + 2].getAsInteger(10, limbs[i]))
                         return false;
-                    StringRef inner = text.slice(pos + 1, close);
-                    if (inner.empty())
+                }
+                bound = lowering::abiDecodeBoundAPInt(limbs[0], limbs[1], limbs[2], limbs[3]);
+                return true;
+            }
+
+            static bool parseCalldataRefinementSpec(StringRef text, CalldataRefinementSpec &out)
+            {
+                out = CalldataRefinementSpec{};
+                if (text.empty())
+                    return true;
+
+                SmallVector<StringRef, 8> tokens;
+                text.split(tokens, ';', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
+                for (StringRef token : tokens)
+                {
+                    if (token == "nonzero_address")
                     {
-                        out.abi.dims.push_back(-1);
+                        out.nonZeroAddress = true;
+                        continue;
                     }
-                    else
+                    bool isSigned = false;
+                    llvm::APInt bound(256, 0);
+                    if (parseRefinementBoundToken(token, "min:", isSigned, bound))
                     {
-                        int64_t val = 0;
-                        if (inner.getAsInteger(10, val))
-                            return false;
-                        out.abi.dims.push_back(val);
+                        out.isSigned = isSigned;
+                        out.hasMin = true;
+                        out.min = bound;
+                        continue;
                     }
-                    pos = close + 1;
+                    if (parseRefinementBoundToken(token, "max:", isSigned, bound))
+                    {
+                        out.isSigned = isSigned;
+                        out.hasMax = true;
+                        out.max = bound;
+                        continue;
+                    }
+                    return false;
                 }
                 return true;
             }
 
-            static bool parseAbiLayout(StringRef text, AbiLayout &out)
+            static Value calldataRefinementSatisfied(OpBuilder &builder, Location loc, const CalldataRefinementSpec &spec, Value canonicalWord)
             {
-                size_t pos = 0;
-                if (!parseAbiLayout(text, pos, out))
-                    return false;
-                while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])))
-                    ++pos;
-                return pos == text.size();
+                auto u256Type = sir::U256Type::get(builder.getContext());
+                Value valid;
+                auto combine = [&](Value next) -> Value {
+                    if (!next)
+                        return valid;
+                    if (!valid)
+                        return next;
+                    return builder.create<sir::AndOp>(loc, u256Type, valid, next);
+                };
+
+                if (spec.hasMin)
+                    valid = combine(lowering::abiDecodeWordGte(builder, loc, canonicalWord, lowering::constU256(builder, loc, spec.min), spec.isSigned));
+                if (spec.hasMax)
+                    valid = combine(lowering::abiDecodeWordLte(builder, loc, canonicalWord, lowering::constU256(builder, loc, spec.max), spec.isSigned));
+                if (spec.nonZeroAddress)
+                {
+                    Value zero = lowering::constU256(builder, loc, 0);
+                    Value isZero = builder.create<sir::EqOp>(loc, u256Type, canonicalWord, zero);
+                    valid = combine(builder.create<sir::IsZeroOp>(loc, u256Type, isZero));
+                }
+                return valid;
             }
 
-            static Value computePaddedBytes(OpBuilder &builder, Location loc, MLIRContext *ctx, Value len)
+            static int64_t dispatcherHeadSlotsForLayout(const AbiLayoutNode &layout)
             {
+                return canonicalAbiLayoutIsDynamic(layout) ? 1 : canonicalAbiLayoutHeadSlots(layout);
+            }
+
+            static bool isStaticFixedArrayLayout(const AbiLayoutNode &layout)
+            {
+                return layout.kind == AbiLayoutKind::FixedArray &&
+                       !canonicalAbiLayoutIsDynamic(layout) &&
+                       canonicalAbiLayoutHeadSlots(layout) > 0;
+            }
+
+            static std::optional<CalldataStaticDecode> decodeStaticCalldataWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiLayoutNode &layout, Value word, uint64_t enumVariantCount = 0, bool needsRefinementCheck = false, bool permissive = false)
+            {
+                if (layout.kind != AbiLayoutKind::Static)
+                    return std::nullopt;
+
                 auto u256Type = sir::U256Type::get(ctx);
-                Value c31 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 31));
-                Value c5 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(IntegerType::get(ctx, 64, IntegerType::Unsigned), 5));
-                Value lenPlus = builder.create<sir::AddOp>(loc, u256Type, len, c31);
-                Value shifted = builder.create<sir::ShrOp>(loc, u256Type, c5, lenPlus);
-                return builder.create<sir::ShlOp>(loc, u256Type, c5, shifted);
+                auto makeDecode = [&](Value payload, Value canonicalWord, Value valid, lowering::AbiDecodeError error) {
+                    CalldataStaticDecode decoded;
+                    decoded.payload = payload;
+                    decoded.canonicalWord = canonicalWord;
+                    if (!permissive)
+                        decoded.checks.push_back({valid, error});
+                    return decoded;
+                };
+                auto addEnumRangeCheck = [&](CalldataStaticDecode decoded) {
+                    if (enumVariantCount == 0)
+                        return decoded;
+                    Value count = lowering::constU256(builder, loc, enumVariantCount);
+                    Value inRange = builder.create<sir::LtOp>(loc, u256Type, decoded.payload, count);
+                    decoded.checks.push_back({inRange, lowering::AbiDecodeError::EnumOutOfRange});
+                    return decoded;
+                };
+                switch (layout.staticKind)
+                {
+                case AbiStaticKind::Bool:
+                {
+                    Value payload = permissive ? lowering::boolAbiWordPermissivePayload(builder, loc, word) : word;
+                    return makeDecode(payload, payload, lowering::boolAbiWordIsCanonical(builder, loc, word), lowering::AbiDecodeError::InvalidBoolValue);
+                }
+                case AbiStaticKind::Address:
+                {
+                    Value payload = lowering::maskLowBits(builder, loc, word, 160);
+                    return makeDecode(payload, payload, builder.create<sir::EqOp>(loc, u256Type, word, payload), lowering::AbiDecodeError::InvalidAddress);
+                }
+                case AbiStaticKind::Uint:
+                {
+                    if (layout.width >= 256)
+                    {
+                        if (enumVariantCount == 0 && !needsRefinementCheck)
+                            return std::nullopt;
+                        CalldataStaticDecode decoded;
+                        decoded.payload = word;
+                        decoded.canonicalWord = word;
+                        return addEnumRangeCheck(decoded);
+                    }
+                    Value payload = lowering::maskLowBits(builder, loc, word, layout.width);
+                    return addEnumRangeCheck(makeDecode(payload, payload, builder.create<sir::EqOp>(loc, u256Type, word, payload), lowering::AbiDecodeError::NonCanonicalPadding));
+                }
+                case AbiStaticKind::Int:
+                {
+                    if (layout.width >= 256)
+                    {
+                        if (enumVariantCount == 0 && !needsRefinementCheck)
+                            return std::nullopt;
+                        CalldataStaticDecode decoded;
+                        decoded.payload = word;
+                        decoded.canonicalWord = word;
+                        return addEnumRangeCheck(decoded);
+                    }
+                    if (layout.width == 0 || layout.width % 8 != 0)
+                        return std::nullopt;
+                    Value byteIndex = lowering::constU256(builder, loc, (layout.width / 8) - 1);
+                    Value expected = builder.create<sir::SignExtendOp>(loc, u256Type, byteIndex, word);
+                    return addEnumRangeCheck(makeDecode(expected, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::NonCanonicalPadding));
+                }
+                case AbiStaticKind::FixedBytes:
+                {
+                    if (layout.width >= 32 || layout.width == 0)
+                        return std::nullopt;
+                    uint64_t shiftBits = static_cast<uint64_t>(32 - layout.width) * 8ULL;
+                    Value shift = lowering::constU256(builder, loc, shiftBits);
+                    Value payload = builder.create<sir::ShrOp>(loc, u256Type, shift, word);
+                    Value expected = builder.create<sir::ShlOp>(loc, u256Type, shift, payload);
+                    return makeDecode(payload, expected, builder.create<sir::EqOp>(loc, u256Type, word, expected), lowering::AbiDecodeError::InvalidFixedBytes);
+                }
+                }
+                return std::nullopt;
+            }
+
+            static Value materializeAbiReturnStaticWord(OpBuilder &builder, Location loc, MLIRContext *ctx, const AbiLayoutNode &layout, Value payload)
+            {
+                if (layout.kind != AbiLayoutKind::Static)
+                    return payload;
+
+                auto u256Type = sir::U256Type::get(ctx);
+                if (layout.staticKind == AbiStaticKind::Int &&
+                    layout.width > 0 &&
+                    layout.width < 256 &&
+                    layout.width % 8 == 0)
+                {
+                    Value byteIndex = lowering::constU256(builder, loc, (layout.width / 8) - 1);
+                    return builder.create<sir::SignExtendOp>(loc, u256Type, byteIndex, payload).getResult();
+                }
+
+                if (layout.staticKind == AbiStaticKind::FixedBytes &&
+                    layout.width > 0 &&
+                    layout.width < 32)
+                {
+                    // Ora fixed-bytes values carry their bytes in the low bits
+                    // after ABI decode. The ABI word is left-aligned.
+                    Value shift = lowering::constU256(builder, loc, static_cast<uint64_t>(32 - layout.width) * 8ULL);
+                    return builder.create<sir::ShlOp>(loc, u256Type, shift, payload).getResult();
+                }
+
+                return payload;
             }
 
             static Value computeAbiEncodedSize(
@@ -420,31 +670,30 @@ namespace mlir
                 Location loc,
                 MLIRContext *ctx,
                 Value basePtr,
-                const AbiLayout &layout)
+                const AbiLayoutNode &layout)
             {
                 auto u256Type = sir::U256Type::get(ctx);
                 auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
-                auto i64Type = IntegerType::get(ctx, 64, IntegerType::Unsigned);
-                Value c32 = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, 32));
+                Value c32 = lowering::constU256(builder, loc, 32);
 
-                if (layout.supportsDynamicArray())
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
                 {
                     Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                    Value elemWords = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.staticElementWordCount()));
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(layout));
                     Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
                     Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
                     return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
                 }
 
-                if (!layout.isTupleLike())
+                if (!canonicalAbiLayoutIsTupleLike(layout))
                 {
-                    if (layout.abi.base == AbiBase::BytesDyn || layout.abi.base == AbiBase::String)
+                    if (layout.kind == AbiLayoutKind::DynamicBytes)
                     {
                         Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
-                        Value padded = computePaddedBytes(builder, loc, ctx, length);
+                        Value padded = lowering::ceil32(builder, loc, length);
                         return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
                     }
-                    if (layout.abi.supportsDynamicArray())
+                    if (layout.kind == AbiLayoutKind::DynamicArray)
                     {
                         Value length = builder.create<sir::LoadOp>(loc, u256Type, basePtr);
                         Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, length, c32);
@@ -453,13 +702,14 @@ namespace mlir
                     return c32;
                 }
 
-                Value total = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, layout.headSlots() * 32));
+                Value total = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
                 int64_t headOffset = 0;
-                for (const AbiLayout &field : layout.fields)
+                for (const auto &fieldPtr : layout.children)
                 {
-                    if (field.isDynamic())
+                    const AbiLayoutNode &field = *fieldPtr;
+                    if (canonicalAbiLayoutIsDynamic(field))
                     {
-                        Value headOff = builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(i64Type, headOffset));
+                        Value headOff = lowering::constU256(builder, loc, headOffset);
                         Value offPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, headOff);
                         Value relOff = builder.create<sir::LoadOp>(loc, u256Type, offPtr);
                         Value childPtr = builder.create<sir::AddPtrOp>(loc, ptrType, basePtr, relOff);
@@ -469,10 +719,287 @@ namespace mlir
                     }
                     else
                     {
-                        headOffset += field.headSlots() * 32;
+                        headOffset += canonicalAbiLayoutHeadSlots(field) * 32;
                     }
                 }
                 return total;
+            }
+
+            struct AbiReturnBuffer
+            {
+                Value ptr;
+                Value size;
+            };
+
+            static Value computePointerBackedAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout);
+
+            static LogicalResult emitPointerBackedAbiEncoding(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout,
+                Value destPtr);
+
+            static LogicalResult emitPointerBackedStaticAbiWords(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                const AbiLayoutNode &layout,
+                Value sourcePtr,
+                Value sourceOffset,
+                Value destPtr,
+                Value destOffset)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+                if (layout.kind == AbiLayoutKind::Static)
+                {
+                    Value src = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceOffset);
+                    Value dst = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, destOffset);
+                    Value raw = builder.create<sir::LoadOp>(loc, u256Type, src);
+                    builder.create<sir::StoreOp>(loc, dst, materializeAbiReturnStaticWord(builder, loc, ctx, layout, raw));
+                    return success();
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout) && !canonicalAbiLayoutIsDynamic(layout))
+                {
+                    Value sourceCursor = sourceOffset;
+                    Value destCursor = destOffset;
+                    for (const auto &child : layout.children)
+                    {
+                        if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, *child, sourcePtr, sourceCursor, destPtr, destCursor)))
+                            return failure();
+                        Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(*child) * 32);
+                        sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                        destCursor = builder.create<sir::AddOp>(loc, u256Type, destCursor, childBytes);
+                    }
+                    return success();
+                }
+
+                if (layout.kind == AbiLayoutKind::FixedArray && !canonicalAbiLayoutIsDynamic(layout) && layout.children.size() == 1)
+                {
+                    const AbiLayoutNode &element = *layout.children.front();
+                    int64_t elementSlots = canonicalAbiLayoutHeadSlots(element);
+                    if (elementSlots <= 0)
+                        return failure();
+                    Value elementBytes = lowering::constU256(builder, loc, elementSlots * 32);
+                    Value sourceCursor = sourceOffset;
+                    Value destCursor = destOffset;
+                    for (unsigned i = 0; i < layout.arrayLen; ++i)
+                    {
+                        if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, element, sourcePtr, sourceCursor, destPtr, destCursor)))
+                            return failure();
+                        sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, elementBytes);
+                        destCursor = builder.create<sir::AddOp>(loc, u256Type, destCursor, elementBytes);
+                    }
+                    return success();
+                }
+
+                int64_t words = canonicalAbiLayoutHeadSlots(layout);
+                if (words <= 0)
+                    return failure();
+                Value bytes = lowering::constU256(builder, loc, words * 32);
+                Value src = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceOffset);
+                Value dst = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, destOffset);
+                builder.create<sir::MCopyOp>(loc, dst, src, bytes);
+                return success();
+            }
+
+            static Value computePointerBackedAbiEncodedSize(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                Value c32 = lowering::constU256(builder, loc, 32);
+
+                if (layout.kind == AbiLayoutKind::DynamicBytes)
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value padded = lowering::ceil32(builder, loc, length);
+                    return builder.create<sir::AddOp>(loc, u256Type, padded, c32);
+                }
+
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(*layout.children.front()));
+                    Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
+                    Value lenBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
+                    return builder.create<sir::AddOp>(loc, u256Type, lenBytes, c32);
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout))
+                {
+                    Value total = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
+                    Value sourceCursor = lowering::constU256(builder, loc, 0);
+                    for (const auto &childPtr : layout.children)
+                    {
+                        const AbiLayoutNode &child = *childPtr;
+                        if (canonicalAbiLayoutIsDynamic(child))
+                        {
+                            Value childSlot = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceCursor);
+                            Value childPtrWord = builder.create<sir::LoadOp>(loc, u256Type, childSlot);
+                            Value childSource = builder.create<sir::BitcastOp>(loc, ptrType, childPtrWord);
+                            Value childSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, childSource, child);
+                            total = builder.create<sir::AddOp>(loc, u256Type, total, childSize);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, c32);
+                        }
+                        else
+                        {
+                            Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(child) * 32);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                        }
+                    }
+                    return total;
+                }
+
+                int64_t words = canonicalAbiLayoutHeadSlots(layout);
+                return lowering::constU256(builder, loc, (words > 0 ? words : 1) * 32);
+            }
+
+            static LogicalResult emitPointerBackedAbiEncoding(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtr,
+                const AbiLayoutNode &layout,
+                Value destPtr)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                Value c32 = lowering::constU256(builder, loc, 32);
+
+                if (layout.kind == AbiLayoutKind::DynamicBytes)
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value padded = lowering::ceil32(builder, loc, length);
+                    builder.create<sir::StoreOp>(loc, destPtr, length);
+                    Value srcPayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, c32);
+                    Value dstPayload = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, c32);
+                    builder.create<sir::MCopyOp>(loc, dstPayload, srcPayload, padded);
+                    return success();
+                }
+
+                if (canonicalAbiLayoutSupportsDynamicArray(layout))
+                {
+                    Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                    Value elemWords = lowering::constU256(builder, loc, canonicalAbiLayoutStaticElementWordCount(*layout.children.front()));
+                    Value words = builder.create<sir::MulOp>(loc, u256Type, length, elemWords);
+                    Value payloadBytes = builder.create<sir::MulOp>(loc, u256Type, words, c32);
+                    builder.create<sir::StoreOp>(loc, destPtr, length);
+                    Value srcPayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, c32);
+                    Value dstPayload = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, c32);
+                    builder.create<sir::MCopyOp>(loc, dstPayload, srcPayload, payloadBytes);
+                    return success();
+                }
+
+                if (canonicalAbiLayoutIsTupleLike(layout))
+                {
+                    Value tailOffset = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(layout) * 32);
+                    Value sourceCursor = lowering::constU256(builder, loc, 0);
+                    Value headCursor = lowering::constU256(builder, loc, 0);
+                    for (const auto &childPtr : layout.children)
+                    {
+                        const AbiLayoutNode &child = *childPtr;
+                        if (canonicalAbiLayoutIsDynamic(child))
+                        {
+                            Value headSlot = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, headCursor);
+                            builder.create<sir::StoreOp>(loc, headSlot, tailOffset);
+
+                            Value childSlot = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, sourceCursor);
+                            Value childPtrWord = builder.create<sir::LoadOp>(loc, u256Type, childSlot);
+                            Value childSource = builder.create<sir::BitcastOp>(loc, ptrType, childPtrWord);
+                            Value childDest = builder.create<sir::AddPtrOp>(loc, ptrType, destPtr, tailOffset);
+                            if (failed(emitPointerBackedAbiEncoding(builder, loc, ctx, childSource, child, childDest)))
+                                return failure();
+                            Value childSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, childSource, child);
+                            tailOffset = builder.create<sir::AddOp>(loc, u256Type, tailOffset, childSize);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, c32);
+                            headCursor = builder.create<sir::AddOp>(loc, u256Type, headCursor, c32);
+                        }
+                        else
+                        {
+                            if (failed(emitPointerBackedStaticAbiWords(builder, loc, ctx, child, sourcePtr, sourceCursor, destPtr, headCursor)))
+                                return failure();
+                            Value childBytes = lowering::constU256(builder, loc, canonicalAbiLayoutHeadSlots(child) * 32);
+                            sourceCursor = builder.create<sir::AddOp>(loc, u256Type, sourceCursor, childBytes);
+                            headCursor = builder.create<sir::AddOp>(loc, u256Type, headCursor, childBytes);
+                        }
+                    }
+                    return success();
+                }
+
+                return emitPointerBackedStaticAbiWords(
+                    builder,
+                    loc,
+                    ctx,
+                    layout,
+                    sourcePtr,
+                    lowering::constU256(builder, loc, 0),
+                    destPtr,
+                    lowering::constU256(builder, loc, 0));
+            }
+
+            static FailureOr<AbiReturnBuffer> materializeSingleDynamicTupleAbiReturn(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtrWord,
+                const AbiLayoutNode &layout)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                Value wordSize = lowering::constU256(builder, loc, 32);
+                Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
+                Value tupleSize = computePointerBackedAbiEncodedSize(builder, loc, ctx, sourcePtr, layout);
+                Value size = builder.create<sir::AddOp>(loc, u256Type, wordSize, tupleSize);
+                Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                builder.create<sir::StoreOp>(loc, retPtr, wordSize);
+                Value tupleDest = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, wordSize);
+                if (failed(emitPointerBackedAbiEncoding(builder, loc, ctx, sourcePtr, layout, tupleDest)))
+                    return failure();
+                return AbiReturnBuffer{retPtr, size};
+            }
+
+            static AbiReturnBuffer materializeSingleDynamicAbiReturn(
+                OpBuilder &builder,
+                Location loc,
+                MLIRContext *ctx,
+                Value sourcePtrWord,
+                bool byteLengthPayload)
+            {
+                auto u256Type = sir::U256Type::get(ctx);
+                auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+                Value wordSize = lowering::constU256(builder, loc, 32);
+                Value twoWords = lowering::constU256(builder, loc, 64);
+                Value sourcePtr = builder.create<sir::BitcastOp>(loc, ptrType, sourcePtrWord);
+                Value length = builder.create<sir::LoadOp>(loc, u256Type, sourcePtr);
+                Value payloadBytes = byteLengthPayload
+                                         ? length
+                                         : builder.create<sir::MulOp>(loc, u256Type, length, wordSize).getResult();
+                Value paddedPayloadBytes = byteLengthPayload
+                                               ? lowering::ceil32(builder, loc, payloadBytes)
+                                               : payloadBytes;
+                Value size = builder.create<sir::AddOp>(loc, u256Type, twoWords, paddedPayloadBytes);
+                Value retPtr = builder.create<sir::SAllocAnyOp>(loc, ptrType, size);
+                builder.create<sir::StoreOp>(loc, retPtr, wordSize);
+                Value lengthSlot = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, wordSize);
+                builder.create<sir::StoreOp>(loc, lengthSlot, length);
+                Value sourcePayload = builder.create<sir::AddPtrOp>(loc, ptrType, sourcePtr, wordSize);
+                Value destPayload = builder.create<sir::AddPtrOp>(loc, ptrType, retPtr, twoWords);
+                builder.create<sir::MCopyOp>(loc, destPayload, sourcePayload, payloadBytes);
+                return AbiReturnBuffer{retPtr, size};
             }
 
             struct PubFuncInfo
@@ -483,11 +1010,12 @@ namespace mlir
                 unsigned argCount = 0;
                 unsigned retCount = 0;
                 bool returnsErrorUnion = false;
-                SmallVector<AbiType, 8> abiParams;
+                bool permissiveAbiDecode = false;
                 SmallVector<std::string, 8> abiParamLayouts;
+                SmallVector<uint64_t, 8> abiParamEnumCounts;
+                SmallVector<std::string, 8> abiParamRefinements;
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
-                AbiType abiReturn;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -507,13 +1035,11 @@ namespace mlir
                 uint64_t paramCount = 0;
             };
 
-            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *ctx, uint32_t selector)
+            static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *, uint32_t selector)
             {
-                auto u256Type = sir::U256Type::get(ctx);
-                auto u256IntType = IntegerType::get(ctx, 256, IntegerType::Unsigned);
                 llvm::APInt selectorWord(256, selector);
                 selectorWord = selectorWord.shl(224);
-                return builder.create<sir::ConstOp>(loc, u256Type, IntegerAttr::get(u256IntType, selectorWord));
+                return lowering::constU256(builder, loc, selectorWord);
             }
 
             struct SIRDispatcherPass : public PassWrapper<SIRDispatcherPass, OperationPass<ModuleOp>>
@@ -540,13 +1066,13 @@ namespace mlir
                         return;
                     if (block->empty())
                         return;
-                    block->back().setAttr("sir.block_order", IntegerAttr::get(IntegerType::get(block->getParent()->getContext(), 64), order));
+                    block->back().setAttr("sir.block_order", IntegerAttr::get(mlir::IntegerType::get(block->getParent()->getContext(), 64), order));
                 }
 
                 static Value getConst(OpBuilder &builder,
                                       Location loc,
                                       Type type,
-                                      IntegerType i64Type,
+                                      mlir::IntegerType i64Type,
                                       int64_t value,
                                       DenseMap<Block *, DenseMap<int64_t, Value>> &cache,
                                       Block *block,
@@ -597,6 +1123,12 @@ namespace mlir
                     auto i64Type = builder.getI64Type();
 
                     SmallVector<ErrorInfo, 8> abiErrors;
+                    llvm::DenseSet<uint64_t> seenErrorIds;
+                    auto addErrorInfo = [&](uint64_t id, uint32_t selector, uint64_t paramCount) {
+                        if (!seenErrorIds.insert(id).second)
+                            return;
+                        abiErrors.push_back(ErrorInfo{id, selector, paramCount});
+                    };
                     module.walk([&](sir::ErrorDeclOp decl) {
                         auto idAttr = decl->getAttrOfType<IntegerAttr>("sir.error_id");
                         auto selectorAttr = decl->getAttrOfType<StringAttr>("sir.error_selector");
@@ -604,38 +1136,55 @@ namespace mlir
                         if (!idAttr || !selectorAttr || !paramTypes)
                             return;
 
-                        StringRef selStr = selectorAttr.getValue();
-                        if (!selStr.starts_with("0x") || selStr.size() != 10)
+                        auto selector = parseErrorSelector(selectorAttr.getValue());
+                        if (!selector)
                             return;
-
-                        uint32_t selector = 0;
-                        for (char c : selStr.drop_front(2))
-                        {
-                            selector <<= 4;
-                            if (c >= '0' && c <= '9')
-                                selector |= (c - '0');
-                            else if (c >= 'a' && c <= 'f')
-                                selector |= (c - 'a' + 10);
-                            else if (c >= 'A' && c <= 'F')
-                                selector |= (c - 'A' + 10);
-                            else
-                                return;
-                        }
-
-                        abiErrors.push_back(ErrorInfo{
+                        addErrorInfo(
                             idAttr.getValue().getZExtValue(),
-                            selector,
-                            static_cast<uint64_t>(paramTypes.size()),
-                        });
+                            *selector,
+                            static_cast<uint64_t>(paramTypes.size()));
                     });
+                    if (auto idDict = module->getAttrOfType<DictionaryAttr>("sir.error_ids"))
+                    {
+                        auto selectorDict = module->getAttrOfType<DictionaryAttr>("sir.error_selectors");
+                        auto paramCountDict = module->getAttrOfType<DictionaryAttr>("sir.error_param_counts");
+                        for (NamedAttribute idEntry : idDict)
+                        {
+                            auto idAttr = dyn_cast<IntegerAttr>(idEntry.getValue());
+                            auto selectorAttr = dyn_cast_or_null<StringAttr>(lookupDictionaryAttr(selectorDict, idEntry.getName()));
+                            if (!idAttr || !selectorAttr)
+                                continue;
+                            auto selector = parseErrorSelector(selectorAttr.getValue());
+                            if (!selector)
+                                continue;
+                            uint64_t paramCount = 0;
+                            if (auto paramCountAttr = dyn_cast_or_null<IntegerAttr>(lookupDictionaryAttr(paramCountDict, idEntry.getName())))
+                                paramCount = paramCountAttr.getValue().getZExtValue();
+                            addErrorInfo(idAttr.getValue().getZExtValue(), *selector, paramCount);
+                        }
+                    }
 
-                    // Rewrite all non-entry functions: sir.return -> sir.iret (ptr as u256).
+                    // Rewrite all non-entry functions: public ABI functions
+                    // return (ptr,len), but private scalar helpers return the
+                    // scalar word itself. Keeping private helpers ABI-shaped
+                    // makes internal callers observe memory pointers as values.
                     for (func::FuncOp func : module.getOps<func::FuncOp>())
                     {
                         if (func.getName() == "init" || func.getName() == "main")
                             continue;
                         if (userInit && func == userInit)
                             continue;
+
+                        auto vis = func->getAttrOfType<StringAttr>("ora.visibility");
+                        auto ft = func.getFunctionType();
+                        const bool privateScalarReturn =
+                            vis && vis.getValue() == "private" &&
+                            ft.getNumResults() == 1 &&
+                            !isa<sir::PtrType>(ft.getResult(0));
+                        const bool privateErrorUnionReturn =
+                            vis && vis.getValue() == "private" &&
+                            ft.getNumResults() == 2 &&
+                            func->getAttrOfType<BoolAttr>("ora.returns_error_union");
 
                         bool hasReturn = false;
                         for (Block &block : func.getBlocks())
@@ -645,20 +1194,48 @@ namespace mlir
                             if (auto ret = dyn_cast<sir::ReturnOp>(block.getTerminator()))
                             {
                                 builder.setInsertionPoint(ret);
-                                Value ptr = ret.getPtr();
-                                Value len = ret.getLen();
-                                Value ptr_u = builder.create<sir::BitcastOp>(loc, u256Type, ptr);
-                                builder.create<sir::IRetOp>(loc, ValueRange{ptr_u, len});
+                                if (privateErrorUnionReturn)
+                                {
+                                    Value ptr = ret.getPtr();
+                                    Value tag = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ptr);
+                                    Value c32 = lowering::constU256(builder, ret.getLoc(), 32);
+                                    Value payloadPtr = builder.create<sir::AddPtrOp>(ret.getLoc(), ptrType, ptr, c32);
+                                    Value payload = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, payloadPtr);
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{tag, payload});
+                                }
+                                else if (privateScalarReturn)
+                                {
+                                    Value scalar = builder.create<sir::LoadOp>(ret.getLoc(), u256Type, ret.getPtr());
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{scalar});
+                                }
+                                else
+                                {
+                                    Value ptr = ret.getPtr();
+                                    Value len = ret.getLen();
+                                    Value ptr_u = builder.create<sir::BitcastOp>(ret.getLoc(), u256Type, ptr);
+                                    builder.create<sir::IRetOp>(ret.getLoc(), ValueRange{ptr_u, len});
+                                }
                                 ret.erase();
                                 hasReturn = true;
                             }
                         }
                         if (hasReturn)
                         {
-                            auto ft = func.getFunctionType();
                             SmallVector<Type, 4> results;
-                            results.push_back(u256Type);
-                            results.push_back(u256Type);
+                            if (privateErrorUnionReturn)
+                            {
+                                results.push_back(u256Type);
+                                results.push_back(u256Type);
+                            }
+                            else if (privateScalarReturn)
+                            {
+                                results.push_back(u256Type);
+                            }
+                            else
+                            {
+                                results.push_back(u256Type);
+                                results.push_back(u256Type);
+                            }
                             auto newType = builder.getFunctionType(ft.getInputs(), results);
                             func.setType(newType);
                         }
@@ -730,14 +1307,13 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiType abi;
-                                if (!parseAbiType(sattr.getValue(), abi))
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(sattr.getValue(), layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     func.emitError("unsupported ABI param type: " + sattr.getValue());
                                     signalPassFailure();
                                     return;
                                 }
-                                info.abiParams.push_back(abi);
                                 info.abiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
@@ -753,6 +1329,41 @@ namespace mlir
                                     return;
                                 }
                                 info.resultInputModes.push_back(sattr.getValue().str());
+                            }
+                        }
+                        if (auto enumCountsAttr = func->getAttrOfType<ArrayAttr>("ora.abi_param_enum_counts"))
+                        {
+                            for (Attribute a : enumCountsAttr)
+                            {
+                                auto iattr = dyn_cast<IntegerAttr>(a);
+                                if (!iattr)
+                                {
+                                    func.emitError("ora.abi_param_enum_counts contains non-integer attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.abiParamEnumCounts.push_back(iattr.getValue().getZExtValue());
+                            }
+                        }
+                        if (auto refinementsAttr = func->getAttrOfType<ArrayAttr>("ora.abi_param_refinements"))
+                        {
+                            for (Attribute a : refinementsAttr)
+                            {
+                                auto sattr = dyn_cast<StringAttr>(a);
+                                if (!sattr)
+                                {
+                                    func.emitError("ora.abi_param_refinements contains non-string attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                CalldataRefinementSpec parsed;
+                                if (!parseCalldataRefinementSpec(sattr.getValue(), parsed))
+                                {
+                                    func.emitError("ora.abi_param_refinements contains malformed refinement metadata");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.abiParamRefinements.push_back(sattr.getValue().str());
                             }
                         }
                         if (auto resultInputErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.result_input_error_ids"))
@@ -772,30 +1383,53 @@ namespace mlir
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
-                            AbiType abiReturn;
-                            if (!parseAbiType(abiReturnAttr.getValue(), abiReturn))
+                            AbiLayoutNode abiReturn;
+                            if (!parseAbiLayout(abiReturnAttr.getValue(), abiReturn, AbiLayoutSyntax::CanonicalAbi))
                             {
                                 func.emitError("unsupported ABI return type: " + abiReturnAttr.getValue());
                                 signalPassFailure();
                                 return;
                             }
-                            info.abiReturn = abiReturn;
+                            info.abiReturnLayout = abiReturnAttr.getValue().str();
                             info.hasAbiReturn = true;
                         }
                         if (auto abiReturnWordsAttr = func->getAttrOfType<IntegerAttr>("ora.abi_return_words"))
                             info.abiReturnWords = abiReturnWordsAttr.getInt();
                         if (auto abiReturnLayoutAttr = func->getAttrOfType<StringAttr>("ora.abi_return_layout"))
+                        {
+                            AbiLayoutNode abiReturnLayout;
+                            if (!parseAbiLayout(abiReturnLayoutAttr.getValue(), abiReturnLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                func.emitError("invalid ora.abi_return_layout");
+                                signalPassFailure();
+                                return;
+                            }
                             info.abiReturnLayout = abiReturnLayoutAttr.getValue().str();
+                        }
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
-                        if (!info.abiParams.empty() && info.resultInputModes.size() != info.abiParams.size())
+                        if (auto modeAttr = func->getAttrOfType<StringAttr>("ora.abi_decode_mode"))
+                            info.permissiveAbiDecode = modeAttr.getValue() == "permissive";
+                        if (!info.abiParamLayouts.empty() && info.resultInputModes.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.result_input_modes length does not match ora.abi_params");
                             signalPassFailure();
                             return;
                         }
-                        if (!info.abiParams.empty() && info.resultInputErrorIds.size() != info.abiParams.size())
+                        if (!info.abiParamLayouts.empty() && info.abiParamEnumCounts.size() != info.abiParamLayouts.size())
+                        {
+                            func.emitError("ora.abi_param_enum_counts length does not match ora.abi_params");
+                            signalPassFailure();
+                            return;
+                        }
+                        if (!info.abiParamLayouts.empty() && info.abiParamRefinements.size() != info.abiParamLayouts.size())
+                        {
+                            func.emitError("ora.abi_param_refinements length does not match ora.abi_params");
+                            signalPassFailure();
+                            return;
+                        }
+                        if (!info.abiParamLayouts.empty() && info.resultInputErrorIds.size() != info.abiParamLayouts.size())
                         {
                             func.emitError("ora.result_input_error_ids length does not match ora.abi_params");
                             signalPassFailure();
@@ -805,18 +1439,18 @@ namespace mlir
                         auto loweredArgCountForSourceParam = [&](size_t idx) -> unsigned {
                             if (idx < info.resultInputModes.size() &&
                                 (info.resultInputModes[idx] == "wide_payloadless" || info.resultInputModes[idx] == "wide_single_error"))
-                                return 2;
+                                return static_cast<unsigned>(adt_helpers::kAdtCarrierWordCount);
                             return 1;
                         };
 
-                        unsigned expectedArgCount = info.abiParams.empty() ? info.argCount : 0;
-                        if (!info.abiParams.empty())
+                        unsigned expectedArgCount = info.abiParamLayouts.empty() ? info.argCount : 0;
+                        if (!info.abiParamLayouts.empty())
                         {
-                            for (size_t i = 0; i < info.abiParams.size(); ++i)
+                            for (size_t i = 0; i < info.abiParamLayouts.size(); ++i)
                                 expectedArgCount += loweredArgCountForSourceParam(i);
                         }
 
-                        if (!info.abiParams.empty() && expectedArgCount != info.argCount)
+                        if (!info.abiParamLayouts.empty() && expectedArgCount != info.argCount)
                         {
                             func.emitError("public ABI param metadata does not match lowered function argument count");
                             signalPassFailure();
@@ -824,28 +1458,23 @@ namespace mlir
                         }
 
                         int64_t headSlots = 0;
-                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        size_t sourceParamCount = info.abiParamLayouts.empty() ? info.argCount : info.abiParamLayouts.size();
                         for (size_t i = 0; i < sourceParamCount; ++i)
                         {
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
-                            if (info.abiParams.empty())
+                            if (info.abiParamLayouts.empty())
                             {
                                 headSlots += 1;
                             }
                             else
                             {
-                                int64_t slots = abi.headSlots();
-                                if (abi.base == AbiBase::Tuple && i < info.abiParamLayouts.size())
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
-                                    AbiLayout layout;
-                                    if (!parseAbiLayout(info.abiParamLayouts[i], layout))
-                                    {
-                                        func.emitError("invalid tuple ABI param layout");
-                                        signalPassFailure();
-                                        return;
-                                    }
-                                    slots = layout.isDynamic() ? 1 : layout.headSlots();
+                                    func.emitError("invalid ABI param layout");
+                                    signalPassFailure();
+                                    return;
                                 }
+                                int64_t slots = dispatcherHeadSlotsForLayout(layout);
                                 if (slots < 0)
                                 {
                                     func.emitError("unsupported ABI type for head sizing");
@@ -880,6 +1509,19 @@ namespace mlir
                             return;
 
                         auto calleeType = calleeFunc.getFunctionType();
+                        unsigned matchedResults = std::min(icall.getNumResults(), calleeType.getNumResults());
+                        for (unsigned i = 0; i < matchedResults; ++i)
+                        {
+                            Type oldType = icall.getResult(i).getType();
+                            Type calleeResultType = calleeType.getResult(i);
+                            if (isPtrWordResultRepair(oldType, calleeResultType))
+                            {
+                                icall.emitError("dispatcher icall ptr/u256 result mismatch requires explicit lowering");
+                                signalPassFailure();
+                                return;
+                            }
+                        }
+
                         // sir.icall is word-based: args/results must be sir.u256.
                         // Avoid retyping calls to raw callee signatures that use
                         // non-word types (e.g. i256/ptr), which creates invalid IR.
@@ -912,47 +1554,21 @@ namespace mlir
                                 continue;
                             }
 
-                            if (isa<sir::PtrType>(oldRes.getType()) && isa<sir::U256Type>(newRes.getType()))
+                            if (isPtrWordResultRepair(oldRes.getType(), newRes.getType()))
                             {
-                                auto bc = callBuilder.create<sir::BitcastOp>(icall.getLoc(),
-                                                                             oldRes.getType(),
-                                                                             newRes);
-                                oldRes.replaceAllUsesWith(bc.getResult());
-                                continue;
-                            }
-                            if (isa<sir::U256Type>(oldRes.getType()) && isa<sir::PtrType>(newRes.getType()))
-                            {
-                                auto bc = callBuilder.create<sir::BitcastOp>(icall.getLoc(),
-                                                                             oldRes.getType(),
-                                                                             newRes);
-                                oldRes.replaceAllUsesWith(bc.getResult());
-                                continue;
+                                icall.emitError("dispatcher icall ptr/u256 result mismatch requires explicit lowering");
+                                signalPassFailure();
+                                return;
                             }
 
                             oldRes.replaceAllUsesWith(newRes);
                         }
 
-                        // If old call had fewer results, the prefix mapping above is sufficient.
                         if (icall.getNumResults() > newCall.getNumResults())
                         {
-                            auto u256 = sir::U256Type::get(module.getContext());
-                            auto zero = callBuilder.create<sir::ConstOp>(icall.getLoc(), u256,
-                                                                         IntegerAttr::get(callBuilder.getI64Type(), 0));
-                            for (unsigned i = common; i < icall.getNumResults(); ++i)
-                            {
-                                Value oldRes = icall.getResult(i);
-                                if (isa<sir::PtrType>(oldRes.getType()))
-                                {
-                                    auto bc = callBuilder.create<sir::BitcastOp>(icall.getLoc(),
-                                                                                 oldRes.getType(),
-                                                                                 zero);
-                                    oldRes.replaceAllUsesWith(bc.getResult());
-                                }
-                                else
-                                {
-                                    oldRes.replaceAllUsesWith(zero);
-                                }
-                            }
+                            icall.emitError("dispatcher icall result count exceeds rewritten callee result count");
+                            signalPassFailure();
+                            return;
                         }
 
                         icall.erase();
@@ -970,11 +1586,32 @@ namespace mlir
                     Block *initDecode = nullptr;
                     builder.setInsertionPointToEnd(initEntry);
                     DenseMap<Block *, DenseMap<int64_t, Value>> constCache;
+                    DenseMap<uint64_t, Block *> initAbiDecodeRevertBlocks;
 
                     auto getInitRevert = [&]() -> Block * {
                         if (!initRevert)
                             initRevert = initFunc.addBlock();
                         return initRevert;
+                    };
+
+                    auto getInitAbiDecodeRevertBlock = [&](lowering::AbiDecodeError error) -> Block * {
+                        uint64_t ordinal = static_cast<uint64_t>(error);
+                        auto it = initAbiDecodeRevertBlocks.find(ordinal);
+                        if (it != initAbiDecodeRevertBlocks.end())
+                            return it->second;
+
+                        OpBuilder::InsertionGuard guard(builder);
+                        Block *block = initFunc.addBlock();
+                        initAbiDecodeRevertBlocks.try_emplace(ordinal, block);
+                        builder.setInsertionPointToEnd(block);
+                        Value size = lowering::constU256(builder, initLoc, 32);
+                        Value payload = lowering::constU256(builder, initLoc, ordinal);
+                        Value ptr = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, size);
+                        builder.create<sir::StoreOp>(initLoc, ptr, payload);
+                        builder.create<sir::RevertOp>(initLoc, ptr, size);
+                        std::string blockName = "init_abi_decode_revert_" + std::to_string(ordinal);
+                        setBlockName(block, blockName);
+                        return block;
                     };
 
                     if (userInit)
@@ -994,7 +1631,7 @@ namespace mlir
                             }
                             if (allNone)
                             {
-                                auto newType = FunctionType::get(
+                                auto newType = mlir::FunctionType::get(
                                     userInit.getContext(), userInitType.getInputs(), {});
                                 userInit.setFunctionType(newType);
                                 // Also strip result attributes to match the new 0-result type.
@@ -1008,7 +1645,7 @@ namespace mlir
                             }
                         }
 
-                        SmallVector<AbiType, 8> initAbiParams;
+                        SmallVector<std::string, 8> initAbiParamLayouts;
                         if (auto abiAttr = userInit->getAttrOfType<ArrayAttr>("ora.abi_params"))
                         {
                             for (Attribute a : abiAttr)
@@ -1020,35 +1657,57 @@ namespace mlir
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiType abi;
-                                if (!parseAbiType(sattr.getValue(), abi))
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(sattr.getValue(), layout, AbiLayoutSyntax::CanonicalAbi))
                                 {
                                     userInit.emitError("unsupported ABI param type: " + sattr.getValue());
                                     signalPassFailure();
                                     return;
                                 }
-                                initAbiParams.push_back(abi);
+                                initAbiParamLayouts.push_back(sattr.getValue().str());
                             }
                         }
 
                         unsigned argCount = userInitType.getNumInputs();
-                        if (!initAbiParams.empty() && initAbiParams.size() != argCount)
+                        if (!initAbiParamLayouts.empty() && initAbiParamLayouts.size() != argCount)
                         {
                             userInit.emitError("ora.abi_params length does not match function argument count");
                             signalPassFailure();
                             return;
                         }
-
+                        bool hasDynamicConstructorParam = false;
+                        for (StringRef abiLayoutText : initAbiParamLayouts)
+                        {
+                            AbiLayoutNode layout;
+                            if (!parseAbiLayout(abiLayoutText, layout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                userInit.emitError("unsupported ABI param type: " + abiLayoutText);
+                                signalPassFailure();
+                                return;
+                            }
+                            if (canonicalAbiLayoutIsDynamic(layout))
+                            {
+                                hasDynamicConstructorParam = true;
+                                break;
+                            }
+                        }
                         int64_t headSlots = 0;
                         for (unsigned i = 0; i < argCount; ++i)
                         {
-                            if (initAbiParams.empty())
+                            if (initAbiParamLayouts.empty())
                             {
                                 headSlots += 1;
                             }
                             else
                             {
-                                int64_t slots = initAbiParams[i].headSlots();
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(initAbiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    userInit.emitError("invalid constructor ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                int64_t slots = dispatcherHeadSlotsForLayout(layout);
                                 if (slots < 0)
                                 {
                                     userInit.emitError("unsupported ABI type for head sizing");
@@ -1066,12 +1725,16 @@ namespace mlir
                         int64_t minHeadBytes = 32 * headSlots;
                         if (minHeadBytes > 0)
                         {
-                            Value minSizeVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, minHeadBytes));
+                            Value valid_code = builder.create<sir::IsZeroOp>(initLoc, u256Type, codeTooShort);
+                            Block *codeOkBlock = initFunc.addBlock();
+                            builder.create<sir::CondBrOp>(initLoc, valid_code, ValueRange{}, ValueRange{}, codeOkBlock, getInitRevert());
+                            builder.setInsertionPointToEnd(codeOkBlock);
+
+                            Value minSizeVal = lowering::constU256(builder, initLoc, minHeadBytes);
                             Value dataTooShort = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, minSizeVal);
-                            Value anyTooShort = builder.create<sir::OrOp>(initLoc, u256Type, codeTooShort, dataTooShort);
-                            Value valid_args = builder.create<sir::IsZeroOp>(initLoc, u256Type, anyTooShort);
+                            Value valid_args = builder.create<sir::IsZeroOp>(initLoc, u256Type, dataTooShort);
                             initDecode = initFunc.addBlock();
-                            builder.create<sir::CondBrOp>(initLoc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitRevert());
+                            builder.create<sir::CondBrOp>(initLoc, valid_args, ValueRange{}, ValueRange{}, initDecode, getInitAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
                             builder.setInsertionPointToEnd(initDecode);
                         }
                         else
@@ -1082,6 +1745,20 @@ namespace mlir
                             builder.setInsertionPointToEnd(initDecode);
                         }
 
+                        if (hasDynamicConstructorParam)
+                        {
+                            // Dynamic constructor decoding copies appended ABI args into
+                            // heap memory before validating dynamic tails. Keep that buffer
+                            // above the SIR text legalizer's fixed scratch area,
+                            // otherwise branch operand spills can corrupt later tails.
+                            Value initFreePtrSlot = builder.create<sir::BitcastOp>(initLoc, ptrType, lowering::constU256(builder, initLoc, 32));
+                            Value initScratchFence = lowering::constU256(builder, initLoc, lowering::kConstructorDecodeScratchFenceBytes);
+                            Value initCurrentFreePtr = builder.create<sir::LoadOp>(initLoc, u256Type, initFreePtrSlot);
+                            Value initShouldRaiseFreePtr = builder.create<sir::LtOp>(initLoc, u256Type, initCurrentFreePtr, initScratchFence);
+                            Value initFreePtr = builder.create<sir::SelectOp>(initLoc, u256Type, initShouldRaiseFreePtr, initScratchFence, initCurrentFreePtr);
+                            builder.create<sir::StoreOp>(initLoc, initFreePtrSlot, initFreePtr);
+                        }
+
                         Value dataBuf = builder.create<sir::MallocOp>(initLoc, ptrType, dataLen);
                         builder.create<sir::CodeCopyOp>(initLoc, dataBuf, initEnd, dataLen);
 
@@ -1090,7 +1767,18 @@ namespace mlir
                         for (unsigned i = 0; i < argCount; ++i)
                         {
                             headOffsets.push_back(32 * headSlot);
-                            int64_t slots = initAbiParams.empty() ? 1 : initAbiParams[i].headSlots();
+                            int64_t slots = 1;
+                            if (!initAbiParamLayouts.empty())
+                            {
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(initAbiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    module.emitError("invalid constructor ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                slots = dispatcherHeadSlotsForLayout(layout);
+                            }
                             if (slots < 0)
                             {
                                 module.emitError("unsupported ABI type for head offset sizing");
@@ -1102,61 +1790,356 @@ namespace mlir
 
                         SmallVector<Value, 8> args;
                         auto ptrType = sir::PtrType::get(ctx, 1);
+                        Value nextConstructorDynamicOffset;
+                        auto getNextConstructorDynamicOffset = [&]() -> Value {
+                            if (!nextConstructorDynamicOffset)
+                                nextConstructorDynamicOffset = lowering::constU256(builder, initLoc, static_cast<uint64_t>(headSlot) * 32ULL);
+                            return nextConstructorDynamicOffset;
+                        };
+                        auto emitStrictConstructorBoundsPrefix = [&](Value offsetWord,
+                                                                     Value expectedOffset,
+                                                                     StrictDynamicCalldataKind kind,
+                                                                     uint64_t arrayElementWords = 1) -> StrictDynamicBounds {
+                            return emitStrictDynamicBoundsPrefix(
+                                builder,
+                                initLoc,
+                                u256Type,
+                                offsetWord,
+                                expectedOffset,
+                                kind,
+                                [&]() -> Block * { return initFunc.addBlock(); },
+                                [&](lowering::AbiDecodeError error) -> Block * { return getInitAbiDecodeRevertBlock(error); },
+                                [&]() -> Value { return dataLen; },
+                                [&](Value) -> StrictDynamicBoundsBase {
+                                    Value dynamicPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offsetWord);
+                                    return StrictDynamicBoundsBase{dynamicPtr, offsetWord};
+                                },
+                                [&](Value dynamicPtr) -> Value {
+                                    return builder.create<sir::LoadOp>(initLoc, u256Type, dynamicPtr);
+                                },
+                                false,
+                                arrayElementWords);
+                        };
+                        auto materializeStrictConstructorDynamic = [&](Value offsetWord,
+                                                                       Value expectedOffset,
+                                                                       StrictDynamicCalldataKind kind,
+                                                                       unsigned fixedBytesWidth = 0,
+                                                                       uint64_t arrayElementWords = 1) -> FailureOr<StrictDynamicCalldataValue> {
+                            StrictDynamicBounds bounds = emitStrictConstructorBoundsPrefix(
+                                offsetWord,
+                                expectedOffset,
+                                kind,
+                                arrayElementWords);
+                            Block *doneBlock = initFunc.addBlock();
+
+                            Value tailEnd = builder.create<sir::AddOp>(initLoc, u256Type, offsetWord, bounds.total);
+                            Value tailMissing = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, tailEnd);
+                            Value tailPresent = builder.create<sir::IsZeroOp>(initLoc, u256Type, tailMissing);
+                            const bool validatesWordElements = strictDynamicCalldataValidatesWordElements(kind);
+
+                            Block *wordArrayValidateCondBlock = nullptr;
+                            Block *wordArrayValidateBodyBlock = nullptr;
+                            Block *wordArrayValidateDoneBlock = nullptr;
+                            if (validatesWordElements)
+                            {
+                                wordArrayValidateCondBlock = initFunc.addBlock();
+                                wordArrayValidateCondBlock->addArgument(u256Type, initLoc);
+                                wordArrayValidateCondBlock->addArgument(u256Type, initLoc);
+                                wordArrayValidateBodyBlock = initFunc.addBlock();
+                                wordArrayValidateBodyBlock->addArgument(u256Type, initLoc);
+                                wordArrayValidateBodyBlock->addArgument(u256Type, initLoc);
+                                wordArrayValidateDoneBlock = initFunc.addBlock();
+                                wordArrayValidateDoneBlock->addArgument(u256Type, initLoc);
+                            }
+                            Block *bytesPadCondBlock = nullptr;
+                            if (kind == StrictDynamicCalldataKind::BytesLike)
+                            {
+                                bytesPadCondBlock = doneBlock;
+                                bytesPadCondBlock->addArgument(u256Type, initLoc);
+                                bytesPadCondBlock->addArgument(u256Type, initLoc);
+                            }
+                            builder.create<sir::CondBrOp>(
+                                initLoc,
+                                tailPresent,
+                                validatesWordElements
+                                    ? ValueRange{
+                                          lowering::constU256(builder, initLoc, 0),
+                                          lowering::constU256(builder, initLoc, 1),
+                                      }
+                                : kind == StrictDynamicCalldataKind::BytesLike
+                                    ? ValueRange{
+                                          lowering::constU256(builder, initLoc, 0),
+                                          lowering::constU256(builder, initLoc, 1),
+                                      }
+                                    : ValueRange{},
+                                ValueRange{},
+                                validatesWordElements
+                                    ? wordArrayValidateCondBlock
+                                : kind == StrictDynamicCalldataKind::BytesLike
+                                    ? bytesPadCondBlock
+                                    : doneBlock,
+                                getInitAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                            if (validatesWordElements)
+                            {
+                                builder.setInsertionPointToEnd(wordArrayValidateCondBlock);
+                                Value iv = wordArrayValidateCondBlock->getArgument(0);
+                                Value allValid = wordArrayValidateCondBlock->getArgument(1);
+                                Value hasElement = builder.create<sir::LtOp>(initLoc, u256Type, iv, bounds.dynamicLen);
+                                Value continueValidation = builder.create<sir::AndOp>(initLoc, u256Type, hasElement, allValid);
+                                builder.create<sir::CondBrOp>(
+                                    initLoc,
+                                    continueValidation,
+                                    ValueRange{iv, allValid},
+                                    ValueRange{allValid},
+                                    wordArrayValidateBodyBlock,
+                                    wordArrayValidateDoneBlock);
+
+                                builder.setInsertionPointToEnd(wordArrayValidateBodyBlock);
+                                Value bodyIv = wordArrayValidateBodyBlock->getArgument(0);
+                                Value bodyAllValid = wordArrayValidateBodyBlock->getArgument(1);
+                                Value elementByteOffset = builder.create<sir::MulOp>(initLoc, u256Type, bodyIv, bounds.wordSize);
+                                Value elementTailOffset = builder.create<sir::AddOp>(initLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                Value elementPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, bounds.payloadBase, elementTailOffset);
+                                Value elementWord = builder.create<sir::LoadOp>(initLoc, u256Type, elementPtr);
+                                Value elementValid = nullptr;
+                                if (kind == StrictDynamicCalldataKind::AddressArray)
+                                {
+                                    Value elementPayload = lowering::maskLowBits(builder, initLoc, elementWord, 160);
+                                    elementValid = builder.create<sir::EqOp>(initLoc, u256Type, elementWord, elementPayload);
+                                }
+                                else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                {
+                                    elementValid = lowering::boolAbiWordIsCanonical(builder, initLoc, elementWord);
+                                }
+                                else
+                                {
+                                    lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, initLoc, fixedBytesWidth, elementWord);
+                                    elementValid = decoded.valid;
+                                }
+                                Value nextAllValid = builder.create<sir::AndOp>(initLoc, u256Type, bodyAllValid, elementValid);
+                                Value nextIv = builder.create<sir::AddOp>(initLoc, u256Type, bodyIv, lowering::constU256(builder, initLoc, 1));
+                                builder.create<sir::BrOp>(initLoc, ValueRange{nextIv, nextAllValid}, wordArrayValidateCondBlock);
+
+                                builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
+                                Value validElements = wordArrayValidateDoneBlock->getArgument(0);
+                                FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                if (failed(invalidElementError))
+                                    return failure();
+                                builder.create<sir::CondBrOp>(
+                                    initLoc,
+                                    validElements,
+                                    ValueRange{},
+                                    ValueRange{},
+                                    doneBlock,
+                                    getInitAbiDecodeRevertBlock(*invalidElementError));
+                            }
+
+                            if (kind == StrictDynamicCalldataKind::FixedBytesArray)
+                            {
+                                builder.setInsertionPointToEnd(doneBlock);
+                                Value resultPtr = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, bounds.total);
+                                builder.create<sir::StoreOp>(initLoc, resultPtr, bounds.dynamicLen);
+                                Value resultContentPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, resultPtr, bounds.wordSize);
+
+                                Block *copyCondBlock = initFunc.addBlock();
+                                copyCondBlock->addArgument(u256Type, initLoc);
+                                Block *copyBodyBlock = initFunc.addBlock();
+                                copyBodyBlock->addArgument(u256Type, initLoc);
+                                Block *copyDoneBlock = initFunc.addBlock();
+
+                                builder.create<sir::BrOp>(
+                                    initLoc,
+                                    ValueRange{lowering::constU256(builder, initLoc, 0)},
+                                    copyCondBlock);
+
+                                builder.setInsertionPointToEnd(copyCondBlock);
+                                Value copyIv = copyCondBlock->getArgument(0);
+                                Value hasElement = builder.create<sir::LtOp>(initLoc, u256Type, copyIv, bounds.dynamicLen);
+                                builder.create<sir::CondBrOp>(initLoc, hasElement, ValueRange{copyIv}, ValueRange{}, copyBodyBlock, copyDoneBlock);
+
+                                builder.setInsertionPointToEnd(copyBodyBlock);
+                                Value bodyIv = copyBodyBlock->getArgument(0);
+                                Value elementByteOffset = builder.create<sir::MulOp>(initLoc, u256Type, bodyIv, bounds.wordSize);
+                                Value elementTailOffset = builder.create<sir::AddOp>(initLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                Value elementPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, bounds.payloadBase, elementTailOffset);
+                                Value elementWord = builder.create<sir::LoadOp>(initLoc, u256Type, elementPtr);
+                                lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, initLoc, fixedBytesWidth, elementWord);
+                                Value resultElementPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, resultContentPtr, elementByteOffset);
+                                builder.create<sir::StoreOp>(initLoc, resultElementPtr, decoded.payload);
+                                Value nextIv = builder.create<sir::AddOp>(initLoc, u256Type, bodyIv, lowering::constU256(builder, initLoc, 1));
+                                builder.create<sir::BrOp>(initLoc, ValueRange{nextIv}, copyCondBlock);
+
+                                builder.setInsertionPointToEnd(copyDoneBlock);
+                                return StrictDynamicCalldataValue{
+                                    builder.create<sir::BitcastOp>(initLoc, u256Type, resultPtr).getResult(),
+                                    bounds.nextExpectedOffset,
+                                };
+                            }
+
+                            if (kind != StrictDynamicCalldataKind::BytesLike)
+                            {
+                                builder.setInsertionPointToEnd(doneBlock);
+                                return StrictDynamicCalldataValue{
+                                    builder.create<sir::BitcastOp>(initLoc, u256Type, bounds.payloadBase).getResult(),
+                                    bounds.nextExpectedOffset,
+                                };
+                            }
+
+                            Block *padCondBlock = bytesPadCondBlock;
+                            Block *padBodyBlock = initFunc.addBlock();
+                            padBodyBlock->addArgument(u256Type, initLoc);
+                            padBodyBlock->addArgument(u256Type, initLoc);
+                            Block *padDoneBlock = initFunc.addBlock();
+                            padDoneBlock->addArgument(u256Type, initLoc);
+                            Block *bytesDoneBlock = initFunc.addBlock();
+
+                            builder.setInsertionPointToEnd(padCondBlock);
+                            Value padIv = padCondBlock->getArgument(0);
+                            Value padAllValid = padCondBlock->getArgument(1);
+                            Value contentPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, bounds.payloadBase, bounds.wordSize);
+                            Value padStart = builder.create<sir::AddPtrOp>(initLoc, ptrType, contentPtr, bounds.dynamicLen);
+                            Value padCount = builder.create<sir::SubOp>(initLoc, u256Type, bounds.padded, bounds.dynamicLen);
+                            Value hasPadByte = builder.create<sir::LtOp>(initLoc, u256Type, padIv, padCount);
+                            Value continuePad = builder.create<sir::AndOp>(initLoc, u256Type, hasPadByte, padAllValid);
+                            builder.create<sir::CondBrOp>(
+                                initLoc,
+                                continuePad,
+                                ValueRange{padIv, padAllValid},
+                                ValueRange{padAllValid},
+                                padBodyBlock,
+                                padDoneBlock);
+
+                            builder.setInsertionPointToEnd(padBodyBlock);
+                            Value bodyIv = padBodyBlock->getArgument(0);
+                            Value bodyAllValid = padBodyBlock->getArgument(1);
+                            Value padBytePtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, padStart, bodyIv);
+                            Value padByte = builder.create<sir::Load8Op>(initLoc, u256Type, padBytePtr, lowering::constU256(builder, initLoc, 0));
+                            Value byteIsZero = builder.create<sir::EqOp>(initLoc, u256Type, padByte, lowering::constU256(builder, initLoc, 0));
+                            Value nextAllValid = builder.create<sir::AndOp>(initLoc, u256Type, bodyAllValid, byteIsZero);
+                            Value nextIv = builder.create<sir::AddOp>(initLoc, u256Type, bodyIv, lowering::constU256(builder, initLoc, 1));
+                            builder.create<sir::BrOp>(initLoc, ValueRange{nextIv, nextAllValid}, padCondBlock);
+
+                            builder.setInsertionPointToEnd(padDoneBlock);
+                            Value paddingValid = padDoneBlock->getArgument(0);
+                            builder.create<sir::CondBrOp>(
+                                initLoc,
+                                paddingValid,
+                                ValueRange{},
+                                ValueRange{},
+                                bytesDoneBlock,
+                                getInitAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                            builder.setInsertionPointToEnd(bytesDoneBlock);
+                            return StrictDynamicCalldataValue{
+                                builder.create<sir::BitcastOp>(initLoc, u256Type, bounds.payloadBase).getResult(),
+                                bounds.nextExpectedOffset,
+                            };
+                        };
                         for (unsigned idx = 0; idx < argCount; ++idx)
                         {
                             int64_t offs = headOffsets[idx];
-                            Value offc = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, offs));
+                            Value offc = lowering::constU256(builder, initLoc, offs);
                             Value headPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                             Value head = builder.create<sir::LoadOp>(initLoc, u256Type, headPtr);
-                            AbiType abi = initAbiParams.empty() ? AbiType{} : initAbiParams[idx];
+                            AbiLayoutNode abiLayout;
+                            const bool hasAbiLayout = !initAbiParamLayouts.empty();
+                            if (hasAbiLayout && !parseAbiLayout(initAbiParamLayouts[idx], abiLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                module.emitError("invalid constructor ABI param layout");
+                                signalPassFailure();
+                                return;
+                            }
                             Value argVal = head;
 
-                            if (!initAbiParams.empty() && abi.isArray() && abi.supportsStaticArray())
+                            if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
-                                int64_t elemCount = abi.dims.front();
-                                int64_t totalBytes = elemCount * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(initLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
+                                Value totalVal = lowering::constU256(builder, initLoc, totalBytes);
                                 Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, totalVal);
                                 Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, offc);
                                 builder.create<sir::MCopyOp>(initLoc, buf, src, totalVal);
                                 argVal = buf;
                             }
-                            else if (!initAbiParams.empty() && abi.isDynamic())
+                            else if (hasAbiLayout && canonicalAbiLayoutIsDynamic(abiLayout))
                             {
-                                if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
+                                if (abiLayout.kind == AbiLayoutKind::DynamicBytes)
                                 {
-                                    Value c32_dyn = getConst(builder, initLoc, u256Type, i64Type, 32, constCache, builder.getInsertionBlock(), "word_size");
-                                    Value absOff = head;
-                                    Value absPtr = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, absOff);
-                                    Value len = builder.create<sir::LoadOp>(initLoc, u256Type, absPtr);
-
-                                    Value total = nullptr;
-                                    if (abi.baseIsDynamic())
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::BytesLike);
+                                    if (failed(strictArg))
                                     {
-                                        Value c31 = getConst(builder, initLoc, u256Type, i64Type, 31, constCache, builder.getInsertionBlock(), "pad_31");
-                                        Value c5 = getConst(builder, initLoc, u256Type, i64Type, 5, constCache, builder.getInsertionBlock(), "shift_5");
-                                        Value lenPlus = builder.create<sir::AddOp>(initLoc, u256Type, len, c31);
-                                        Value shifted = builder.create<sir::ShrOp>(initLoc, u256Type, c5, lenPlus);
-                                        Value padded = builder.create<sir::ShlOp>(initLoc, u256Type, c5, shifted);
-                                        total = builder.create<sir::AddOp>(initLoc, u256Type, padded, c32_dyn);
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
                                     }
-                                    else
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicU256ArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::U256Array);
+                                    if (failed(strictArg))
                                     {
-                                        Value lenBytes = builder.create<sir::MulOp>(initLoc, u256Type, len, c32_dyn);
-                                        total = builder.create<sir::AddOp>(initLoc, u256Type, lenBytes, c32_dyn);
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
                                     }
-
-                                    Value end = builder.create<sir::AddOp>(initLoc, u256Type, absOff, total);
-                                    Value tooShortDyn = builder.create<sir::LtOp>(initLoc, u256Type, dataLen, end);
-                                    Value valid_dyn = builder.create<sir::IsZeroOp>(initLoc, u256Type, tooShortDyn);
-                                    Block *dynBody = initFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(initLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, getInitRevert());
-                                    builder.setInsertionPointToEnd(dynBody);
-
-                                    Value buf = builder.create<sir::SAllocAnyOp>(initLoc, ptrType, total);
-                                    Value src = builder.create<sir::AddPtrOp>(initLoc, ptrType, dataBuf, absOff);
-                                    builder.create<sir::MCopyOp>(initLoc, buf, src, total);
-                                    argVal = buf;
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicAddressArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::AddressArray);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicBoolArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::BoolArray);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicFixedBytesArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abiLayout.children.front()->width);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (std::optional<uint64_t> elementWords = fullWordStaticArrayElementWords(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictConstructorDynamic(head, getNextConstructorDynamicOffset(), StrictDynamicCalldataKind::U256Array, 0, *elementWords);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for constructor");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextConstructorDynamicOffset = strictArg->nextExpectedOffset;
                                 }
                                 else
                                 {
@@ -1225,16 +2208,13 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
                     // Sensei initializes memory[0x20] to its static memory high-water mark
-                    // before entering main. Only raise it here when debug named-memory slots
-                    // need room after CODESIZE.
+                    // before entering main. Raise it past compiler-owned named-memory slots
+                    // placed after CODESIZE so user allocations cannot collide with them.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);
                     Value runtimeHeapBase = builder.create<sir::CodeSizeOp>(dispatcherMainLoc, u256Type);
-                    if (uint64_t debugNamedMemoryBytes = computeDebugNamedMemoryReserveBytes(module))
+                    if (uint64_t namedMemoryBytes = computeNamedMemoryReserveBytes(module))
                     {
-                        Value reservedBytes = builder.create<sir::ConstOp>(
-                            dispatcherMainLoc,
-                            u256Type,
-                            IntegerAttr::get(i64Type, debugNamedMemoryBytes));
+                        Value reservedBytes = lowering::constU256(builder, dispatcherMainLoc, namedMemoryBytes);
                         runtimeHeapBase = builder.create<sir::AddOp>(dispatcherMainLoc, u256Type, runtimeHeapBase, reservedBytes);
                     }
                     Value currentFreePtr = builder.create<sir::LoadOp>(dispatcherMainLoc, u256Type, freePtrSlot);
@@ -1274,6 +2254,27 @@ namespace mlir
                     setBlockName(loadSelector, "load_selector");
                     setBlockOrder(loadSelector, 1);
 
+                    DenseMap<uint64_t, Block *> abiDecodeRevertBlocks;
+                    auto getAbiDecodeRevertBlock = [&](lowering::AbiDecodeError error) -> Block * {
+                        uint64_t ordinal = static_cast<uint64_t>(error);
+                        auto it = abiDecodeRevertBlocks.find(ordinal);
+                        if (it != abiDecodeRevertBlocks.end())
+                            return it->second;
+
+                        OpBuilder::InsertionGuard guard(builder);
+                        Block *block = mainFunc.addBlock();
+                        abiDecodeRevertBlocks.try_emplace(ordinal, block);
+                        builder.setInsertionPointToEnd(block);
+                        Value size = getConst(builder, dispatcherMainLoc, u256Type, i64Type, 32, constCache, block, "word_size");
+                        Value payload = lowering::constU256(builder, dispatcherMainLoc, ordinal);
+                        Value ptr = builder.create<sir::SAllocAnyOp>(dispatcherMainLoc, ptrType, size);
+                        builder.create<sir::StoreOp>(dispatcherMainLoc, ptr, payload);
+                        builder.create<sir::RevertOp>(dispatcherMainLoc, ptr, size);
+                        std::string blockName = "abi_decode_revert_" + std::to_string(ordinal);
+                        setBlockName(block, blockName);
+                        return block;
+                    };
+
                     // case blocks
                     for (size_t i = 0; i < pubFuncs.size(); ++i)
                     {
@@ -1307,12 +2308,22 @@ namespace mlir
                         SmallVector<Value, 8> args;
                         SmallVector<int64_t, 8> headOffsets;
                         int64_t headSlot = 0;
-                        size_t sourceParamCount = info.abiParams.empty() ? info.argCount : info.abiParams.size();
+                        size_t sourceParamCount = info.abiParamLayouts.empty() ? info.argCount : info.abiParamLayouts.size();
                         for (size_t i = 0; i < sourceParamCount; ++i)
                         {
                             headOffsets.push_back(4 + 32 * headSlot);
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[i];
-                            int64_t slots = info.abiParams.empty() ? 1 : abi.headSlots();
+                            int64_t slots = 1;
+                            if (!info.abiParamLayouts.empty())
+                            {
+                                AbiLayoutNode layout;
+                                if (!parseAbiLayout(info.abiParamLayouts[i], layout, AbiLayoutSyntax::CanonicalAbi))
+                                {
+                                    info.func.emitError("invalid ABI param layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                slots = dispatcherHeadSlotsForLayout(layout);
+                            }
                             if (slots < 0)
                             {
                                 module.emitError("unsupported ABI type for head offset sizing");
@@ -1322,6 +2333,15 @@ namespace mlir
                             headSlot += slots;
                         }
 
+                        Value nextDynamicOffset;
+                        auto getNextDynamicOffset = [&]() -> Value {
+                            // Keep the common static/no-arg dispatcher path byte-stable:
+                            // this offset is only meaningful once a strict dynamic
+                            // calldata parameter is actually being decoded.
+                            if (!nextDynamicOffset)
+                                nextDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(headSlot) * 32ULL);
+                            return nextDynamicOffset;
+                        };
                         unsigned loweredArgIndex = 0;
                         for (unsigned idx = 0; idx < sourceParamCount; ++idx)
                         {
@@ -1331,14 +2351,55 @@ namespace mlir
                                               : offs == 68 ? StringRef("arg2_offset")
                                                            : StringRef();
                             Value offc = offName.empty()
-                                             ? builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, offs))
+                                             ? lowering::constU256(builder, caseDecodeLoc, offs)
                                              : getConst(builder, caseDecodeLoc, u256Type, i64Type, offs, constCache, caseBody, offName);
                             Value head = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, offc);
                             StringRef argPrefix = idx == 0 ? "a_" : (idx == 1 ? "b_" : (idx == 2 ? "n_" : "arg_"));
                             setResultName(head.getDefiningOp(), (argPrefix + info.func.getName()).str());
 
-                            AbiType abi = info.abiParams.empty() ? AbiType{} : info.abiParams[idx];
+                            AbiLayoutNode abiLayout;
+                            const bool hasAbiLayout = !info.abiParamLayouts.empty();
+                            if (hasAbiLayout && !parseAbiLayout(info.abiParamLayouts[idx], abiLayout, AbiLayoutSyntax::CanonicalAbi))
+                            {
+                                info.func.emitError("invalid ABI param layout");
+                                signalPassFailure();
+                                return;
+                            }
                             Value argVal = head;
+                            if (hasAbiLayout && abiLayout.kind == AbiLayoutKind::Static)
+                            {
+                                uint64_t enumVariantCount = idx < info.abiParamEnumCounts.size() ? info.abiParamEnumCounts[idx] : 0;
+                                const bool needsRefinementCheck = idx < info.abiParamRefinements.size() && !info.abiParamRefinements[idx].empty();
+                                if (std::optional<CalldataStaticDecode> decoded = decodeStaticCalldataWord(builder, caseDecodeLoc, ctx, abiLayout, head, enumVariantCount, needsRefinementCheck, info.permissiveAbiDecode))
+                                {
+                                    if (needsRefinementCheck)
+                                    {
+                                        CalldataRefinementSpec refinementSpec;
+                                        if (!parseCalldataRefinementSpec(info.abiParamRefinements[idx], refinementSpec))
+                                        {
+                                            info.func.emitError("invalid public calldata refinement metadata");
+                                            signalPassFailure();
+                                            return;
+                                        }
+                                        if (Value refinementValid = calldataRefinementSatisfied(builder, caseDecodeLoc, refinementSpec, decoded->canonicalWord))
+                                            decoded->checks.push_back({refinementValid, lowering::AbiDecodeError::RefinementViolation});
+                                    }
+                                    for (auto [valid, error] : decoded->checks)
+                                    {
+                                        Block *validBody = mainFunc.addBlock();
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            valid,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            validBody,
+                                            getAbiDecodeRevertBlock(error));
+                                        builder.setInsertionPointToEnd(validBody);
+                                        caseBody = validBody;
+                                    }
+                                    argVal = decoded->payload;
+                                }
+                            }
                             bool appendWideResultInput = false;
                             Value wideTag;
                             Value widePayload;
@@ -1346,40 +2407,655 @@ namespace mlir
                                 return loweredArgIndex + 1 < info.inputTypes.size() &&
                                        isa<sir::PtrType>(info.inputTypes[loweredArgIndex + 1]);
                             };
-                            auto materializeDynamicAbiValue = [&](const AbiLayout &fieldLayout, Value absOff, bool expectsPtr) -> FailureOr<Value> {
-                                if (!expectsPtr)
-                                    return failure();
-                                if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String || fieldLayout.abi.supportsDynamicArray() || fieldLayout.supportsDynamicArray()))
+                            auto hasCurrentInputSlot = [&]() -> bool {
+                                return loweredArgIndex < info.inputTypes.size();
+                            };
+                            auto emitStrictCalldataBoundsPrefix = [&](Value frameBaseOff,
+                                                                      Value offsetWord,
+                                                                      Value expectedOffset,
+                                                                      StrictDynamicCalldataKind kind,
+                                                                      uint64_t arrayElementWords = 1) -> StrictDynamicBounds {
+                                return emitStrictDynamicBoundsPrefix(
+                                    builder,
+                                    caseDecodeLoc,
+                                    u256Type,
+                                    offsetWord,
+                                    expectedOffset,
+                                    kind,
+                                    [&]() -> Block * { return mainFunc.addBlock(); },
+                                    [&](lowering::AbiDecodeError error) -> Block * { return getAbiDecodeRevertBlock(error); },
+                                    [&]() -> Value { return builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type); },
+                                    [&](Value) -> StrictDynamicBoundsBase {
+                                        Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, frameBaseOff, offsetWord);
+                                        return StrictDynamicBoundsBase{absOff, absOff};
+                                    },
+                                    [&](Value absOff) -> Value {
+                                        return builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
+                                    },
+                                    info.permissiveAbiDecode,
+                                    arrayElementWords);
+                            };
+                            auto materializeStrictDynamicCalldataValue = [&](Value offsetWord,
+                                                                             Value expectedOffset,
+                                                                             StrictDynamicCalldataKind kind,
+                                                                             unsigned fixedBytesWidth = 0,
+                                                                             uint64_t arrayElementWords = 1) -> FailureOr<StrictDynamicCalldataValue> {
+                                if (!hasCurrentInputSlot())
                                     return failure();
 
-                                Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
-                                Value total = nullptr;
-                                if (fieldLayout.supportsDynamicArray())
+                                StrictDynamicBounds bounds = emitStrictCalldataBoundsPrefix(
+                                    lowering::constU256(builder, caseDecodeLoc, 4),
+                                    offsetWord,
+                                    expectedOffset,
+                                    kind,
+                                    arrayElementWords);
+                                Block *copyBlock = mainFunc.addBlock();
+                                Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                Value tailEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, bounds.total);
+                                Value tailMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tailEnd);
+                                Value tailPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tailMissing);
+                                const bool validatesWordElements = strictDynamicCalldataValidatesWordElements(kind) && !info.permissiveAbiDecode;
+                                Block *wordArrayValidateCondBlock = nullptr;
+                                Block *wordArrayValidateBodyBlock = nullptr;
+                                Block *wordArrayValidateDoneBlock = nullptr;
+                                if (validatesWordElements)
                                 {
-                                    Value elemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldLayout.staticElementWordCount(), constCache, caseBody);
-                                    Value words = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, elemWords);
-                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, words, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
-                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                    wordArrayValidateCondBlock = mainFunc.addBlock();
+                                    wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateBodyBlock = mainFunc.addBlock();
+                                    wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateDoneBlock = mainFunc.addBlock();
+                                    wordArrayValidateDoneBlock->addArgument(u256Type, caseDecodeLoc);
                                 }
-                                else if (fieldLayout.abi.baseIsDynamic())
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    tailPresent,
+                                    validatesWordElements
+                                        ? ValueRange{
+                                              lowering::constU256(builder, caseDecodeLoc, 0),
+                                              lowering::constU256(builder, caseDecodeLoc, 1),
+                                          }
+                                        : ValueRange{},
+                                    ValueRange{},
+                                    validatesWordElements ? wordArrayValidateCondBlock : copyBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                if (validatesWordElements)
                                 {
-                                    Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
-                                    Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
-                                    Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, len, c31);
-                                    Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
-                                    Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
-                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                    builder.setInsertionPointToEnd(wordArrayValidateCondBlock);
+                                    Value iv = wordArrayValidateCondBlock->getArgument(0);
+                                    Value allValid = wordArrayValidateCondBlock->getArgument(1);
+                                    Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, iv, bounds.dynamicLen);
+                                    Value continueValidation = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasElement, allValid);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        continueValidation,
+                                        ValueRange{iv, allValid},
+                                        ValueRange{allValid},
+                                        wordArrayValidateBodyBlock,
+                                        wordArrayValidateDoneBlock);
+
+                                    builder.setInsertionPointToEnd(wordArrayValidateBodyBlock);
+                                    Value bodyIv = wordArrayValidateBodyBlock->getArgument(0);
+                                    Value bodyAllValid = wordArrayValidateBodyBlock->getArgument(1);
+                                    Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                    Value elementTailOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                    Value elementAbsOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, elementTailOffset);
+                                    Value elementWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, elementAbsOffset);
+                                    Value elementValid = nullptr;
+                                    if (kind == StrictDynamicCalldataKind::AddressArray)
+                                    {
+                                        Value elementPayload = lowering::maskLowBits(builder, caseDecodeLoc, elementWord, 160);
+                                        elementValid = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, elementWord, elementPayload);
+                                    }
+                                    else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                    {
+                                        elementValid = lowering::boolAbiWordIsCanonical(builder, caseDecodeLoc, elementWord);
+                                    }
+                                    else
+                                    {
+                                        lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, fixedBytesWidth, elementWord);
+                                        elementValid = decoded.valid;
+                                    }
+                                    Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, elementValid);
+                                    Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid}, wordArrayValidateCondBlock);
+
+                                    builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
+                                    Value validElements = wordArrayValidateDoneBlock->getArgument(0);
+                                    FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    if (failed(invalidElementError))
+                                        return failure();
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        validElements,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        copyBlock,
+                                        getAbiDecodeRevertBlock(*invalidElementError));
                                 }
-                                else
+
+                                builder.setInsertionPointToEnd(copyBlock);
+                                if (kind == StrictDynamicCalldataKind::FixedBytesArray ||
+                                    (info.permissiveAbiDecode &&
+                                     (kind == StrictDynamicCalldataKind::AddressArray ||
+                                      kind == StrictDynamicCalldataKind::BoolArray)))
                                 {
-                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
-                                    total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
+                                    Value resultPtr = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                    builder.create<sir::StoreOp>(caseDecodeLoc, resultPtr, bounds.dynamicLen);
+                                    Value resultContentPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultPtr, bounds.wordSize);
+
+                                    Block *copyCondBlock = mainFunc.addBlock();
+                                    copyCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *copyBodyBlock = mainFunc.addBlock();
+                                    copyBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *copyDoneBlock = mainFunc.addBlock();
+
+                                    builder.create<sir::BrOp>(
+                                        caseDecodeLoc,
+                                        ValueRange{lowering::constU256(builder, caseDecodeLoc, 0)},
+                                        copyCondBlock);
+
+                                    builder.setInsertionPointToEnd(copyCondBlock);
+                                    Value copyIv = copyCondBlock->getArgument(0);
+                                    Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, copyIv, bounds.dynamicLen);
+                                    builder.create<sir::CondBrOp>(caseDecodeLoc, hasElement, ValueRange{copyIv}, ValueRange{}, copyBodyBlock, copyDoneBlock);
+
+                                    builder.setInsertionPointToEnd(copyBodyBlock);
+                                    Value bodyIv = copyBodyBlock->getArgument(0);
+                                    Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                    Value elementTailOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                    Value elementAbsOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, elementTailOffset);
+                                    Value elementWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, elementAbsOffset);
+                                    Value elementPayload = nullptr;
+                                    if (kind == StrictDynamicCalldataKind::AddressArray)
+                                        elementPayload = lowering::maskLowBits(builder, caseDecodeLoc, elementWord, 160);
+                                    else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                        elementPayload = lowering::boolAbiWordPermissivePayload(builder, caseDecodeLoc, elementWord);
+                                    else
+                                        elementPayload = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, fixedBytesWidth, elementWord).payload;
+                                    Value resultElementPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultContentPtr, elementByteOffset);
+                                    builder.create<sir::StoreOp>(caseDecodeLoc, resultElementPtr, elementPayload);
+                                    Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv}, copyCondBlock);
+
+                                    builder.setInsertionPointToEnd(copyDoneBlock);
+                                    caseBody = copyDoneBlock;
+                                    return StrictDynamicCalldataValue{
+                                        builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, resultPtr).getResult(),
+                                        bounds.nextExpectedOffset,
+                                    };
                                 }
-                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
-                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
-                                return builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult();
+
+                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, bounds.payloadBase, bounds.total);
+                                if (kind == StrictDynamicCalldataKind::U256Array ||
+                                    kind == StrictDynamicCalldataKind::AddressArray ||
+                                    kind == StrictDynamicCalldataKind::BoolArray)
+                                {
+                                    caseBody = copyBlock;
+                                    return StrictDynamicCalldataValue{
+                                        builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult(),
+                                        bounds.nextExpectedOffset,
+                                    };
+                                }
+                                if (info.permissiveAbiDecode)
+                                {
+                                    caseBody = copyBlock;
+                                    return StrictDynamicCalldataValue{
+                                        builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult(),
+                                        bounds.nextExpectedOffset,
+                                    };
+                                }
+
+                                Block *padCondBlock = mainFunc.addBlock();
+                                padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                Block *padBodyBlock = mainFunc.addBlock();
+                                padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                Block *padDoneBlock = mainFunc.addBlock();
+                                padDoneBlock->addArgument(u256Type, caseDecodeLoc);
+                                Block *okBlock = mainFunc.addBlock();
+                                Value contentPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, buf, bounds.wordSize);
+                                Value padStart = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, contentPtr, bounds.dynamicLen);
+                                Value padCount = builder.create<sir::SubOp>(caseDecodeLoc, u256Type, bounds.padded, bounds.dynamicLen);
+                                builder.create<sir::BrOp>(
+                                    caseDecodeLoc,
+                                    ValueRange{
+                                        lowering::constU256(builder, caseDecodeLoc, 0),
+                                        lowering::constU256(builder, caseDecodeLoc, 1),
+                                    },
+                                    padCondBlock);
+
+                                builder.setInsertionPointToEnd(padCondBlock);
+                                Value padIv = padCondBlock->getArgument(0);
+                                Value padAllValid = padCondBlock->getArgument(1);
+                                Value hasPadByte = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, padIv, padCount);
+                                Value continuePad = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasPadByte, padAllValid);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    continuePad,
+                                    ValueRange{padIv, padAllValid},
+                                    ValueRange{padAllValid},
+                                    padBodyBlock,
+                                    padDoneBlock);
+
+                                builder.setInsertionPointToEnd(padBodyBlock);
+                                Value bodyIv = padBodyBlock->getArgument(0);
+                                Value bodyAllValid = padBodyBlock->getArgument(1);
+                                Value padBytePtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, padStart, bodyIv);
+                                Value padByte = builder.create<sir::Load8Op>(caseDecodeLoc, u256Type, padBytePtr, lowering::constU256(builder, caseDecodeLoc, 0));
+                                Value byteIsZero = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, padByte, lowering::constU256(builder, caseDecodeLoc, 0));
+                                Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, byteIsZero);
+                                Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid}, padCondBlock);
+
+                                builder.setInsertionPointToEnd(padDoneBlock);
+                                Value paddingValid = padDoneBlock->getArgument(0);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    paddingValid,
+                                    ValueRange{},
+                                    ValueRange{},
+                                    okBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                builder.setInsertionPointToEnd(okBlock);
+                                caseBody = okBlock;
+                                return StrictDynamicCalldataValue{
+                                    builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult(),
+                                    bounds.nextExpectedOffset,
+                                };
                             };
-                            auto materializeResultCarrier = [&](const AbiLayout &fieldLayout, Value tupleBaseOff, int64_t fieldHeadByteOffset) -> FailureOr<Value> {
+                            auto resultFieldDynamicKind = [&](const AbiLayoutNode &fieldLayout, StrictDynamicCalldataKind &kind, unsigned &fixedBytesWidth) -> bool {
+                                fixedBytesWidth = 0;
+                                if (!canonicalAbiLayoutIsDynamic(fieldLayout))
+                                    return false;
+                                if (canonicalAbiLayoutIsTupleLike(fieldLayout))
+                                    return false;
+                                if (fieldLayout.kind == AbiLayoutKind::DynamicBytes)
+                                {
+                                    kind = StrictDynamicCalldataKind::BytesLike;
+                                    return true;
+                                }
+                                if (isDynamicU256ArrayAbiNode(fieldLayout))
+                                {
+                                    kind = StrictDynamicCalldataKind::U256Array;
+                                    return true;
+                                }
+                                if (isDynamicAddressArrayAbiNode(fieldLayout))
+                                {
+                                    kind = StrictDynamicCalldataKind::AddressArray;
+                                    return true;
+                                }
+                                if (isDynamicBoolArrayAbiNode(fieldLayout))
+                                {
+                                    kind = StrictDynamicCalldataKind::BoolArray;
+                                    return true;
+                                }
+                                if (isDynamicFixedBytesArrayAbiNode(fieldLayout))
+                                {
+                                    kind = StrictDynamicCalldataKind::FixedBytesArray;
+                                    fixedBytesWidth = fieldLayout.children.front()->width;
+                                    return true;
+                                }
+                                return false;
+                            };
+
+                            auto validateNestedDynamicCalldataValue = [&](Value frameBaseOff,
+                                                                          Value offsetWord,
+                                                                          Value expectedOffset,
+                                                                          StrictDynamicCalldataKind kind,
+                                                                          unsigned fixedBytesWidth = 0) -> FailureOr<Value> {
+                                StrictDynamicBounds bounds = emitStrictCalldataBoundsPrefix(
+                                    frameBaseOff,
+                                    offsetWord,
+                                    expectedOffset,
+                                    kind);
+                                Block *doneBlock = mainFunc.addBlock();
+
+                                Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                Value tailEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, bounds.total);
+                                Value tailMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tailEnd);
+                                Value tailPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tailMissing);
+                                const bool validatesWordElements = strictDynamicCalldataValidatesWordElements(kind) && !info.permissiveAbiDecode;
+                                Block *wordArrayValidateCondBlock = nullptr;
+                                Block *wordArrayValidateBodyBlock = nullptr;
+                                Block *wordArrayValidateDoneBlock = nullptr;
+                                if (validatesWordElements)
+                                {
+                                    wordArrayValidateCondBlock = mainFunc.addBlock();
+                                    wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateBodyBlock = mainFunc.addBlock();
+                                    wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    wordArrayValidateDoneBlock = mainFunc.addBlock();
+                                    wordArrayValidateDoneBlock->addArgument(u256Type, caseDecodeLoc);
+                                }
+                                else if (kind == StrictDynamicCalldataKind::BytesLike)
+                                {
+                                    doneBlock->addArgument(u256Type, caseDecodeLoc);
+                                    doneBlock->addArgument(u256Type, caseDecodeLoc);
+                                }
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    tailPresent,
+                                    validatesWordElements
+                                        ? ValueRange{
+                                              lowering::constU256(builder, caseDecodeLoc, 0),
+                                              lowering::constU256(builder, caseDecodeLoc, 1),
+                                          }
+                                    : kind == StrictDynamicCalldataKind::BytesLike
+                                        ? ValueRange{
+                                              lowering::constU256(builder, caseDecodeLoc, 0),
+                                              lowering::constU256(builder, caseDecodeLoc, 1),
+                                          }
+                                        : ValueRange{},
+                                    ValueRange{},
+                                    validatesWordElements
+                                        ? wordArrayValidateCondBlock
+                                    : kind == StrictDynamicCalldataKind::BytesLike
+                                        ? doneBlock
+                                        : doneBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                if (validatesWordElements)
+                                {
+                                    builder.setInsertionPointToEnd(wordArrayValidateCondBlock);
+                                    Value iv = wordArrayValidateCondBlock->getArgument(0);
+                                    Value allValid = wordArrayValidateCondBlock->getArgument(1);
+                                    Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, iv, bounds.dynamicLen);
+                                    Value continueValidation = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasElement, allValid);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        continueValidation,
+                                        ValueRange{iv, allValid},
+                                        ValueRange{allValid},
+                                        wordArrayValidateBodyBlock,
+                                        wordArrayValidateDoneBlock);
+
+                                    builder.setInsertionPointToEnd(wordArrayValidateBodyBlock);
+                                    Value bodyIv = wordArrayValidateBodyBlock->getArgument(0);
+                                    Value bodyAllValid = wordArrayValidateBodyBlock->getArgument(1);
+                                    Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                    Value elementTailOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                    Value elementAbsOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, elementTailOffset);
+                                    Value elementWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, elementAbsOffset);
+                                    Value elementValid = nullptr;
+                                    if (kind == StrictDynamicCalldataKind::AddressArray)
+                                    {
+                                        Value elementPayload = lowering::maskLowBits(builder, caseDecodeLoc, elementWord, 160);
+                                        elementValid = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, elementWord, elementPayload);
+                                    }
+                                    else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                    {
+                                        elementValid = lowering::boolAbiWordIsCanonical(builder, caseDecodeLoc, elementWord);
+                                    }
+                                    else
+                                    {
+                                        lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, fixedBytesWidth, elementWord);
+                                        elementValid = decoded.valid;
+                                    }
+                                    Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, elementValid);
+                                    Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid}, wordArrayValidateCondBlock);
+
+                                    builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
+                                    Value validElements = wordArrayValidateDoneBlock->getArgument(0);
+                                    FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                    if (failed(invalidElementError))
+                                        return failure();
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        validElements,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        doneBlock,
+                                        getAbiDecodeRevertBlock(*invalidElementError));
+                                }
+
+                                if (kind == StrictDynamicCalldataKind::BytesLike && info.permissiveAbiDecode)
+                                {
+                                    builder.setInsertionPointToEnd(doneBlock);
+                                    caseBody = doneBlock;
+                                    return bounds.nextExpectedOffset;
+                                }
+
+                                if (kind == StrictDynamicCalldataKind::BytesLike)
+                                {
+                                    Block *padCondBlock = doneBlock;
+                                    Block *padBodyBlock = mainFunc.addBlock();
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *padDoneBlock = mainFunc.addBlock();
+                                    padDoneBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *okBlock = mainFunc.addBlock();
+
+                                    builder.setInsertionPointToEnd(padCondBlock);
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, bounds.payloadBase, bounds.total);
+                                    Value padIv = padCondBlock->getArgument(0);
+                                    Value padAllValid = padCondBlock->getArgument(1);
+                                    Value contentPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, buf, bounds.wordSize);
+                                    Value padStart = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, contentPtr, bounds.dynamicLen);
+                                    Value padCount = builder.create<sir::SubOp>(caseDecodeLoc, u256Type, bounds.padded, bounds.dynamicLen);
+                                    Value hasPadByte = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, padIv, padCount);
+                                    Value continuePad = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasPadByte, padAllValid);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        continuePad,
+                                        ValueRange{padIv, padAllValid},
+                                        ValueRange{padAllValid},
+                                        padBodyBlock,
+                                        padDoneBlock);
+
+                                    builder.setInsertionPointToEnd(padBodyBlock);
+                                    Value bodyIv = padBodyBlock->getArgument(0);
+                                    Value bodyAllValid = padBodyBlock->getArgument(1);
+                                    Value padBytePtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, padStart, bodyIv);
+                                    Value padByte = builder.create<sir::Load8Op>(caseDecodeLoc, u256Type, padBytePtr, lowering::constU256(builder, caseDecodeLoc, 0));
+                                    Value byteIsZero = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, padByte, lowering::constU256(builder, caseDecodeLoc, 0));
+                                    Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, byteIsZero);
+                                    Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid}, padCondBlock);
+
+                                    builder.setInsertionPointToEnd(padDoneBlock);
+                                    Value paddingValid = padDoneBlock->getArgument(0);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        paddingValid,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        okBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                    builder.setInsertionPointToEnd(okBlock);
+                                    caseBody = okBlock;
+                                    return bounds.nextExpectedOffset;
+                                }
+
+                                builder.setInsertionPointToEnd(doneBlock);
+                                caseBody = doneBlock;
+                                return bounds.nextExpectedOffset;
+                            };
+
+                            std::function<bool(const AbiLayoutNode &, Value, int64_t)> validateStaticCalldataFieldsAtHead =
+                                [&](const AbiLayoutNode &layout, Value baseOff, int64_t headByteOffset) -> bool {
+                                if (canonicalAbiLayoutIsDynamic(layout))
+                                    return true;
+
+                                if (layout.kind == AbiLayoutKind::Static)
+                                {
+                                    Value fieldHeadOff = builder.create<sir::AddOp>(
+                                        caseDecodeLoc,
+                                        u256Type,
+                                        baseOff,
+                                        lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(headByteOffset)));
+                                    Value word = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                    std::optional<CalldataStaticDecode> decoded =
+                                        decodeStaticCalldataWord(builder, caseDecodeLoc, ctx, layout, word, 0, false, info.permissiveAbiDecode);
+                                    if (!decoded)
+                                        return true;
+
+                                    for (auto [valid, error] : decoded->checks)
+                                    {
+                                        Block *validBody = mainFunc.addBlock();
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            valid,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            validBody,
+                                            getAbiDecodeRevertBlock(error));
+                                        builder.setInsertionPointToEnd(validBody);
+                                        caseBody = validBody;
+                                    }
+                                    return true;
+                                }
+
+                                if (canonicalAbiLayoutIsTupleLike(layout))
+                                {
+                                    int64_t childHeadByteOffset = headByteOffset;
+                                    for (const auto &childLayoutPtr : layout.children)
+                                    {
+                                        const AbiLayoutNode &childLayout = *childLayoutPtr;
+                                        if (!validateStaticCalldataFieldsAtHead(childLayout, baseOff, childHeadByteOffset))
+                                            return false;
+                                        int64_t slots = canonicalAbiLayoutIsDynamic(childLayout) ? 1 : canonicalAbiLayoutHeadSlots(childLayout);
+                                        if (slots <= 0)
+                                            return false;
+                                        childHeadByteOffset += slots * 32;
+                                    }
+                                    return true;
+                                }
+
+                                if (layout.kind == AbiLayoutKind::FixedArray && layout.children.size() == 1)
+                                {
+                                    const AbiLayoutNode &elementLayout = *layout.children.front();
+                                    int64_t elementSlots = canonicalAbiLayoutHeadSlots(elementLayout);
+                                    if (elementSlots <= 0)
+                                        return false;
+                                    int64_t elementHeadByteOffset = headByteOffset;
+                                    for (unsigned i = 0; i < layout.arrayLen; ++i)
+                                    {
+                                        if (!validateStaticCalldataFieldsAtHead(elementLayout, baseOff, elementHeadByteOffset))
+                                            return false;
+                                        elementHeadByteOffset += elementSlots * 32;
+                                    }
+                                    return true;
+                                }
+
+                                return true;
+                            };
+
+                            auto materializeDynamicTupleCarrierAtHead = [&](const AbiLayoutNode &fieldLayout,
+                                                                            Value tupleBaseOff,
+                                                                            Value fieldHeadOff,
+                                                                            Value expectedDynamicOffset) -> FailureOr<StrictDynamicCalldataValue> {
+                                int64_t tupleHeadSlots = canonicalAbiLayoutHeadSlots(fieldLayout);
+                                if (tupleHeadSlots <= 0)
+                                    return failure();
+
+                                Block *offsetOkBlock = mainFunc.addBlock();
+                                Block *headOkBlock = mainFunc.addBlock();
+                                Value offsetWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                Value offsetOk = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, offsetWord, expectedDynamicOffset);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    offsetOk,
+                                    ValueRange{},
+                                    ValueRange{},
+                                    offsetOkBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                builder.setInsertionPointToEnd(offsetOkBlock);
+                                Value fieldBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, offsetWord);
+                                Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                Value tupleHeadBytes = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(tupleHeadSlots) * 32ULL);
+                                Value tupleHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldBaseOff, tupleHeadBytes);
+                                Value headMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tupleHeadEnd);
+                                Value headPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, headMissing);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    headPresent,
+                                    ValueRange{},
+                                    ValueRange{},
+                                    headOkBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                builder.setInsertionPointToEnd(headOkBlock);
+                                Value nextFieldDynamicOffset = tupleHeadBytes;
+                                SmallVector<DynamicTupleChild, 2> dynamicChildren;
+                                int64_t childHeadByteOffset = 0;
+                                for (const auto &childLayoutPtr : fieldLayout.children)
+                                {
+                                    const AbiLayoutNode &childLayout = *childLayoutPtr;
+                                    if (canonicalAbiLayoutIsDynamic(childLayout))
+                                    {
+                                        StrictDynamicCalldataKind childKind;
+                                        unsigned fixedBytesWidth = 0;
+                                        if (!resultFieldDynamicKind(childLayout, childKind, fixedBytesWidth))
+                                            return failure();
+
+                                        Value childHeadOff = builder.create<sir::AddOp>(
+                                            caseDecodeLoc,
+                                            u256Type,
+                                            fieldBaseOff,
+                                            lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(childHeadByteOffset)));
+                                        Value childOffset = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, childHeadOff);
+                                        FailureOr<Value> childNextOffset = validateNestedDynamicCalldataValue(
+                                            fieldBaseOff,
+                                            childOffset,
+                                            nextFieldDynamicOffset,
+                                            childKind,
+                                            fixedBytesWidth);
+                                        if (failed(childNextOffset))
+                                            return failure();
+                                        dynamicChildren.push_back({childHeadByteOffset, childKind, fixedBytesWidth});
+                                        nextFieldDynamicOffset = *childNextOffset;
+                                        childHeadByteOffset += 32;
+                                    }
+                                    else
+                                    {
+                                        int64_t slots = canonicalAbiLayoutHeadSlots(childLayout);
+                                        if (slots <= 0)
+                                            return failure();
+                                        if (!validateStaticCalldataFieldsAtHead(childLayout, fieldBaseOff, childHeadByteOffset))
+                                            return failure();
+                                        childHeadByteOffset += slots * 32;
+                                    }
+                                }
+
+                                Value resultPtr = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, nextFieldDynamicOffset);
+                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, resultPtr, fieldBaseOff, nextFieldDynamicOffset);
+
+                                for (const DynamicTupleChild &child : dynamicChildren)
+                                {
+                                    Value childHeadPtr = builder.create<sir::AddPtrOp>(
+                                        caseDecodeLoc,
+                                        ptrType,
+                                        resultPtr,
+                                        lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(child.headByteOffset)));
+                                    Value childOffset = builder.create<sir::LoadOp>(caseDecodeLoc, u256Type, childHeadPtr);
+                                    Value childPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultPtr, childOffset);
+                                    Value childPayload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, childPtr);
+                                    builder.create<sir::StoreOp>(caseDecodeLoc, childHeadPtr, childPayload);
+                                }
+
+                                Value nextOuterDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offsetWord, nextFieldDynamicOffset);
+                                Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, resultPtr);
+                                return StrictDynamicCalldataValue{payload, nextOuterDynamicOffset};
+                            };
+
+                            auto materializeResultCarrier = [&](const AbiLayoutNode &fieldLayout,
+                                                                Value tupleBaseOff,
+                                                                int64_t fieldHeadByteOffset,
+                                                                Value expectedDynamicOffset,
+                                                                bool wrapDynamicPayloadInSingleFieldStruct = false) -> FailureOr<StrictDynamicCalldataValue> {
                                 bool expectsPtr = resultInputCarrierExpectsPtr();
                                 Value fieldHeadOff = builder.create<sir::AddOp>(
                                     caseDecodeLoc,
@@ -1388,46 +3064,547 @@ namespace mlir
                                     getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldHeadByteOffset, constCache, caseBody)
                                 );
 
-                                if (fieldLayout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(fieldLayout))
                                 {
-                                    Value relOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
-                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, relOff);
-                                    return materializeDynamicAbiValue(fieldLayout, absOff, expectsPtr);
+                                    if (canonicalAbiLayoutIsTupleLike(fieldLayout))
+                                    {
+                                        int64_t tupleHeadSlots = canonicalAbiLayoutHeadSlots(fieldLayout);
+                                        if (tupleHeadSlots <= 0)
+                                            return failure();
+
+                                        Block *offsetOkBlock = mainFunc.addBlock();
+                                        Block *headOkBlock = mainFunc.addBlock();
+                                        Value offsetWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                        Value offsetOk = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, offsetWord, expectedDynamicOffset);
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            offsetOk,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            offsetOkBlock,
+                                            getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                        builder.setInsertionPointToEnd(offsetOkBlock);
+                                        Value wordSize = lowering::constU256(builder, caseDecodeLoc, 32);
+                                        Value fieldBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, offsetWord);
+                                        Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                        Value tupleHeadBytes = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(tupleHeadSlots) * 32ULL);
+                                        Value tupleHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldBaseOff, tupleHeadBytes);
+                                        Value headMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tupleHeadEnd);
+                                        Value headPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, headMissing);
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            headPresent,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            headOkBlock,
+                                            getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                        builder.setInsertionPointToEnd(headOkBlock);
+                                        Value nextFieldDynamicOffset = tupleHeadBytes;
+                                        SmallVector<DynamicTupleChild, 2> dynamicChildren;
+                                        int64_t childHeadByteOffset = 0;
+                                        for (const auto &childLayoutPtr : fieldLayout.children)
+                                        {
+                                            const AbiLayoutNode &childLayout = *childLayoutPtr;
+                                            if (canonicalAbiLayoutIsDynamic(childLayout))
+                                            {
+                                                StrictDynamicCalldataKind childKind;
+                                                unsigned fixedBytesWidth = 0;
+                                                if (!resultFieldDynamicKind(childLayout, childKind, fixedBytesWidth))
+                                                    return failure();
+
+                                                Value childHeadOff = builder.create<sir::AddOp>(
+                                                    caseDecodeLoc,
+                                                    u256Type,
+                                                    fieldBaseOff,
+                                                    lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(childHeadByteOffset)));
+                                                Value childOffset = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, childHeadOff);
+                                                FailureOr<Value> childNextOffset = validateNestedDynamicCalldataValue(
+                                                    fieldBaseOff,
+                                                    childOffset,
+                                                    nextFieldDynamicOffset,
+                                                    childKind,
+                                                    fixedBytesWidth);
+                                                if (failed(childNextOffset))
+                                                    return failure();
+                                                dynamicChildren.push_back({childHeadByteOffset, childKind, fixedBytesWidth});
+                                                nextFieldDynamicOffset = *childNextOffset;
+                                                childHeadByteOffset += 32;
+                                            }
+                                            else
+                                            {
+                                                int64_t slots = canonicalAbiLayoutHeadSlots(childLayout);
+                                                if (slots <= 0)
+                                                    return failure();
+                                                if (!validateStaticCalldataFieldsAtHead(childLayout, fieldBaseOff, childHeadByteOffset))
+                                                    return failure();
+                                                childHeadByteOffset += slots * 32;
+                                            }
+                                        }
+
+                                        Value resultPtr = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, nextFieldDynamicOffset);
+                                        builder.create<sir::CallDataCopyOp>(caseDecodeLoc, resultPtr, fieldBaseOff, nextFieldDynamicOffset);
+
+                                        for (const DynamicTupleChild &child : dynamicChildren)
+                                        {
+                                            Value childHeadPtr = builder.create<sir::AddPtrOp>(
+                                                caseDecodeLoc,
+                                                ptrType,
+                                                resultPtr,
+                                                lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(child.headByteOffset)));
+                                            Value childOffset = builder.create<sir::LoadOp>(caseDecodeLoc, u256Type, childHeadPtr);
+                                            Value childPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultPtr, childOffset);
+                                            Value childPayload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, childPtr);
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, childHeadPtr, childPayload);
+                                            if (child.kind != StrictDynamicCalldataKind::FixedBytesArray)
+                                                continue;
+
+                                            Value childLen = builder.create<sir::LoadOp>(caseDecodeLoc, u256Type, childPtr);
+                                            Value childContentPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, childPtr, wordSize);
+
+                                            Block *copyCondBlock = mainFunc.addBlock();
+                                            copyCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                            Block *copyBodyBlock = mainFunc.addBlock();
+                                            copyBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                            Block *copyDoneBlock = mainFunc.addBlock();
+
+                                            builder.create<sir::BrOp>(
+                                                caseDecodeLoc,
+                                                ValueRange{lowering::constU256(builder, caseDecodeLoc, 0)},
+                                                copyCondBlock);
+
+                                            builder.setInsertionPointToEnd(copyCondBlock);
+                                            Value copyIv = copyCondBlock->getArgument(0);
+                                            Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, copyIv, childLen);
+                                            builder.create<sir::CondBrOp>(caseDecodeLoc, hasElement, ValueRange{copyIv}, ValueRange{}, copyBodyBlock, copyDoneBlock);
+
+                                            builder.setInsertionPointToEnd(copyBodyBlock);
+                                            Value bodyIv = copyBodyBlock->getArgument(0);
+                                            Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, wordSize);
+                                            Value elementPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, childContentPtr, elementByteOffset);
+                                            Value elementWord = builder.create<sir::LoadOp>(caseDecodeLoc, u256Type, elementPtr);
+                                            lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, child.fixedBytesWidth, elementWord);
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, elementPtr, decoded.payload);
+                                            Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                            builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv}, copyCondBlock);
+
+                                            builder.setInsertionPointToEnd(copyDoneBlock);
+                                            caseBody = copyDoneBlock;
+                                        }
+
+                                        Value nextOuterDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offsetWord, nextFieldDynamicOffset);
+                                        Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, resultPtr);
+                                        if (wrapDynamicPayloadInSingleFieldStruct)
+                                        {
+                                            Value wrapper = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, lowering::constU256(builder, caseDecodeLoc, 32));
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, wrapper, payload);
+                                            payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, wrapper);
+                                        }
+                                        return StrictDynamicCalldataValue{payload, nextOuterDynamicOffset};
+                                    }
+
+                                    StrictDynamicCalldataKind kind;
+                                    unsigned fixedBytesWidth = 0;
+                                    if (!resultFieldDynamicKind(fieldLayout, kind, fixedBytesWidth))
+                                        return failure();
+
+                                    Value offsetWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff);
+                                    StrictDynamicBounds bounds = emitStrictCalldataBoundsPrefix(
+                                        tupleBaseOff,
+                                        offsetWord,
+                                        expectedDynamicOffset,
+                                        kind);
+                                    Block *copyBlock = mainFunc.addBlock();
+
+                                    Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value tailEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, bounds.total);
+                                    Value tailMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tailEnd);
+                                    Value tailPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tailMissing);
+                                    const bool validatesWordElements = strictDynamicCalldataValidatesWordElements(kind) && !info.permissiveAbiDecode;
+                                    Block *wordArrayValidateCondBlock = nullptr;
+                                    Block *wordArrayValidateBodyBlock = nullptr;
+                                    Block *wordArrayValidateDoneBlock = nullptr;
+                                    if (validatesWordElements)
+                                    {
+                                        wordArrayValidateCondBlock = mainFunc.addBlock();
+                                        wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                        wordArrayValidateCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                        wordArrayValidateBodyBlock = mainFunc.addBlock();
+                                        wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                        wordArrayValidateBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                        wordArrayValidateDoneBlock = mainFunc.addBlock();
+                                        wordArrayValidateDoneBlock->addArgument(u256Type, caseDecodeLoc);
+                                    }
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        tailPresent,
+                                        validatesWordElements
+                                            ? ValueRange{
+                                                  lowering::constU256(builder, caseDecodeLoc, 0),
+                                                  lowering::constU256(builder, caseDecodeLoc, 1),
+                                              }
+                                            : ValueRange{},
+                                        ValueRange{},
+                                        validatesWordElements ? wordArrayValidateCondBlock : copyBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                    if (validatesWordElements)
+                                    {
+                                        builder.setInsertionPointToEnd(wordArrayValidateCondBlock);
+                                        Value iv = wordArrayValidateCondBlock->getArgument(0);
+                                        Value allValid = wordArrayValidateCondBlock->getArgument(1);
+                                        Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, iv, bounds.dynamicLen);
+                                        Value continueValidation = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasElement, allValid);
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            continueValidation,
+                                            ValueRange{iv, allValid},
+                                            ValueRange{allValid},
+                                            wordArrayValidateBodyBlock,
+                                            wordArrayValidateDoneBlock);
+
+                                        builder.setInsertionPointToEnd(wordArrayValidateBodyBlock);
+                                        Value bodyIv = wordArrayValidateBodyBlock->getArgument(0);
+                                        Value bodyAllValid = wordArrayValidateBodyBlock->getArgument(1);
+                                        Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                        Value elementTailOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                        Value elementAbsOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, elementTailOffset);
+                                        Value elementWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, elementAbsOffset);
+                                        Value elementValid = nullptr;
+                                        if (kind == StrictDynamicCalldataKind::AddressArray)
+                                        {
+                                            Value elementPayload = lowering::maskLowBits(builder, caseDecodeLoc, elementWord, 160);
+                                            elementValid = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, elementWord, elementPayload);
+                                        }
+                                        else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                        {
+                                            elementValid = lowering::boolAbiWordIsCanonical(builder, caseDecodeLoc, elementWord);
+                                        }
+                                        else
+                                        {
+                                            lowering::FixedBytesWordDecode decoded = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, fixedBytesWidth, elementWord);
+                                            elementValid = decoded.valid;
+                                        }
+                                        Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, elementValid);
+                                        Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid}, wordArrayValidateCondBlock);
+
+                                        builder.setInsertionPointToEnd(wordArrayValidateDoneBlock);
+                                        Value validElements = wordArrayValidateDoneBlock->getArgument(0);
+                                        FailureOr<lowering::AbiDecodeError> invalidElementError = strictDynamicCalldataInvalidElementError(kind);
+                                        if (failed(invalidElementError))
+                                            return failure();
+                                        builder.create<sir::CondBrOp>(
+                                            caseDecodeLoc,
+                                            validElements,
+                                            ValueRange{},
+                                            ValueRange{},
+                                            copyBlock,
+                                            getAbiDecodeRevertBlock(*invalidElementError));
+                                    }
+
+                                    builder.setInsertionPointToEnd(copyBlock);
+                                    if (kind == StrictDynamicCalldataKind::FixedBytesArray ||
+                                        (info.permissiveAbiDecode &&
+                                         (kind == StrictDynamicCalldataKind::AddressArray ||
+                                          kind == StrictDynamicCalldataKind::BoolArray)))
+                                    {
+                                        Value resultPtr = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                        builder.create<sir::StoreOp>(caseDecodeLoc, resultPtr, bounds.dynamicLen);
+                                        Value resultContentPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultPtr, bounds.wordSize);
+
+                                        Block *copyCondBlock = mainFunc.addBlock();
+                                        copyCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                        Block *copyBodyBlock = mainFunc.addBlock();
+                                        copyBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                        Block *copyDoneBlock = mainFunc.addBlock();
+
+                                        builder.create<sir::BrOp>(
+                                            caseDecodeLoc,
+                                            ValueRange{lowering::constU256(builder, caseDecodeLoc, 0)},
+                                            copyCondBlock);
+
+                                        builder.setInsertionPointToEnd(copyCondBlock);
+                                        Value copyIv = copyCondBlock->getArgument(0);
+                                        Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, copyIv, bounds.dynamicLen);
+                                        builder.create<sir::CondBrOp>(caseDecodeLoc, hasElement, ValueRange{copyIv}, ValueRange{}, copyBodyBlock, copyDoneBlock);
+
+                                        builder.setInsertionPointToEnd(copyBodyBlock);
+                                        Value bodyIv = copyBodyBlock->getArgument(0);
+                                        Value elementByteOffset = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                        Value elementTailOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementByteOffset, bounds.wordSize);
+                                        Value elementAbsOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, elementTailOffset);
+                                        Value elementWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, elementAbsOffset);
+                                        Value elementPayload = nullptr;
+                                        if (kind == StrictDynamicCalldataKind::AddressArray)
+                                            elementPayload = lowering::maskLowBits(builder, caseDecodeLoc, elementWord, 160);
+                                        else if (kind == StrictDynamicCalldataKind::BoolArray)
+                                            elementPayload = lowering::boolAbiWordPermissivePayload(builder, caseDecodeLoc, elementWord);
+                                        else
+                                            elementPayload = lowering::decodeFixedBytesAbiWord(builder, caseDecodeLoc, fixedBytesWidth, elementWord).payload;
+                                        Value resultElementPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultContentPtr, elementByteOffset);
+                                        builder.create<sir::StoreOp>(caseDecodeLoc, resultElementPtr, elementPayload);
+                                        Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv}, copyCondBlock);
+
+                                        builder.setInsertionPointToEnd(copyDoneBlock);
+                                        caseBody = copyDoneBlock;
+                                        Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, resultPtr);
+                                        if (wrapDynamicPayloadInSingleFieldStruct)
+                                        {
+                                            Value wrapper = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.wordSize);
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, wrapper, payload);
+                                            payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, wrapper);
+                                        }
+                                        return StrictDynamicCalldataValue{payload, bounds.nextExpectedOffset};
+                                    }
+
+                                    if (kind == StrictDynamicCalldataKind::U256Array ||
+                                        kind == StrictDynamicCalldataKind::AddressArray ||
+                                        kind == StrictDynamicCalldataKind::BoolArray)
+                                    {
+                                        Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                        builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, bounds.payloadBase, bounds.total);
+                                        caseBody = copyBlock;
+                                        Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf);
+                                        if (wrapDynamicPayloadInSingleFieldStruct)
+                                        {
+                                            Value wrapper = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.wordSize);
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, wrapper, payload);
+                                            payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, wrapper);
+                                        }
+                                        return StrictDynamicCalldataValue{payload, bounds.nextExpectedOffset};
+                                    }
+                                    if (info.permissiveAbiDecode)
+                                    {
+                                        Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                        builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, bounds.payloadBase, bounds.total);
+                                        caseBody = copyBlock;
+                                        Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf);
+                                        if (wrapDynamicPayloadInSingleFieldStruct)
+                                        {
+                                            Value wrapper = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.wordSize);
+                                            builder.create<sir::StoreOp>(caseDecodeLoc, wrapper, payload);
+                                            payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, wrapper);
+                                        }
+                                        return StrictDynamicCalldataValue{payload, bounds.nextExpectedOffset};
+                                    }
+
+                                    Block *padCondBlock = mainFunc.addBlock();
+                                    padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *padBodyBlock = mainFunc.addBlock();
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    padBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *padDoneBlock = mainFunc.addBlock();
+                                    padDoneBlock->addArgument(u256Type, caseDecodeLoc);
+                                    Block *okBlock = mainFunc.addBlock();
+                                    Value contentOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, bounds.wordSize);
+                                    Value padStart = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, contentOff, bounds.dynamicLen);
+                                    Value padCount = builder.create<sir::SubOp>(caseDecodeLoc, u256Type, bounds.padded, bounds.dynamicLen);
+                                    builder.create<sir::BrOp>(
+                                        caseDecodeLoc,
+                                        ValueRange{
+                                            lowering::constU256(builder, caseDecodeLoc, 0),
+                                            lowering::constU256(builder, caseDecodeLoc, 1),
+                                            padStart,
+                                            padCount,
+                                        },
+                                        padCondBlock);
+
+                                    builder.setInsertionPointToEnd(padCondBlock);
+                                    Value padIv = padCondBlock->getArgument(0);
+                                    Value padAllValid = padCondBlock->getArgument(1);
+                                    Value condPadStart = padCondBlock->getArgument(2);
+                                    Value condPadCount = padCondBlock->getArgument(3);
+                                    Value hasPadByte = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, padIv, condPadCount);
+                                    Value continuePad = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, hasPadByte, padAllValid);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        continuePad,
+                                        ValueRange{padIv, padAllValid, condPadStart, condPadCount},
+                                        ValueRange{padAllValid},
+                                        padBodyBlock,
+                                        padDoneBlock);
+
+                                    builder.setInsertionPointToEnd(padBodyBlock);
+                                    Value bodyIv = padBodyBlock->getArgument(0);
+                                    Value bodyAllValid = padBodyBlock->getArgument(1);
+                                    Value bodyPadStart = padBodyBlock->getArgument(2);
+                                    Value bodyPadCount = padBodyBlock->getArgument(3);
+                                    Value padByteOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyPadStart, bodyIv);
+                                    Value padWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, padByteOff);
+                                    Value c248_padShift = lowering::constU256(builder, caseDecodeLoc, 248);
+                                    Value padByte = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c248_padShift, padWord);
+                                    Value byteIsZero = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, padByte, lowering::constU256(builder, caseDecodeLoc, 0));
+                                    Value nextAllValid = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, bodyAllValid, byteIsZero);
+                                    Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextIv, nextAllValid, bodyPadStart, bodyPadCount}, padCondBlock);
+
+                                    builder.setInsertionPointToEnd(padDoneBlock);
+                                    Value paddingValid = padDoneBlock->getArgument(0);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        paddingValid,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        okBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                    builder.setInsertionPointToEnd(okBlock);
+                                    caseBody = okBlock;
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.total);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, bounds.payloadBase, bounds.total);
+                                    Value payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf);
+                                    if (wrapDynamicPayloadInSingleFieldStruct)
+                                    {
+                                        Value wrapper = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, bounds.wordSize);
+                                        builder.create<sir::StoreOp>(caseDecodeLoc, wrapper, payload);
+                                        payload = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, wrapper);
+                                    }
+                                    return StrictDynamicCalldataValue{payload, bounds.nextExpectedOffset};
                                 }
 
-                                int64_t words = fieldLayout.headSlots();
+                                int64_t words = canonicalAbiLayoutHeadSlots(fieldLayout);
                                 if (words <= 0)
                                     return failure();
                                 if (!expectsPtr && words != 1)
                                     return failure();
                                 if (!expectsPtr)
-                                    return builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff).getResult();
+                                    return StrictDynamicCalldataValue{
+                                        builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadOff).getResult(),
+                                        expectedDynamicOffset,
+                                    };
 
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
+                                Value totalVal = lowering::constU256(builder, caseDecodeLoc, words * 32);
                                 Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, fieldHeadOff, totalVal);
-                                return builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult();
+                                return StrictDynamicCalldataValue{
+                                    builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, buf).getResult(),
+                                    expectedDynamicOffset,
+                                };
                             };
 
-                            if (!info.abiParams.empty() &&
+                            auto materializeDynamicTupleArrayCalldataValue = [&](const AbiLayoutNode &arrayLayout,
+                                                                                 Value offsetWord,
+                                                                                 Value expectedOffset) -> FailureOr<StrictDynamicCalldataValue> {
+                                std::optional<uint64_t> elementHeadWords = dynamicTupleArrayElementHeadWords(arrayLayout);
+                                if (!elementHeadWords || arrayLayout.children.size() != 1)
+                                    return failure();
+                                const AbiLayoutNode &elementLayout = *arrayLayout.children.front();
+
+                                StrictDynamicBounds bounds = emitStrictCalldataBoundsPrefix(
+                                    lowering::constU256(builder, caseDecodeLoc, 4),
+                                    offsetWord,
+                                    expectedOffset,
+                                    StrictDynamicCalldataKind::U256Array);
+
+                                Block *tableOkBlock = mainFunc.addBlock();
+                                Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                Value elementOffsetBase = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, bounds.wordSize);
+                                Value arrayHeadBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bounds.dynamicLen, bounds.wordSize);
+                                Value tableEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, elementOffsetBase, arrayHeadBytes);
+                                Value tableMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tableEnd);
+                                Value tablePresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tableMissing);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    tablePresent,
+                                    ValueRange{},
+                                    ValueRange{},
+                                    tableOkBlock,
+                                    getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                builder.setInsertionPointToEnd(tableOkBlock);
+                                Value elementBytes = lowering::constU256(builder, caseDecodeLoc, *elementHeadWords * 32ULL);
+                                Value rowBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bounds.dynamicLen, elementBytes);
+                                Value resultTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.wordSize, rowBytes);
+                                Value resultPtr = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, resultTotal);
+                                builder.create<sir::StoreOp>(caseDecodeLoc, resultPtr, bounds.dynamicLen);
+
+                                Value firstElementOffset = arrayHeadBytes;
+                                Block *loopCondBlock = mainFunc.addBlock();
+                                loopCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                loopCondBlock->addArgument(u256Type, caseDecodeLoc);
+                                Block *loopBodyBlock = mainFunc.addBlock();
+                                loopBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                loopBodyBlock->addArgument(u256Type, caseDecodeLoc);
+                                Block *loopDoneBlock = mainFunc.addBlock();
+                                loopDoneBlock->addArgument(u256Type, caseDecodeLoc);
+
+                                builder.create<sir::BrOp>(
+                                    caseDecodeLoc,
+                                    ValueRange{lowering::constU256(builder, caseDecodeLoc, 0), firstElementOffset},
+                                    loopCondBlock);
+
+                                builder.setInsertionPointToEnd(loopCondBlock);
+                                Value iv = loopCondBlock->getArgument(0);
+                                Value expectedElementOffset = loopCondBlock->getArgument(1);
+                                Value hasElement = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, iv, bounds.dynamicLen);
+                                builder.create<sir::CondBrOp>(
+                                    caseDecodeLoc,
+                                    hasElement,
+                                    ValueRange{iv, expectedElementOffset},
+                                    ValueRange{expectedElementOffset},
+                                    loopBodyBlock,
+                                    loopDoneBlock);
+
+                                builder.setInsertionPointToEnd(loopBodyBlock);
+                                Value bodyIv = loopBodyBlock->getArgument(0);
+                                Value bodyExpectedElementOffset = loopBodyBlock->getArgument(1);
+                                Value offsetIndexBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, bounds.wordSize);
+                                Value offsetTableByteOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.wordSize, offsetIndexBytes);
+                                Value elementHeadOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.payloadBase, offsetTableByteOffset);
+                                FailureOr<StrictDynamicCalldataValue> elementCarrier = materializeDynamicTupleCarrierAtHead(
+                                    elementLayout,
+                                    elementOffsetBase,
+                                    elementHeadOff,
+                                    bodyExpectedElementOffset);
+                                if (failed(elementCarrier))
+                                    return failure();
+
+                                Value elementPtr = builder.create<sir::BitcastOp>(caseDecodeLoc, ptrType, elementCarrier->payload);
+                                Value rowIndexBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, bodyIv, elementBytes);
+                                Value rowByteOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.wordSize, rowIndexBytes);
+                                Value rowPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, resultPtr, rowByteOffset);
+                                builder.create<sir::MCopyOp>(caseDecodeLoc, rowPtr, elementPtr, elementBytes);
+                                Value nextIv = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bodyIv, lowering::constU256(builder, caseDecodeLoc, 1));
+                                builder.create<sir::BrOp>(
+                                    caseDecodeLoc,
+                                    ValueRange{nextIv, elementCarrier->nextExpectedOffset},
+                                    loopCondBlock);
+
+                                builder.setInsertionPointToEnd(loopDoneBlock);
+                                caseBody = loopDoneBlock;
+                                Value finalElementOffset = loopDoneBlock->getArgument(0);
+                                Value arrayTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, bounds.wordSize, finalElementOffset);
+                                Value nextOuterDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offsetWord, arrayTotal);
+                                return StrictDynamicCalldataValue{
+                                    builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, resultPtr).getResult(),
+                                    nextOuterDynamicOffset,
+                                };
+                            };
+
+                            if (hasAbiLayout &&
                                 idx < info.resultInputModes.size() &&
                                 info.resultInputModes[idx] == "narrow_payloadless")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public Result input requires tuple ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
-                                {
-                                    info.func.emitError("invalid Result input ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                if (layout.isDynamic() || layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1 || layout.fields[1].isDynamic() || layout.fields[1].headSlots() != 1)
+                                if (canonicalAbiLayoutIsDynamic(layout) || layout.children.size() != 2 ||
+                                    !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1 ||
+                                    canonicalAbiLayoutIsDynamic(*layout.children[1]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[1]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires static layout (bool,payload)");
                                     signalPassFailure();
@@ -1435,35 +3612,29 @@ namespace mlir
                                 }
 
                                 Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, head, one);
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, head, one);
                                 Value payloadOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size"));
                                 Value payload = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, payloadOff);
                                 Value packedOk = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, payload);
                                 Value errId = getConst(builder, caseDecodeLoc, u256Type, i64Type, info.resultInputErrorIds[idx], constCache, caseBody);
                                 Value packedErrPayload = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, one, errId);
                                 Value packedErr = builder.create<sir::OrOp>(caseDecodeLoc, u256Type, packedErrPayload, one);
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 argVal = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, packedErr, packedOk);
                             }
-                            else if (!info.abiParams.empty() &&
+                            else if (hasAbiLayout &&
                                      idx < info.resultInputModes.size() &&
                                      info.resultInputModes[idx] == "wide_payloadless")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public wide Result input requires tuple ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
-                                {
-                                    info.func.emitError("invalid wide Result input ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                if (layout.fields.size() != 2 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1)
+                                if (layout.children.size() != 2 || !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires layout (bool,payload)");
                                     signalPassFailure();
@@ -1477,47 +3648,77 @@ namespace mlir
                                     return;
                                 }
 
+                                int64_t resultHeadSlots = canonicalAbiLayoutHeadSlots(layout);
+                                if (resultHeadSlots <= 0)
+                                {
+                                    info.func.emitError("public Result input currently requires carrier-compatible payload layout");
+                                    signalPassFailure();
+                                    return;
+                                }
                                 Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
                                 Value tupleBaseOff = offc;
                                 Value tagWord = head;
-                                if (layout.isDynamic())
+                                if (canonicalAbiLayoutIsDynamic(layout))
                                 {
+                                    Block *resultOffsetOkBlock = mainFunc.addBlock();
+                                    Block *resultHeadOkBlock = mainFunc.addBlock();
+                                    Value offsetOk = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, head, getNextDynamicOffset());
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        offsetOk,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        resultOffsetOkBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                    builder.setInsertionPointToEnd(resultOffsetOkBlock);
                                     tupleBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, head);
+                                    Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value tupleHeadBytes = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
+                                    Value tupleHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, tupleHeadBytes);
+                                    Value tupleHeadMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tupleHeadEnd);
+                                    Value tupleHeadPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tupleHeadMissing);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        tupleHeadPresent,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        resultHeadOkBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                    builder.setInsertionPointToEnd(resultHeadOkBlock);
                                     tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
                                 }
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
-                                FailureOr<Value> okCarrier = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32);
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, tagWord, one);
+                                Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
+                                FailureOr<StrictDynamicCalldataValue> okCarrier = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
                                 if (failed(okCarrier))
                                 {
                                     info.func.emitError("public Result input currently requires a carrier-compatible payload layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 Value zeroCarrier = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, caseBody, "zero");
                                 wideTag = tag;
-                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, zeroCarrier, *okCarrier);
+                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, zeroCarrier, okCarrier->payload);
+                                if (canonicalAbiLayoutIsDynamic(layout))
+                                    nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, okCarrier->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
-                            else if (!info.abiParams.empty() &&
+                            else if (hasAbiLayout &&
                                      idx < info.resultInputModes.size() &&
                                      info.resultInputModes[idx] == "wide_single_error")
                             {
-                                if (abi.base != AbiBase::Tuple || idx >= info.abiParamLayouts.size())
+                                const AbiLayoutNode &layout = abiLayout;
+                                if (!canonicalAbiLayoutIsTupleLike(layout))
                                 {
                                     info.func.emitError("public wide Result input requires tuple ABI layout");
                                     signalPassFailure();
                                     return;
                                 }
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
-                                {
-                                    info.func.emitError("invalid wide Result input ABI layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                if (layout.fields.size() != 3 || layout.fields[0].abi.base != AbiBase::Bool ||
-                                    layout.fields[0].headSlots() != 1)
+                                if (layout.children.size() != 3 || !isStaticBoolAbiNode(*layout.children[0]) ||
+                                    canonicalAbiLayoutHeadSlots(*layout.children[0]) != 1)
                                 {
                                     info.func.emitError("public Result input currently requires layout (bool,ok_payload,err_payload)");
                                     signalPassFailure();
@@ -1531,420 +3732,205 @@ namespace mlir
                                     return;
                                 }
 
-                                Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                                Value tupleBaseOff = offc;
-                                Value tagWord = head;
-                                if (layout.isDynamic())
-                                {
-                                    tupleBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, head);
-                                    tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
-                                }
-                                Value tag = builder.create<sir::AndOp>(caseDecodeLoc, u256Type, tagWord, one);
-                                int64_t errFieldOffset = 32 + (layout.fields[1].isDynamic() ? 32 : layout.fields[1].headSlots() * 32);
-                                FailureOr<Value> okPayload = materializeResultCarrier(layout.fields[1], tupleBaseOff, 32);
-                                FailureOr<Value> errPayload = materializeResultCarrier(layout.fields[2], tupleBaseOff, errFieldOffset);
-                                if (failed(okPayload) || failed(errPayload))
+                                int64_t errFieldOffset = 32 + (canonicalAbiLayoutIsDynamic(*layout.children[1]) ? 32 : canonicalAbiLayoutHeadSlots(*layout.children[1]) * 32);
+                                int64_t resultHeadSlots = canonicalAbiLayoutHeadSlots(layout);
+                                if (resultHeadSlots <= 0 || errFieldOffset <= 0)
                                 {
                                     info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
                                     signalPassFailure();
                                     return;
                                 }
-                                Value isError = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, tag, one);
+                                Value one = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
+                                Value tupleBaseOff = offc;
+                                Value tagWord = head;
+                                if (canonicalAbiLayoutIsDynamic(layout))
+                                {
+                                    Block *resultOffsetOkBlock = mainFunc.addBlock();
+                                    Block *resultHeadOkBlock = mainFunc.addBlock();
+                                    Value offsetOk = builder.create<sir::EqOp>(caseDecodeLoc, u256Type, head, getNextDynamicOffset());
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        offsetOk,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        resultOffsetOkBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::NonCanonicalEncoding));
+
+                                    builder.setInsertionPointToEnd(resultOffsetOkBlock);
+                                    tupleBaseOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, offc, head);
+                                    Value cdsize = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
+                                    Value tupleHeadBytes = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
+                                    Value tupleHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, tupleHeadBytes);
+                                    Value tupleHeadMissing = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize, tupleHeadEnd);
+                                    Value tupleHeadPresent = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tupleHeadMissing);
+                                    builder.create<sir::CondBrOp>(
+                                        caseDecodeLoc,
+                                        tupleHeadPresent,
+                                        ValueRange{},
+                                        ValueRange{},
+                                        resultHeadOkBlock,
+                                        getAbiDecodeRevertBlock(lowering::AbiDecodeError::TruncatedBuffer));
+
+                                    builder.setInsertionPointToEnd(resultHeadOkBlock);
+                                    tagWord = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, tupleBaseOff);
+                                }
+                                Value tag = error_union_helpers::maskedTagWordWithMask(builder, caseDecodeLoc, tagWord, one);
+                                Value resultDynamicOffset = lowering::constU256(builder, caseDecodeLoc, static_cast<uint64_t>(resultHeadSlots) * 32ULL);
+                                FailureOr<StrictDynamicCalldataValue> okPayload = materializeResultCarrier(*layout.children[1], tupleBaseOff, 32, resultDynamicOffset);
+                                if (failed(okPayload))
+                                {
+                                    info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                FailureOr<StrictDynamicCalldataValue> errPayload = materializeResultCarrier(
+                                    *layout.children[2],
+                                    tupleBaseOff,
+                                    errFieldOffset,
+                                    okPayload->nextExpectedOffset,
+                                    canonicalAbiLayoutIsDynamic(*layout.children[2]) && !canonicalAbiLayoutIsTupleLike(*layout.children[2]));
+                                if (failed(errPayload))
+                                {
+                                    info.func.emitError("public Result input currently requires carrier-compatible ok/error payload layouts");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseDecodeLoc, tag, one);
                                 wideTag = tag;
-                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, *errPayload, *okPayload);
+                                widePayload = builder.create<sir::SelectOp>(caseDecodeLoc, u256Type, isError, errPayload->payload, okPayload->payload);
+                                if (canonicalAbiLayoutIsDynamic(layout))
+                                    nextDynamicOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, errPayload->nextExpectedOffset);
                                 appendWideResultInput = true;
                             }
-                            else if (!info.abiParams.empty() && abi.isArray() && abi.supportsStaticArray())
+                            else if (hasAbiLayout && isStaticFixedArrayLayout(abiLayout))
                             {
-                                int64_t elemCount = abi.dims.front();
-                                int64_t totalBytes = elemCount * 32;
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, totalBytes));
+                                int64_t totalBytes = canonicalAbiLayoutHeadSlots(abiLayout) * 32;
+                                Value totalVal = lowering::constU256(builder, caseDecodeLoc, totalBytes);
                                 Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
                                 builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
                                 argVal = buf;
                             }
-                            else if (!info.abiParams.empty() && abi.base == AbiBase::Tuple && idx < info.abiParamLayouts.size())
+                            else if (hasAbiLayout && canonicalAbiLayoutIsTupleLike(abiLayout))
                             {
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiParamLayouts[idx], layout))
+                                if (canonicalAbiLayoutIsDynamic(abiLayout))
                                 {
-                                    info.func.emitError("invalid tuple ABI param layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                if (layout.isDynamic())
-                                {
-                                    if (layout.hasDynamicArrayDim() && layout.isTupleLike() && !layout.supportsDynamicArray())
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeResultCarrier(
+                                            abiLayout,
+                                            lowering::constU256(builder, caseDecodeLoc, 4),
+                                            offs - 4,
+                                            getNextDynamicOffset());
+                                    if (failed(strictArg))
                                     {
-                                        std::function<int64_t(const AbiLayout &)> compactWordCount =
-                                            [&](const AbiLayout &node) -> int64_t {
-                                            if (node.isTupleLike())
-                                            {
-                                                int64_t total = 0;
-                                                for (const AbiLayout &field : node.fields)
-                                                {
-                                                    int64_t words = compactWordCount(field);
-                                                    if (words <= 0)
-                                                        return -1;
-                                                    total += words;
-                                                }
-                                                return total;
-                                            }
-                                            if (node.isDynamic())
-                                            {
-                                                if (node.abi.base == AbiBase::BytesDyn || node.abi.base == AbiBase::String ||
-                                                    node.abi.supportsDynamicArray() || node.supportsDynamicArray())
-                                                    return 1;
-                                                return -1;
-                                            }
-                                            return node.headSlots();
-                                        };
-
-                                        int64_t elemWords = compactWordCount(layout);
-                                        int64_t abiHeadWords = layout.headSlots();
-                                        if (elemWords <= 0)
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-                                        if (abiHeadWords <= 0)
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-
-                                        Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
-                                        Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                                        Value one_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                                        Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
-                                        Value outerLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
-                                        Value elemWordsVal = getConst(builder, caseDecodeLoc, u256Type, i64Type, elemWords, constCache, caseBody);
-                                        Value compactWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerLen, elemWordsVal);
-                                        Value compactWordsWithLen = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, compactWords, one_dyn);
-                                        Value compactTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, compactWordsWithLen, c32_dyn);
-
-                                        Value outerHeadWords = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outerLen, one_dyn);
-                                        Value outerHeadTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerHeadWords, c32_dyn);
-                                        Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
-                                        Value outerEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, outerHeadTotal);
-                                        Value outerTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, outerEnd);
-                                        Value validOuter = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, outerTooShort);
-                                        Block *outerBody = mainFunc.addBlock();
-                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validOuter, ValueRange{}, ValueRange{}, outerBody, revertError);
-                                        builder.setInsertionPointToEnd(outerBody);
-
-                                        Value outerBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, compactTotal);
-                                        builder.create<sir::StoreOp>(caseDecodeLoc, outerBuf, outerLen);
-
-                                        Block *loopCond = mainFunc.addBlock();
-                                        loopCond->addArgument(u256Type, caseDecodeLoc);
-                                        Block *loopBody = mainFunc.addBlock();
-                                        loopBody->addArgument(u256Type, caseDecodeLoc);
-                                        Block *loopAfter = mainFunc.addBlock();
-                                        Value zero_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, builder.getInsertionBlock(), "zero");
-                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{zero_dyn}, loopCond);
-
-                                        builder.setInsertionPointToEnd(loopCond);
-                                        Value row = loopCond->getArgument(0);
-                                        Value rowLt = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, row, outerLen);
-                                        builder.create<sir::CondBrOp>(caseDecodeLoc, rowLt, ValueRange{row}, ValueRange{}, loopBody, loopAfter);
-
-                                        builder.setInsertionPointToEnd(loopBody);
-                                        Value rowBody = loopBody->getArgument(0);
-                                        Value rowIndexBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowBody, c32_dyn);
-                                        Value rowHeadOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowIndexBytes, c32_dyn);
-                                        Value rowHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, rowHeadOffset);
-                                        Value rowRelOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowHeadAbs);
-                                        Value rowDataBase = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, c32_dyn);
-                                        Value rowAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowDataBase, rowRelOff);
-                                        Value rowHeadSize = getConst(builder, caseDecodeLoc, u256Type, i64Type, abiHeadWords * 32, constCache, caseBody);
-                                        Value rowHeadEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowAbsOff, rowHeadSize);
-                                        Value rowTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, rowHeadEnd);
-                                        Value validRow = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, rowTooShort);
-                                        Block *rowCopy = mainFunc.addBlock();
-                                        rowCopy->addArgument(u256Type, caseDecodeLoc);
-                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validRow, ValueRange{rowBody}, ValueRange{}, rowCopy, revertError);
-
-                                        builder.setInsertionPointToEnd(rowCopy);
-                                        Value rowCopyIndex = rowCopy->getArgument(0);
-                                        Value rowCompactWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCopyIndex, elemWordsVal);
-                                        Value rowCompactBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCompactWords, c32_dyn);
-                                        Value rowOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCompactBytes, c32_dyn);
-
-                                        std::function<LogicalResult(const AbiLayout &, Value, Value)> compactTuple =
-                                            [&](const AbiLayout &tupleLayout, Value tupleBaseOff, Value outBaseOffset) -> LogicalResult {
-                                            if (!tupleLayout.isTupleLike())
-                                                return failure();
-
-                                            int64_t fieldHeadByteOffset = 0;
-                                            int64_t fieldWordOffset = 0;
-                                            for (const AbiLayout &fieldLayout : tupleLayout.fields)
-                                            {
-                                                int64_t compactWordsForField = compactWordCount(fieldLayout);
-                                                if (compactWordsForField <= 0)
-                                                    return failure();
-
-                                                Value fieldHeadOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldHeadByteOffset, constCache, builder.getInsertionBlock());
-                                                Value fieldHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, fieldHeadOffset);
-                                                Value fieldOutWordOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldWordOffset * 32, constCache, builder.getInsertionBlock());
-                                                Value fieldOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outBaseOffset, fieldOutWordOffset);
-
-                                                if (fieldLayout.isDynamic())
-                                                {
-                                                    Value relOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldHeadAbs);
-                                                    Value fieldAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, tupleBaseOff, relOff);
-                                                    if (fieldLayout.isTupleLike())
-                                                    {
-                                                        if (failed(compactTuple(fieldLayout, fieldAbsOff, fieldOutOffset)))
-                                                            return failure();
-                                                    }
-                                                    else
-                                                    {
-                                                        if (!(fieldLayout.abi.base == AbiBase::BytesDyn || fieldLayout.abi.base == AbiBase::String ||
-                                                              fieldLayout.abi.supportsDynamicArray() || fieldLayout.supportsDynamicArray()))
-                                                        {
-                                                            return failure();
-                                                        }
-
-                                                        Value fieldOutPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, fieldOutOffset);
-                                                        Value fieldLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, fieldAbsOff);
-                                                        Value fieldTotal = nullptr;
-                                                        if (fieldLayout.supportsDynamicArray())
-                                                        {
-                                                            Value fieldElemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldLayout.staticElementWordCount(), constCache, caseBody);
-                                                            Value fieldWords = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldLen, fieldElemWords);
-                                                            Value fieldLenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldWords, c32_dyn);
-                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldLenBytes, c32_dyn);
-                                                        }
-                                                        else if (fieldLayout.abi.baseIsDynamic())
-                                                        {
-                                                            Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
-                                                            Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
-                                                            Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldLen, c31);
-                                                            Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
-                                                            Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
-                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, c32_dyn);
-                                                        }
-                                                        else
-                                                        {
-                                                            Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, fieldLen, c32_dyn);
-                                                            fieldTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
-                                                        }
-
-                                                        Value fieldEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldAbsOff, fieldTotal);
-                                                        Value fieldTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, fieldEnd);
-                                                        Value validField = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, fieldTooShort);
-                                                        Block *fieldCopy = mainFunc.addBlock();
-                                                        builder.create<sir::CondBrOp>(caseDecodeLoc, validField, ValueRange{}, ValueRange{}, fieldCopy, revertError);
-
-                                                        builder.setInsertionPointToEnd(fieldCopy);
-                                                        Value fieldBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, fieldTotal);
-                                                        builder.create<sir::CallDataCopyOp>(caseDecodeLoc, fieldBuf, fieldAbsOff, fieldTotal);
-                                                        Value fieldPtrWord = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, fieldBuf);
-                                                        builder.create<sir::StoreOp>(caseDecodeLoc, fieldOutPtr, fieldPtrWord);
-                                                    }
-
-                                                    fieldHeadByteOffset += 32;
-                                                    fieldWordOffset += compactWordsForField;
-                                                    continue;
-                                                }
-
-                                                if (fieldLayout.isTupleLike())
-                                                {
-                                                    if (failed(compactTuple(fieldLayout, fieldHeadAbs, fieldOutOffset)))
-                                                        return failure();
-                                                    fieldHeadByteOffset += fieldLayout.headSlots() * 32;
-                                                    fieldWordOffset += compactWordsForField;
-                                                    continue;
-                                                }
-
-                                                int64_t fieldWords = fieldLayout.headSlots();
-                                                if (fieldWords <= 0)
-                                                    return failure();
-                                                for (int64_t fieldWord = 0; fieldWord < fieldWords; ++fieldWord)
-                                                {
-                                                    Value fieldWordByteOffset = getConst(builder, caseDecodeLoc, u256Type, i64Type, fieldWord * 32, constCache, builder.getInsertionBlock());
-                                                    Value srcOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldHeadAbs, fieldWordByteOffset);
-                                                    Value dstOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, fieldOutOffset, fieldWordByteOffset);
-                                                    Value dstPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, dstOff);
-                                                    Value wordVal = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, srcOff);
-                                                    builder.create<sir::StoreOp>(caseDecodeLoc, dstPtr, wordVal);
-                                                }
-                                                fieldHeadByteOffset += fieldWords * 32;
-                                                fieldWordOffset += fieldWords;
-                                            }
-                                            return success();
-                                        };
-
-                                        if (failed(compactTuple(layout, rowAbsOff, rowOutOffset)))
-                                        {
-                                            module.emitError("unsupported dynamic ABI type for dispatcher");
-                                            signalPassFailure();
-                                            return;
-                                        }
-
-                                        Value nextRow = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCopyIndex, one_dyn);
-                                        builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextRow}, loopCond);
-
-                                        builder.setInsertionPointToEnd(loopAfter);
-                                        argVal = outerBuf;
-                                        argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
-
-                                        args.push_back(argVal);
-                                        loweredArgIndex += 1;
-                                        continue;
+                                        module.emitError("unsupported dynamic tuple ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
                                     }
-                                    if (!layout.supportsDynamicArray())
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else
+                                {
+                                    int64_t words = canonicalAbiLayoutHeadSlots(abiLayout);
+                                    if (words <= 0)
+                                    {
+                                        module.emitError("unsupported tuple ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    Value totalVal = lowering::constU256(builder, caseDecodeLoc, words * 32);
+                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
+                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
+                                    argVal = buf;
+                                }
+                            }
+                            else if (hasAbiLayout && canonicalAbiLayoutIsDynamic(abiLayout))
+                            {
+                                if (abiLayout.kind == AbiLayoutKind::DynamicBytes)
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BytesLike);
+                                    if (failed(strictArg))
                                     {
                                         module.emitError("unsupported dynamic ABI type for dispatcher");
                                         signalPassFailure();
                                         return;
                                     }
-
-                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
-                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
-                                    Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
-                                    Value elemWords = getConst(builder, caseDecodeLoc, u256Type, i64Type, layout.staticElementWordCount(), constCache, caseBody);
-                                    Value words = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, elemWords);
-                                    Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, words, c32_dyn);
-                                    Value total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
-
-                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
-                                    Value end = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, total);
-                                    Value tooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, end);
-                                    Value valid_dyn = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tooShort);
-                                    Block *dynBody = mainFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(caseDecodeLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
-                                    builder.setInsertionPointToEnd(dynBody);
-
-                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
-                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
-                                    argVal = buf;
-                                    argVal = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, argVal);
-
-                                    args.push_back(argVal);
-                                    loweredArgIndex += 1;
-                                    continue;
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
                                 }
-                                int64_t words = layout.headSlots();
-                                if (words <= 0)
+                                else if (isDynamicU256ArrayAbiNode(abiLayout))
                                 {
-                                    module.emitError("unsupported tuple ABI type for dispatcher");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                Value totalVal = builder.create<sir::ConstOp>(caseDecodeLoc, u256Type, IntegerAttr::get(i64Type, words * 32));
-                                Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, totalVal);
-                                builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, offc, totalVal);
-                                argVal = buf;
-                            }
-                            else if (!info.abiParams.empty() && abi.isDynamic())
-                            {
-                                if (abi.supportsNestedDynamicArray())
-                                {
-                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
-                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                                    Value one_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
-                                    Value outerLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
-                                    Value outerWords = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, outerLen, one_dyn);
-                                    Value outerTotal = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, outerWords, c32_dyn);
-
-                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
-                                    Value outerEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, outerTotal);
-                                    Value outerTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, outerEnd);
-                                    Value validOuter = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, outerTooShort);
-                                    Block *outerBody = mainFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(caseDecodeLoc, validOuter, ValueRange{}, ValueRange{}, outerBody, revertError);
-                                    builder.setInsertionPointToEnd(outerBody);
-
-                                    Value outerBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, outerTotal);
-                                    builder.create<sir::StoreOp>(caseDecodeLoc, outerBuf, outerLen);
-
-                                    Block *loopCond = mainFunc.addBlock();
-                                    loopCond->addArgument(u256Type, caseDecodeLoc);
-                                    Block *loopBody = mainFunc.addBlock();
-                                    loopBody->addArgument(u256Type, caseDecodeLoc);
-                                    Block *loopAfter = mainFunc.addBlock();
-                                    Value zero_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 0, constCache, builder.getInsertionBlock(), "zero");
-                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{zero_dyn}, loopCond);
-
-                                    builder.setInsertionPointToEnd(loopCond);
-                                    Value row = loopCond->getArgument(0);
-                                    Value rowLt = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, row, outerLen);
-                                    builder.create<sir::CondBrOp>(caseDecodeLoc, rowLt, ValueRange{row}, ValueRange{}, loopBody, loopAfter);
-
-                                    builder.setInsertionPointToEnd(loopBody);
-                                    Value rowBody = loopBody->getArgument(0);
-                                    Value rowBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowBody, c32_dyn);
-                                    Value rowHeadOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowBytes, c32_dyn);
-                                    Value rowHeadAbs = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, rowHeadOffset);
-                                    Value rowRelOff = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowHeadAbs);
-                                    Value rowDataBase = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, c32_dyn);
-                                    Value rowAbsOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowDataBase, rowRelOff);
-                                    Value rowLen = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, rowAbsOff);
-                                    Value rowLenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowLen, c32_dyn);
-                                    Value rowTotal = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowLenBytes, c32_dyn);
-                                    Value rowEnd = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowAbsOff, rowTotal);
-                                    Value rowTooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, rowEnd);
-                                    Value validRow = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, rowTooShort);
-                                    Block *rowCopy = mainFunc.addBlock();
-                                    rowCopy->addArgument(u256Type, caseDecodeLoc);
-                                    builder.create<sir::CondBrOp>(caseDecodeLoc, validRow, ValueRange{rowBody}, ValueRange{}, rowCopy, revertError);
-
-                                    builder.setInsertionPointToEnd(rowCopy);
-                                    Value rowCopyIndex = rowCopy->getArgument(0);
-                                    Value rowBuf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, rowTotal);
-                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, rowBuf, rowAbsOff, rowTotal);
-                                    Value rowPtrWord = builder.create<sir::BitcastOp>(caseDecodeLoc, u256Type, rowBuf);
-                                    Value rowOutBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, rowCopyIndex, c32_dyn);
-                                    Value rowOutOffset = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowOutBytes, c32_dyn);
-                                    Value rowOutPtr = builder.create<sir::AddPtrOp>(caseDecodeLoc, ptrType, outerBuf, rowOutOffset);
-                                    builder.create<sir::StoreOp>(caseDecodeLoc, rowOutPtr, rowPtrWord);
-                                    Value nextRow = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, rowCopyIndex, one_dyn);
-                                    builder.create<sir::BrOp>(caseDecodeLoc, ValueRange{nextRow}, loopCond);
-
-                                    builder.setInsertionPointToEnd(loopAfter);
-                                    argVal = outerBuf;
-                                }
-                                else if (abi.base == AbiBase::BytesDyn || abi.base == AbiBase::String || abi.supportsDynamicArray())
-                                {
-                                    Value c4_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 4, constCache, caseBody, "selector_offset");
-                                    Value c32_dyn = getConst(builder, caseDecodeLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
-                                    Value absOff = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, head, c4_dyn);
-                                    Value len = builder.create<sir::CallDataLoadOp>(caseDecodeLoc, u256Type, absOff);
-
-                                    Value total = nullptr;
-                                    if (abi.baseIsDynamic())
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::U256Array);
+                                    if (failed(strictArg))
                                     {
-                                        Value c31 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 31, constCache, caseBody, "pad_31");
-                                        Value c5 = getConst(builder, caseDecodeLoc, u256Type, i64Type, 5, constCache, caseBody, "shift_5");
-                                        Value lenPlus = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, len, c31);
-                                        Value shifted = builder.create<sir::ShrOp>(caseDecodeLoc, u256Type, c5, lenPlus);
-                                        Value padded = builder.create<sir::ShlOp>(caseDecodeLoc, u256Type, c5, shifted);
-                                        total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, padded, c32_dyn);
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
                                     }
-                                    else
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicAddressArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::AddressArray);
+                                    if (failed(strictArg))
                                     {
-                                        Value lenBytes = builder.create<sir::MulOp>(caseDecodeLoc, u256Type, len, c32_dyn);
-                                        total = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, lenBytes, c32_dyn);
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
                                     }
-
-                                    Value cdsize_case = builder.create<sir::CallDataSizeOp>(caseDecodeLoc, u256Type);
-                                    Value end = builder.create<sir::AddOp>(caseDecodeLoc, u256Type, absOff, total);
-                                    // Check cdsize >= end (i.e., !(cdsize < end))
-                                    Value tooShort = builder.create<sir::LtOp>(caseDecodeLoc, u256Type, cdsize_case, end);
-                                    Value valid_dyn = builder.create<sir::IsZeroOp>(caseDecodeLoc, u256Type, tooShort);
-                                    Block *dynBody = mainFunc.addBlock();
-                                    builder.create<sir::CondBrOp>(caseDecodeLoc, valid_dyn, ValueRange{}, ValueRange{}, dynBody, revertError);
-                                    builder.setInsertionPointToEnd(dynBody);
-
-                                    Value buf = builder.create<sir::SAllocAnyOp>(caseDecodeLoc, ptrType, total);
-                                    builder.create<sir::CallDataCopyOp>(caseDecodeLoc, buf, absOff, total);
-                                    argVal = buf;
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicBoolArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::BoolArray);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (isDynamicFixedBytesArrayAbiNode(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg = materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::FixedBytesArray, abiLayout.children.front()->width);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (dynamicTupleArrayElementHeadWords(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeDynamicTupleArrayCalldataValue(abiLayout, head, getNextDynamicOffset());
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
+                                }
+                                else if (std::optional<uint64_t> elementWords = fullWordStaticArrayElementWords(abiLayout))
+                                {
+                                    FailureOr<StrictDynamicCalldataValue> strictArg =
+                                        materializeStrictDynamicCalldataValue(head, getNextDynamicOffset(), StrictDynamicCalldataKind::U256Array, 0, *elementWords);
+                                    if (failed(strictArg))
+                                    {
+                                        module.emitError("unsupported dynamic ABI type for dispatcher");
+                                        signalPassFailure();
+                                        return;
+                                    }
+                                    argVal = strictArg->payload;
+                                    nextDynamicOffset = strictArg->nextExpectedOffset;
                                 }
                                 else
                                 {
@@ -1958,7 +3944,7 @@ namespace mlir
                             {
                                 args.push_back(wideTag);
                                 args.push_back(widePayload);
-                                loweredArgIndex += 2;
+                                loweredArgIndex += static_cast<unsigned>(adt_helpers::kAdtCarrierWordCount);
                                 continue;
                             }
 
@@ -1990,6 +3976,15 @@ namespace mlir
                             SymbolRefAttr::get(ctx, info.func.getName()),
                             args);
 
+                        AbiLayoutNode abiReturnLayout;
+                        const bool hasReturnLayout = info.hasAbiReturn && !info.abiReturnLayout.empty();
+                        if (hasReturnLayout && !parseAbiLayout(info.abiReturnLayout, abiReturnLayout, AbiLayoutSyntax::CanonicalAbi))
+                        {
+                            info.func.emitError("invalid ora.abi_return_layout");
+                            signalPassFailure();
+                            return;
+                        }
+
                         if (info.returnsErrorUnion)
                         {
                             if (info.retCount != 2)
@@ -2008,14 +4003,23 @@ namespace mlir
                             Value payloadPtr = builder.create<sir::AddPtrOp>(caseErrorLoc, ptrType, ptr, c32_union);
                             Value payload = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadPtr);
                             Value one = getConst(builder, caseErrorLoc, u256Type, i64Type, 1, constCache, caseBody, "one");
-                            Value maskedTag = builder.create<sir::AndOp>(caseErrorLoc, u256Type, tag, one);
-                            Value isError = builder.create<sir::EqOp>(caseErrorLoc, u256Type, maskedTag, one);
+                            Value maskedTag = error_union_helpers::maskedTagWordWithMask(builder, caseErrorLoc, tag, one);
+                            Value isError = error_union_helpers::extractedTagIsErrorWithMask(builder, caseErrorLoc, maskedTag, one);
+                            Value payloadScratchSize = getConst(builder, caseErrorLoc, u256Type, i64Type, 32, constCache, caseBody, "word_size");
+                            Value payloadScratchPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, payloadScratchSize);
+                            builder.create<sir::StoreOp>(caseErrorLoc, payloadScratchPtr, payload);
+
+                            auto loadPayloadFromScratch = [&](Block *block, Location loc) -> Value {
+                                (void)block;
+                                return builder.create<sir::LoadOp>(loc, u256Type, payloadScratchPtr);
+                            };
 
                             Block *successBlock = mainFunc.addBlock();
                             Block *errorDispatchBlock = mainFunc.addBlock();
                             builder.create<sir::CondBrOp>(caseErrorLoc, isError, ValueRange{}, ValueRange{}, errorDispatchBlock, successBlock);
 
                             builder.setInsertionPointToEnd(successBlock);
+                            Value successPayload = loadPayloadFromScratch(successBlock, caseReturnLoc);
                             Value retPtr = nullptr;
                             Value size = nullptr;
                             if (!info.hasAbiReturn)
@@ -2023,45 +4027,22 @@ namespace mlir
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 0, constCache, successBlock, "zero");
                                 retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, size);
                             }
-                            else if (info.abiReturn.isStaticBase() && !info.abiReturn.isArray() && !info.abiReturn.baseIsDynamic())
+                            else if (hasReturnLayout && abiReturnLayout.kind == AbiLayoutKind::Static)
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
                                 retPtr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                                 setResultName(retPtr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, payload);
+                                builder.create<sir::StoreOp>(caseReturnLoc, retPtr, materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, abiReturnLayout, successPayload));
                             }
-                            else if (info.abiReturn.base == AbiBase::Tuple && info.abiReturnWords > 0)
+                            else if (hasReturnLayout && !canonicalAbiLayoutIsDynamic(abiReturnLayout) && info.abiReturnWords > 0)
                             {
                                 size = getConst(builder, caseReturnLoc, u256Type, i64Type, info.abiReturnWords * 32, constCache, successBlock);
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
                             }
-                            else if (!info.abiReturnLayout.empty())
+                            else if (hasReturnLayout)
                             {
-                                AbiLayout layout;
-                                if (!parseAbiLayout(info.abiReturnLayout, layout))
-                                {
-                                    info.func.emitError("invalid ora.abi_return_layout");
-                                    signalPassFailure();
-                                    return;
-                                }
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
-                                size = computeAbiEncodedSize(builder, caseReturnLoc, ctx, retPtr, layout);
-                            }
-                            else if (info.abiReturn.base == AbiBase::BytesDyn || info.abiReturn.base == AbiBase::String)
-                            {
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
-                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
-                                Value padded = computePaddedBytes(builder, caseReturnLoc, ctx, length);
-                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, padded, wordSize);
-                            }
-                            else if (info.abiReturn.supportsDynamicArray())
-                            {
-                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, payload);
-                                Value length = builder.create<sir::LoadOp>(caseReturnLoc, u256Type, retPtr);
-                                Value wordSize = getConst(builder, caseReturnLoc, u256Type, i64Type, 32, constCache, successBlock, "word_size");
-                                Value lenBytes = builder.create<sir::MulOp>(caseReturnLoc, u256Type, length, wordSize);
-                                size = builder.create<sir::AddOp>(caseReturnLoc, u256Type, lenBytes, wordSize);
+                                retPtr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, successPayload);
+                                size = computeAbiEncodedSize(builder, caseReturnLoc, ctx, retPtr, abiReturnLayout);
                             }
                             else
                             {
@@ -2077,19 +4058,17 @@ namespace mlir
                             {
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);
+                                Value comparePayload = loadPayloadFromScratch(compareBlock, caseErrorLoc);
 
                                 Value errId = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>(errInfo.id), constCache, compareBlock);
-                                Value compareValue = payload;
-                                if (errInfo.paramCount != 0)
-                                {
-                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, payload);
-                                    compareValue = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadAggPtr);
-                                }
+                                Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, comparePayload);
+                                Value compareValue = builder.create<sir::LoadOp>(caseErrorLoc, u256Type, payloadAggPtr);
                                 Value matches = builder.create<sir::EqOp>(caseErrorLoc, u256Type, compareValue, errId);
                                 Block *emitBlock = mainFunc.addBlock();
                                 builder.create<sir::CondBrOp>(caseErrorLoc, matches, ValueRange{}, ValueRange{}, emitBlock, nextErrorBlock);
 
                                 builder.setInsertionPointToEnd(emitBlock);
+                                Value emitPayload = loadPayloadFromScratch(emitBlock, caseErrorLoc);
                                 if (errInfo.paramCount == 0)
                                 {
                                     Value size4 = getConst(builder, caseErrorLoc, u256Type, i64Type, 4, constCache, emitBlock);
@@ -2104,7 +4083,7 @@ namespace mlir
                                     Value revertPtr = builder.create<sir::SAllocAnyOp>(caseErrorLoc, ptrType, revertSize);
                                     builder.create<sir::StoreOp>(caseErrorLoc, revertPtr, getShiftedSelectorConst(builder, caseErrorLoc, ctx, errInfo.selector));
 
-                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, payload);
+                                    Value payloadAggPtr = builder.create<sir::BitcastOp>(caseErrorLoc, ptrType, emitPayload);
                                     for (uint64_t index = 0; index < errInfo.paramCount; ++index)
                                     {
                                         Value srcOffset = getConst(builder, caseErrorLoc, u256Type, i64Type, static_cast<int64_t>((index + 1) * 32), constCache, emitBlock);
@@ -2129,8 +4108,43 @@ namespace mlir
                         {
                             Value ptr_u = call.getResult(0);
                             Value len = call.getResult(1);
-                            Value ptr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, ptr_u);
-                            builder.create<sir::ReturnOp>(caseReturnLoc, ptr, len);
+                            if (hasReturnLayout &&
+                                canonicalAbiLayoutIsTupleLike(abiReturnLayout) &&
+                                canonicalAbiLayoutIsDynamic(abiReturnLayout))
+                            {
+                                (void)len;
+                                FailureOr<AbiReturnBuffer> encoded = materializeSingleDynamicTupleAbiReturn(
+                                    builder,
+                                    caseReturnLoc,
+                                    ctx,
+                                    ptr_u,
+                                    abiReturnLayout);
+                                if (failed(encoded))
+                                {
+                                    info.func.emitError("unsupported dynamic tuple ABI return layout");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                builder.create<sir::ReturnOp>(caseReturnLoc, encoded->ptr, encoded->size);
+                            }
+                            else if (hasReturnLayout &&
+                                (abiReturnLayout.kind == AbiLayoutKind::DynamicBytes ||
+                                 canonicalAbiLayoutSupportsDynamicArray(abiReturnLayout)))
+                            {
+                                (void)len;
+                                AbiReturnBuffer encoded = materializeSingleDynamicAbiReturn(
+                                    builder,
+                                    caseReturnLoc,
+                                    ctx,
+                                    ptr_u,
+                                    abiReturnLayout.kind == AbiLayoutKind::DynamicBytes);
+                                builder.create<sir::ReturnOp>(caseReturnLoc, encoded.ptr, encoded.size);
+                            }
+                            else
+                            {
+                                Value ptr = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, ptr_u);
+                                builder.create<sir::ReturnOp>(caseReturnLoc, ptr, len);
+                            }
                         }
                         else if (info.retCount == 1)
                         {
@@ -2139,12 +4153,13 @@ namespace mlir
                             Value size = c32_ret;
                             Value ptr = builder.create<sir::SAllocAnyOp>(caseReturnLoc, ptrType, size);
                             setResultName(ptr.getDefiningOp(), ("buf_" + info.func.getName()).str());
-                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, val);
+                            Value stored = hasReturnLayout ? materializeAbiReturnStaticWord(builder, caseReturnLoc, ctx, abiReturnLayout, val) : val;
+                            builder.create<sir::StoreOp>(caseReturnLoc, ptr, stored);
                             builder.create<sir::ReturnOp>(caseReturnLoc, ptr, size);
                         }
                         else
                         {
-                            Value z = builder.create<sir::ConstOp>(caseReturnLoc, u256Type, IntegerAttr::get(i64Type, 0));
+                            Value z = lowering::constU256(builder, caseReturnLoc, 0);
                             Value pz = builder.create<sir::BitcastOp>(caseReturnLoc, ptrType, z);
                             builder.create<sir::ReturnOp>(caseReturnLoc, pz, z);
                         }

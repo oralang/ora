@@ -1,0 +1,21 @@
+// INPUT: tests/sir_text/inputs/dispatcher_static_tuple_arg.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn main:
+// CHECK: switch selector {
+// CHECK: 0xE18D95B8 => @first_
+
+// CHECK-LABEL:     first_ {
+// CHECK: cdsize_first = calldatasize
+// CHECK: min_cdsize_2args_0 = const 0x43
+// CHECK: valid_first = lt min_cdsize_2args_0 cdsize_first
+// CHECK: => valid_first ? @first_exec : @revert_error
+
+// CHECK-LABEL:     first_exec {
+// CHECK: selector_offset_0 = const 0x4
+// CHECK: a_first = calldataload selector_offset_0
+// CHECK: v4 = const 0x40
+// CHECK: v5 = sallocany 0x40
+// CHECK: calldatacopy v5 selector_offset_0 v4
+// CHECK: icall @first v5
+// CHECK: return

@@ -4,5 +4,5 @@
 // CHECK-LABEL: func.func @multipleRefinements
 // CHECK-LABEL: func.func @transferWithConstraints
 // CHECK-LABEL: func.func @calculateWithConstraints
-// CHECK-LABEL: func.func @returnMultipleConstraints
+// CHECK-LABEL: func.func @returnWithConstraint
 // CHECK-LABEL: func.func @nestedConstraints

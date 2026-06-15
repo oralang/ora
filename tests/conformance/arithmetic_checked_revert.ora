@@ -1,0 +1,43 @@
+// Requires are boundary-enforced.
+comptime const std = @import("std");
+
+contract ArithmeticCheckedRevert {
+    pub fn add(a: u256, b: u256) -> u256
+        requires a <= 1000000
+        requires b <= 1000000
+    {
+        return a + b;
+    }
+
+    pub fn constant_add_overflow() -> u256 {
+        var adjustment: u256 = 0;
+        if (std.msg.sender() == std.constants.ZERO_ADDRESS) {
+            adjustment = 1;
+        }
+        let max_value: u256 = std.constants.U256_MAX - adjustment;
+        return max_value + 1;
+    }
+
+    pub fn div(a: u256, b: u256) -> u256
+        requires b != 0
+    {
+        return a / b;
+    }
+
+    fn private_div(a: u256, b: u256) -> u256
+        requires b != 0
+    {
+        return a / b;
+    }
+
+    pub fn call_private_div(a: u256, b: u256) -> u256 {
+        return private_div(a, b);
+    }
+
+    pub fn ordered_requires(a: u256, b: u256) -> u256
+        requires b != 0
+        requires a / b < 10
+    {
+        return a / b;
+    }
+}

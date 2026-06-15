@@ -1,1 +1,0 @@
-// AUTO-GENERATED. Do not edit by hand.\n// INPUT: ora-example/wip/max_features.ora\n// CHECK-NOT: builtin.unrealized_conversion_cast\n// CHECK: module\n

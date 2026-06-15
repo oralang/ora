@@ -15,7 +15,7 @@ contract LoopInvariants {
         
         while (i <= n)
             invariant sum >= 0
-            invariant sum <= 5050
+            invariant sum <= i * 100
             invariant i <= n + 1
         {
             sum = sum + i;
@@ -77,7 +77,7 @@ contract LoopInvariants {
         
         while (i <= base_n)
             invariant sum >= 0
-            invariant sum <= 5050
+            invariant sum <= i * 100
             invariant i <= base_n + 1
         {
             sum = sum + i;

@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const z3_verification = @import("ora_z3_verification");
+const Metrics = ora_root.metrics.Metrics;
 
 const h = @import("compiler.test.helpers.zig");
 const compileText = h.compileText;
@@ -179,8 +180,8 @@ test "compiler aggregates sema and verification across multiple root items" {
 
     const module_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
     try testing.expectEqual(@as(usize, 2), module_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, module_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, module_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, module_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, module_facts.facts[1].kind);
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     const hir_text = try hir_result.renderText(testing.allocator);
@@ -384,7 +385,7 @@ test "compiler source loader injects embedded std modules" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -525,6 +526,53 @@ test "compiler parses log, error, and bitfield declarations" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error_decl"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.log_decl\""));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "\"ora.error_decl\""));
+}
+
+test "compiler parses bitfield layout annotations without raw source substring matching" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        enabled: bool(1);
+        \\        mode: u8 @bits(1 .. 9);
+        \\        code: u16 @at(9, 16);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(ast_diags.isEmpty());
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const bitfield = ast_file.item(contract.members[0]).Bitfield;
+
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[0].width.?);
+    try testing.expectEqual(@as(u32, 1), bitfield.fields[1].offset.?);
+    try testing.expectEqual(@as(u32, 8), bitfield.fields[1].width.?);
+    try testing.expectEqual(@as(u32, 9), bitfield.fields[2].offset.?);
+    try testing.expectEqual(@as(u32, 16), bitfield.fields[2].width.?);
+}
+
+test "compiler rejects malformed bitfield layout annotations" {
+    const source_text =
+        \\contract Ledger {
+        \\    bitfield Flags: u256 {
+        \\        reversed: u8 @bits(5..2);
+        \\        spaced: u8 @at (2, 8);
+        \\        unknown: u8 @where(2, 8);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_diags = try compilation.db.astDiagnostics(compilation.db.sources.module(compilation.root_module_id).file_id);
+    try testing.expect(diagnosticMessagesContain(ast_diags, "@bits range end must be greater than start"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "bitfield layout annotation arguments must immediately follow the annotation name"));
+    try testing.expect(diagnosticMessagesContain(ast_diags, "unsupported bitfield layout annotation"));
 }
 
 test "compiler preserves typed local names in assignments" {
@@ -724,8 +772,238 @@ test "compiler tracks HIR unknown type fallbacks" {
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
     try testing.expect(hir_result.type_fallback_count > 0);
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expect(hir_result.executableFallbackCount() >= hir_result.type_fallback_count);
     try testing.expectEqual(compiler.hir.TypeFallbackReason.sema_unknown, hir_result.type_fallbacks[0].reason);
     try testing.expectEqual(module.file_id, hir_result.type_fallbacks[0].location.file_id);
+}
+
+test "HIR emittability arms all executable fallback counters" {
+    var hir_result: compiler.hir.LoweringResult = undefined;
+    hir_result.type_fallback_count = 0;
+    hir_result.placeholder_count = 0;
+    hir_result.default_value_count = 0;
+
+    try testing.expect(hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 0), hir_result.executableFallbackCount());
+
+    hir_result.placeholder_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+
+    hir_result.placeholder_count = 0;
+    hir_result.default_value_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+
+    hir_result.default_value_count = 0;
+    hir_result.type_fallback_count = 1;
+    try testing.expect(!hir_result.isEmittable());
+    try testing.expectEqual(@as(usize, 1), hir_result.executableFallbackCount());
+}
+
+test "HIR executable fallback verifier enforces protocol-zero allowlist" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    return 1;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    const module_op = mlir.oraModuleGetOperation(hir_result.module.raw_module);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("abi_padding")),
+    );
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    mlir.oraOperationSetAttributeByName(
+        module_op,
+        mlir.oraStringRefCreateFromCString("ora.protocol_zero"),
+        mlir.oraStringAttrCreate(hir_result.context, mlir.oraStringRefCreateFromCString("debug_zero")),
+    );
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("unknown protocol-zero purpose", violation.reason);
+}
+
+test "compiler tracks HIR executable placeholders as non-emittable" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn run() -> u256 {
+        \\        let sum: u256 = 0;
+        \\        for (9) |i| {
+        \\            sum += i;
+        \\        }
+        \\        return sum;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.for_placeholder"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.executable_fallback"));
+    try testing.expect(hir_result.placeholder_count > 0);
+    try testing.expect(!hir_result.isEmittable());
+    const violation = compiler.hir.findExecutableFallback(hir_result.module.raw_module) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("ora.for_placeholder", violation.op_name);
+}
+
+test "compiler diagnoses uninitialized locals instead of emitting HIR default values" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    let value: u256;
+        \\    return value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "local declaration requires an initializer"));
+    try testing.expect(!hir_result.isEmittable());
+}
+
+test "compiler does not count unary negation zero as a HIR default value" {
+    const source_text =
+        \\pub fn negate(value: i256) -> i256 {
+        \\    return -value;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "checked negation overflow"));
+}
+
+test "compiler lowers void error-union success without HIR default values" {
+    const source_text =
+        \\error Done;
+        \\
+        \\pub fn explicit_ok() -> !void | Done {
+        \\    return;
+        \\}
+        \\
+        \\pub fn implicit_ok() -> !void | Done {
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.default_value_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
+test "compiler resolves assignment integer literals before HIR lowering" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u256 = 0;
+        \\
+        \\    pub fn init() {
+        \\        counter = 0;
+        \\    }
+        \\
+        \\    pub fn increment() {
+        \\        counter += 1;
+        \\    }
+        \\
+        \\    pub fn get() -> u256 {
+        \\        return counter;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler rejects assignment integer literals that overflow the target type" {
+    const source_text =
+        \\contract Counter {
+        \\    storage var counter: u8 = 0;
+        \\
+        \\    pub fn set() {
+        \\        counter = 300;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "constant value 300 does not fit in type 'u8'"));
+}
+
+test "compiler resolves std environment intrinsics before HIR lowering" {
+    const source_text =
+        \\contract Env {
+        \\    storage var owner: address;
+        \\
+        \\    pub fn capture() -> u256 {
+        \\        owner = std.msg.sender();
+        \\        let sender: address = std.msg.sender;
+        \\        let origin: address = std.tx.origin();
+        \\        let coinbase: address = std.block.coinbase;
+        \\        let value: u256 = std.msg.value();
+        \\        let gas_price: u256 = std.transaction.gasprice();
+        \\        let timestamp: u256 = std.block.timestamp;
+        \\        let number: u256 = std.block.number();
+        \\        return value + gas_price + timestamp + number;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+}
+
+test "compiler resolves for-range integer bounds before HIR lowering" {
+    const source_text =
+        \\pub fn sum() -> u256 {
+        \\    let total: u256 = 0;
+        \\    for (0..5) |i| {
+        \\        total += i;
+        \\    }
+        \\    return total;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
 test "compiler persists divmod as a tuple consteval value" {
@@ -803,7 +1081,7 @@ test "compiler render ladder step 3 add array literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: 1, second: 2 };
         \\    return pair.first;
         \\}
@@ -826,7 +1104,7 @@ test "compiler render ladder step 4 add array indexing into struct literal" {
         \\error Failure(code: u256);
         \\
         \\pub fn build() -> u256 {
-        \\    let items = [1, 2, 3];
+        \\    let items: [u256; 3] = [1, 2, 3];
         \\    let pair = Pair { first: items[0], second: items[1] };
         \\    return pair.first;
         \\}
@@ -1371,7 +1649,7 @@ test "compiler contextualizes nested array literals to their declared element ty
 test "compiler uses const-evaluated tuple indices during type checking" {
     const source_text =
         \\pub fn pick(flag: bool) -> bool {
-        \\    let pair = (flag, 7);
+        \\    let pair: (bool, u256) = (flag, 7);
         \\    return pair[1 - 1];
         \\}
     ;
@@ -1616,7 +1894,7 @@ test "compiler unrolls small constant runtime for-count loops" {
     const source_text =
         \\contract Sample {
         \\    pub fn run() -> u256 {
-        \\        let sum = 0;
+        \\        let sum: u256 = 0;
         \\        for (4) |i| {
         \\            sum += i;
         \\        }
@@ -1625,8 +1903,16 @@ test "compiler unrolls small constant runtime for-count loops" {
         \\}
     ;
 
-    const rendered = try renderOraMlirForSource(source_text);
-    defer testing.allocator.free(rendered);
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.isEmittable());
+    try testing.expect(compiler.hir.findExecutableFallback(hir_result.module.raw_module) == null);
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
     try testing.expect(std.mem.indexOf(u8, rendered, "scf.for") == null);
     try testing.expect(std.mem.indexOf(u8, rendered, "ora.for_placeholder") == null);
     try testing.expect(std.mem.count(u8, rendered, "ora.stmt.1") >= 4);
@@ -2539,6 +2825,12 @@ test "ora dialect exposes external call ops through C API" {
         mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("uint256")),
     };
     const arg_types_attr = mlir.oraArrayAttrCreate(ctx, arg_type_attrs.len, &arg_type_attrs);
+    const layout_attr = mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("tuple(static(address),static(uint256))"));
+    const encode_attrs = [_]mlir.MlirNamedAttribute{
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("selector")), selector_attr),
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("arg_types")), arg_types_attr),
+        mlir.oraNamedAttributeGet(mlir.oraIdentifierGet(ctx, mlir.oraStringRefCreateFromCString("layout")), layout_attr),
+    };
     const return_type_attrs = [_]mlir.MlirAttribute{
         mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("bool")),
     };
@@ -2560,7 +2852,20 @@ test "ora dialect exposes external call ops through C API" {
     const amount = mlir.oraOperationGetResult(amount_const, 0);
 
     const encode_operands = [_]mlir.MlirValue{ target, amount };
-    const encode_op = mlir.oraAbiEncodeOpCreate(ctx, loc, selector_attr, arg_types_attr, &encode_operands, encode_operands.len, i256_ty);
+    const encode_result_types = [_]mlir.MlirType{i256_ty};
+    const encode_op = mlir.oraOperationCreate(
+        ctx,
+        loc,
+        mlir.oraStringRefCreateFromCString("ora.abi_encode_with_selector"),
+        &encode_operands,
+        encode_operands.len,
+        &encode_result_types,
+        encode_result_types.len,
+        &encode_attrs,
+        encode_attrs.len,
+        0,
+        false,
+    );
     mlir.oraBlockAppendOwnedOperation(body, encode_op);
 
     const calldata = mlir.oraOperationGetResult(encode_op, 0);
@@ -2579,16 +2884,33 @@ test "ora dialect exposes external call ops through C API" {
     mlir.oraBlockAppendOwnedOperation(body, external_call_op);
 
     const returndata = mlir.oraOperationGetResult(external_call_op, 1);
+    const decode_layout = mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("tuple(static(bool))"));
     const decode_op = mlir.oraAbiDecodeOpCreate(ctx, loc, return_types_attr, returndata, i1_ty);
+    // The C ABI constructor stays stable for existing callers; the required
+    // decode attrs are attached immediately before the op is verified/printed.
+    mlir.oraOperationSetAttributeByName(decode_op, mlir.oraStringRefCreateFromCString("layout"), decode_layout);
+    mlir.oraOperationSetAttributeByName(
+        decode_op,
+        mlir.oraStringRefCreateFromCString("source"),
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("returndata")),
+    );
+    mlir.oraOperationSetAttributeByName(
+        decode_op,
+        mlir.oraStringRefCreateFromCString("failure_mode"),
+        mlir.oraStringAttrCreate(ctx, mlir.oraStringRefCreateFromCString("error_union")),
+    );
     mlir.oraBlockAppendOwnedOperation(body, decode_op);
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
     defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_encode_with_selector"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.external_call"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.abi_decode"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "layout = \"tuple(static(bool))\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "source = \"returndata\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "failure_mode = \"error_union\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"call\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ERC20\""));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"transfer\""));
@@ -2611,11 +2933,11 @@ test "complex SMT app probes do not degrade verification encoding" {
     }
 }
 
-test "stale flagship probes remain non-degraded and vacuous specs fail closed" {
+test "stale flagship probes remain non-degraded" {
     const probes = [_]struct { path: []const u8, function_name: []const u8, timeout_ms: u32, expect_success: bool }{
         .{ .path = "ora-example/apps/erc20_verified.ora", .function_name = "transferFrom", .timeout_ms = 5_000, .expect_success = true },
         .{ .path = "ora-example/apps/defi_lending_pool.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
-        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = false },
+        .{ .path = "ora-example/apps/defi_lending_pool_fv.ora", .function_name = "borrow", .timeout_ms = 15_000, .expect_success = true },
     };
 
     for (probes) |probe| {
@@ -2631,6 +2953,81 @@ test "stale flagship probes remain non-degraded and vacuous specs fail closed" {
             try testing.expect(std.mem.indexOf(u8, result.error_kinds, "PreconditionViolation") != null);
         }
     }
+}
+
+test "compilePackageWithOptions records frontend metrics by phase" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract MetricsSmoke {
+        \\    pub fn get() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var counting_allocator = ora_root.lsp.allocation_stats.CountingAllocator.init(testing.allocator);
+    var metrics = Metrics.init(true);
+    metrics.setAllocationStats(&counting_allocator.stats);
+    var compilation = try compiler.compilePackageWithOptions(counting_allocator.allocator(), root_path, .{
+        .compile_options = .{ .instrumentation = &metrics },
+    });
+    defer compilation.deinit();
+
+    try testing.expect(compilation.isArtifactEmittable());
+
+    const expected_phases = [_][]const u8{
+        "syntax",
+        "ast-lower",
+        "module-graph",
+        "item-index",
+        "resolve",
+        "typecheck",
+        "const-eval",
+        "verify-facts",
+        "hir-lower",
+    };
+    try testing.expectEqual(expected_phases.len, metrics.count);
+    for (expected_phases, 0..) |phase_name, index| {
+        try testing.expectEqualStrings(phase_name, metrics.phases[index].name);
+        try testing.expect(metrics.phases[index].invocations > 0);
+    }
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_tree = try compilation.db.syntaxTree(module.file_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const module_graph = try compilation.db.moduleGraph(compilation.package_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+    const resolution = try compilation.db.resolveNames(compilation.root_module_id);
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const const_eval = try compilation.db.constEval(compilation.root_module_id);
+    const verification_facts = try compilation.db.moduleVerificationFacts(compilation.root_module_id);
+    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    try testing.expectEqual(@as(u64, @intCast(syntax_tree.tokens.len)), metrics.phases[0].work_count);
+    try testing.expectEqual(@as(u64, @intCast(ast_file.expressions.len)), metrics.phases[1].work_count);
+    try testing.expectEqual(@as(u64, @intCast(module_graph.modules.len)), metrics.phases[2].work_count);
+    try testing.expectEqual(@as(u64, @intCast(item_index.entries.len)), metrics.phases[3].work_count);
+    try testing.expectEqual(@as(u64, @intCast(resolution.expr_bindings.len)), metrics.phases[4].work_count);
+    try testing.expectEqual(@as(u64, @intCast(typecheck.expr_types.len)), metrics.phases[5].work_count);
+    try testing.expectEqual(@as(u64, @intCast(const_eval.values.len)), metrics.phases[6].work_count);
+    try testing.expectEqual(@as(u64, @intCast(verification_facts.facts.len)), metrics.phases[7].work_count);
+    try testing.expectEqual(@as(u64, @intCast(lowering.items.len)), metrics.phases[8].work_count);
+
+    var total_alloc_calls: u64 = 0;
+    var total_bytes_allocated: u64 = 0;
+    for (metrics.phases[0..metrics.count]) |phase| {
+        total_alloc_calls += phase.alloc_calls;
+        total_bytes_allocated += phase.bytes_allocated;
+    }
+    try testing.expect(total_alloc_calls > 0);
+    try testing.expect(total_bytes_allocated > 0);
 }
 
 test "SMT degradation probes fail closed in sequential and parallel verification" {

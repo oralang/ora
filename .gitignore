@@ -19,6 +19,15 @@ _targets_backup/
 # Ora dialect build artifacts (generated during compilation)
 vendor/ora-dialect-build/
 vendor/sir-dialect-build/
+vendor/ora-dialect-build-asan/
+vendor/ora-dialect-build-ubsan/
+vendor/ora-dialect-build-asan-ubsan/
+vendor/sir-dialect-build-asan/
+vendor/sir-dialect-build-ubsan/
+vendor/sir-dialect-build-asan-ubsan/
+vendor/mlir-asan/
+vendor/mlir-ubsan/
+vendor/mlir-asan-ubsan/
 
 docs/issues/
 
@@ -32,5 +41,10 @@ docs/
 
 tmp/
 artifacts/
+outside-pr/
 zig-out/
 .*/
+
+# Python bytecode (scripts/ helpers)
+__pycache__/
+*.pyc

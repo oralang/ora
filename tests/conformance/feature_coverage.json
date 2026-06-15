@@ -1,0 +1,537 @@
+{
+  "version": 1,
+  "description": "Feature coverage map. Every runtime language feature listed here must have at least one EXECUTED conformance spec (bytecode run on lib/evm). Features whose correct behavior is compile-time rejection may instead list negative expected-diagnostic specs. Otherwise an explicit skip reason is required.",
+  "ci_commands": [
+    "zig build check-feature-execution-coverage",
+    "zig build check-negative-corpus",
+    "zig build test-conformance",
+    "zig build gate"
+  ],
+  "features": [
+    {
+      "id": "dispatcher.static_scalar_args",
+      "area": "dispatcher_abi",
+      "behavior": "Public function with address/uint256 args decodes calldata and executes",
+      "specs": [
+        "tests/conformance/counter.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.constructor_args",
+      "area": "dispatcher_abi",
+      "behavior": "Constructor args are ABI-decoded at deploy and initialize storage",
+      "specs": [
+        "tests/conformance/counter.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.string_arg",
+      "area": "dispatcher_abi",
+      "behavior": "Dynamic string calldata arg is bounds-checked, copied, and usable",
+      "specs": [
+        "tests/conformance/dispatcher_string_arg.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_array_arg",
+      "area": "dispatcher_abi",
+      "behavior": "uint256[] calldata arg decodes with correct length and elements",
+      "specs": [
+        "tests/conformance/dispatcher_dynamic_array_arg.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_tuple_arg",
+      "area": "dispatcher_abi",
+      "behavior": "Dynamic tuple calldata arg decodes head/tail correctly",
+      "specs": [
+        "tests/conformance/dispatcher_dynamic_tuple_arg.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_return_aggregates",
+      "area": "dispatcher_abi",
+      "behavior": "Dynamic aggregate returns are ABI-encoded (offset/length/payload)",
+      "specs": [
+        "tests/conformance/dispatcher_dynamic_return_aggregates.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.dynamic_string_return",
+      "area": "dispatcher_abi",
+      "behavior": "Dynamic string return decodes on the caller side",
+      "specs": [
+        "tests/conformance/external_return_decode.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.error_union_revert_selector",
+      "area": "dispatcher_abi",
+      "behavior": "Error-union error path REVERTs with the 4-byte custom error selector",
+      "specs": [
+        "tests/conformance/dispatcher_error_union_revert.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.narrow_error_union_return",
+      "area": "dispatcher_abi",
+      "behavior": "Narrow error-union dispatcher returns preserve bool Ok values and custom-error reverts",
+      "specs": [
+        "tests/conformance/dispatcher_narrow_error_union_return.spec.toml"
+      ]
+    },
+    {
+      "id": "dispatcher.abi_roundtrip_static_types",
+      "area": "dispatcher_abi",
+      "behavior": "encode->call->decode identity for u256/i16/address/bool/bytes4/uint256[]",
+      "specs": [
+        "tests/conformance/properties.zig#checkAbiRoundtripProperty"
+      ]
+    },
+    {
+      "id": "dispatcher.value_transfer",
+      "area": "dispatcher_abi",
+      "behavior": "Non-payable by default: dispatcher REVERTs (0,0) on nonzero call value before selector dispatch; std.msg.value() reads 0 on the zero path. No payable surface yet",
+      "specs": [
+        "tests/conformance/value_transfer.spec.toml"
+      ]
+    },
+    {
+      "id": "abi.source_encode_decode_roundtrip",
+      "area": "abi_builtins",
+      "behavior": "Contract-side @abiEncode/@abiDecode roundtrip is the identity",
+      "specs": [
+        "tests/conformance/properties.zig#checkSourceAbiEncodeRoundtripProperty"
+      ]
+    },
+    {
+      "id": "storage.scalar_u256",
+      "area": "storage",
+      "behavior": "Scalar storage read/write with raw-slot parity",
+      "specs": [
+        "tests/conformance/counter.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.mapping_address_key",
+      "area": "storage",
+      "behavior": "map<address,V> store/load with keccak slot parity",
+      "specs": [
+        "tests/conformance/storage_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.mapping_u256_key",
+      "area": "storage",
+      "behavior": "map<u256,V> store/load with keccak slot parity",
+      "specs": [
+        "tests/conformance/storage_u256_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.mapping_string_key",
+      "area": "storage",
+      "behavior": "map<string,V> store/load",
+      "specs": [
+        "tests/conformance/storage_string_key_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.mapping_fixed_bytes_key",
+      "area": "storage",
+      "behavior": "map<bytesN,V> store/load",
+      "specs": [
+        "tests/conformance/storage_fixed_bytes_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.mapping_narrow_int_key",
+      "area": "storage",
+      "behavior": "map with narrow integer key normalizes key width correctly",
+      "specs": [
+        "tests/conformance/storage_narrow_integer_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.nested_mapping",
+      "area": "storage",
+      "behavior": "map<K1,map<K2,V>> double-keccak slot derivation",
+      "specs": [
+        "tests/conformance/storage_nested_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.triple_nested_mapping",
+      "area": "storage",
+      "behavior": "Triple-nested map slot derivation",
+      "specs": [
+        "tests/conformance/storage_triple_nested_mapping.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.map_to_struct",
+      "area": "storage",
+      "behavior": "Struct values under a map: field offsets within derived slot",
+      "specs": [
+        "tests/conformance/storage_map_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.nested_map_to_struct",
+      "area": "storage",
+      "behavior": "Struct values under nested maps",
+      "specs": [
+        "tests/conformance/storage_nested_map_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.struct_scalar_fields",
+      "area": "storage",
+      "behavior": "Top-level storage struct field slots",
+      "specs": [
+        "tests/conformance/storage_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.struct_static_array",
+      "area": "storage",
+      "behavior": "Static array field inside a storage struct",
+      "specs": [
+        "tests/conformance/storage_struct_static_array.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.bitfield",
+      "area": "storage",
+      "behavior": "Packed bitfield read/modify/write within one slot",
+      "specs": [
+        "tests/conformance/storage_bitfield.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.custom_bitfield",
+      "area": "storage",
+      "behavior": "Custom-width bitfield packing",
+      "specs": [
+        "tests/conformance/storage_custom_bitfield.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.map_to_bitfield",
+      "area": "storage",
+      "behavior": "Bitfield values under a map",
+      "specs": [
+        "tests/conformance/storage_map_bitfield.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.dynamic_array",
+      "area": "storage",
+      "behavior": "Storage dynamic array push/index with length slot + keccak data root",
+      "specs": [
+        "tests/conformance/storage_dynamic_array.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.slice_of_structs",
+      "area": "storage",
+      "behavior": "Dynamic array of fixed structs (uint256,uint256,uint256)[] stores at keccak(slot) base with correct per-element offsets; get_middle reads back",
+      "specs": [
+        "tests/conformance/storage_slice_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.slice_of_dynamic_structs",
+      "area": "storage",
+      "behavior": "Dynamic array of structs containing a dynamic array (uint256,uint256[],uint256)[] resolves nested keccak-rooted layout for inner slices",
+      "specs": [
+        "tests/conformance/storage_slice_dynamic_struct.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.store_load_roundtrip_property",
+      "area": "storage",
+      "behavior": "store(slot,x) -> load(slot) == x across diverse slots",
+      "specs": [
+        "tests/conformance/properties.zig#checkStorageProperty"
+      ]
+    },
+    {
+      "id": "error_union.local_narrow_paths",
+      "area": "error_union",
+      "behavior": "Local narrow error union: Ok and Err paths via try/unwrap/catch",
+      "specs": [
+        "tests/conformance/properties.zig#checkErrorUnionProperty"
+      ]
+    },
+    {
+      "id": "error_union.storage_result_scalar",
+      "area": "error_union",
+      "behavior": "Result<scalar> stored and re-read from storage",
+      "specs": [
+        "tests/conformance/storage_result_scalar.spec.toml"
+      ]
+    },
+    {
+      "id": "error_union.storage_result_dynamic_string",
+      "area": "error_union",
+      "behavior": "Result<string> in storage with keccak-rooted dynamic payload",
+      "specs": [
+        "tests/conformance/storage_result_dynamic_string.spec.toml"
+      ]
+    },
+    {
+      "id": "error_union.storage_result_dynamic_bytes",
+      "area": "error_union",
+      "behavior": "Result<bytes> in storage",
+      "specs": [
+        "tests/conformance/storage_result_dynamic_bytes.spec.toml"
+      ]
+    },
+    {
+      "id": "error_union.storage_result_dynamic_slice",
+      "area": "error_union",
+      "behavior": "Result<slice> in storage",
+      "specs": [
+        "tests/conformance/storage_result_dynamic_slice.spec.toml"
+      ]
+    },
+    {
+      "id": "error_union.wide_carrier",
+      "area": "error_union",
+      "behavior": "Wide (>255-bit struct) success payload through local error union; Ok and Err/catch paths executed",
+      "specs": [
+        "tests/conformance/error_union_wide_carrier.spec.toml"
+      ]
+    },
+    {
+      "id": "error_union.local_aggregate_result",
+      "area": "error_union",
+      "behavior": "Local Result<string>: try Ok/Err paths, match extraction, tuple-from-match content, and tuple-return-in-catch content executed",
+      "specs": [
+        "tests/conformance/error_union_local_aggregate.spec.toml"
+      ]
+    },
+    {
+      "id": "local.result_memref_scalar",
+      "area": "local_memory",
+      "behavior": "Local Result with scalar payload through memref-backed locals",
+      "specs": [
+        "tests/conformance/result_memref_scalar.spec.toml"
+      ]
+    },
+    {
+      "id": "local.result_memref_opaque",
+      "area": "local_memory",
+      "behavior": "Local Result with opaque payload through memref-backed locals",
+      "specs": [
+        "tests/conformance/result_memref_opaque.spec.toml"
+      ]
+    },
+    {
+      "id": "events.multifield_log_layout",
+      "area": "events",
+      "behavior": "Multi-field event (address, uint256) layout: topics vs data packing on the wire",
+      "specs": [
+        "tests/conformance/events_multifield.spec.toml"
+      ]
+    },
+    {
+      "id": "events.log_topics_and_data",
+      "area": "events",
+      "behavior": "log statement emits expected topics and ABI-encoded data",
+      "specs": [
+        "tests/conformance/environment_log.spec.toml"
+      ]
+    },
+    {
+      "id": "environment.builtins",
+      "area": "environment",
+      "behavior": "Environment builtins (sender etc.) return host-provided values",
+      "specs": [
+        "tests/conformance/environment_log.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.wrapping_ops",
+      "area": "arithmetic",
+      "behavior": "Wrapping add/sub/mul match u256 reference semantics",
+      "specs": [
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ]
+    },
+    {
+      "id": "arithmetic.signed_division_comparison",
+      "area": "arithmetic",
+      "behavior": "Signed narrow division and comparison match reference semantics",
+      "specs": [
+        "tests/conformance/properties.zig#checkArithmeticProperty"
+      ]
+    },
+    {
+      "id": "arithmetic.unprovable_overflow_rejected",
+      "area": "arithmetic",
+      "behavior": "Unconstrained checked arithmetic that the verifier cannot prove safe is rejected at compile time with no bytecode artifact",
+      "negative_specs": [
+        "tests/negative/unprovable_overflow.ora"
+      ]
+    },
+    {
+      "id": "verification.falsification_pairing",
+      "area": "verification",
+      "behavior": "Execution falsification: verified arithmetic, map-storage, map-frame, error-union Ok, loop-invariant, and storage-backed branch postconditions are checked at runtime on in-envelope boundary inputs, pairing verifier discharge with concrete execution to catch a false-UNSAT",
+      "specs": [
+        "tests/conformance/falsification_arith.spec.toml",
+        "tests/conformance/falsification_map_effect.spec.toml",
+        "tests/conformance/falsification_map_frame.spec.toml",
+        "tests/conformance/falsification_error_union_ok.spec.toml",
+        "tests/conformance/falsification_loop_invariant.spec.toml",
+        "tests/conformance/falsification_storage_branch.spec.toml"
+      ]
+    },
+    {
+      "id": "arithmetic.checked_arith_runtime_behavior",
+      "area": "arithmetic",
+      "behavior": "Retained checked-add assert reverts on real overflow; CHARACTERIZATION pins: requires not boundary-enforced, discharged div-zero check removed (silent 0) - known finding with audit",
+      "specs": [
+        "tests/conformance/arithmetic_checked_revert.spec.toml"
+      ]
+    },
+    {
+      "id": "control_flow.runtime_loop",
+      "area": "control_flow",
+      "behavior": "Runtime-bound loop over slice executes correct iteration count",
+      "specs": [
+        "tests/conformance/properties.zig#sum_slice"
+      ]
+    },
+    {
+      "id": "control_flow.switch_execution",
+      "area": "control_flow",
+      "behavior": "switch over runtime value takes each literal arm and else",
+      "specs": [
+        "tests/conformance/switch_execution.spec.toml"
+      ]
+    },
+    {
+      "id": "refinements.runtime_guard_revert",
+      "area": "refinements",
+      "behavior": "MinValue/InRange refinement params: in-range args execute, violating args REVERT at the boundary guard",
+      "specs": [
+        "tests/conformance/refinement_guard_revert.spec.toml"
+      ]
+    },
+    {
+      "id": "traits.monomorphized_methods",
+      "area": "traits_generics",
+      "behavior": "Contract functions can call concrete trait impl receiver methods, including nested self-calls inside the impl body",
+      "specs": [
+        "tests/conformance/trait_impl_contract_call.spec.toml"
+      ]
+    },
+    {
+      "id": "generics.comptime_instantiation",
+      "area": "traits_generics",
+      "behavior": "Monomorphized comptime-generic fn (u256 and u8 instances) driven at runtime; fully-folded call returns the comptime result",
+      "specs": [
+        "tests/conformance/generic_instantiation.spec.toml"
+      ]
+    },
+    {
+      "id": "comptime.constant_folding_observable",
+      "area": "comptime",
+      "behavior": "comptime const expressions fold and are observable via the ABI, alone and mixed with runtime args",
+      "specs": [
+        "tests/conformance/comptime_observable.spec.toml"
+      ]
+    },
+    {
+      "id": "enums.storage_roundtrip",
+      "area": "adt_enums",
+      "behavior": "Enum stored, re-read, compared; ordinal raw-slot parity",
+      "specs": [
+        "tests/conformance/enum_storage_roundtrip.spec.toml"
+      ]
+    },
+    {
+      "id": "adt.payload_match_execution",
+      "area": "adt_enums",
+      "behavior": "Payload-carrying enum variants are constructed, matched, destructured by positional and named fields, and returned through executed bytecode",
+      "specs": [
+        "tests/conformance/adt_payload_match.spec.toml"
+      ]
+    },
+    {
+      "id": "locks.guard_revert_on_locked_write",
+      "area": "locks",
+      "behavior": "tstore.guard REVERTs an indirect write to a locked map slot at runtime; disjoint-slot write under lock succeeds",
+      "specs": [
+        "tests/conformance/lock_guard_revert.spec.toml"
+      ]
+    },
+    {
+      "id": "locks.reentrancy_guard_cross_contract",
+      "area": "locks",
+      "behavior": "@lock rejects a re-entrant cross-contract entry before the inner call can commit state",
+      "specs": [
+        "tests/conformance/reentrancy_lock_guard.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.combinatorial_map_struct_array",
+      "area": "storage",
+      "behavior": "Struct with a static-array field stored under a map: array-offset within struct within map-derived slot, with raw-slot parity and key independence",
+      "specs": [
+        "tests/conformance/storage_map_struct_array.spec.toml"
+      ]
+    },
+    {
+      "id": "adversarial.calldata_decode",
+      "area": "adversarial",
+      "behavior": "Hostile raw calldata against the dispatcher decode surface (unknown selector, truncated args, out-of-bounds dynamic offsets, non-canonical bool/address/fixed-bytes/signed-narrow scalar/array/tuple fields, nested dynamic tuple tails, and non-canonical static elements inside nested dynamic tuple arrays) must revert, never accept-and-misbehave",
+      "specs": [
+        "tests/conformance/adversarial_calldata.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.vault_error_union_flow",
+      "area": "full_app",
+      "behavior": "Multi-caller vault scenario over ora-example/vault/02_errors.ora: deposits, partial withdraw, per-caller balances, total, ZeroAmount and payload-carrying InsufficientBalance revert paths",
+      "specs": [
+        "tests/conformance/app_vault_errors.spec.toml"
+      ]
+    },
+    {
+      "id": "tuples.static_return",
+      "area": "tuples",
+      "behavior": "Static tuple returns (uint,uint) and (uint,bool) ABI-encode correctly",
+      "specs": [
+        "tests/conformance/tuple_static_return.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.erc20_flow",
+      "area": "full_app",
+      "behavior": "ERC-20 (full_token) realistic flow: init supply, transfer, approve, transferFrom, balance/allowance reads \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_full_token.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.amm_pool",
+      "area": "full_app",
+      "behavior": "AMM pool: addLiquidity (shares==amountA), reserves/shares reads, swap executes \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_amm_pool.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.staking",
+      "area": "full_app",
+      "behavior": "Staking: stake, getStake/getTotalStaked, unstake, claimRewards \u2014 gas benchmark + execution coverage",
+      "specs": [
+        "tests/conformance/app_staking.spec.toml"
+      ]
+    }
+  ]
+}

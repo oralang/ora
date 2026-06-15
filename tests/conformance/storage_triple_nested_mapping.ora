@@ -1,0 +1,11 @@
+contract TripleNestedMappingStorageSmoke {
+    storage var limits: map<address, map<address, map<address, u256>>>;
+
+    pub fn set_limit(owner: address, spender: address, asset: address, amount: u256) {
+        limits[owner][spender][asset] = amount;
+    }
+
+    pub fn get_limit(owner: address, spender: address, asset: address) -> u256 {
+        return limits[owner][spender][asset];
+    }
+}

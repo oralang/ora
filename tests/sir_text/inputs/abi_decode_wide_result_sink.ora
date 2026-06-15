@@ -1,0 +1,17 @@
+contract AbiDecodeWideResultSink {
+    pub fn roundtrip(x: u256) -> u256 {
+        let decoded = @abiDecode(u256, @abiEncode(x));
+        return match (decoded) {
+            Ok(value) => value,
+            Err(_) => 0,
+        };
+    }
+
+    pub fn malformed(payload: bytes) -> u256 {
+        let decoded = @abiDecode(u256, payload);
+        return match (decoded) {
+            Ok(_) => 0,
+            Err(_) => 1,
+        };
+    }
+}

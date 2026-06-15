@@ -213,6 +213,8 @@ test "compiler syntax parses guard clauses alongside requires and ensures" {
         \\    requires values >= 0
         \\    guard values < 100
         \\    ensures result >= 0
+        \\    ensures_ok result == values
+        \\    ensures_err values == 0
         \\{
         \\    return values;
         \\}
@@ -230,8 +232,43 @@ test "compiler syntax parses guard clauses alongside requires and ensures" {
     const requires_clause = nthChildNodeOfKind(function.?, .SpecClause, 0);
     const guard_clause = nthChildNodeOfKind(function.?, .SpecClause, 1);
     const ensures_clause = nthChildNodeOfKind(function.?, .SpecClause, 2);
+    const ensures_ok_clause = nthChildNodeOfKind(function.?, .SpecClause, 3);
+    const ensures_err_clause = nthChildNodeOfKind(function.?, .SpecClause, 4);
     try testing.expect(requires_clause != null);
     try testing.expect(guard_clause != null);
+    try testing.expect(ensures_clause != null);
+    try testing.expect(ensures_ok_clause != null);
+    try testing.expect(ensures_err_clause != null);
+}
+
+test "compiler syntax parses modifies as reserved spec clause" {
+    const source_text =
+        \\contract Vault {
+        \\    storage var total: u256 = 0;
+        \\
+        \\    pub fn run(value: u256)
+        \\        modifies total, pending
+        \\        ensures total >= value
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    const contract = nthChildNodeOfKind(root, .ContractItem, 0);
+    try testing.expect(contract != null);
+    const function = nthChildNodeOfKind(contract.?, .FunctionItem, 0);
+    try testing.expect(function != null);
+
+    const modifies_clause = nthChildNodeOfKind(function.?, .SpecClause, 0);
+    const ensures_clause = nthChildNodeOfKind(function.?, .SpecClause, 1);
+    try testing.expect(modifies_clause != null);
     try testing.expect(ensures_clause != null);
 }
 

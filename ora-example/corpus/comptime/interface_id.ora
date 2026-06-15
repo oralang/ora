@@ -1,0 +1,26 @@
+comptime const interfaces = @import("std/interfaces");
+
+trait ERC165 {
+    fn supportsInterface(self, interface_id: bytes4) -> bool;
+}
+
+trait ERC20Mini {
+    fn balanceOf(self, owner: address) -> u256;
+    fn transfer(self, to: address, value: u256) -> bool;
+}
+
+contract InterfaceIdCorpus {
+    pub fn erc165_id() -> bytes4 {
+        return comptime {
+            const id: bytes4 = interfaces.interfaceId(ERC165);
+            id;
+        };
+    }
+
+    pub fn mini_id() -> bytes4 {
+        return comptime {
+            const id: bytes4 = interfaces.interfaceId(ERC20Mini);
+            id;
+        };
+    }
+}

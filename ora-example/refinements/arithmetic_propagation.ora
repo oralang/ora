@@ -63,10 +63,10 @@ contract RefinementArithmetic {
         return x + y;
     }
 
-    pub fn test_scaled_mixed(x: Scaled<u256, 18>) -> Scaled<u256, 18>
+    pub fn test_scaled_mixed(x: Scaled<u256, 18>) -> u256
         requires(x <= std.constants.U256_MAX - 1000000000000000000)
     {
-        // Scaled<u256, 18> + u256 = Scaled<u256, 18> (scale preserved)
+        // Scaled<u256, 18> + plain u256 drops the scaled carrier type.
         let y: u256 = 1000000000000000000; // 1e18
         return x + y;
     }

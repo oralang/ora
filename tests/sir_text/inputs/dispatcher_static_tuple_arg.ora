@@ -1,0 +1,5 @@
+contract DispatcherStaticTupleArg {
+    pub fn first(t: (u256, address)) -> u256 {
+        return t.0;
+    }
+}

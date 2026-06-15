@@ -1,0 +1,9 @@
+contract Vault {
+    storage balances: map<address, u256>;
+    storage users: map<u256, address>;
+
+    pub fn complex(i: u256)
+        modifies balances[users[i]]
+    {
+    }
+}

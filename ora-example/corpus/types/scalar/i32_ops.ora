@@ -1,8 +1,12 @@
+comptime const std = @import("std");
+
 contract I32Ops {
     storage var a: i32;
     storage var b: i32;
 
-    pub fn arithmetic(x: i32, y: i32) -> i32 {
+    pub fn arithmetic(x: i32, y: i32) -> i32
+        requires(x != std.constants.I32_MIN)
+    {
         let add: i32 = x +% y;
         let sub: i32 = x -% y;
         let mul: i32 = x *% y;

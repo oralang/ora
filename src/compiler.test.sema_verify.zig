@@ -26,7 +26,7 @@ const diagnosticMessagesContain = h.diagnosticMessagesContain;
 const countDiagnosticMessages = h.countDiagnosticMessages;
 const DiagnosticProbePhase = h.DiagnosticProbePhase;
 const expectDiagnosticProbeContains = h.expectDiagnosticProbeContains;
-const containsEffectSlot = h.containsEffectSlot;
+const containsFieldEffectSlot = h.containsFieldEffectSlot;
 const containsKeyedEffectSlot = h.containsKeyedEffectSlot;
 const nthDescendantNodeOfKind = h.nthDescendantNodeOfKind;
 const nthDescendantNodeOfKindInner = h.nthDescendantNodeOfKindInner;
@@ -52,6 +52,412 @@ test "compiler lowers ensures on implicit void returns" {
     const ensures_index = std.mem.indexOf(u8, hir_text, "ora.ensures") orelse return error.TestUnexpectedResult;
     const return_index = std.mem.indexOf(u8, hir_text, "ora.return") orelse return error.TestUnexpectedResult;
     try testing.expect(ensures_index < return_index);
+}
+
+test "compiler accepts v1 modifies storage paths" {
+    const source_text =
+        \\contract Vault {
+        \\    struct Config {
+        \\        owner: address,
+        \\    }
+        \\
+        \\    storage total: u256 = 0;
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\    storage buckets: map<u256, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn run(owner: address, spender: address, value: u256)
+        \\        modifies total
+        \\        modifies config.owner
+        \\        modifies balances[owner]
+        \\        modifies balances[msg.sender]
+        \\        modifies balances[tx.origin]
+        \\        modifies buckets[42]
+        \\        modifies allowances[owner][spender]
+        \\        ensures total == value
+        \\    {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn comma(owner: address)
+        \\        modifies balances[owner], total
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects unsupported modifies map keys fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\    storage users: map<u256, address>;
+        \\
+        \\    pub fn complex(i: u256)
+        \\        modifies balances[users[i]]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1"));
+}
+
+test "compiler rejects mixed indexed-field modifies paths fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    struct User {
+        \\        balance: u256,
+        \\    }
+        \\
+        \\    storage users: map<address, User>;
+        \\
+        \\    pub fn unsupported(owner: address)
+        \\        modifies users[owner].balance
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`"));
+}
+
+test "compiler rejects external storage modifies paths fail closed" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn external_name(owner: address)
+        \\        modifies caller_storage[owner]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn callee_name(owner: address)
+        \\        modifies callee_storage[owner]
+        \\    {
+        \\    }
+        \\
+        \\    pub fn external_storage_name(owner: address)
+        \\        modifies external_storage[owner]
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 3), countDiagnosticMessages(&typecheck.diagnostics, "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`"));
+}
+
+test "compiler enforces modifies declarations against storage writes" {
+    const source_text =
+        \\contract Vault {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage total: u256 = 0;
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies balances[owner], total, config.owner
+        \\    {
+        \\        balances[owner] = value;
+        \\        total = value;
+        \\        config.owner = owner;
+        \\    }
+        \\
+        \\    pub fn wrong_param(owner: address, other: address, value: u256)
+        \\        modifies balances[owner]
+        \\    {
+        \\        balances[other] = value;
+        \\    }
+        \\
+        \\    pub fn wrong_sender_origin(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        balances[tx.origin] = value;
+        \\    }
+        \\
+        \\    pub fn wrong_field(next_admin: address)
+        \\        modifies config.owner
+        \\    {
+        \\        config.admin = next_admin;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    var wrong_param: ?compiler.ast.ItemId = null;
+    var wrong_sender_origin: ?compiler.ast.ItemId = null;
+    var wrong_field: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        switch (ast_file.item(member_id).*) {
+            .Function => |function| {
+                if (std.mem.eql(u8, function.name, "wrong_param")) wrong_param = member_id;
+                if (std.mem.eql(u8, function.name, "wrong_sender_origin")) wrong_sender_origin = member_id;
+                if (std.mem.eql(u8, function.name, "wrong_field")) wrong_field = member_id;
+            },
+            else => {},
+        }
+    }
+    const other_key = [_]compiler.sema.KeySegment{.{ .parameter = 1 }};
+    const tx_origin_key = [_]compiler.sema.KeySegment{.{ .tx_origin = {} }};
+    const admin_field = [_][]const u8{"admin"};
+
+    switch (typecheck.itemEffect(wrong_param.?)) {
+        .reads_writes => |effect| try testing.expect(containsKeyedEffectSlot(effect.writes, "balances", .storage, &other_key)),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(wrong_sender_origin.?)) {
+        .reads_writes => |effect| try testing.expect(containsKeyedEffectSlot(effect.writes, "balances", .storage, &tx_origin_key)),
+        else => return error.TestUnexpectedResult,
+    }
+    switch (typecheck.itemEffect(wrong_field.?)) {
+        .writes => |effect| try testing.expect(containsFieldEffectSlot(effect.slots, "config", .storage, &admin_field)),
+        else => return error.TestUnexpectedResult,
+    }
+
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[other]' is not covered by this function's `modifies` clause"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[tx.origin]' is not covered by this function's `modifies` clause"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler matches modifies environment keys through direct uses and immutable local aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn direct(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        balances[std.msg.sender()] = value;
+        \\    }
+        \\
+        \\    pub fn aliased(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        balances[sender] = value;
+        \\    }
+        \\
+        \\    pub fn nested(spender: address, value: u256)
+        \\        modifies allowances[msg.sender][spender]
+        \\    {
+        \\        let owner: address = std.msg.sender();
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\
+        \\    pub fn origin(value: u256)
+        \\        modifies balances[tx.origin]
+        \\    {
+        \\        const origin: address = std.tx.origin();
+        \\        balances[origin] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler does not match modifies environment keys through mutable local aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        var sender: address = std.msg.sender();
+        \\        balances[sender] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'balances[?]' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler treats modifies empty form as no storage writes" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn ok(user: address) -> u256
+        \\        modifies()
+        \\    {
+        \\        return balances[user];
+        \\    }
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies()
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'total' is not covered by this function's `modifies` clause"));
+}
+
+test "compiler rejects modifies empty form combined with non-empty clauses" {
+    const source_text =
+        \\contract Vault {
+        \\    storage total: u256 = 0;
+        \\
+        \\    pub fn bad(value: u256)
+        \\        modifies()
+        \\        modifies total
+        \\    {
+        \\        total = value;
+        \\    }
+        \\
+        \\    pub fn also_bad(value: u256)
+        \\        modifies total
+        \\        modifies()
+        \\    {
+        \\        total = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(&typecheck.diagnostics, "`modifies()` cannot be combined with non-empty `modifies` clauses"));
+}
+
+test "compiler lowers checked modifies declarations into HIR metadata" {
+    const source_text =
+        \\contract Vault {
+        \\    struct Config {
+        \\        owner: address,
+        \\        admin: address,
+        \\    }
+        \\
+        \\    storage config: Config;
+        \\    storage balances: map<address, u256>;
+        \\    storage allowances: map<address, map<address, u256>>;
+        \\
+        \\    fn touch(owner: address, spender: address, value: u256)
+        \\        modifies config.owner, balances[owner], allowances[owner][spender]
+        \\    {
+        \\        config.owner = owner;
+        \\        balances[owner] = value;
+        \\        allowances[owner][spender] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const ast_file = try compilation.db.astFile(compilation.db.sources.module(compilation.root_module_id).file_id);
+    const contract_id = ast_file.root_items[0];
+    const contract = ast_file.item(contract_id).Contract;
+    var function_id: ?compiler.ast.ItemId = null;
+    for (contract.members) |member_id| {
+        if (ast_file.item(member_id).* == .Function) {
+            function_id = member_id;
+            break;
+        }
+    }
+    try testing.expect(function_id != null);
+
+    const function_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = function_id.? });
+    try testing.expectEqual(@as(usize, 1), function_facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.modifies, function_facts.facts[0].kind);
+    try testing.expectEqual(function_id.?, function_facts.facts[0].owner.itemId().?);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "ora.modifies_slots = [\"config.owner\", \"balances[param#0]\", \"allowances[param#0][param#1]\"]"));
+}
+
+test "compiler corpus covers modifies sema matrix" {
+    const Probe = struct {
+        path: []const u8,
+        expected_diagnostic: []const u8 = "",
+    };
+
+    const probes = [_]Probe{
+        .{ .path = "ora-example/corpus/modifies/pass_supported_paths.ora" },
+        .{ .path = "ora-example/corpus/modifies/pass_empty_no_writes.ora" },
+        .{
+            .path = "ora-example/corpus/modifies/fail_unsupported_map_key.ora",
+            .expected_diagnostic = "`modifies` map keys must be literals, function parameters, `msg.sender`, or `tx.origin` in v1",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_mixed_indexed_field_path.ora",
+            .expected_diagnostic = "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_external_storage_path.ora",
+            .expected_diagnostic = "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_write_outside_declared.ora",
+            .expected_diagnostic = "is not covered by this function's `modifies` clause",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_empty_with_write.ora",
+            .expected_diagnostic = "storage write to 'total' is not covered by this function's `modifies` clause",
+        },
+        .{
+            .path = "ora-example/corpus/modifies/fail_empty_mixed.ora",
+            .expected_diagnostic = "`modifies()` cannot be combined with non-empty `modifies` clauses",
+        },
+    };
+
+    for (probes) |probe| {
+        var compilation = try compilePackage(probe.path);
+        defer compilation.deinit();
+
+        const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+        if (probe.expected_diagnostic.len == 0) {
+            try testing.expect(typecheck.diagnostics.isEmpty());
+        } else {
+            try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, probe.expected_diagnostic));
+        }
+    }
 }
 
 test "compiler extracts verification facts and lowers HIR handles" {
@@ -114,14 +520,14 @@ test "compiler verification facts include guard clauses" {
     const body_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .body = ast_file.item(function_id).Function.body });
 
     try testing.expectEqual(@as(usize, 3), function_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, function_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, function_facts.facts[1].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, function_facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, function_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.guard, function_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, function_facts.facts[2].kind);
 
     try testing.expectEqual(@as(usize, 3), body_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, body_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.guard, body_facts.facts[1].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, body_facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, body_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.guard, body_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, body_facts.facts[2].kind);
 }
 
 test "compiler lowers guard clauses through runtime assert and assume" {
@@ -141,7 +547,7 @@ test "compiler lowers guard clauses through runtime assert and assume" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"guard_clause\""));
 }
 
-test "compiler does not duplicate guard lowering when function already starts with same filter" {
+test "compiler keeps guard lowering even when function already starts with same filter" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    guard amount < 10;
@@ -156,11 +562,11 @@ test "compiler does not duplicate guard lowering when function already starts wi
     const hir_text = try renderHirTextForSource(source_text);
     defer testing.allocator.free(hir_text);
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard violation path: amount < 10\""));
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "\"guard violation path: amount < 10\""));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "\"guard_clause\""));
 }
 
-test "compiler removes proven guard clauses after verification" {
+test "compiler keeps proven guard clauses after verification cleanup" {
     const source_text =
         \\pub fn safe_add(amount: u256) -> bool
         \\    requires amount < 10;
@@ -189,8 +595,8 @@ test "compiler removes proven guard clauses after verification" {
     const hir_text = try mutable_hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "\"guard_clause\""));
-    try testing.expectEqual(@as(usize, 0), std.mem.count(u8, hir_text, "cf.assert"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "\"guard_clause\""));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, hir_text, "cf.assert"));
 }
 
 test "compiler verification facts respect item and body keys" {
@@ -231,21 +637,74 @@ test "compiler verification facts respect item and body keys" {
     const body_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .body = function.body });
 
     try testing.expectEqual(@as(usize, 1), contract_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.invariant, contract_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.contract_invariant, contract_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.contract, contract_facts.facts[0].context);
 
     try testing.expectEqual(@as(usize, 2), function_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, function_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, function_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, function_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, function_facts.facts[1].kind);
 
     try testing.expectEqual(@as(usize, 2), body_facts.facts.len);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.requires, body_facts.facts[0].kind);
-    try testing.expectEqual(compiler.ast.SpecClauseKind.ensures, body_facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.requires, body_facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ensures, body_facts.facts[1].kind);
+}
+
+test "compiler verification facts include loop invariants and havoc targets" {
+    const source_text =
+        \\pub fn run(limit: u256) {
+        \\    let total = 0;
+        \\    while (total < limit)
+        \\        invariant total <= limit;
+        \\    {
+        \\        havoc total;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const function_id = ast_file.root_items[0];
+    const function = ast_file.item(function_id).Function;
+    const body = ast_file.body(function.body);
+    const while_stmt_id = body.statements[1];
+    const while_stmt = ast_file.statement(while_stmt_id).While;
+    const havoc_stmt_id = ast_file.body(while_stmt.body).statements[0];
+
+    const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = function_id });
+    try testing.expectEqual(@as(usize, 2), facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.loop_invariant, facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationContext.loop, facts.facts[0].context);
+    try testing.expect(facts.facts[0].expr != null);
+    try testing.expect(facts.facts[0].target_name == null);
+    const loop_owner = facts.facts[0].owner.statementOwner().?;
+    try testing.expectEqual(function_id, loop_owner.item);
+    try testing.expectEqual(while_stmt_id, loop_owner.stmt);
+
+    try testing.expectEqual(compiler.sema.VerificationFactKind.havoc, facts.facts[1].kind);
+    try testing.expect(facts.facts[1].expr == null);
+    try testing.expectEqualStrings("total", facts.facts[1].target_name.?);
+    const havoc_owner = facts.facts[1].owner.statementOwner().?;
+    try testing.expectEqual(function_id, havoc_owner.item);
+    try testing.expectEqual(havoc_stmt_id, havoc_owner.stmt);
+
+    const statement_facts = try compilation.db.verificationFacts(compilation.root_module_id, .{
+        .statement = .{ .item = function_id, .stmt = while_stmt_id },
+    });
+    try testing.expectEqual(@as(usize, 1), statement_facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.loop_invariant, statement_facts.facts[0].kind);
 }
 
 test "compiler inserts parameter refinement guards in HIR" {
     const source_text =
         \\pub fn guarded(
         \\    bounded: MinValue<u256, 100>,
+        \\    bounded_max: MaxValue<u256, 200>,
+        \\    bounded_range: InRange<u256, 50, 150>,
+        \\    rate: BasisPoints<u256>,
+        \\    amount: NonZero<u256>,
         \\    target: NonZeroAddress,
         \\) -> u256 {
         \\    return bounded;
@@ -258,6 +717,17 @@ test "compiler inserts parameter refinement guards in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "parameter_refinement"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MinValue"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "MaxValue"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "InRange"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "BasisPoints"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "NonZero"));
+    // Runtime guard messages are pinned to refinement_semantics.expectationText.
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MinValue value >= 100"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected MaxValue value <= 200"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected InRange value between 50 and 150"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected BasisPoints value between 0 and 10000"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected NonZero value != 0"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "expected NonZeroAddress value != 0"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_to_base"));
 }
 
@@ -511,6 +981,17 @@ test "compiler lowers ghost items into ghost AST nodes" {
     const ghost_body = ast_file.body(ghost_block.body);
     try testing.expectEqual(@as(usize, 1), ghost_body.statements.len);
     try testing.expect(ast_file.statement(ghost_body.statements[0]).* == .VariableDecl);
+
+    const facts = try compilation.db.verificationFacts(compilation.root_module_id, .{ .item = ast_file.root_items[0] });
+    try testing.expectEqual(@as(usize, 4), facts.facts.len);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_constant, facts.facts[0].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_field, facts.facts[1].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_function, facts.facts[2].kind);
+    try testing.expectEqual(compiler.sema.VerificationFactKind.ghost_block, facts.facts[3].kind);
+    try testing.expectEqual(contract.members[0], facts.facts[0].owner.itemId().?);
+    try testing.expectEqual(contract.members[1], facts.facts[1].owner.itemId().?);
+    try testing.expectEqual(contract.members[2], facts.facts[2].owner.itemId().?);
+    try testing.expectEqual(contract.members[3], facts.facts[3].owner.itemId().?);
 }
 
 test "compiler lowers ghost declarations into verification HIR" {
@@ -547,8 +1028,8 @@ test "compiler lowers ghost declarations into verification HIR" {
 test "compiler preserves nested while continue by guarding later statements" {
     const source_text =
         \\pub fn count(limit: u256) -> u256 {
-        \\    let sum = 0;
-        \\    let i = 0;
+        \\    let sum: u256 = 0;
+        \\    let i: u256 = 0;
         \\    while (i < limit) {
         \\        i = i + 1;
         \\        if (i == 2) {

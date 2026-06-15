@@ -1,0 +1,29 @@
+struct Row {
+    head: u256;
+    values: slice[u256];
+    tail: u256;
+}
+
+contract SliceDynamicStructStorageSmoke {
+    storage var rows: slice[Row];
+
+    pub fn set(values: slice[Row]) {
+        rows = values;
+    }
+
+    pub fn set_tail(index: u256, value: u256) {
+        rows[index].tail = value;
+    }
+
+    pub fn get_head(index: u256) -> u256 {
+        return rows[index].head;
+    }
+
+    pub fn get_value(index: u256, col: u256) -> u256 {
+        return rows[index].values[col];
+    }
+
+    pub fn get_tail(index: u256) -> u256 {
+        return rows[index].tail;
+    }
+}

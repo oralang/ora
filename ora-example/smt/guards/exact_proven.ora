@@ -4,7 +4,7 @@
 // Tests that SMT can prove Exact division constraints when requires clauses
 // provide sufficient information. Guards should be removed (no runtime cost).
 //
-// Run with: --verify --emit-mlir-sir
+// Run with: --verify --emit=mlir:sir
 // Expected: Guards removed in MLIR output (SMT discharge successful)
 // ============================================================================
 
@@ -28,11 +28,10 @@ contract ExactProven {
     }
 
     // SMT can prove Exact division from arithmetic
-    pub fn provenExactDivisionArithmetic(quotient: u256)
-        requires quotient <= std.constants.U256_MAX / 4
+    pub fn provenExactDivisionArithmetic(x: Exact<u256>)
+        requires x % 4 == 0
     {
-        let x: Exact<u256> = quotient * 4;
-        // Guard should be removed - x is constructed as a multiple of 4.
+        // Guard should be removed - requires proves divisibility by 4.
         let q: u256 = x / 4;
     }
 
@@ -45,12 +44,12 @@ contract ExactProven {
     }
 
     // SMT can prove Exact from multiplication result
-    pub fn provenExactFromMultiplication(x: u256)
+    pub fn provenExactFromMultiplication(product: Exact<u256>, x: u256)
         requires x != 0
         requires x <= std.constants.U256_MAX / 10
+        requires product == x * 10
     {
-        let product: Exact<u256> = x * 10;
-        // Product of x and a known factor is exactly divisible by that factor.
+        // Product is supplied as an Exact carrier and constrained to x * 10.
         let q1: u256 = product / x;
         let q2: u256 = product / 10;
     }

@@ -1,0 +1,107 @@
+type PairValues = [u256; 2];
+type NonZeroU256 = MinValue<u256, 1>;
+
+enum Status: u8 {
+    Active,
+    Paused,
+}
+
+bitfield Flags: u8 {
+    enabled: u1,
+    mode: u7,
+}
+
+struct Pair {
+    amount: u256,
+    ok: bool,
+}
+
+contract AbiDecodeStaticCorpus {
+    pub fn scalar_value() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(u256, hex"0000000000000000000000000000000000000000000000000000000000000005");
+            const out = match (decoded) {
+                Ok(value) => value,
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn array_sum() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(PairValues, hex"00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000000000000000003");
+            const out = match (decoded) {
+                Ok(values) => values[0] + values[1],
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn struct_amount() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(Pair, hex"00000000000000000000000000000000000000000000000000000000000000070000000000000000000000000000000000000000000000000000000000000001");
+            const out = match (decoded) {
+                Ok(pair) => pair.amount,
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn fixed_bytes_sum() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(bytes4, hex"aabbccdd00000000000000000000000000000000000000000000000000000000");
+            const out = match (decoded) {
+                Ok(value) => @cast(u256, @abiEncode(value)[0]) + @cast(u256, @abiEncode(value)[3]),
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn enum_ok() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(Status, hex"0000000000000000000000000000000000000000000000000000000000000001");
+            const out = match (decoded) {
+                Ok(_) => 1,
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn bitfield_last_byte() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(Flags, hex"0000000000000000000000000000000000000000000000000000000000000003");
+            const out = match (decoded) {
+                Ok(value) => @abiEncode(value)[31],
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn refinement_ok() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(NonZeroU256, hex"0000000000000000000000000000000000000000000000000000000000000005");
+            const out = match (decoded) {
+                Ok(value) => value,
+                Err(_) => 0,
+            };
+            out;
+        };
+    }
+
+    pub fn malformed_is_err() -> u256 {
+        return comptime {
+            const decoded = @abiDecode(bool, hex"0000000000000000000000000000000000000000000000000000000000000002");
+            const out = match (decoded) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            };
+            out;
+        };
+    }
+}

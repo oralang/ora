@@ -1,0 +1,28 @@
+// Combinatorial layout: a struct with a static-array field, stored
+// under a map. Exercises array-offset-within-struct-within-map-derived-slot —
+// a combination not covered by the per-feature specs (map_struct = scalar
+// fields, struct_static_array = top-level).
+struct Bucket {
+    slots: [u256; 3];
+    tail: u256;
+}
+
+contract MapStructArray {
+    storage var buckets: map<u256, Bucket>;
+
+    pub fn set_slot(key: u256, idx: u256, value: u256) {
+        buckets[key].slots[idx] = value;
+    }
+
+    pub fn set_tail(key: u256, value: u256) {
+        buckets[key].tail = value;
+    }
+
+    pub fn get_slot(key: u256, idx: u256) -> u256 {
+        return buckets[key].slots[idx];
+    }
+
+    pub fn get_tail(key: u256) -> u256 {
+        return buckets[key].tail;
+    }
+}

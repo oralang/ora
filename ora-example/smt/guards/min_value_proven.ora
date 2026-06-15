@@ -4,7 +4,7 @@
 // Tests that SMT can prove MinValue constraints when requires clauses provide
 // sufficient information. Guards should be removed (no runtime cost).
 //
-// Run with: --verify --emit-mlir-sir
+// Run with: --verify --emit=mlir:sir
 // Expected: Guards removed in MLIR output (SMT discharge successful)
 // ============================================================================
 
@@ -59,4 +59,3 @@ contract MinValueProven {
         return value;
     }
 }
-

@@ -1,0 +1,32 @@
+struct Holder {
+    head: u256;
+    body: [u256; 4];
+    tail: u256;
+}
+
+contract StorageStructStaticArray {
+    storage var holder: Holder;
+    storage var marker: u256;
+
+    pub fn init() {
+        let body: [u256; 4] = [1, 2, 3, 4];
+        holder = Holder { head: 11, body: body, tail: 99 };
+        marker = 500;
+    }
+
+    pub fn set_body(index: u256, value: u256) {
+        holder.body[index] = value;
+    }
+
+    pub fn get_body(index: u256) -> u256 {
+        return holder.body[index];
+    }
+
+    pub fn get_tail() -> u256 {
+        return holder.tail;
+    }
+
+    pub fn get_marker() -> u256 {
+        return marker;
+    }
+}

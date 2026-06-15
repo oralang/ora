@@ -96,6 +96,13 @@ namespace mlir
                 return {};
             }
 
+            static ::mlir::OpFoldResult foldAddressCarrierRoundTrip(::mlir::Value value, ::mlir::Type resultType)
+            {
+                if (value.getType() == resultType)
+                    return value;
+                return {};
+            }
+
             template <typename SwitchLikeOp>
             static ::mlir::LogicalResult verifySwitchLikeOp(SwitchLikeOp op)
             {
@@ -702,6 +709,20 @@ namespace mlir
         }
 
         // RefinementToBaseOp: ora.refinement_to_base
+        ::mlir::OpFoldResult AddrToI160Op::fold(FoldAdaptor)
+        {
+            if (auto inner = getAddr().getDefiningOp<I160ToAddrOp>())
+                return foldAddressCarrierRoundTrip(inner.getI160(), getResult().getType());
+            return {};
+        }
+
+        ::mlir::OpFoldResult I160ToAddrOp::fold(FoldAdaptor)
+        {
+            if (auto inner = getI160().getDefiningOp<AddrToI160Op>())
+                return foldAddressCarrierRoundTrip(inner.getAddr(), getResult().getType());
+            return {};
+        }
+
         void RefinementToBaseOp::build(::mlir::OpBuilder &odsBuilder, ::mlir::OperationState &odsState, ::mlir::Value value)
         {
             Type valueType = value.getType();
@@ -711,6 +732,22 @@ namespace mlir
 
             odsState.addOperands(value);
             odsState.addTypes(baseType);
+        }
+
+        ::mlir::OpFoldResult RefinementToBaseOp::fold(FoldAdaptor)
+        {
+            if (auto inner = getValue().getDefiningOp<BaseToRefinementOp>())
+                if (inner.getValue().getType() == getResult().getType())
+                    return inner.getValue();
+            return {};
+        }
+
+        ::mlir::OpFoldResult BaseToRefinementOp::fold(FoldAdaptor)
+        {
+            if (auto inner = getValue().getDefiningOp<RefinementToBaseOp>())
+                if (inner.getValue().getType() == getResult().getType())
+                    return inner.getValue();
+            return {};
         }
 
     } // namespace ora
@@ -746,7 +783,111 @@ namespace mlir
                     if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
                         return intAttr;
                 }
+                if (auto constOp = value.getDefiningOp<ConstOp>())
+                {
+                    if (auto intAttr = llvm::dyn_cast<mlir::IntegerAttr>(constOp.getValueAttr()))
+                        return intAttr;
+                }
                 return std::nullopt;
+            }
+
+            static bool isIntegerConstant(::mlir::Value value, uint64_t expected)
+            {
+                auto attr = getConstantIntegerAttr(value);
+                return attr && attr->getValue() == expected;
+            }
+
+            static bool isZeroIntegerConstant(::mlir::Value value)
+            {
+                auto attr = getConstantIntegerAttr(value);
+                return attr && attr->getValue().isZero();
+            }
+
+            static std::optional<unsigned> getIntegerLikeBitWidth(::mlir::Type type)
+            {
+                if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+                    return oraInt.getWidth();
+                if (auto builtinInt = llvm::dyn_cast<::mlir::IntegerType>(type))
+                    return builtinInt.getWidth();
+                return std::nullopt;
+            }
+
+            static std::optional<llvm::APInt> computeBoundedWrappingPower(
+                const llvm::APInt &base,
+                const llvm::APInt &exponent,
+                unsigned bitWidth)
+            {
+                constexpr uint64_t kMaxFoldExponent = 1024;
+                uint64_t exp = exponent.getLimitedValue(kMaxFoldExponent + 1);
+                if (exp > kMaxFoldExponent)
+                    return std::nullopt;
+
+                llvm::APInt result(bitWidth, 1);
+                llvm::APInt factor = base.zextOrTrunc(bitWidth);
+                while (exp != 0)
+                {
+                    if (exp & 1)
+                        result *= factor;
+                    exp >>= 1;
+                    if (exp != 0)
+                        factor *= factor;
+                }
+                return result;
+            }
+
+            static std::optional<bool> compareSameOperand(StringRef predicate)
+            {
+                if (predicate == "eq" || predicate == "le" || predicate == "lte" ||
+                    predicate == "ule" || predicate == "ge" || predicate == "gte" ||
+                    predicate == "uge" || predicate == "sle" || predicate == "sge")
+                    return true;
+                if (predicate == "ne" || predicate == "neq" || predicate == "lt" ||
+                    predicate == "ult" || predicate == "gt" || predicate == "ugt" ||
+                    predicate == "slt" || predicate == "sgt")
+                    return false;
+                return std::nullopt;
+            }
+
+            static std::optional<bool> compareConstantIntegers(
+                StringRef predicate,
+                const llvm::APInt &lhs,
+                const llvm::APInt &rhs)
+            {
+                if (predicate == "eq")
+                    return lhs == rhs;
+                if (predicate == "ne" || predicate == "neq")
+                    return lhs != rhs;
+                if (predicate == "lt" || predicate == "ult")
+                    return lhs.ult(rhs);
+                if (predicate == "le" || predicate == "lte" || predicate == "ule")
+                    return lhs.ule(rhs);
+                if (predicate == "gt" || predicate == "ugt")
+                    return lhs.ugt(rhs);
+                if (predicate == "ge" || predicate == "gte" || predicate == "uge")
+                    return lhs.uge(rhs);
+                if (predicate == "slt")
+                    return lhs.slt(rhs);
+                if (predicate == "sle")
+                    return lhs.sle(rhs);
+                if (predicate == "sgt")
+                    return lhs.sgt(rhs);
+                if (predicate == "sge")
+                    return lhs.sge(rhs);
+                return std::nullopt;
+            }
+
+            static LogicalResult replaceOpWithValueIfSameType(
+                PatternRewriter &rewriter,
+                Operation *op,
+                Value replacement)
+            {
+                if (op->getNumResults() != 1)
+                    return failure();
+                if (replacement.getType() != op->getResult(0).getType())
+                    return failure();
+
+                rewriter.replaceOp(op, replacement);
+                return success();
             }
 
             static GlobalOp lookupGlobalFor(Operation *op, StringRef globalName)
@@ -786,6 +927,18 @@ namespace mlir
                 auto newConst = rewriter.create<arith::ConstantOp>(op->getLoc(), resultType, valueAttr);
                 rewriter.replaceOp(op, newConst.getResult());
                 return success();
+            }
+
+            static mlir::LogicalResult replaceOpWithBoolConstant(
+                PatternRewriter &rewriter,
+                Operation *op,
+                bool value)
+            {
+                return replaceOpWithConstant(
+                    rewriter,
+                    op,
+                    op->getResult(0).getType(),
+                    llvm::APInt(1, value ? 1 : 0));
             }
 
             static ::mlir::LogicalResult getStructFieldInfo(
@@ -844,6 +997,20 @@ namespace mlir
                 }
 
                 return op->emitError() << "unknown field '" << fieldName << "' on anonymous struct";
+            }
+
+            static ::mlir::LogicalResult getStructFieldInfo(
+                Operation *op,
+                Type structValueType,
+                StringRef fieldName,
+                size_t &fieldIndex,
+                ::mlir::Type &fieldType)
+            {
+                if (auto structType = llvm::dyn_cast<StructType>(structValueType))
+                    return getStructFieldInfo(op, structType, fieldName, fieldIndex, fieldType);
+                if (auto anonType = llvm::dyn_cast<AnonymousStructType>(structValueType))
+                    return getStructFieldInfo(op, anonType, fieldName, fieldIndex, fieldType);
+                return failure();
             }
         } // namespace
 
@@ -1003,19 +1170,11 @@ namespace mlir
         {
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            if (failed(getStructFieldInfo(*this, getStructValue().getType(), getFieldName(), fieldIndex, fieldType)))
             {
-                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                    return failure();
-            }
-            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
-            {
-                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
-                    return failure();
-            }
-            else
-            {
-                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+                if (!llvm::isa<StructType, AnonymousStructType>(getStructValue().getType()))
+                    return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+                return failure();
             }
 
             if (getResult().getType() != fieldType)
@@ -1153,19 +1312,11 @@ namespace mlir
 
             size_t fieldIndex = 0;
             ::mlir::Type fieldType;
-            if (auto structType = llvm::dyn_cast<StructType>(getStructValue().getType()))
+            if (failed(getStructFieldInfo(*this, getStructValue().getType(), getFieldName(), fieldIndex, fieldType)))
             {
-                if (failed(getStructFieldInfo(*this, structType, getFieldName(), fieldIndex, fieldType)))
-                    return failure();
-            }
-            else if (auto anonType = llvm::dyn_cast<AnonymousStructType>(getStructValue().getType()))
-            {
-                if (failed(getStructFieldInfo(*this, anonType, getFieldName(), fieldIndex, fieldType)))
-                    return failure();
-            }
-            else
-            {
-                return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+                if (!llvm::isa<StructType, AnonymousStructType>(getStructValue().getType()))
+                    return emitOpError("struct operand must have !ora.struct<...> or !ora.struct_anon<...> type");
+                return failure();
             }
 
             if (getValue().getType() != fieldType)
@@ -1234,6 +1385,17 @@ namespace mlir
 
         ::mlir::LogicalResult AbiEncodeOp::verify()
         {
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
+
+            return success();
+        }
+
+        ::mlir::LogicalResult AbiEncodeWithSelectorOp::verify()
+        {
             auto selectorAttr = (*this)->getAttr("selector");
             if (!selectorAttr)
                 return emitOpError("requires 'selector' attribute");
@@ -1253,6 +1415,11 @@ namespace mlir
                 if (!llvm::isa<::mlir::StringAttr>(attr))
                     return emitOpError("'arg_types' entries must be string attributes");
             }
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
 
             return success();
         }
@@ -1275,6 +1442,18 @@ namespace mlir
 
         ::mlir::LogicalResult AbiDecodeOp::verify()
         {
+            auto verifyStringEnumAttr = [&](llvm::StringRef attrName,
+                                            llvm::ArrayRef<llvm::StringRef> allowed) -> ::mlir::LogicalResult
+            {
+                auto attr = (*this)->getAttrOfType<::mlir::StringAttr>(attrName);
+                if (!attr)
+                    return emitOpError() << "requires '" << attrName << "' string attribute";
+                if (!llvm::is_contained(allowed, attr.getValue()))
+                    return emitOpError() << "has unsupported '" << attrName << "' value '"
+                                         << attr.getValue() << "'";
+                return success();
+            };
+
             auto returnTypesAttr = (*this)->getAttrOfType<::mlir::ArrayAttr>("return_types");
             if (!returnTypesAttr)
                 return emitOpError("requires 'return_types' array attribute");
@@ -1284,6 +1463,21 @@ namespace mlir
             {
                 if (!llvm::isa<::mlir::StringAttr>(attr))
                     return emitOpError("'return_types' entries must be string attributes");
+            }
+            auto layoutAttr = (*this)->getAttr("layout");
+            if (!layoutAttr)
+                return emitOpError("requires 'layout' attribute");
+            if (!llvm::isa<::mlir::StringAttr>(layoutAttr))
+                return emitOpError("'layout' must be a string attribute");
+            if (failed(verifyStringEnumAttr("source", {"calldata", "returndata", "memory"})))
+                return failure();
+            if (failed(verifyStringEnumAttr("failure_mode", {"result", "revert", "error_union"})))
+                return failure();
+            if (auto modeAttr = (*this)->getAttrOfType<::mlir::StringAttr>("decode_mode"))
+            {
+                if (!llvm::is_contained({"strict", "permissive"}, modeAttr.getValue()))
+                    return emitOpError() << "has unsupported 'decode_mode' value '"
+                                         << modeAttr.getValue() << "'";
             }
 
             return success();
@@ -1975,85 +2169,32 @@ namespace mlir
 
         namespace
         {
-            struct FoldAddConstants : public OpRewritePattern<AddOp>
+            enum class BinaryIntegerFoldKind
             {
-                using OpRewritePattern<AddOp>::OpRewritePattern;
+                Add,
+                Sub,
+                Mul,
+            };
 
-                LogicalResult matchAndRewrite(AddOp op, PatternRewriter &rewriter) const override
+            template <typename OpT, BinaryIntegerFoldKind Kind>
+            struct FoldBinaryIntegerConstants : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
                 {
                     auto lhsVal = getConstantIntegerAttr(op.getLhs());
                     auto rhsVal = getConstantIntegerAttr(op.getRhs());
-
                     if (!lhsVal || !rhsVal)
                         return failure();
 
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        lhsVal->getValue() + rhsVal->getValue());
-                }
-            };
-
-            struct FoldMulConstants : public OpRewritePattern<MulOp>
-            {
-                using OpRewritePattern<MulOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(MulOp op, PatternRewriter &rewriter) const override
-                {
-                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-
-                    if (!lhsVal || !rhsVal)
-                        return failure();
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        lhsVal->getValue() * rhsVal->getValue());
-                }
-            };
-
-            struct FoldSubConstants : public OpRewritePattern<SubOp>
-            {
-                using OpRewritePattern<SubOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(SubOp op, PatternRewriter &rewriter) const override
-                {
-                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-
-                    if (!lhsVal || !rhsVal)
-                        return failure();
-
-                    return replaceOpWithConstant(
-                        rewriter,
-                        op,
-                        op.getResult().getType(),
-                        lhsVal->getValue() - rhsVal->getValue());
-                }
-            };
-
-            struct FoldDivConstants : public OpRewritePattern<DivOp>
-            {
-                using OpRewritePattern<DivOp>::OpRewritePattern;
-
-                LogicalResult matchAndRewrite(DivOp op, PatternRewriter &rewriter) const override
-                {
-                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
-                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
-
-                    if (!lhsVal || !rhsVal || rhsVal->getValue().isZero())
-                        return failure();
-
-                    auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType());
-                    if (!resultOraType)
-                        return failure();
-
-                    llvm::APInt result = resultOraType.getIsSigned()
-                                             ? lhsVal->getValue().sdiv(rhsVal->getValue())
-                                             : lhsVal->getValue().udiv(rhsVal->getValue());
+                    llvm::APInt result = lhsVal->getValue();
+                    if constexpr (Kind == BinaryIntegerFoldKind::Add)
+                        result += rhsVal->getValue();
+                    else if constexpr (Kind == BinaryIntegerFoldKind::Sub)
+                        result -= rhsVal->getValue();
+                    else
+                        result *= rhsVal->getValue();
 
                     return replaceOpWithConstant(
                         rewriter,
@@ -2062,27 +2203,730 @@ namespace mlir
                         result);
                 }
             };
+
+            template <typename OpT, BinaryIntegerFoldKind Kind>
+            struct FoldBinaryIntegerIdentity : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
+                {
+                    if constexpr (Kind == BinaryIntegerFoldKind::Add)
+                    {
+                        if (isZeroIntegerConstant(op.getRhs()))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                        if (isZeroIntegerConstant(op.getLhs()))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getRhs());
+                    }
+                    else if constexpr (Kind == BinaryIntegerFoldKind::Sub)
+                    {
+                        if (isZeroIntegerConstant(op.getRhs()))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                    }
+                    else
+                    {
+                        if (isIntegerConstant(op.getRhs(), 1))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                        if (isIntegerConstant(op.getLhs(), 1))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getRhs());
+                        if (isZeroIntegerConstant(op.getLhs()))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                        if (isZeroIntegerConstant(op.getRhs()))
+                            return replaceOpWithValueIfSameType(rewriter, op, op.getRhs());
+                    }
+
+                    return failure();
+                }
+            };
+
+            enum class SignedBinaryFoldKind
+            {
+                Div,
+                Rem,
+            };
+
+            template <typename OpT, SignedBinaryFoldKind Kind>
+            struct FoldSignedAwareBinaryConstants : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
+                {
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
+                    if (!lhsVal || !rhsVal || rhsVal->getValue().isZero())
+                        return failure();
+
+                    auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType());
+                    if (!resultOraType)
+                        return failure();
+
+                    llvm::APInt result = lhsVal->getValue();
+                    if constexpr (Kind == SignedBinaryFoldKind::Div)
+                        result = resultOraType.getIsSigned()
+                                     ? lhsVal->getValue().sdiv(rhsVal->getValue())
+                                     : lhsVal->getValue().udiv(rhsVal->getValue());
+                    else
+                        result = resultOraType.getIsSigned()
+                                     ? lhsVal->getValue().srem(rhsVal->getValue())
+                                     : lhsVal->getValue().urem(rhsVal->getValue());
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        result);
+                }
+            };
+
+            struct FoldDivIdentity : public OpRewritePattern<DivOp>
+            {
+                using OpRewritePattern<DivOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(DivOp op, PatternRewriter &rewriter) const override
+                {
+                    if (isIntegerConstant(op.getRhs(), 1))
+                        return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                    return failure();
+                }
+            };
+
+            struct FoldRemByOne : public OpRewritePattern<RemOp>
+            {
+                using OpRewritePattern<RemOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(RemOp op, PatternRewriter &rewriter) const override
+                {
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
+                    if (!rhsVal || rhsVal->getValue() != 1)
+                        return failure();
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        llvm::APInt::getZero(rhsVal->getValue().getBitWidth()));
+                }
+            };
+
+            struct FoldPowerConstants : public OpRewritePattern<PowerOp>
+            {
+                using OpRewritePattern<PowerOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(PowerOp op, PatternRewriter &rewriter) const override
+                {
+                    auto baseVal = getConstantIntegerAttr(op.getBase());
+                    auto exponentVal = getConstantIntegerAttr(op.getExponent());
+                    if (!baseVal || !exponentVal)
+                        return failure();
+
+                    auto bitWidth = getIntegerLikeBitWidth(op.getResult().getType());
+                    if (!bitWidth)
+                        return failure();
+
+                    auto result = computeBoundedWrappingPower(
+                        baseVal->getValue(),
+                        exponentVal->getValue(),
+                        *bitWidth);
+                    if (!result)
+                        return failure();
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        *result);
+                }
+            };
+
+            struct FoldPowerIdentity : public OpRewritePattern<PowerOp>
+            {
+                using OpRewritePattern<PowerOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(PowerOp op, PatternRewriter &rewriter) const override
+                {
+                    if (isZeroIntegerConstant(op.getExponent()))
+                    {
+                        auto bitWidth = getIntegerLikeBitWidth(op.getResult().getType());
+                        if (!bitWidth)
+                            return failure();
+                        return replaceOpWithConstant(
+                            rewriter,
+                            op,
+                            op.getResult().getType(),
+                            llvm::APInt(*bitWidth, 1));
+                    }
+
+                    if (isIntegerConstant(op.getExponent(), 1))
+                        return replaceOpWithValueIfSameType(rewriter, op, op.getBase());
+
+                    if (isIntegerConstant(op.getBase(), 1))
+                        return replaceOpWithValueIfSameType(rewriter, op, op.getBase());
+
+                    return failure();
+                }
+            };
+
+            enum class ShiftFoldKind
+            {
+                Left,
+                Right,
+            };
+
+            template <typename OpT, ShiftFoldKind Kind>
+            struct FoldWrappingShiftConstants : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
+                {
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
+                    if (!lhsVal || !rhsVal)
+                        return failure();
+
+                    uint64_t shift = rhsVal->getValue().getLimitedValue();
+                    if (shift >= lhsVal->getValue().getBitWidth())
+                        return failure();
+
+                    llvm::APInt result = lhsVal->getValue();
+                    if constexpr (Kind == ShiftFoldKind::Left)
+                    {
+                        result <<= shift;
+                    }
+                    else
+                    {
+                        bool isSigned = false;
+                        if (auto resultOraType = llvm::dyn_cast<ora::IntegerType>(op.getResult().getType()))
+                            isSigned = resultOraType.getIsSigned();
+                        result = isSigned ? lhsVal->getValue().ashr(shift)
+                                          : lhsVal->getValue().lshr(shift);
+                    }
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        result);
+                }
+            };
+
+            template <typename OpT>
+            struct FoldWrappingShiftByZero : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
+                {
+                    if (isZeroIntegerConstant(op.getRhs()))
+                        return replaceOpWithValueIfSameType(rewriter, op, op.getLhs());
+                    return failure();
+                }
+            };
+
+            template <typename OpT, BinaryIntegerFoldKind Kind>
+            static void addBinaryIntegerCanonicalizers(RewritePatternSet &results, MLIRContext *context)
+            {
+                results.add<
+                    FoldBinaryIntegerConstants<OpT, Kind>,
+                    FoldBinaryIntegerIdentity<OpT, Kind>>(context);
+            }
+
+            template <typename OpT, SignedBinaryFoldKind Kind, typename IdentityPatternT>
+            static void addSignedAwareBinaryCanonicalizers(RewritePatternSet &results, MLIRContext *context)
+            {
+                results.add<
+                    FoldSignedAwareBinaryConstants<OpT, Kind>,
+                    IdentityPatternT>(context);
+            }
+
+            template <typename OpT, ShiftFoldKind Kind>
+            static void addWrappingShiftCanonicalizers(RewritePatternSet &results, MLIRContext *context)
+            {
+                results.add<
+                    FoldWrappingShiftConstants<OpT, Kind>,
+                    FoldWrappingShiftByZero<OpT>>(context);
+            }
+
+            struct FoldCmpSameOperand : public OpRewritePattern<CmpOp>
+            {
+                using OpRewritePattern<CmpOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(CmpOp op, PatternRewriter &rewriter) const override
+                {
+                    if (op.getLhs() != op.getRhs())
+                        return failure();
+                    auto result = compareSameOperand(op.getPredicate());
+                    if (!result)
+                        return failure();
+                    return replaceOpWithBoolConstant(rewriter, op, *result);
+                }
+            };
+
+            struct FoldCmpConstants : public OpRewritePattern<CmpOp>
+            {
+                using OpRewritePattern<CmpOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(CmpOp op, PatternRewriter &rewriter) const override
+                {
+                    auto lhsVal = getConstantIntegerAttr(op.getLhs());
+                    auto rhsVal = getConstantIntegerAttr(op.getRhs());
+
+                    if (!lhsVal || !rhsVal)
+                        return failure();
+
+                    auto result = compareConstantIntegers(
+                        op.getPredicate(),
+                        lhsVal->getValue(),
+                        rhsVal->getValue());
+                    if (!result)
+                        return failure();
+                    return replaceOpWithBoolConstant(rewriter, op, *result);
+                }
+            };
+
+            struct FoldErrorIsErrorFromConstructor : public OpRewritePattern<ErrorIsErrorOp>
+            {
+                using OpRewritePattern<ErrorIsErrorOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(ErrorIsErrorOp op, PatternRewriter &rewriter) const override
+                {
+                    if (op.getValue().getDefiningOp<ErrorOkOp>())
+                        return replaceOpWithBoolConstant(rewriter, op, false);
+                    if (op.getValue().getDefiningOp<ErrorErrOp>())
+                        return replaceOpWithBoolConstant(rewriter, op, true);
+                    return failure();
+                }
+            };
+
+            template <typename ProjectionOpT, typename ConstructorOpT>
+            struct FoldErrorProjectionFromConstructor : public OpRewritePattern<ProjectionOpT>
+            {
+                using OpRewritePattern<ProjectionOpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(ProjectionOpT op, PatternRewriter &rewriter) const override
+                {
+                    auto constructor = op.getValue().template getDefiningOp<ConstructorOpT>();
+                    if (!constructor || constructor.getValue().getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, constructor.getValue());
+                    return success();
+                }
+            };
+
+            struct FoldAdtTagFromConstruct : public OpRewritePattern<AdtTagOp>
+            {
+                using OpRewritePattern<AdtTagOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(AdtTagOp op, PatternRewriter &rewriter) const override
+                {
+                    auto construct = op.getValue().getDefiningOp<AdtConstructOp>();
+                    if (!construct)
+                        return failure();
+
+                    auto adtType = llvm::dyn_cast<AdtType>(construct.getResult().getType());
+                    if (!adtType)
+                        return failure();
+
+                    size_t variantIndex = 0;
+                    Type payloadType;
+                    if (failed(getAdtVariantInfo(op.getOperation(), adtType, construct.getVariantName(), variantIndex, payloadType)))
+                        return failure();
+
+                    auto bitWidth = getIntegerLikeBitWidth(op.getResult().getType());
+                    if (!bitWidth)
+                        return failure();
+
+                    return replaceOpWithConstant(
+                        rewriter,
+                        op,
+                        op.getResult().getType(),
+                        llvm::APInt(*bitWidth, variantIndex));
+                }
+            };
+
+            struct FoldAdtPayloadFromMatchingConstruct : public OpRewritePattern<AdtPayloadOp>
+            {
+                using OpRewritePattern<AdtPayloadOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(AdtPayloadOp op, PatternRewriter &rewriter) const override
+                {
+                    auto construct = op.getValue().getDefiningOp<AdtConstructOp>();
+                    if (!construct || construct.getVariantName() != op.getVariantName())
+                        return failure();
+
+                    auto payloadValues = construct.getPayloadValues();
+                    if (payloadValues.size() != 1 || payloadValues.front().getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, payloadValues.front());
+                    return success();
+                }
+            };
+
+            struct FoldTupleExtractFromCreate : public OpRewritePattern<TupleExtractOp>
+            {
+                using OpRewritePattern<TupleExtractOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(TupleExtractOp op, PatternRewriter &rewriter) const override
+                {
+                    auto tupleCreate = op.getTupleValue().getDefiningOp<TupleCreateOp>();
+                    if (!tupleCreate)
+                        return failure();
+
+                    auto index = static_cast<size_t>(op.getIndex());
+                    auto elements = tupleCreate.getElements();
+                    if (index >= elements.size())
+                        return failure();
+
+                    Value element = elements[index];
+                    if (element.getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, element);
+                    return success();
+                }
+            };
+
+            struct FoldTupleCreateFromExtracts : public OpRewritePattern<TupleCreateOp>
+            {
+                using OpRewritePattern<TupleCreateOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(TupleCreateOp op, PatternRewriter &rewriter) const override
+                {
+                    Value sourceTuple;
+                    for (auto [index, element] : llvm::enumerate(op.getElements()))
+                    {
+                        auto extract = element.getDefiningOp<TupleExtractOp>();
+                        if (!extract)
+                            return failure();
+                        if (extract.getIndex() != static_cast<uint64_t>(index))
+                            return failure();
+                        if (!sourceTuple)
+                        {
+                            sourceTuple = extract.getTupleValue();
+                            continue;
+                        }
+                        if (extract.getTupleValue() != sourceTuple)
+                            return failure();
+                    }
+
+                    if (!sourceTuple || sourceTuple.getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, sourceTuple);
+                    return success();
+                }
+            };
+
+            static LogicalResult getStructConstructorFieldValues(
+                Value structValue,
+                ValueRange &fieldValues,
+                bool requireNamedInstantiateTypeMatch = false)
+            {
+                if (auto structInit = structValue.getDefiningOp<StructInitOp>())
+                {
+                    fieldValues = structInit.getFieldValues();
+                    return success();
+                }
+
+                if (auto structInstantiate = structValue.getDefiningOp<StructInstantiateOp>())
+                {
+                    if (requireNamedInstantiateTypeMatch)
+                    {
+                        auto namedStructType = llvm::dyn_cast<StructType>(structValue.getType());
+                        if (!namedStructType || namedStructType.getName() != structInstantiate.getStructName())
+                            return failure();
+                    }
+                    fieldValues = structInstantiate.getFieldValues();
+                    return success();
+                }
+
+                return failure();
+            }
+
+            struct FoldStructFieldExtractFromCreate : public OpRewritePattern<StructFieldExtractOp>
+            {
+                using OpRewritePattern<StructFieldExtractOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(StructFieldExtractOp op, PatternRewriter &rewriter) const override
+                {
+                    size_t fieldIndex = 0;
+                    Type fieldType;
+                    if (failed(getStructFieldInfo(
+                            op.getOperation(),
+                            op.getStructValue().getType(),
+                            op.getFieldName(),
+                            fieldIndex,
+                            fieldType)))
+                        return failure();
+
+                    ValueRange fieldValues;
+                    if (failed(getStructConstructorFieldValues(op.getStructValue(), fieldValues)))
+                        return failure();
+
+                    if (fieldIndex >= fieldValues.size())
+                        return failure();
+
+                    Value fieldValue = fieldValues[fieldIndex];
+                    if (fieldValue.getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, fieldValue);
+                    return success();
+                }
+            };
+
+            static FailureOr<Value> getStructReconstructionSource(
+                Operation *op,
+                ValueRange fieldValues,
+                Type resultType)
+            {
+                Value sourceStruct;
+                for (auto [index, fieldValue] : llvm::enumerate(fieldValues))
+                {
+                    auto extract = fieldValue.getDefiningOp<StructFieldExtractOp>();
+                    if (!extract)
+                        return failure();
+
+                    size_t fieldIndex = 0;
+                    Type fieldType;
+                    if (failed(getStructFieldInfo(
+                            op,
+                            extract.getStructValue().getType(),
+                            extract.getFieldName(),
+                            fieldIndex,
+                            fieldType)))
+                        return failure();
+
+                    if (fieldIndex != static_cast<size_t>(index))
+                        return failure();
+                    if (fieldType != fieldValue.getType())
+                        return failure();
+
+                    if (!sourceStruct)
+                    {
+                        sourceStruct = extract.getStructValue();
+                        continue;
+                    }
+                    if (extract.getStructValue() != sourceStruct)
+                        return failure();
+                }
+
+                if (!sourceStruct || sourceStruct.getType() != resultType)
+                    return failure();
+
+                return sourceStruct;
+            }
+
+            static LogicalResult validateStructInstantiateResult(StructInstantiateOp op)
+            {
+                auto resultStructType = llvm::dyn_cast<StructType>(op.getResult().getType());
+                if (!resultStructType || resultStructType.getName() != op.getStructName())
+                    return failure();
+                return success();
+            }
+
+            static LogicalResult validateStructInstantiateResult(StructInitOp)
+            {
+                return success();
+            }
+
+            template <typename OpT>
+            struct FoldStructCreateFromExtracts : public OpRewritePattern<OpT>
+            {
+                using OpRewritePattern<OpT>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(OpT op, PatternRewriter &rewriter) const override
+                {
+                    if (failed(validateStructInstantiateResult(op)))
+                        return failure();
+
+                    FailureOr<Value> sourceStruct = getStructReconstructionSource(
+                        op.getOperation(),
+                        op.getFieldValues(),
+                        op.getResult().getType());
+                    if (failed(sourceStruct))
+                        return failure();
+
+                    rewriter.replaceOp(op, *sourceStruct);
+                    return success();
+                }
+            };
+
+            struct FoldStructFieldExtractFromUpdate : public OpRewritePattern<StructFieldExtractOp>
+            {
+                using OpRewritePattern<StructFieldExtractOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(StructFieldExtractOp op, PatternRewriter &rewriter) const override
+                {
+                    auto update = op.getStructValue().getDefiningOp<StructFieldUpdateOp>();
+                    if (!update)
+                        return failure();
+
+                    if (update.getFieldName() == op.getFieldName())
+                    {
+                        if (update.getValue().getType() != op.getResult().getType())
+                            return failure();
+                        rewriter.replaceOp(op, update.getValue());
+                        return success();
+                    }
+
+                    rewriter.replaceOpWithNewOp<StructFieldExtractOp>(
+                        op,
+                        op.getResult().getType(),
+                        update.getStructValue(),
+                        op.getFieldNameAttr());
+                    return success();
+                }
+            };
+
+            struct FoldStructFieldUpdateNoop : public OpRewritePattern<StructFieldUpdateOp>
+            {
+                using OpRewritePattern<StructFieldUpdateOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(StructFieldUpdateOp op, PatternRewriter &rewriter) const override
+                {
+                    auto extract = op.getValue().getDefiningOp<StructFieldExtractOp>();
+                    if (!extract)
+                        return failure();
+                    if (extract.getStructValue() != op.getStructValue())
+                        return failure();
+                    if (extract.getFieldName() != op.getFieldName())
+                        return failure();
+                    if (op.getStructValue().getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOp(op, op.getStructValue());
+                    return success();
+                }
+            };
+
+            struct FoldStructFieldUpdateIntoInit : public OpRewritePattern<StructFieldUpdateOp>
+            {
+                using OpRewritePattern<StructFieldUpdateOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(StructFieldUpdateOp op, PatternRewriter &rewriter) const override
+                {
+                    if (op.getStructValue().getType() != op.getResult().getType())
+                        return failure();
+
+                    size_t fieldIndex = 0;
+                    Type fieldType;
+                    if (failed(getStructFieldInfo(
+                            op.getOperation(),
+                            op.getStructValue().getType(),
+                            op.getFieldName(),
+                            fieldIndex,
+                            fieldType)))
+                        return failure();
+
+                    if (fieldType != op.getValue().getType())
+                        return failure();
+
+                    ValueRange fieldValues;
+                    if (failed(getStructConstructorFieldValues(
+                            op.getStructValue(), fieldValues, /*requireNamedInstantiateTypeMatch=*/true)))
+                        return failure();
+
+                    if (fieldIndex >= fieldValues.size())
+                        return failure();
+
+                    SmallVector<Value> rebuiltFields(fieldValues.begin(), fieldValues.end());
+                    rebuiltFields[fieldIndex] = op.getValue();
+                    rewriter.replaceOpWithNewOp<StructInitOp>(
+                        op,
+                        op.getResult().getType(),
+                        rebuiltFields);
+                    return success();
+                }
+            };
+
+            struct FoldStructFieldUpdateOverwrite : public OpRewritePattern<StructFieldUpdateOp>
+            {
+                using OpRewritePattern<StructFieldUpdateOp>::OpRewritePattern;
+
+                LogicalResult matchAndRewrite(StructFieldUpdateOp op, PatternRewriter &rewriter) const override
+                {
+                    auto inner = op.getStructValue().getDefiningOp<StructFieldUpdateOp>();
+                    if (!inner)
+                        return failure();
+                    if (inner.getFieldName() != op.getFieldName())
+                        return failure();
+                    if (inner.getStructValue().getType() != op.getResult().getType())
+                        return failure();
+
+                    rewriter.replaceOpWithNewOp<StructFieldUpdateOp>(
+                        op,
+                        op.getResult().getType(),
+                        inner.getStructValue(),
+                        op.getFieldNameAttr(),
+                        op.getValue());
+                    return success();
+                }
+            };
         }
 
-        void AddOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
-        {
-            results.add<FoldAddConstants>(context);
+#define DEFINE_ORA_BINARY_CANONICALIZER(OpT, Kind)                                 \
+        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
+                                              MLIRContext *context)                \
+        {                                                                          \
+            addBinaryIntegerCanonicalizers<OpT, BinaryIntegerFoldKind::Kind>(      \
+                results, context);                                                 \
         }
 
-        void MulOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
-        {
-            results.add<FoldMulConstants>(context);
+#define DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(OpT, Kind, IdentityPatternT)        \
+        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
+                                              MLIRContext *context)                \
+        {                                                                          \
+            addSignedAwareBinaryCanonicalizers<OpT, SignedBinaryFoldKind::Kind,    \
+                                               IdentityPatternT>(results, context);\
         }
 
-        void SubOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
-        {
-            results.add<FoldSubConstants>(context);
+#define DEFINE_ORA_SHIFT_CANONICALIZER(OpT, Kind)                                  \
+        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
+                                              MLIRContext *context)                \
+        {                                                                          \
+            addWrappingShiftCanonicalizers<OpT, ShiftFoldKind::Kind>(              \
+                results, context);                                                 \
         }
 
-        void DivOp::getCanonicalizationPatterns(RewritePatternSet &results, MLIRContext *context)
-        {
-            results.add<FoldDivConstants>(context);
+#define DEFINE_ORA_PATTERN_CANONICALIZER(OpT, ...)                                 \
+        void OpT::getCanonicalizationPatterns(RewritePatternSet &results,          \
+                                              MLIRContext *context)                \
+        {                                                                          \
+            results.add<__VA_ARGS__>(context);                                     \
         }
+
+        DEFINE_ORA_BINARY_CANONICALIZER(AddOp, Add)
+        DEFINE_ORA_BINARY_CANONICALIZER(AddWrappingOp, Add)
+        DEFINE_ORA_BINARY_CANONICALIZER(MulOp, Mul)
+        DEFINE_ORA_BINARY_CANONICALIZER(MulWrappingOp, Mul)
+        DEFINE_ORA_BINARY_CANONICALIZER(SubOp, Sub)
+        DEFINE_ORA_BINARY_CANONICALIZER(SubWrappingOp, Sub)
+        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(DivOp, Div, FoldDivIdentity)
+        DEFINE_ORA_SIGNED_BINARY_CANONICALIZER(RemOp, Rem, FoldRemByOne)
+        DEFINE_ORA_PATTERN_CANONICALIZER(PowerOp, FoldPowerConstants, FoldPowerIdentity)
+        DEFINE_ORA_SHIFT_CANONICALIZER(ShlWrappingOp, Left)
+        DEFINE_ORA_SHIFT_CANONICALIZER(ShrWrappingOp, Right)
+        DEFINE_ORA_PATTERN_CANONICALIZER(CmpOp, FoldCmpSameOperand, FoldCmpConstants)
+        DEFINE_ORA_PATTERN_CANONICALIZER(ErrorIsErrorOp, FoldErrorIsErrorFromConstructor)
+        DEFINE_ORA_PATTERN_CANONICALIZER(ErrorUnwrapOp, FoldErrorProjectionFromConstructor<ErrorUnwrapOp, ErrorOkOp>)
+        DEFINE_ORA_PATTERN_CANONICALIZER(ErrorGetErrorOp, FoldErrorProjectionFromConstructor<ErrorGetErrorOp, ErrorErrOp>)
+        DEFINE_ORA_PATTERN_CANONICALIZER(AdtTagOp, FoldAdtTagFromConstruct)
+        DEFINE_ORA_PATTERN_CANONICALIZER(AdtPayloadOp, FoldAdtPayloadFromMatchingConstruct)
+        DEFINE_ORA_PATTERN_CANONICALIZER(TupleExtractOp, FoldTupleExtractFromCreate)
+        DEFINE_ORA_PATTERN_CANONICALIZER(TupleCreateOp, FoldTupleCreateFromExtracts)
+        DEFINE_ORA_PATTERN_CANONICALIZER(StructInitOp, FoldStructCreateFromExtracts<StructInitOp>)
+        DEFINE_ORA_PATTERN_CANONICALIZER(StructInstantiateOp, FoldStructCreateFromExtracts<StructInstantiateOp>)
+        DEFINE_ORA_PATTERN_CANONICALIZER(StructFieldExtractOp, FoldStructFieldExtractFromCreate, FoldStructFieldExtractFromUpdate)
+        DEFINE_ORA_PATTERN_CANONICALIZER(StructFieldUpdateOp, FoldStructFieldUpdateNoop, FoldStructFieldUpdateIntoInit, FoldStructFieldUpdateOverwrite)
+
+#undef DEFINE_ORA_BINARY_CANONICALIZER
+#undef DEFINE_ORA_SIGNED_BINARY_CANONICALIZER
+#undef DEFINE_ORA_SHIFT_CANONICALIZER
+#undef DEFINE_ORA_PATTERN_CANONICALIZER
 
         //===----------------------------------------------------------------------===//
         // Memory Effects
