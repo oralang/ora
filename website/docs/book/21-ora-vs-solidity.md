@@ -56,11 +56,11 @@ fn withdraw(amount: u256) -> !bool | InsufficientBalance | ExternalCallFailed {
     let sender: address = std.msg.sender();
     let current: u256 = balances[sender];
     if (current < amount) {
-        return Err(InsufficientBalance(amount, current));   // returns an error VALUE
+        return InsufficientBalance(amount, current);   // returns an error VALUE
     }
     balances[sender] = current - amount;
     let ok: bool = try external<IToken>(token, gas: 100000).transfer(sender, amount);
-    return Ok(ok);
+    return ok;
 }
 ```
 
@@ -227,26 +227,30 @@ contract Vault {
 
 **The root cause**: Solidity doesn't track which storage slots a function reads or writes. The checks-effects-interactions pattern is a *convention*, not an enforcement mechanism. OpenZeppelin's `nonReentrant` modifier is a runtime lock bolted on through inheritance — it requires importing a library, inheriting from it, and applying the modifier. Three things to remember, none enforced by the language.
 
-**Ora's response**: built-in `@lock`/`@unlock` combined with the effect system.
+**Ora's response**: built-in `@lock`/`@unlock` combined with the effect system. Locks are storage-path locks: they do not mutate a boolean guard. The storage path itself is the lock identity.
 
 ```ora
-storage var reentrancyGuard: u256 = 0;
+extern trait ReentryHook {
+    call fn onCall(self) -> bool;
+}
 
-pub fn withdraw(amount: u256) -> !bool | InsufficientBalance {
+storage var balances: map<address, u256>;
+
+pub fn deposit_and_call(hook: address, amount: u256) -> bool {
     let sender: NonZeroAddress = std.msg.sender();
-    @lock(reentrancyGuard);
-    let current: u256 = balances[sender];
-    if (current < amount) {
-        @unlock(reentrancyGuard);
-        return Err(InsufficientBalance(amount, current));
-    }
-    balances[sender] = current - amount;
-    @unlock(reentrancyGuard);
-    return Ok(true);
+    balances[sender] += amount;
+    @lock(balances[sender]);
+    let hook_result = external<ReentryHook>(hook, gas: 200000).onCall();
+    @unlock(balances[sender]);
+
+    return match (hook_result) {
+        Ok(ok) => ok,
+        Err(_) => false,
+    };
 }
 ```
 
-The effect system verifies lock/unlock discipline across all code paths — including early returns through error unions. No library, no inheritance, no modifier to forget.
+The function updates `balances[sender]` first, then locks that exact storage path across the external-call window. If re-entrant code tries to rewrite `balances[sender]` while it is locked, the write reverts. The lock itself does not change the balance value.
 
 ---
 

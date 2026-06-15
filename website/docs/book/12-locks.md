@@ -8,85 +8,70 @@ sidebar_position: 12
 
 Reentrancy is the most exploited vulnerability in smart contract history. It occurs when an external call re-enters the contract before state updates complete.
 
-Ora provides `@lock` and `@unlock` directives for compiler-checked reentrancy protection.
+Ora provides `@lock` and `@unlock` directives for transaction-scoped storage-path locking. A lock does not change the value stored at that path. It records that the path is locked for the current transaction, and writes to that locked path are rejected until it is unlocked or the transaction reverts.
 
 ## The lock pattern
 
 ```ora
-contract Vault {
-    storage var reentrancyGuard: u256 = 0;
+contract Balances {
+    storage var balances: map<address, u256>;
 
-    pub fn withdraw(amount: u256) {
-        @lock(reentrancyGuard);
-        // Protected code — no reentrant call can reach here
-        balances[sender] -= amount;
-        @unlock(reentrancyGuard);
+    pub fn read_then_write(user: address, amount: u256) {
+        @lock(balances[user]);
+        let current: u256 = balances[user];
+        @unlock(balances[user]);
+
+        balances[user] = current + amount;
     }
 }
 ```
 
-- `@lock(guard)` acquires the lock. If the guard is already locked, the transaction reverts.
-- `@unlock(guard)` releases the lock.
-- The guard is a storage variable used as a mutex.
+- `@lock(path)` locks the storage path identified by `path`.
+- `@unlock(path)` releases that storage-path lock.
+- The lock is on the storage path, not on a boolean value. `@lock(x)` does not set `x`, and `@unlock(x)` does not clear it.
+- Writes to the same locked path are rejected. Writes to other storage paths may still be valid.
+- If the current function needs to update that same path, update it before the lock or after the unlock.
 
 ## Lock discipline
 
-The compiler tracks lock state:
+The compiler tracks the active lock set while checking the function body:
 
-- A function that calls `@lock` must call `@unlock` on every exit path
-- Attempting to `@lock` an already-locked guard reverts
-- The lock is transaction-scoped — it's automatically released if the transaction reverts
+- Direct writes to the same storage path while it is locked are rejected
+- Runtime guards protect lock-participating paths across calls
+- The lock is transaction-scoped and is released if the transaction reverts
 
-## The vault with locks
+## Lock the state you changed
+
+For reentrancy-sensitive flows, commit the state update first, then lock the storage path that must not be rewritten during the external-call window.
 
 ```ora
-error InsufficientBalance(required: u256, available: u256);
+extern trait ReentryHook {
+    call fn onCall(self) -> bool;
+}
 
 comptime const std = @import("std");
 
-contract Vault {
-    storage var totalDeposits: u256 = 0;
+contract ReentrancyVictim {
     storage var balances: map<address, u256>;
-    storage var reentrancyGuard: u256 = 0;
 
-    log Deposit(account: address, amount: u256);
-    log Withdrawal(account: address, amount: u256);
-
-    pub fn deposit(amount: MinValue<u256, 1>) {
+    pub fn deposit_and_call(hook: address, amount: u256) -> bool {
         let sender: NonZeroAddress = std.msg.sender();
-        @lock(reentrancyGuard);
         balances[sender] += amount;
-        totalDeposits += amount;
-        @unlock(reentrancyGuard);
-        log Deposit(sender, amount);
-    }
+        @lock(balances[sender]);
+        let hook_result = external<ReentryHook>(hook, gas: 200000).onCall();
+        @unlock(balances[sender]);
 
-    pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
-        let sender: NonZeroAddress = std.msg.sender();
-        @lock(reentrancyGuard);
-        let current: u256 = balances[sender];
-        if (current < amount) {
-            @unlock(reentrancyGuard);
-            return InsufficientBalance(amount, current);
-        }
-        balances[sender] = current - amount;
-        totalDeposits -= amount;
-        @unlock(reentrancyGuard);
-        log Withdrawal(sender, amount);
-        return true;
-    }
-
-    pub fn balanceOf(account: address) -> u256 {
-        return balances[account];
-    }
-
-    pub fn getTotalDeposits() -> u256 {
-        return totalDeposits;
+        return match (hook_result) {
+            Ok(ok) => ok,
+            Err(_) => false,
+        };
     }
 }
 ```
 
-Note that `@unlock` must be called before the error return path in `withdraw`. The compiler checks that every exit path releases the lock.
+If the hook re-enters code that tries to write `balances[sender]`, the write targets a locked storage path and reverts. The lock does not change the balance value; it prevents the locked path from being rewritten while the lock is active.
+
+Executable path-locking examples live in `ora-example/locks/` and `tests/conformance/lock_guard_revert.ora`.
 
 ## Further reading
 

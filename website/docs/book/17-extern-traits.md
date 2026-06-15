@@ -106,18 +106,21 @@ contract TokenVault {
     storage var token: address;
     storage var self_address: address;
     storage var balances: map<address, u256>;
-    storage var reentrancyGuard: u256 = 0;
 
     pub fn deposit(amount: MinValue<u256, 1>) -> !bool | ExternalCallFailed {
         let sender: NonZeroAddress = std.msg.sender();
 
-        @lock(reentrancyGuard);
         balances[sender] += amount;
-        @unlock(reentrancyGuard);
+        @lock(balances[sender]);
 
-        let ok: bool = try external<IERC20>(token, gas: 100000)
+        let transfer_result = external<IERC20>(token, gas: 100000)
             .transferFrom(sender, self_address, amount);
-        return ok;
+        @unlock(balances[sender]);
+
+        return match (transfer_result) {
+            Ok(ok) => ok,
+            Err(_) => ExternalCallFailed,
+        };
     }
 
     pub fn getBalance(user: address) -> u256 {
@@ -126,7 +129,7 @@ contract TokenVault {
 }
 ```
 
-State is committed (`balances[sender] += amount`) inside the lock, before the external call. This follows the checks-effects-interactions pattern, enforced by the compiler.
+State is committed (`balances[sender] += amount`) before the external call, then that exact balance path is locked until the call result is captured. This is the path-locking pattern described in [Chapter 12](./12-locks.md).
 
 ## Further reading
 

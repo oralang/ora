@@ -98,9 +98,9 @@ This creates an `ora.toml` config, a `contracts/main.ora` starter file, and a `R
 | `ora fmt file.ora` | Format a single file |
 | `ora fmt src/` | Format all `.ora` files in a directory (recursive) |
 | `ora fmt --check file.ora` | Check formatting (CI) |
-| `ora emit --emit-mlir file.ora` | Emit Ora MLIR |
-| `ora emit --emit-ast file.ora` | Emit parsed AST |
-| `ora emit --emit-bytecode file.ora` | Emit EVM bytecode |
+| `ora emit --emit=mlir:ora file.ora` | Emit Ora MLIR |
+| `ora emit --emit=ast file.ora` | Emit parsed AST |
+| `ora emit --emit=bytecode file.ora` | Emit EVM bytecode |
 | `ora init name` | Scaffold a new project |
 
 ## Further reading

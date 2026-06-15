@@ -151,7 +151,7 @@ Useful for ABI selector computation, storage slot calculation, and compile-time 
 
 ## Extern traits
 
-For calling external contracts (Solidity, Vyper, etc.), Ora uses `extern trait` — a separate mechanism covered in [Chapter 17: External Contract Calls](./17-extern-traits).
+For calling external contracts (Solidity, Vyper, etc.), Ora uses `extern trait` — a separate mechanism covered in [Chapter 17: External Contract Calls](./17-extern-traits.md).
 
 Extern traits cannot be implemented with `impl` blocks and cannot have ghost specs.
 

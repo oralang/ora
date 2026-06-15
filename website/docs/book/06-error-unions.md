@@ -1,10 +1,10 @@
 ---
-title: "Chapter 6: Error Unions"
-description: Explicit error handling with error unions, try expressions, and try/catch.
+title: "Chapter 6: Result and Error Unions"
+description: Explicit error handling with Result values, error unions, try expressions, and try/catch.
 sidebar_position: 6
 ---
 
-# Error Unions
+# Result and Error Unions
 
 Ora makes errors part of the type system. A function that can fail declares its error types in the return type. The caller must handle them — the compiler rejects code that ignores a possible error.
 
@@ -45,13 +45,48 @@ pub fn deposit(amount: u256) -> !bool | ZeroAmount | Unauthorized {
 }
 ```
 
-## Returning errors
+## Result return types
 
-Return an error by name:
+`Result<T, E>` is the explicit value form. It uses `Ok(...)` and `Err(...)`
+constructors and is useful when success/error values are stored, matched, or
+passed around like ordinary data:
 
 ```ora
-return ZeroAmount;                              // nullary error
-return InsufficientBalance(amount, current);    // error with fields
+pub fn withdraw(current: u256, amount: u256) -> Result<u256, InsufficientBalance> {
+    if (current < amount) {
+        return Err(InsufficientBalance(amount, current));
+    }
+    return Ok(current - amount);
+}
+
+pub fn inspect(current: u256, amount: u256) -> u256 {
+    let maybe = withdraw(current, amount);
+    return match (maybe) {
+        Ok(remaining) => remaining,
+        Err(err) => err.required,
+    };
+}
+```
+
+The equivalent corpus example is
+`ora-example/corpus/types/error-union/result_payload_error.ora`.
+
+## Returning errors
+
+For an error-union return type, return an error constructor or success value
+directly:
+
+```ora
+return ZeroAmount;                                // nullary error
+return InsufficientBalance(amount, current);      // error with fields
+return true;                                      // success value
+```
+
+For a `Result<T, E>` return type, use `Ok(...)` and `Err(...)`:
+
+```ora
+return Err(InsufficientBalance(amount, current));
+return Ok(current - amount);
 ```
 
 ## Try expressions

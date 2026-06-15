@@ -85,10 +85,10 @@ The counterexample shows specific values that violate the property.
 
 ### Verification reports
 
-Use `--emit-smt-report` to generate detailed audit reports:
+Use `--emit=smt-report` to generate detailed audit reports:
 
 ```bash
-./zig-out/bin/ora build contract.ora --verify --emit-smt-report
+./zig-out/bin/ora build contract.ora --explain --emit=smt-report
 ```
 
 This produces `.smt.report.md` and `.smt.report.json` files with:

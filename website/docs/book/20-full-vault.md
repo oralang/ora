@@ -32,7 +32,6 @@ contract Vault {
     // Storage state (Ch. 2, 7)
     storage var totalDeposits: u256 = 0;
     storage var balances: map<address, u256>;
-    storage var reentrancyGuard: u256 = 0;
 
     // Ghost state for verification (Ch. 11)
     ghost storage spec_sum: u256 = 0;
@@ -51,11 +50,11 @@ contract Vault {
         ensures(spec_sum == old(spec_sum) + amount)                         // Ghost invariant (Ch. 11)
     {
         let sender: NonZeroAddress = std.msg.sender();                      // Refinement (Ch. 8)
-        @lock(reentrancyGuard);                                             // Reentrancy lock (Ch. 12)
         balances[sender] += amount;                                         // Compound assignment (Ch. 3)
+        @lock(balances[sender]);                                            // Locks this balance path; does not mutate it
         totalDeposits += amount;
         spec_sum += amount;                                                 // Ghost update (Ch. 11)
-        @unlock(reentrancyGuard);
+        @unlock(balances[sender]);
         log Deposit(sender, amount);                                        // Event (Ch. 9)
     }
 
@@ -68,16 +67,15 @@ contract Vault {
         ensures(spec_sum == old(spec_sum) - amount)
     {
         let sender: NonZeroAddress = std.msg.sender();
-        @lock(reentrancyGuard);
         let current: u256 = balances[sender];                               // Storage → memory (Ch. 7)
         if (current < amount) {                                             // Control flow (Ch. 4)
-            @unlock(reentrancyGuard);
             return InsufficientBalance(amount, current);                    // Error return (Ch. 6)
         }
         balances[sender] = current - amount;
+        @lock(balances[sender]);
         totalDeposits -= amount;
         spec_sum -= amount;
-        @unlock(reentrancyGuard);
+        @unlock(balances[sender]);
         log Withdrawal(sender, amount);
         return true;
     }
@@ -101,7 +99,7 @@ The compiler and verifier enforce:
 3. **No overflow** — `requires(totalDeposits <= U256_MAX - amount)` prevents arithmetic overflow
 4. **Correct accounting** — `ensures(totalDeposits == old(totalDeposits) + amount)` verified by Z3
 5. **Conservation** — `spec_sum` tracks total flow; verified to match `totalDeposits`
-6. **No reentrancy** — `@lock`/`@unlock` on `reentrancyGuard`
+6. **No reentrancy-sensitive rewrites** — `@lock`/`@unlock` on the balance path after mutation
 7. **Explicit errors** — `InsufficientBalance` with context, not a silent `false`
 8. **Auditability** — `Deposit`/`Withdrawal` events for off-chain tracking
 

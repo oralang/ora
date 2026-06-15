@@ -117,11 +117,11 @@ contract Vault {
     pub fn withdraw(amount: MinValue<u256, 1>) -> !bool | InsufficientBalance {
         let sender: NonZeroAddress = std.msg.sender();
         let current: u256 = balances[sender];
-        if (current < amount) { return Err(InsufficientBalance(amount, current)); }
+        if (current < amount) { return InsufficientBalance(amount, current); }
         balances[sender] = current - amount;
         totalDeposits -= amount;
         log Withdrawal(sender, amount);
-        return Ok(true);
+        return true;
     }
 
     pub fn balanceOf(account: address) -> u256 {
