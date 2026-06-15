@@ -994,6 +994,40 @@ test "compiler lowers contextual aggregate integer literals without type fallbac
     try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
 }
 
+test "compiler contextualizes typed dot bitfield integer literals without type fallback" {
+    const source_text =
+        \\bitfield TokenConfig : u256 {
+        \\    paused: bool;
+        \\    mintable: bool;
+        \\    burnable: bool;
+        \\    decimals: u8;
+        \\    version: u8;
+        \\}
+        \\
+        \\contract TokenWithBitfield {
+        \\    storage var config: TokenConfig;
+        \\
+        \\    pub fn init() {
+        \\        let cfg: TokenConfig = .{
+        \\            .paused = false,
+        \\            .mintable = true,
+        \\            .burnable = true,
+        \\            .decimals = 18,
+        \\            .version = 1,
+        \\        };
+        \\        config = cfg;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+}
+
 test "compiler lowers function-valued bindings without function fallback" {
     const source_text =
         \\fn helper(value: u256) -> u256 {

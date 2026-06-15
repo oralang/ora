@@ -3596,12 +3596,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (item == .Bitfield) {
                 const bitfield_type = self.parent.typecheck.exprType(expr_id);
                 const word_type = self.parent.lowerExprType(expr_id);
+                const bitfield_name = bitfield_type.name() orelse concrete_name;
                 var packed_word = appendValueOp(
                     self.block,
                     createIntegerConstant(self.parent.context, self.parent.location(struct_literal.range), word_type, 0),
                 );
                 for (struct_literal.fields) |init| {
-                    const field_value = try self.lowerExpr(init.value, locals);
+                    const resolved = (try self.parent.resolveBitfieldField(bitfield_name, init.name)) orelse
+                        return error.MlirOperationCreationFailed;
+                    const field_value = if (resolved.field_type) |field_sema_type|
+                        try @This().lowerExprForSemaFlowTarget(self, init.value, field_sema_type, init.range, locals)
+                    else blk: {
+                        const field_type = self.parent.lowerTypeExpr(resolved.field.type_expr);
+                        break :blk try self.lowerExprForFlowTarget(init.value, field_type, locals);
+                    };
                     packed_word = try self.createBitfieldFieldUpdate(packed_word, bitfield_type, init.name, field_value, init.range);
                 }
                 return packed_word;
