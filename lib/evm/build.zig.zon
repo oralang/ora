@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .voltaire = .{
-            .path = "../../../voltaire",
+            .path = "../../vendor/voltaire",
         },
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis.git#3d37f043a161fd32897ad44a2dddbfaab75faa8a",

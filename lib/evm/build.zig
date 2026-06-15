@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const voltaire_root = "../../../voltaire";
+    const voltaire_root = "../../vendor/voltaire";
 
     const voltaire_dep = b.dependency("voltaire", .{
         .target = target,
