@@ -1,0 +1,29 @@
+// Compile-time-only refinement forms and their arithmetic contracts.
+
+comptime const std = @import("std");
+
+contract RefinementCompileTimeMatrix {
+    pub fn exactDivision(dividend: Exact<u256>, divisor: NonZero<u256>) -> u256
+        requires divisor == 10
+        requires dividend % divisor == 0
+    {
+        return dividend / divisor;
+    }
+
+    pub fn scaledAdd(a: Scaled<u256, 18>, b: Scaled<u256, 18>) -> Scaled<u256, 18>
+        requires a <= std.constants.U256_MAX - b
+    {
+        return a + b;
+    }
+
+    pub fn scaledMul(a: Scaled<u256, 18>, b: Scaled<u256, 6>) -> Scaled<u256, 24>
+        requires b != 0
+        requires a <= std.constants.U256_MAX / b
+    {
+        return a * b;
+    }
+
+    pub fn basisPointsToRange(fee: BasisPoints<u256>) -> InRange<u256, 0, 10000> {
+        return fee;
+    }
+}

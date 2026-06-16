@@ -1,0 +1,76 @@
+// Refinement types with function contracts and runtime assertions.
+
+comptime const std = @import("std");
+
+error Rejected;
+
+contract RefinementClauseMatrix {
+    pub fn minValue(amount: MinValue<u256, 10>) -> u256
+        requires amount >= 10
+        ensures result >= 10
+    {
+        let base: u256 = amount;
+        assert(base >= 10, "MinValue fact must be available");
+        return base;
+    }
+
+    pub fn maxValue(limit: MaxValue<u256, 1000>) -> u256
+        requires limit <= 1000
+        ensures result <= 1000
+    {
+        let base: u256 = limit;
+        assert(base <= 1000, "MaxValue fact must be available");
+        return base;
+    }
+
+    pub fn inRange(rate: InRange<u256, 100, 900>) -> u256
+        requires rate >= 100
+        requires rate <= 900
+        ensures result >= 100
+        ensures result <= 900
+    {
+        let base: u256 = rate;
+        assert(base >= 100, "InRange lower bound must be available");
+        assert(base <= 900, "InRange upper bound must be available");
+        return base;
+    }
+
+    pub fn nonZero(value: NonZero<u256>) -> u256
+        requires value > 0
+        ensures result > 0
+    {
+        let base: u256 = value;
+        assert(base > 0, "NonZero fact must be available");
+        return base;
+    }
+
+    pub fn basisPoints(fee: BasisPoints<u256>) -> u256
+        requires fee <= 10000
+        ensures result <= 10000
+    {
+        let base: u256 = fee;
+        assert(base <= 10000, "BasisPoints upper bound must be available");
+        return base;
+    }
+
+    pub fn nonZeroAddress(account: NonZeroAddress) -> address
+        requires account != std.constants.ZERO_ADDRESS
+        ensures result != std.constants.ZERO_ADDRESS
+    {
+        let base: address = account;
+        assert(base != std.constants.ZERO_ADDRESS, "NonZeroAddress fact must be available");
+        return base;
+    }
+
+    pub fn guarded(amount: MinValue<u256, 1>) -> !u256 | Rejected
+        guard amount > 0
+        requires amount >= 1
+        ensures_ok result >= 1
+        ensures_err amount >= 1
+    {
+        if (amount == 1) {
+            return Rejected;
+        }
+        return amount;
+    }
+}

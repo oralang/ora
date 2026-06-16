@@ -1,0 +1,11 @@
+// Contradictory refinement contract clauses must fail verification.
+
+contract FailRefinementContractClauses {
+    pub fn impossible(value: u256)
+        requires value == 0
+        requires value > 0
+    {
+        let refined: NonZero<u256> = value;
+        let _: u256 = refined;
+    }
+}

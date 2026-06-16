@@ -1,0 +1,45 @@
+// Refinement contracts over storage updates.
+
+comptime const std = @import("std");
+
+contract RefinementStateContracts {
+    storage var total: MinValue<u256, 0> = 0;
+    storage var cap: MaxValue<u256, 1000000> = 1000000;
+    storage var fee: BasisPoints<u256> = 0;
+    storage var owner: NonZeroAddress;
+
+    pub fn init(new_owner: NonZeroAddress, new_fee: BasisPoints<u256>)
+        requires new_owner != std.constants.ZERO_ADDRESS
+        requires new_fee <= 10000
+        ensures fee == new_fee
+    {
+        owner = new_owner;
+        fee = new_fee;
+    }
+
+    pub fn deposit(amount: MinValue<u256, 1>)
+        modifies total
+        requires amount >= 1
+        requires total <= cap
+        requires amount <= cap - total
+        ensures total == old(total) + amount
+    {
+        total = total + amount;
+    }
+
+    pub fn setCap(new_cap: MaxValue<u256, 1000000>)
+        modifies cap
+        requires new_cap <= 1000000
+        requires new_cap >= total
+        ensures cap == new_cap
+    {
+        cap = new_cap;
+    }
+
+    pub fn currentFee() -> BasisPoints<u256>
+        requires fee <= 10000
+        ensures result <= 10000
+    {
+        return fee;
+    }
+}
