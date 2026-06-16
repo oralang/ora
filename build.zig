@@ -1338,11 +1338,10 @@ pub fn build(b: *std.Build) void {
     });
     linkMlirLibraries(b, compiler_tests, mlir_step, ora_dialect_step, sir_dialect_step, target, native_sanitize);
     linkZ3Libraries(b, compiler_tests, z3_step, target);
-    test_step.dependOn(&b.addRunArtifact(compiler_tests).step);
 
-    const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
     const compiler_tests_run = b.addRunArtifact(compiler_tests);
     compiler_tests_run.step.dependOn(b.getInstallStep());
+    if (sensei_build_dependency) |dep| compiler_tests_run.step.dependOn(dep);
     const evm_debug_probe_install_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",
@@ -1350,6 +1349,9 @@ pub fn build(b: *std.Build) void {
     });
     evm_debug_probe_install_cmd.setCwd(b.path("lib/evm"));
     compiler_tests_run.step.dependOn(&evm_debug_probe_install_cmd.step);
+    test_step.dependOn(&compiler_tests_run.step);
+
+    const test_compiler_step = b.step("test-compiler", "Run compiler core tests");
     test_compiler_step.dependOn(&compiler_tests_run.step);
 
     // ========================================================================
