@@ -1493,6 +1493,7 @@ const FunctionLowerer = struct {
     pub const lowerInvariantFact = FunctionCore.lowerInvariantFact;
     pub const lowerStatementInvariants = FunctionCore.lowerStatementInvariants;
     pub const ensureDeferredReturnSlots = FunctionCore.ensureDeferredReturnSlots;
+    pub const attachAssertMessageSelector = FunctionCore.attachAssertMessageSelector;
     pub const appendDeferredReturnTerminator = FunctionCore.appendDeferredReturnTerminator;
     pub const appendDeferredReturnCheck = FunctionCore.appendDeferredReturnCheck;
     pub const bindPatternValue = FunctionCore.bindPatternValue;

@@ -8,6 +8,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Casting.h"
+#include <optional>
 
 namespace mlir::ora::lowering
 {
@@ -52,6 +53,43 @@ namespace mlir::ora::lowering
     inline Value constU256(OpBuilder &rewriter, Location loc, uint64_t value)
     {
         return constU256(rewriter, loc, llvm::APInt(256, value));
+    }
+
+    inline std::optional<uint32_t> parseHexSelector(llvm::StringRef selector)
+    {
+        if (!selector.starts_with("0x") || selector.size() != 10)
+            return std::nullopt;
+
+        uint32_t value = 0;
+        for (char c : selector.drop_front(2))
+        {
+            value <<= 4;
+            if (c >= '0' && c <= '9')
+                value |= static_cast<uint32_t>(c - '0');
+            else if (c >= 'a' && c <= 'f')
+                value |= static_cast<uint32_t>(10 + c - 'a');
+            else if (c >= 'A' && c <= 'F')
+                value |= static_cast<uint32_t>(10 + c - 'A');
+            else
+                return std::nullopt;
+        }
+        return value;
+    }
+
+    inline Value constShiftedSelector(OpBuilder &rewriter, Location loc, uint32_t selector)
+    {
+        llvm::APInt selectorWord(256, selector);
+        selectorWord = selectorWord.shl(224);
+        return constU256(rewriter, loc, selectorWord);
+    }
+
+    inline void emitSelectorRevert(OpBuilder &rewriter, Location loc, uint32_t selector)
+    {
+        auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
+        Value totalSize = constU256(rewriter, loc, 4);
+        Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
+        rewriter.create<sir::StoreOp>(loc, basePtr, constShiftedSelector(rewriter, loc, selector));
+        rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
     }
 
     inline Value createPtrViewMaterializationCast(OpBuilder &rewriter, Location loc, Type resultType, Value input)

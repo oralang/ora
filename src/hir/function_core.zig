@@ -25,6 +25,7 @@ const namedStringAttr = support.namedStringAttr;
 const namedBoolAttr = support.namedBoolAttr;
 const nullStringRef = support.nullStringRef;
 const parseI64Literal = support.parseI64Literal;
+const parseUnsignedIntegerLiteral = support.parseUnsignedIntegerLiteral;
 const reprIntegerType = support.reprIntegerType;
 const strRef = support.strRef;
 const LocalEnv = hir_locals.LocalEnv;
@@ -166,7 +167,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", context).attribute);
                     }
                     appendOp(self.block, op);
-                    try @This().emitRuntimeRequiresAssert(self, clause.range, condition, clause.verification_context);
+                    try @This().emitRuntimeRequiresAssert(self, clause.range, condition, clause.verification_context, null);
                 }
                 try @This().emitExtraGuardClauses(self, &self.locals);
 
@@ -220,15 +221,23 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 const fact = self.parent.verificationFact(entry);
                 if (fact.kind != .requires) continue;
                 const expr = try @This().factExpr(fact.*);
+                const runtime_check_key = try @This().runtimeCheckKeyForRequires(self, expr);
+                defer if (runtime_check_key) |key| self.parent.allocator.free(key);
                 const condition = try self.lowerExpr(expr, locals);
                 const op = mlir.oraRequiresOpCreate(self.parent.context, self.parent.location(fact.range), condition);
                 if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                 appendOp(self.block, op);
-                try @This().emitRuntimeRequiresAssert(self, fact.range, condition, null);
+                try @This().emitRuntimeRequiresAssert(self, fact.range, condition, null, runtime_check_key);
             }
         }
 
-        fn emitRuntimeRequiresAssert(self: *FunctionLowerer, range: source.TextRange, condition: mlir.MlirValue, verification_context: ?[]const u8) anyerror!void {
+        fn emitRuntimeRequiresAssert(
+            self: *FunctionLowerer,
+            range: source.TextRange,
+            condition: mlir.MlirValue,
+            verification_context: ?[]const u8,
+            runtime_check_key: ?[]const u8,
+        ) anyerror!void {
             const loc = self.parent.location(range);
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, condition, nullStringRef());
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
@@ -241,7 +250,80 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 strRef("ora.verification_context"),
                 namedStringAttr(self.parent.context, "ora.verification_context", verification_context orelse "requires").attribute,
             );
+            if (runtime_check_key) |key| {
+                mlir.oraOperationSetAttributeByName(assert_op, strRef("ora.runtime_check_key"), namedStringAttr(self.parent.context, "ora.runtime_check_key", key).attribute);
+            }
             appendOp(self.block, assert_op);
+        }
+
+        pub fn attachAssertMessageSelector(self: *FunctionLowerer, assert_op: mlir.MlirOperation, message: []const u8) anyerror!void {
+            if (message.len == 0) return;
+            const selector = try abi_support.keccakSelectorHex(self.parent.allocator, message);
+            defer self.parent.allocator.free(selector);
+            mlir.oraOperationSetAttributeByName(
+                assert_op,
+                strRef("ora.assert_selector"),
+                namedStringAttr(self.parent.context, "ora.assert_selector", selector).attribute,
+            );
+        }
+
+        fn runtimeCheckKeyForRequires(self: *FunctionLowerer, expr_id: ast.ExprId) anyerror!?[]const u8 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().runtimeCheckKeyForRequires(self, group.expr),
+                .Binary => |binary| @This().runtimeCheckKeyForBinaryRequires(self, binary),
+                else => null,
+            };
+        }
+
+        fn runtimeCheckKeyForBinaryRequires(self: *FunctionLowerer, binary: ast.BinaryExpr) anyerror!?[]const u8 {
+            switch (binary.op) {
+                .ge, .le => {},
+                else => return null,
+            }
+
+            if (@This().nameExprText(self, binary.lhs)) |name| {
+                if (@This().integerLiteralText(self, binary.rhs)) |literal| {
+                    const direction: []const u8 = if (binary.op == .ge) "min" else "max";
+                    return try @This().runtimeCheckKey(self, name, direction, literal);
+                }
+            }
+            if (@This().integerLiteralText(self, binary.lhs)) |literal| {
+                if (@This().nameExprText(self, binary.rhs)) |name| {
+                    const direction: []const u8 = if (binary.op == .le) "min" else "max";
+                    return try @This().runtimeCheckKey(self, name, direction, literal);
+                }
+            }
+            return null;
+        }
+
+        fn nameExprText(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Name => |name| name.name,
+                .Group => |group| @This().nameExprText(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn integerLiteralText(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .IntegerLiteral => |literal| literal.text,
+                .Group => |group| @This().integerLiteralText(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn runtimeCheckKey(self: *FunctionLowerer, name: []const u8, direction: []const u8, literal_text: []const u8) ![]const u8 {
+            const normalized = try @This().normalizedUnsignedLiteralText(self, literal_text);
+            defer self.parent.allocator.free(normalized);
+            return std.fmt.allocPrint(self.parent.allocator, "param:{s}:{s}:{s}", .{ name, direction, normalized });
+        }
+
+        fn normalizedUnsignedLiteralText(self: *FunctionLowerer, literal_text: []const u8) ![]const u8 {
+            const value = parseUnsignedIntegerLiteral(u256, literal_text) orelse return self.parent.allocator.dupe(u8, literal_text);
+            return std.fmt.allocPrint(self.parent.allocator, "{d}", .{value});
         }
 
         fn emitEnsuresClauses(self: *FunctionLowerer, locals: *LocalEnv, exit_kind: EnsureExitKind, ok_result_value: ?mlir.MlirValue) anyerror!void {
@@ -464,6 +546,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             mlir.oraOperationSetAttributeByName(op, strRef("ora.verification_context"), namedStringAttr(self.parent.context, "ora.verification_context", verification_context).attribute);
             mlir.oraOperationSetAttributeByName(op, strRef("ora.refinement_kind"), namedStringAttr(self.parent.context, "ora.refinement_kind", refinement.name).attribute);
             if (var_name) |name| {
+                if (try @This().runtimeCheckProvidesForRefinement(self, name, refinement)) |provides| {
+                    defer self.parent.allocator.free(provides);
+                    mlir.oraOperationSetAttributeByName(op, strRef("ora.runtime_check_provides"), namedStringAttr(self.parent.context, "ora.runtime_check_provides", provides).attribute);
+                }
                 const guard_id = try std.fmt.allocPrint(self.parent.allocator, "guard:{s}:{d}:{d}:{d}:{s}:{s}", .{
                     self.parent.sources.file(self.parent.file.file_id).path,
                     self.parent.sources.lineColumn(.{ .file_id = self.parent.file.file_id, .range = range }).line,
@@ -477,6 +563,24 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
 
             appendOp(self.block, op);
+        }
+
+        fn runtimeCheckProvidesForRefinement(self: *FunctionLowerer, name: []const u8, refinement: RefinementType) !?[]const u8 {
+            const bounds = refinements.bounds(refinement) orelse return null;
+            if (bounds.min_text) |min_text| {
+                if (bounds.max_text) |max_text| {
+                    const min_key = try @This().runtimeCheckKey(self, name, "min", min_text);
+                    defer self.parent.allocator.free(min_key);
+                    const max_key = try @This().runtimeCheckKey(self, name, "max", max_text);
+                    defer self.parent.allocator.free(max_key);
+                    return try std.fmt.allocPrint(self.parent.allocator, "{s}\n{s}", .{ min_key, max_key });
+                }
+                return try @This().runtimeCheckKey(self, name, "min", min_text);
+            }
+            if (bounds.max_text) |max_text| {
+                return try @This().runtimeCheckKey(self, name, "max", max_text);
+            }
+            return null;
         }
 
         fn unwrapRefinementValue(self: *FunctionLowerer, value: mlir.MlirValue, loc: mlir.MlirLocation) anyerror!mlir.MlirValue {
@@ -1507,6 +1611,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     const message = if (assert_stmt.message) |msg| strRef(msg) else nullStringRef();
                     const op = mlir.oraAssertOpCreate(self.parent.context, self.parent.location(assert_stmt.range), condition, message);
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+                    if (assert_stmt.message) |msg| {
+                        try @This().attachAssertMessageSelector(self, op, msg);
+                    }
                     if (self.in_ghost_context) {
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.ghost"), namedBoolAttr(self.parent.context, "ora.ghost", true).attribute);
                         mlir.oraOperationSetAttributeByName(op, strRef("ora.verification"), namedBoolAttr(self.parent.context, "ora.verification", true).attribute);
@@ -2543,6 +2650,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const no_overflow = appendValueOp(self.block, not_op);
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, no_overflow, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            try @This().attachAssertMessageSelector(self, assert_op, message);
             appendOp(self.block, assert_op);
         }
 

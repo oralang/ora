@@ -35,7 +35,9 @@ using namespace ora;
 using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::constU256;
 using mlir::ora::lowering::createPtrViewMaterializationCast;
+using mlir::ora::lowering::emitSelectorRevert;
 using mlir::ora::lowering::findStructDeclForName;
+using mlir::ora::lowering::parseHexSelector;
 namespace abi = mlir::ora::abi_lowering;
 namespace euh = mlir::ora::error_union_helpers;
 
@@ -4811,6 +4813,16 @@ LogicalResult ConvertCfAssertOp::matchAndRewrite(
         Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zeroU256);
         Value zeroLen = constU256(rewriter, loc, 0);
         rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroLen);
+    }
+    else if (op.getMsgAttr())
+    {
+        auto selectorAttr = op->getAttrOfType<StringAttr>("ora.assert_selector");
+        if (!selectorAttr)
+            return rewriter.notifyMatchFailure(op, "message assert missing ora.assert_selector");
+        auto selector = parseHexSelector(selectorAttr.getValue());
+        if (!selector)
+            return rewriter.notifyMatchFailure(op, "invalid ora.assert_selector");
+        emitSelectorRevert(rewriter, loc, *selector);
     }
     else
     {

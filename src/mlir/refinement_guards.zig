@@ -61,12 +61,25 @@ fn walkBlock(
     debug_enabled: bool,
     options: CleanupOptions,
 ) void {
+    var provided_checks = std.StringHashMap(void).init(std.heap.page_allocator);
+    defer provided_checks.deinit();
+
     var current = c.oraBlockGetFirstOperation(block);
     while (current.ptr != null) {
         const next = c.oraOperationGetNextInBlock(current);
         if (isRefinementGuard(current)) {
-            handleRefinementGuard(ctx, block, current, proven_guard_ids, debug_enabled, options);
+            const provides_attr = c.oraOperationGetAttributeByName(current, h.strRef("ora.runtime_check_provides"));
+            const provides = getStringAttr(provides_attr);
+            const kept_runtime_check = handleRefinementGuard(ctx, block, current, proven_guard_ids, debug_enabled, options);
+            if (kept_runtime_check) {
+                addProvidedRuntimeChecks(&provided_checks, provides);
+            }
         } else if (isVerificationOp(current)) {
+            if (shouldEraseDominatedRuntimeRequires(current, &provided_checks, debug_enabled, options)) {
+                c.oraOperationErase(current);
+                current = next;
+                continue;
+            }
             handleVerificationOp(ctx, block, current, proven_guard_ids, debug_enabled, options);
         } else {
             walkOperation(ctx, current, proven_guard_ids, debug_enabled, options);
@@ -102,7 +115,7 @@ fn handleRefinementGuard(
     proven_guard_ids: *const std.StringHashMap(void),
     debug_enabled: bool,
     options: CleanupOptions,
-) void {
+) bool {
     const guard_id_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.guard_id"));
     const guard_id = getStringAttr(guard_id_attr);
 
@@ -111,16 +124,26 @@ fn handleRefinementGuard(
             std.debug.print("[guard-cleanup] removed {s}\n", .{guard_id.?});
         }
         c.oraOperationErase(op);
-        return;
+        return false;
     }
 
     const condition = c.oraOperationGetOperand(op, 0);
     const message_attr = c.oraOperationGetAttributeByName(op, h.strRef("message"));
     const message = getStringAttr(message_attr) orelse "Refinement guard failed";
+    const selector_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.assert_selector"));
+    const selector = getStringAttr(selector_attr);
     const loc = c.oraOperationGetLocation(op);
 
     const assert_op = c.oraCfAssertOpCreate(ctx, loc, condition, h.strRef(message));
     if (assert_op.ptr != null) {
+        c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.stringAttr(ctx, "guard"));
+        c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.stringAttr(ctx, "refinement_guard"));
+        if (selector) |selector_text| {
+            c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.assert_selector"), h.stringAttr(ctx, selector_text));
+        }
+        if (guard_id) |id| {
+            c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.guard_id"), h.stringAttr(ctx, id));
+        }
         h.insertOpBefore(block, assert_op, op);
     }
     if (debug_enabled) {
@@ -132,6 +155,41 @@ fn handleRefinementGuard(
     }
 
     c.oraOperationErase(op);
+    return true;
+}
+
+fn addProvidedRuntimeChecks(provided_checks: *std.StringHashMap(void), provides: ?[]const u8) void {
+    const text = provides orelse return;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |key| {
+        if (key.len == 0) continue;
+        provided_checks.put(key, {}) catch {};
+    }
+}
+
+fn shouldEraseDominatedRuntimeRequires(
+    op: c.MlirOperation,
+    provided_checks: *const std.StringHashMap(void),
+    debug_enabled: bool,
+    options: CleanupOptions,
+) bool {
+    if (options.keep_proved_checks) return false;
+    const name = c.oraOperationGetName(op);
+    if (name.data == null or name.length == 0) return false;
+    if (!std.mem.eql(u8, name.data[0..name.length], "ora.assert")) return false;
+
+    const verification_type_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_type"));
+    const verification_type = getStringAttr(verification_type_attr) orelse return false;
+    if (!std.mem.eql(u8, verification_type, "requires")) return false;
+
+    const key_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.runtime_check_key"));
+    const key = getStringAttr(key_attr) orelse return false;
+    if (!provided_checks.contains(key)) return false;
+
+    if (debug_enabled) {
+        std.debug.print("[verification-cleanup] removed dominated requires check {s}\n", .{key});
+    }
+    return true;
 }
 
 fn handleVerificationOp(
@@ -162,6 +220,8 @@ fn handleVerificationOp(
             const condition = c.oraOperationGetOperand(op, 0);
             const message_attr = c.oraOperationGetAttributeByName(op, h.strRef("message"));
             const message = getStringAttr(message_attr) orelse "Assertion failed";
+            const selector_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.assert_selector"));
+            const selector = getStringAttr(selector_attr);
             const loc = c.oraOperationGetLocation(op);
             const assert_op = c.oraCfAssertOpCreate(ctx, loc, condition, h.strRef(message));
             if (assert_op.ptr != null) {
@@ -170,6 +230,9 @@ fn handleVerificationOp(
                 }
                 if (verification_type) |type_str| {
                     c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.stringAttr(ctx, type_str));
+                }
+                if (selector) |selector_text| {
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.assert_selector"), h.stringAttr(ctx, selector_text));
                 }
                 h.insertOpBefore(block, assert_op, op);
             }

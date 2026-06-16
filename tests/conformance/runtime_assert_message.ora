@@ -1,0 +1,5 @@
+contract RuntimeAssertMessage {
+    pub fn checked(flag: bool) {
+        assert(flag, "balance too low");
+    }
+}

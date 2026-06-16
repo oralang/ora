@@ -4512,6 +4512,167 @@ test "compiler lowers requires clauses to runtime revert and erases ensures befo
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.ensures"));
 }
 
+test "refinement cleanup deduplicates requires checks implied by parameter refinement" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: InRange<u256, 0, 200>)
+        \\        requires value >= 0
+        \\        requires value <= 200
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
+}
+
+test "refinement cleanup keeps dominated requires checks in keep-proved mode" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: InRange<u256, 0, 200>)
+        \\        requires value >= 0
+        \\        requires value <= 200
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
+        .keep_proved_checks = true,
+    });
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.count(u8, after, "cf.assert") > 1);
+}
+
+test "refinement cleanup preserves requires checks not implied by parameter refinement" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: InRange<u256, 0, 200>)
+        \\        requires value <= 150
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, after, "cf.assert"));
+}
+
+test "refinement cleanup preserves assert message selector on cf.assert" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(flag: bool) {
+        \\        assert(flag, "bad");
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const selector = try compiler.hir.abi.keccakSelectorHex(testing.allocator, "bad");
+    defer testing.allocator.free(selector);
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "cf.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "ora.assert_selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, selector));
+}
+
+test "refinement cleanup tags kept refinement guards as clean runtime checks" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: MinValue<u256, 10>) {
+        \\        let _: u256 = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "cf.assert"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "ora.verification_type"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "guard"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "ora.verification_context"));
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "refinement_guard"));
+}
+
+test "compiler lowers runtime refinement guards to clean revert through OraToSIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: MinValue<u256, 10>) {
+        \\        let _: u256 = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "sir.invalid"));
+}
+
 test "compiler preserves requires source order before hazardous later clauses" {
     const source_text =
         \\contract Check {
@@ -5123,7 +5284,7 @@ test "compiler lowers bare assert to runtime revert through OraToSIR" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.invalid"));
 }
 
-test "compiler lowers message assert to runtime revert payload through OraToSIR" {
+test "compiler lowers message assert to selector revert payload through OraToSIR" {
     const source_text =
         \\contract Check {
         \\    pub fn run(flag: bool) {
@@ -5136,6 +5297,15 @@ test "compiler lowers message assert to runtime revert payload through OraToSIR"
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const selector = try compiler.hir.abi.keccakSelectorHex(testing.allocator, "bad");
+    defer testing.allocator.free(selector);
+
+    const hir_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (hir_text_ref.data != null) mlir.oraStringRefFree(hir_text_ref);
+    const hir_rendered = hir_text_ref.data[0..hir_text_ref.length];
+    try testing.expect(std.mem.containsAtLeast(u8, hir_rendered, 1, "ora.assert_selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_rendered, 1, selector));
+
     try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 
     const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
@@ -5143,7 +5313,10 @@ test "compiler lowers message assert to runtime revert payload through OraToSIR"
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.revert"));
-    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "sir.store8"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "const 4"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sir.store8"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "08C379A0"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "08c379a0"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.assert"));
 }
 

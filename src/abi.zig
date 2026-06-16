@@ -21,6 +21,7 @@ const CompilerVersion = "0.1.0";
 pub const AbiError = std.mem.Allocator.Error || error{
     MissingContract,
     DuplicateCallableId,
+    DuplicateRuntimeErrorSelector,
     UnsupportedAbiType,
     UnknownStructType,
     UnknownEnumType,
@@ -58,6 +59,17 @@ pub const AbiEffect = struct {
     kind: AbiEffectKind,
     path: ?[]const u8 = null,
     event_id: ?[]const u8 = null,
+};
+
+pub const AbiRuntimeMessage = struct {
+    selector: []const u8,
+    message: []const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: *AbiRuntimeMessage) void {
+        self.allocator.free(self.selector);
+        self.allocator.free(self.message);
+    }
 };
 
 pub const AbiInput = struct {
@@ -179,6 +191,7 @@ pub const ContractAbi = struct {
     contract_count: usize,
     callables: []AbiCallable,
     types: []AbiTypeNode,
+    runtime_messages: []AbiRuntimeMessage,
     type_lookup: std.StringHashMap(usize),
 
     pub fn deinit(self: *ContractAbi) void {
@@ -191,6 +204,11 @@ pub const ContractAbi = struct {
             typ.deinit();
         }
         self.allocator.free(self.types);
+
+        for (self.runtime_messages) |*message| {
+            message.deinit();
+        }
+        self.allocator.free(self.runtime_messages);
 
         self.type_lookup.deinit();
     }
@@ -570,6 +588,20 @@ pub const ContractAbi = struct {
         }
         try writer.writeByte('}');
 
+        try writeObjectKey(writer, &first, "runtimeErrors");
+        try writer.writeByte('{');
+        var runtime_first = true;
+        try writeObjectKey(writer, &runtime_first, "assertMessages");
+        try writer.writeByte('{');
+        for (self.runtime_messages, 0..) |message, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, message.selector);
+            try writer.writeByte(':');
+            try writeJsonString(writer, message.message);
+        }
+        try writer.writeByte('}');
+        try writer.writeByte('}');
+
         try writer.writeByte('}');
         return buffer.toOwnedSlice(allocator);
     }
@@ -706,8 +738,10 @@ const CompilerAbiGenerator = struct {
 
     callables: std.ArrayList(AbiCallable),
     types: std.ArrayList(AbiTypeNode),
+    runtime_messages: std.ArrayList(AbiRuntimeMessage),
     payload_lookup: AbiTypePayloadLookup,
     callable_ids: std.StringHashMap(void),
+    runtime_message_selectors: std.StringHashMap([]const u8),
 
     global_structs: std.StringHashMap(CompilerNamedTypeRef),
     global_bitfields: std.StringHashMap(CompilerNamedTypeRef),
@@ -723,8 +757,10 @@ const CompilerAbiGenerator = struct {
             .compilation = compilation,
             .callables = .{},
             .types = .{},
+            .runtime_messages = .{},
             .payload_lookup = AbiTypePayloadLookup.init(allocator),
             .callable_ids = std.StringHashMap(void).init(allocator),
+            .runtime_message_selectors = std.StringHashMap([]const u8).init(allocator),
             .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_bitfields = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_enums = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
@@ -745,8 +781,14 @@ const CompilerAbiGenerator = struct {
         }
         self.types.deinit(self.allocator);
 
+        for (self.runtime_messages.items) |*message| {
+            message.deinit();
+        }
+        self.runtime_messages.deinit(self.allocator);
+
         self.payload_lookup.deinit();
         self.callable_ids.deinit();
+        self.runtime_message_selectors.deinit();
         self.global_structs.deinit();
         self.global_bitfields.deinit();
         self.global_enums.deinit();
@@ -796,6 +838,13 @@ const CompilerAbiGenerator = struct {
             self.allocator.free(types);
         }
 
+        const runtime_messages = try self.runtime_messages.toOwnedSlice(self.allocator);
+        self.runtime_messages = .{};
+        errdefer {
+            for (runtime_messages) |*message| message.deinit();
+            self.allocator.free(runtime_messages);
+        }
+
         var type_lookup = try buildTypeIdLookup(self.allocator, types);
         errdefer type_lookup.deinit();
 
@@ -808,6 +857,7 @@ const CompilerAbiGenerator = struct {
             .contract_count = self.contract_count,
             .callables = callables,
             .types = types,
+            .runtime_messages = runtime_messages,
             .type_lookup = type_lookup,
         };
     }
@@ -876,6 +926,7 @@ const CompilerAbiGenerator = struct {
         for (contract.members) |member_id| {
             switch (ctx.file.item(member_id).*) {
                 .Function => |function| {
+                    try self.collectRuntimeAssertMessages(ctx, function.body);
                     if (function.visibility == .public) {
                         if (std.mem.eql(u8, function.name, "init")) {
                             try self.addConstructorCallable(ctx, contract.name, member_id, function);
@@ -889,6 +940,60 @@ const CompilerAbiGenerator = struct {
                 else => {},
             }
         }
+    }
+
+    fn collectRuntimeAssertMessages(self: *CompilerAbiGenerator, ctx: CompilerModuleContext, body_id: compiler.BodyId) anyerror!void {
+        const body = ctx.file.body(body_id);
+        for (body.statements) |statement_id| {
+            switch (ctx.file.statement(statement_id).*) {
+                .Assert => |assert_stmt| {
+                    if (assert_stmt.message) |message| try self.addRuntimeAssertMessage(message);
+                },
+                .If => |if_stmt| {
+                    try self.collectRuntimeAssertMessages(ctx, if_stmt.then_body);
+                    if (if_stmt.else_body) |else_body| try self.collectRuntimeAssertMessages(ctx, else_body);
+                },
+                .While => |while_stmt| try self.collectRuntimeAssertMessages(ctx, while_stmt.body),
+                .For => |for_stmt| try self.collectRuntimeAssertMessages(ctx, for_stmt.body),
+                .Switch => |switch_stmt| {
+                    for (switch_stmt.arms) |arm| try self.collectRuntimeAssertMessages(ctx, arm.body);
+                    if (switch_stmt.else_body) |else_body| try self.collectRuntimeAssertMessages(ctx, else_body);
+                },
+                .Try => |try_stmt| {
+                    try self.collectRuntimeAssertMessages(ctx, try_stmt.try_body);
+                    if (try_stmt.catch_clause) |catch_clause| try self.collectRuntimeAssertMessages(ctx, catch_clause.body);
+                },
+                .Block => |block_stmt| try self.collectRuntimeAssertMessages(ctx, block_stmt.body),
+                .LabeledBlock => |block_stmt| try self.collectRuntimeAssertMessages(ctx, block_stmt.body),
+                else => {},
+            }
+        }
+    }
+
+    fn addRuntimeAssertMessage(self: *CompilerAbiGenerator, message: []const u8) anyerror!void {
+        const selector = try compiler_abi.keccakSelectorHex(self.allocator, message);
+
+        if (self.runtime_message_selectors.get(selector)) |existing_message| {
+            self.allocator.free(selector);
+            if (!std.mem.eql(u8, existing_message, message)) return error.DuplicateRuntimeErrorSelector;
+            return;
+        }
+
+        const message_copy = try self.allocator.dupe(u8, message);
+
+        var owned = true;
+        errdefer if (owned) {
+            self.allocator.free(selector);
+            self.allocator.free(message_copy);
+        };
+
+        try self.runtime_message_selectors.put(selector, message_copy);
+        try self.runtime_messages.append(self.allocator, .{
+            .selector = selector,
+            .message = message_copy,
+            .allocator = self.allocator,
+        });
+        owned = false;
     }
 
     fn addFunctionCallable(

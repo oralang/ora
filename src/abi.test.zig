@@ -2000,6 +2000,8 @@ test "abi manifest includes functions errors events effects and sequential type 
         \\    pub fn pureFn() -> u256 { let x: u256 = 1; return x; }
         \\    pub fn viewFn() -> u256 { return counter; }
         \\    pub fn writeFn() { counter = 1; }
+        \\    pub fn checked(flag: bool) { assert(flag, "balance too low"); }
+        \\    fn internalCheck(flag: bool) { assert(flag, "internal failure"); }
         \\    pub fn transferLike(from: address, amount: u256) { counter = amount; }
         \\}
     ;
@@ -2070,6 +2072,17 @@ test "abi manifest includes functions errors events effects and sequential type 
     try testing.expect(std.mem.indexOf(u8, extras_json, "\"messageTemplate\":\"InvalidAmount: amount={amount}\"") != null);
     try testing.expect(std.mem.indexOf(u8, extras_json, "\"group\":\"Events\"") != null);
     try testing.expect(std.mem.indexOf(u8, extras_json, "\"ui\":{\"widget\":\"number\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, extras_json, "\"runtimeErrors\":{\"assertMessages\":{") != null);
+    const balance_selector = try compiler.hir.abi.keccakSelectorHex(allocator, "balance too low");
+    defer allocator.free(balance_selector);
+    const internal_selector = try compiler.hir.abi.keccakSelectorHex(allocator, "internal failure");
+    defer allocator.free(internal_selector);
+    const balance_entry = try std.fmt.allocPrint(allocator, "\"{s}\":\"balance too low\"", .{balance_selector});
+    defer allocator.free(balance_entry);
+    const internal_entry = try std.fmt.allocPrint(allocator, "\"{s}\":\"internal failure\"", .{internal_selector});
+    defer allocator.free(internal_entry);
+    try testing.expect(std.mem.indexOf(u8, extras_json, balance_entry) != null);
+    try testing.expect(std.mem.indexOf(u8, extras_json, internal_entry) != null);
 
     const solidity_json = try contract_abi.toSolidityJson(allocator);
     defer allocator.free(solidity_json);

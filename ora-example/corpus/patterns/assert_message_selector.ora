@@ -1,0 +1,19 @@
+contract AssertMessageSelectorCorpus {
+    pub fn checked(flag: bool)
+        requires flag
+    {
+        assert(flag, "balance too low");
+    }
+
+    pub fn checked_private(flag: bool)
+        requires flag
+    {
+        private_check(flag);
+    }
+
+    fn private_check(flag: bool)
+        requires flag
+    {
+        assert(flag, "internal failure");
+    }
+}

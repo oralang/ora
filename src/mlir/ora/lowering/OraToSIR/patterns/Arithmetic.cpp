@@ -24,6 +24,8 @@ using namespace mlir;
 using namespace ora;
 using mlir::ora::lowering::coerceToU256;
 using mlir::ora::lowering::constU256;
+using mlir::ora::lowering::emitSelectorRevert;
+using mlir::ora::lowering::parseHexSelector;
 using mlir::ora::lowering::kStorageMemRefViewKind;
 
 // Debug logging macro
@@ -316,37 +318,6 @@ static void emitEmptyRevert(ConversionPatternRewriter &rewriter, Location loc)
     rewriter.create<sir::RevertOp>(loc, zeroPtr, zeroU256);
 }
 
-static void emitErrorStringRevert(ConversionPatternRewriter &rewriter, Location loc, StringRef message)
-{
-    auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
-    const uint64_t msgLen = message.size();
-    const uint64_t paddedLen = ((msgLen + 31) / 32) * 32;
-    const uint64_t totalBytes = 4 + evm::kWordBytes + evm::kWordBytes + paddedLen;
-
-    Value totalSize = constU256(rewriter, loc, totalBytes);
-    Value basePtr = rewriter.create<sir::MallocOp>(loc, ptrType, totalSize);
-    rewriter.create<sir::StoreOp>(loc, basePtr, constShiftedSelector(rewriter, loc, 0x08c379a0));
-
-    Value offsetPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, constU256(rewriter, loc, 4));
-    rewriter.create<sir::StoreOp>(loc, offsetPtr, constU256(rewriter, loc, evm::kWordBytes));
-
-    Value lenPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, basePtr, constU256(rewriter, loc, 4 + evm::kWordBytes));
-    rewriter.create<sir::StoreOp>(loc, lenPtr, constU256(rewriter, loc, msgLen));
-
-    for (uint64_t index = 0; index < paddedLen; index += 1)
-    {
-        const uint8_t byte = (index < msgLen) ? static_cast<uint8_t>(message[index]) : static_cast<uint8_t>(0);
-        rewriter.create<sir::Store8Op>(
-            loc,
-            basePtr,
-            constU256(rewriter, loc, 4 + evm::kWordBytes + evm::kWordBytes + index),
-            constU256(rewriter, loc, byte)
-        );
-    }
-
-    rewriter.create<sir::RevertOp>(loc, basePtr, totalSize);
-}
-
 static bool isCleanUserRuntimeCheck(Operation *op)
 {
     auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
@@ -358,7 +329,8 @@ static LogicalResult lowerOraRuntimeCheck(
     Operation *op,
     Value condition,
     ConversionPatternRewriter &rewriter,
-    StringAttr messageAttr = {})
+    StringAttr messageAttr = {},
+    StringAttr selectorAttr = {})
 {
     auto loc = op->getLoc();
     Block *parentBlock = op->getBlock();
@@ -371,7 +343,14 @@ static LogicalResult lowerOraRuntimeCheck(
     if (isCleanUserRuntimeCheck(op))
         emitEmptyRevert(rewriter, loc);
     else if (messageAttr)
-        emitErrorStringRevert(rewriter, loc, messageAttr.getValue());
+    {
+        if (!selectorAttr)
+            return rewriter.notifyMatchFailure(op, "message assert missing ora.assert_selector");
+        auto selector = parseHexSelector(selectorAttr.getValue());
+        if (!selector)
+            return rewriter.notifyMatchFailure(op, "invalid ora.assert_selector");
+        emitSelectorRevert(rewriter, loc, *selector);
+    }
     else
         emitPanicRevert(rewriter, loc, 1);
 
@@ -1141,7 +1120,8 @@ LogicalResult ConvertAssertOp::matchAndRewrite(
         op.getOperation(),
         adaptor.getCondition(),
         rewriter,
-        op->getAttrOfType<mlir::StringAttr>("message"));
+        op->getAttrOfType<mlir::StringAttr>("message"),
+        op->getAttrOfType<mlir::StringAttr>("ora.assert_selector"));
 }
 
 LogicalResult ConvertAssumeOp::matchAndRewrite(

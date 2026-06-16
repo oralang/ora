@@ -398,6 +398,14 @@
       ]
     },
     {
+      "id": "runtime_assert.message_selector_revert",
+      "area": "runtime_checks",
+      "behavior": "assert(condition, message) REVERTs with the compact 4-byte keccak(message) selector payload, not Solidity Error(string) or invalid",
+      "specs": [
+        "tests/conformance/runtime_assert_message.spec.toml"
+      ]
+    },
+    {
       "id": "control_flow.runtime_loop",
       "area": "control_flow",
       "behavior": "Runtime-bound loop over slice executes correct iteration count",

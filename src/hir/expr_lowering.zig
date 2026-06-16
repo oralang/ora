@@ -2921,6 +2921,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const in_bounds = appendValueOp(self.block, self.createCompareOp(loc, "ule", end_offset, source_len));
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, in_bounds, strRef("@slice requires start + length <= value.len"));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            try FunctionLowerer.attachAssertMessageSelector(self, assert_op, "@slice requires start + length <= value.len");
             appendOp(self.block, assert_op);
         }
 
@@ -2985,6 +2986,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "divExact")) {
                 const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, appendValueOp(self.block, self.createCompareOp(loc, "eq", remainder, zero)), strRef("exact division requires zero remainder"));
                 _ = try @This().expectOperation(self, assert_op, builtin.range, "ora.assert");
+                try FunctionLowerer.attachAssertMessageSelector(self, assert_op, "exact division requires zero remainder");
                 appendOp(self.block, assert_op);
                 return quotient;
             }
@@ -3349,6 +3351,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const no_overflow = appendValueOp(self.block, not_op);
             const assert_op = mlir.oraAssertOpCreate(self.parent.context, loc, no_overflow, strRef(message));
             if (mlir.oraOperationIsNull(assert_op)) return error.MlirOperationCreationFailed;
+            try FunctionLowerer.attachAssertMessageSelector(self, assert_op, message);
             appendOp(self.block, assert_op);
         }
 
