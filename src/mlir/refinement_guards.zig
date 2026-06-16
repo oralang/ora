@@ -192,6 +192,13 @@ fn shouldEraseDominatedRuntimeRequires(
     return true;
 }
 
+fn verificationTypeFromOpName(op_name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, op_name, "ora.requires")) return "requires";
+    if (std.mem.eql(u8, op_name, "ora.ensures")) return "ensures";
+    if (std.mem.eql(u8, op_name, "ora.invariant")) return "invariant";
+    return null;
+}
+
 fn handleVerificationOp(
     ctx: c.MlirContext,
     block: c.MlirBlock,
@@ -214,6 +221,7 @@ fn handleVerificationOp(
         const context = getStringAttr(context_attr);
         const verification_type_attr = c.oraOperationGetAttributeByName(op, h.strRef("ora.verification_type"));
         const verification_type = getStringAttr(verification_type_attr);
+        const effective_verification_type = verification_type orelse verificationTypeFromOpName(op_name);
         _ = proven_guard_ids;
         const is_ghost = context != null and std.mem.eql(u8, context.?, "ghost_assertion");
         if (!is_ghost) {
@@ -227,8 +235,10 @@ fn handleVerificationOp(
             if (assert_op.ptr != null) {
                 if (context) |ctx_str| {
                     c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.stringAttr(ctx, ctx_str));
+                } else if (effective_verification_type) |type_str| {
+                    c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_context"), h.stringAttr(ctx, type_str));
                 }
-                if (verification_type) |type_str| {
+                if (effective_verification_type) |type_str| {
                     c.oraOperationSetAttributeByName(assert_op, h.strRef("ora.verification_type"), h.stringAttr(ctx, type_str));
                 }
                 if (selector) |selector_text| {

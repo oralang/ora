@@ -44,6 +44,18 @@ namespace euh = mlir::ora::error_union_helpers;
 // Debug logging macro
 #define DBG(msg) ORA_DEBUG_PREFIX("OraToSIR", msg)
 
+static bool isCleanVerificationRuntimeCheck(StringAttr verificationType)
+{
+    if (!verificationType)
+        return false;
+    StringRef type = verificationType.getValue();
+    return type == "guard" ||
+           type == "requires" ||
+           type == "ensures" ||
+           type == "invariant" ||
+           type == "refinement_guard";
+}
+
 static Value toCondU256(PatternRewriter &rewriter, Location loc, Value value)
 {
     auto u256Type = sir::U256Type::get(rewriter.getContext());
@@ -4805,8 +4817,7 @@ LogicalResult ConvertCfAssertOp::matchAndRewrite(
 
     rewriter.setInsertionPointToStart(failBlock);
     auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
-    if (verificationType &&
-        (verificationType.getValue() == "guard" || verificationType.getValue() == "requires"))
+    if (isCleanVerificationRuntimeCheck(verificationType))
     {
         auto ptrType = sir::PtrType::get(rewriter.getContext(), /*addrSpace=*/1);
         Value zeroU256 = constU256(rewriter, loc, 0);

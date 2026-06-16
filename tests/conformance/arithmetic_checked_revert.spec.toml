@@ -24,7 +24,7 @@ fn = "add(uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = ["0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", 1]
-reverts = {}
+reverts = { any = true }
 
 # Constant-like operands must keep the checked-add revert after canonicalization.
 [[call]]
@@ -32,7 +32,7 @@ fn = "constant_add_overflow()"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
-reverts = {}
+reverts = { any = true }
 
 # Violated requires reverts before EVM div-by-zero semantics.
 [[call]]

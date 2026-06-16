@@ -321,8 +321,14 @@ static void emitEmptyRevert(ConversionPatternRewriter &rewriter, Location loc)
 static bool isCleanUserRuntimeCheck(Operation *op)
 {
     auto verificationType = op->getAttrOfType<StringAttr>("ora.verification_type");
-    return verificationType &&
-           (verificationType.getValue() == "guard" || verificationType.getValue() == "requires");
+    if (!verificationType)
+        return false;
+    StringRef type = verificationType.getValue();
+    return type == "guard" ||
+           type == "requires" ||
+           type == "ensures" ||
+           type == "invariant" ||
+           type == "refinement_guard";
 }
 
 static LogicalResult lowerOraRuntimeCheck(

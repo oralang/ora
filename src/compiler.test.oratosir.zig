@@ -4568,6 +4568,38 @@ test "refinement cleanup keeps dominated requires checks in keep-proved mode" {
     try testing.expect(std.mem.count(u8, after, "cf.assert") > 1);
 }
 
+test "compiler lowers keep-proved requires checks through OraToSIR" {
+    const source_text =
+        \\contract Check {
+        \\    pub fn run(value: InRange<u256, 0, 200>)
+        \\        requires value >= 0
+        \\        requires value <= 200
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{
+        .keep_proved_checks = true,
+    });
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, after, 1, "sir.revert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "sir.invalid"));
+}
+
 test "refinement cleanup preserves requires checks not implied by parameter refinement" {
     const source_text =
         \\contract Check {
