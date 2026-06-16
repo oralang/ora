@@ -49,9 +49,9 @@ surface:
 The closed refinement guard lexicon currently includes `MinValue`, `MaxValue`,
 `InRange`, `NonZeroAddress`, `NonZero`, and `BasisPoints`.
 
-Ora also has refinement types, such as exactness and scaled fixed-point forms.
-Those are type-system and representation facts unless a specific construct emits
-an active guard or SMT obligation. They are not automatically part of the closed
+Ora also has refinement types such as `Exact` and `Scaled`. Those are
+type-system and representation facts unless a specific construct emits an
+active guard or SMT obligation. They are not automatically part of the closed
 runtime/SMT guard lexicon above.
 
 ## Not Proven Today
