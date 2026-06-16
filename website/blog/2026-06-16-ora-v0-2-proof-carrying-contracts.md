@@ -237,6 +237,13 @@ This is why the release includes both SMT reports and bytecode conformance
 tests. A proved property and an emitted check are different things. Ora now
 makes that distinction explicit.
 
+Message-bearing asserts also changed shape. `assert(flag, "balance too low")`
+does not lower to `invalid()` and does not embed the full string in revert data.
+It reverts with the first 4 bytes of `keccak256("balance too low")`, and the ABI
+extras include a `runtimeErrors.assertMessages` table that maps the selector
+back to the original source message. The bytecode stays compact, while tools can
+still show the human-readable message.
+
 ---
 
 ## Runtime ABI: encode, decode, dynamic returns
@@ -285,6 +292,7 @@ Other ABI fixes in v0.2:
 - runtime `@abiDecode` coverage for static and dynamic shapes
 - dispatcher decode matrix coverage
 - custom-error selector reverts
+- selector-based assert-message reverts with ABI metadata for message lookup
 - narrow and wide error-union carrier fixes
 - ABI layout model unification
 - comptime ABI selector/signature/topic helpers
@@ -510,6 +518,8 @@ The v0.2 hardening pass fixes or gates many of those paths:
 - runtime `@abiEncode` no longer returns empty bytes
 - unsupported public ABI shapes reject
 - dispatcher error-union failures return custom-error selectors
+- assert messages revert with compact selectors and publish selector-to-message
+  metadata in ABI extras
 - narrow/wide error-union carriers preserve payload bits
 - typed bitfield literals preserve carrier intent
 - wide integer literals no longer truncate through host integer types
