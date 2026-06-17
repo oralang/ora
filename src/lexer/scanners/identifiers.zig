@@ -24,16 +24,13 @@ pub fn scanIdentifier(lexer: *Lexer) LexerError!void {
     try lexer.addTokenWithInterning(token_type);
 }
 
-/// Append a token with an explicit lexeme slice and range — used to split @-prefixed forms
-/// into `.At` + `.Identifier`/`.Import`.
-fn appendSplitToken(lexer: *Lexer, token_type: lexer_mod.TokenType, lexeme: []const u8, range: SourceRange) LexerError!void {
+/// Append a token with an explicit range, used to split @-prefixed forms into
+/// `.At` + `.Identifier`/`.Import`.
+fn appendSplitToken(lexer: *Lexer, token_type: lexer_mod.TokenType, range: SourceRange) LexerError!void {
     try lexer.tokens.append(lexer.allocator, Token{
         .type = token_type,
-        .lexeme = lexeme,
         .range = range,
         .value = null,
-        .line = range.start_line,
-        .column = range.start_column,
     });
 }
 
@@ -69,7 +66,7 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         .start_offset = lexer.start,
         .end_offset = lexer.start + 1,
     };
-    try appendSplitToken(lexer, .At, lexer.source[lexer.start .. lexer.start + 1], at_range);
+    try appendSplitToken(lexer, .At, at_range);
 
     const tail_range = SourceRange{
         .start_line = lexer.line,
@@ -80,5 +77,5 @@ pub fn scanAtDirective(lexer: *Lexer) LexerError!void {
         .end_offset = lexer.current,
     };
     const tail_type: lexer_mod.TokenType = if (is_import) .Import else .Identifier;
-    try appendSplitToken(lexer, tail_type, lexer.source[lexer.start + 1 .. lexer.current], tail_range);
+    try appendSplitToken(lexer, tail_type, tail_range);
 }

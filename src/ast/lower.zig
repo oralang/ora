@@ -52,7 +52,7 @@ pub fn lower(allocator: std.mem.Allocator, tree: *const syntax.SyntaxTree) !Lowe
 
     var builder = Builder.init(&result.file, tree, &result.diagnostics);
     try builder.parseFile();
-    try builder.finish();
+    builder.finish();
     try validate(&result.file, &result.diagnostics);
     return result;
 }
@@ -154,16 +154,15 @@ const Validator = struct {
                 }
             },
             .Trait => |trait_item| {
-                var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+                var seen = InlineNameSet.init(self.diags.allocator);
                 defer seen.deinit();
                 for (trait_item.methods) |method| {
-                    if (seen.get(method.name)) |first_range| {
+                    if (seen.contains(method.name)) {
                         try self.emitError(method.range, "duplicate trait method '{s}'", .{
                             method.name,
                         });
-                        _ = first_range;
                     } else {
-                        try seen.put(method.name, method.range);
+                        try seen.put(method.name);
                     }
                     if (method.return_type) |type_id| {
                         _ = try self.expectType(type_id, method.range, "trait method references invalid return type id");
@@ -250,6 +249,7 @@ const Validator = struct {
             },
             .Switch => |switch_stmt| {
                 _ = try self.expectExpr(switch_stmt.condition, stmt_range, "switch statement references invalid condition expression id");
+                for (switch_stmt.invariants) |expr_id| _ = try self.expectExpr(expr_id, stmt_range, "switch statement references invalid invariant expression id");
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPattern(arm.pattern, arm.range);
                     _ = try self.expectBody(arm.body, arm.range, "switch arm references invalid body id");
@@ -393,7 +393,7 @@ const Validator = struct {
     }
 
     fn validateParameters(self: *Validator, parameters: []const nodes.Parameter, label: []const u8) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (parameters) |parameter| {
             const pattern_ptr = try self.expectPattern(parameter.pattern, parameter.range, "parameter references invalid pattern id") orelse continue;
@@ -403,13 +403,66 @@ const Validator = struct {
             if (pattern != .Name) continue;
             const name = pattern.Name.name;
             if (name.len == 0) continue;
-            if (seen.get(name)) |_| {
+            if (seen.contains(name)) {
                 try self.emitError(parameter.range, "{s} name '{s}' is declared more than once", .{ label, name });
             } else {
-                try seen.put(name, parameter.range);
+                try seen.put(name);
             }
         }
     }
+
+    const InlineNameSet = struct {
+        const inline_capacity = 16;
+
+        allocator: std.mem.Allocator,
+        inline_items: [inline_capacity][]const u8 = undefined,
+        inline_len: usize = 0,
+        spill: ?std.StringHashMap(void) = null,
+
+        fn init(allocator: std.mem.Allocator) InlineNameSet {
+            return .{ .allocator = allocator };
+        }
+
+        fn deinit(self: *InlineNameSet) void {
+            if (self.spill) |*spill| {
+                spill.deinit();
+            }
+        }
+
+        fn contains(self: *const InlineNameSet, name: []const u8) bool {
+            if (self.spill) |*spill| return spill.contains(name);
+            for (self.inline_items[0..self.inline_len]) |seen_name| {
+                if (std.mem.eql(u8, seen_name, name)) return true;
+            }
+            return false;
+        }
+
+        fn put(self: *InlineNameSet, name: []const u8) !void {
+            if (self.spill) |*spill| {
+                try spill.put(name, {});
+                return;
+            }
+
+            for (self.inline_items[0..self.inline_len]) |seen_name| {
+                if (std.mem.eql(u8, seen_name, name)) return;
+            }
+
+            if (self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = name;
+                self.inline_len += 1;
+                return;
+            }
+
+            var spill = std.StringHashMap(void).init(self.allocator);
+            errdefer spill.deinit();
+            try spill.ensureTotalCapacity(inline_capacity + 1);
+            for (self.inline_items[0..self.inline_len]) |seen_name| {
+                spill.putAssumeCapacity(seen_name, {});
+            }
+            spill.putAssumeCapacity(name, {});
+            self.spill = spill;
+        }
+    };
 
     const AnonymousStructFieldAdapter = struct {
         slice: []const nodes.AnonymousStructFieldType,
@@ -430,72 +483,72 @@ const Validator = struct {
     };
 
     fn validateStructFields(self: *Validator, fields: []const nodes.StructField, noun: []const u8) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (fields) |field| {
             _ = try self.expectType(field.type_expr, field.range, "field references invalid type id");
             if (field.name.len == 0) continue;
-            if (seen.get(field.name)) |_| {
+            if (seen.contains(field.name)) {
                 try self.emitError(field.range, "duplicate {s} name '{s}'", .{ noun, field.name });
             } else {
-                try seen.put(field.name, field.range);
+                try seen.put(field.name);
             }
         }
     }
 
     fn validateBitfieldFields(self: *Validator, fields: []const nodes.BitfieldField) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (fields) |field| {
             _ = try self.expectType(field.type_expr, field.range, "bitfield field references invalid type id");
             if (field.name.len == 0) continue;
-            if (seen.get(field.name)) |_| {
+            if (seen.contains(field.name)) {
                 try self.emitError(field.range, "duplicate bitfield field name '{s}'", .{field.name});
             } else {
-                try seen.put(field.name, field.range);
+                try seen.put(field.name);
             }
         }
     }
 
     fn validateLogFields(self: *Validator, fields: []const nodes.LogField) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (fields) |field| {
             _ = try self.expectType(field.type_expr, field.range, "log field references invalid type id");
             if (field.name.len == 0) continue;
-            if (seen.get(field.name)) |_| {
+            if (seen.contains(field.name)) {
                 try self.emitError(field.range, "duplicate log field name '{s}'", .{field.name});
             } else {
-                try seen.put(field.name, field.range);
+                try seen.put(field.name);
             }
         }
     }
 
     fn validateItemScope(self: *Validator, item_ids: []const ItemId, scope_name: []const u8) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (item_ids) |item_id| {
             const item = self.expectItem(item_id, source.TextRange.empty(0), "scope references invalid item id") catch null orelse continue;
             const name = itemName(item.*) orelse continue;
             if (name.len == 0) continue;
-            if (seen.get(name)) |_| {
+            if (seen.contains(name)) {
                 try self.emitError(source.rangeOf(item.*), "duplicate item name '{s}' in {s}", .{ name, scope_name });
             } else {
-                try seen.put(name, source.rangeOf(item.*));
+                try seen.put(name);
             }
         }
     }
 
     fn validateNames(self: *Validator, adapter: anytype, comptime fmt: []const u8) !void {
-        var seen: std.StringHashMap(source.TextRange) = .init(self.diags.allocator);
+        var seen = InlineNameSet.init(self.diags.allocator);
         defer seen.deinit();
         for (adapter.slice) |entry| {
             const name = adapter.name(entry);
             if (name.len == 0) continue;
-            if (seen.get(name)) |_| {
+            if (seen.contains(name)) {
                 try self.emitError(adapter.range(entry), fmt, .{name});
             } else {
-                try seen.put(name, adapter.range(entry));
+                try seen.put(name);
             }
         }
     }

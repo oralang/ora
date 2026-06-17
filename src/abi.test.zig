@@ -2052,6 +2052,7 @@ test "abi manifest includes functions errors events effects and sequential type 
 
     try testing.expect(std.mem.indexOf(u8, manifest_json, "\"schemaVersion\":\"ora-abi-0.1\"") != null);
     try testing.expect(std.mem.indexOf(u8, manifest_json, "\"contract\":{\"name\":\"Test\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"compiler\":\"ora\",\"version\":\"0.2.0\"") != null);
     try testing.expect(std.mem.indexOf(u8, manifest_json, "\"wireProfiles\":[{\"id\":\"evm-default\"") != null);
     try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"error\"") != null);
     try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"event\"") != null);
@@ -2092,6 +2093,36 @@ test "abi manifest includes functions errors events effects and sequential type 
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"stateMutability\":\"nonpayable\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"error\"") != null);
     try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"event\"") != null);
+}
+
+test "abi emits module scope custom errors to Solidity projection" {
+    const allocator = testing.allocator;
+    const source =
+        \\error Failure(code: u256);
+        \\
+        \\contract C {
+        \\    pub fn run(flag: bool) -> !bool | Failure {
+        \\        if (flag) {
+        \\            return true;
+        \\        }
+        \\        return Failure(7);
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+    const contract_abi = &fixture.contract_abi;
+
+    const failure = findCallable(contract_abi, .@"error", "Failure") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), failure.inputs.len);
+    try testing.expect(failure.selector != null);
+
+    const solidity_json = try contract_abi.toSolidityJson(allocator);
+    defer allocator.free(solidity_json);
+    try testing.expect(std.mem.indexOf(u8, solidity_json, "\"type\":\"error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, solidity_json, "\"name\":\"Failure\"") != null);
+    try testing.expect(std.mem.indexOf(u8, solidity_json, "\"name\":\"code\",\"type\":\"uint256\"") != null);
 }
 
 test "abi sequential type ids dedup equal payloads and keep distinct payloads" {

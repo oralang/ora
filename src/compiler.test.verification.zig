@@ -2968,6 +2968,59 @@ test "verification uses scf while body condition for callee preconditions" {
     try testing.expect(!result.degraded);
 }
 
+test "verification preserves initialized locals in non-continuing labeled blocks" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn f() -> u256 {
+        \\        var res: u256 = 0;
+        \\        outer: {
+        \\            assert(res == 0);
+        \\            res = res + 1;
+        \\            inner: {
+        \\                if (res > 10) {
+        \\                    break :outer;
+        \\                }
+        \\                res = res + 1;
+        \\                break :inner;
+        \\            }
+        \\        }
+        \\        return res;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+}
+
+test "verification keeps continuing labeled blocks conservative" {
+    const source_text =
+        \\contract Sample {
+        \\    pub fn f() -> u256 {
+        \\        var res: u256 = 0;
+        \\        outer: {
+        \\            res = res + 1;
+        \\            if (res < 3) {
+        \\                continue :outer;
+        \\            }
+        \\        }
+        \\        return res;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "f");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(result.errors_len > 0);
+    try testing.expect(std.mem.indexOf(u8, result.error_kinds, "InvariantViolation") != null);
+    try testing.expect(!result.degraded);
+}
+
 test "verification rejects concrete signed min negation overflow" {
     const source_text =
         \\comptime const std = @import("std");

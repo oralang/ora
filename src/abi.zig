@@ -16,7 +16,7 @@ const ProfileId = "evm-default";
 const SchemaVersion = "ora-abi-0.1";
 const ExtrasSchemaVersion = "ora-abi-extras-0.1";
 const CompilerName = "ora";
-const CompilerVersion = "0.1.0";
+const CompilerVersion = "0.2.0";
 
 pub const AbiError = std.mem.Allocator.Error || error{
     MissingContract,
@@ -742,6 +742,7 @@ const CompilerAbiGenerator = struct {
     payload_lookup: AbiTypePayloadLookup,
     callable_ids: std.StringHashMap(void),
     runtime_message_selectors: std.StringHashMap([]const u8),
+    emitted_error_ids: std.StringHashMap(void),
 
     global_structs: std.StringHashMap(CompilerNamedTypeRef),
     global_bitfields: std.StringHashMap(CompilerNamedTypeRef),
@@ -761,6 +762,7 @@ const CompilerAbiGenerator = struct {
             .payload_lookup = AbiTypePayloadLookup.init(allocator),
             .callable_ids = std.StringHashMap(void).init(allocator),
             .runtime_message_selectors = std.StringHashMap([]const u8).init(allocator),
+            .emitted_error_ids = std.StringHashMap(void).init(allocator),
             .global_structs = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_bitfields = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
             .global_enums = std.StringHashMap(CompilerNamedTypeRef).init(allocator),
@@ -789,6 +791,7 @@ const CompilerAbiGenerator = struct {
         self.payload_lookup.deinit();
         self.callable_ids.deinit();
         self.runtime_message_selectors.deinit();
+        self.emitted_error_ids.deinit();
         self.global_structs.deinit();
         self.global_bitfields.deinit();
         self.global_enums.deinit();
@@ -1007,6 +1010,7 @@ const CompilerAbiGenerator = struct {
             .function => |fn_type| fn_type,
             else => return error.UnresolvedType,
         };
+        try self.addPublicReturnErrorCallables(ctx, contract_name, function_type);
         const has_self = functionHasBareSelf(ctx.file, function);
         const offset: usize = if (has_self) 1 else 0;
 
@@ -1145,7 +1149,14 @@ const CompilerAbiGenerator = struct {
         const signature = try self.buildSignature(err.name, signature_types.items);
         const selector = try compiler_abi.keccakSelectorHex(self.allocator, signature);
         const id = try self.buildCallableId(contract_name, signature);
+        if (self.emitted_error_ids.contains(id)) {
+            self.allocator.free(id);
+            self.allocator.free(selector);
+            self.allocator.free(signature);
+            return;
+        }
         try self.ensureCallableIdUnique(id);
+        try self.emitted_error_ids.put(id, {});
 
         try self.callables.append(self.allocator, .{
             .id = id,
@@ -1158,6 +1169,38 @@ const CompilerAbiGenerator = struct {
             .effects = &.{},
             .allocator = self.allocator,
         });
+    }
+
+    fn addPublicReturnErrorCallables(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        function_type: ora_types.semantic.FunctionType,
+    ) anyerror!void {
+        for (function_type.return_types) |return_type| {
+            if (return_type.kind() != .error_union) continue;
+            for (return_type.errorTypes()) |error_type| {
+                try self.addErrorCallableForType(ctx, contract_name, error_type);
+            }
+        }
+    }
+
+    fn addErrorCallableForType(
+        self: *CompilerAbiGenerator,
+        ctx: CompilerModuleContext,
+        contract_name: []const u8,
+        error_type: compiler.sema.Type,
+    ) anyerror!void {
+        _ = ctx;
+        const name = switch (error_type) {
+            .named => |named| named.name,
+            else => return,
+        };
+        const ref = self.global_errors.get(name) orelse return;
+        const owner_ctx = try self.moduleContext(ref.module_id);
+        const item = owner_ctx.file.item(ref.item_id).*;
+        if (item != .ErrorDecl) return;
+        try self.addErrorCallable(owner_ctx, contract_name, item.ErrorDecl);
     }
 
     fn addEventCallable(

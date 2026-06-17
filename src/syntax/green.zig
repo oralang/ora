@@ -17,10 +17,6 @@ pub const GreenTrivia = struct {
 pub const GreenToken = struct {
     kind: TokenKind,
     range: source.TextRange,
-    leading_trivia_start: u32,
-    leading_trivia_len: u32,
-    trailing_trivia_start: u32,
-    trailing_trivia_len: u32,
 };
 
 pub const GreenChild = union(enum) {
@@ -40,16 +36,20 @@ pub const SyntaxTree = struct {
     file_id: source.FileId,
     source_text: []const u8,
     trivia: []GreenTrivia,
+    trivia_capacity: usize,
     tokens: []GreenToken,
+    tokens_capacity: usize,
     children: []GreenChild,
+    children_capacity: usize,
     nodes: []GreenNode,
+    nodes_capacity: usize,
     root: GreenNodeId,
 
     pub fn deinit(self: *SyntaxTree) void {
-        self.allocator.free(self.trivia);
-        self.allocator.free(self.tokens);
-        self.allocator.free(self.children);
-        self.allocator.free(self.nodes);
+        freeBuffer(GreenTrivia, self.allocator, self.trivia, self.trivia_capacity);
+        freeBuffer(GreenToken, self.allocator, self.tokens, self.tokens_capacity);
+        freeBuffer(GreenChild, self.allocator, self.children, self.children_capacity);
+        freeBuffer(GreenNode, self.allocator, self.nodes, self.nodes_capacity);
     }
 
     pub fn rootRange(self: *const SyntaxTree) source.TextRange {
@@ -80,3 +80,8 @@ pub const SyntaxTree = struct {
         return allocator.dupe(u8, self.source_text);
     }
 };
+
+fn freeBuffer(comptime T: type, allocator: std.mem.Allocator, items: []T, capacity: usize) void {
+    if (capacity == 0) return;
+    allocator.free(items.ptr[0..capacity]);
+}

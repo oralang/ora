@@ -270,7 +270,6 @@
 // CHECK-NEXT:     sir.store %ptr_off_1 : !sir.ptr<1>, %32 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/apps/erc20.ora":94:9)))
 // CHECK-NEXT:     %33 = sir.keccak256 %ptr_0 : !sir.ptr<1>, %4 : !sir.u256 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/apps/erc20.ora":94:9)))
 // CHECK-NEXT:     sir.sstore %33 : !sir.u256, %arg1 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/apps/erc20.ora":94:9)))
-// CHECK-NEXT:     sir.sstore %32 : !sir.u256, %32 : !sir.u256 loc("ora.stmt.16"("ora.origin_stmt.16"("{{.*}}/ora-example/apps/erc20.ora":94:9)))
 // CHECK-NEXT:     %34 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/apps/erc20.ora":95:9)))
 // CHECK-NEXT:     %35 = sir.addptr %34 : !sir.ptr<1>, %5 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/apps/erc20.ora":95:9)))
 // CHECK-NEXT:     sir.store %35 : !sir.ptr<1>, %31 : !sir.u256 loc("ora.stmt.17"("ora.origin_stmt.17"("{{.*}}/ora-example/apps/erc20.ora":95:9)))
@@ -469,7 +468,6 @@
 // CHECK-NEXT:     sir.revert %93 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.27"("ora.origin_stmt.27"("{{.*}}/ora-example/apps/erc20.ora":140:39)))
 // CHECK-NEXT:   ^bb16:  // pred: ^bb14
 // CHECK-NEXT:     sir.sstore %58 : !sir.u256, %86 : !sir.u256 loc("ora.stmt.27"("ora.origin_stmt.27"("{{.*}}/ora-example/apps/erc20.ora":140:9)))
-// CHECK-NEXT:     sir.sstore %57 : !sir.u256, %57 : !sir.u256 loc("ora.stmt.27"("ora.origin_stmt.27"("{{.*}}/ora-example/apps/erc20.ora":140:9)))
 // CHECK-NEXT:     %94 = sir.sub %value_7 : !sir.u256, %arg2 : !sir.u256 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/apps/erc20.ora":143:28)))
 // CHECK-NEXT:     %95 = sir.lt %value_7 : !sir.u256, %arg2 : !sir.u256 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/apps/erc20.ora":143:28)))
 // CHECK-NEXT:     %96 = sir.xor %95 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.28"("ora.origin_stmt.28"("{{.*}}/ora-example/apps/erc20.ora":143:28)))

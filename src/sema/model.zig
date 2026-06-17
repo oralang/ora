@@ -301,6 +301,7 @@ pub const GenericBindingValue = semantic_types.GenericBindingValue;
 pub const GenericTypeBinding = semantic_types.GenericTypeBinding;
 pub const LocatedType = semantic_types.LocatedType;
 pub const appendTypeMangleName = semantic_types.appendTypeMangleName;
+pub const typeMangleNameLen = semantic_types.typeMangleNameLen;
 
 pub const ResolvedCall = struct {
     module_id: source.ModuleId,
@@ -560,6 +561,11 @@ pub const Effect = union(enum) {
     }
 };
 
+pub const ExprEffect = struct {
+    expr_id: ast.ExprId,
+    effect: Effect,
+};
+
 pub const TypeCheckKey = union(enum) {
     item: ast.ItemId,
     body: ast.BodyId,
@@ -798,7 +804,7 @@ pub const TypeCheckResult = struct {
     pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
-    expr_effects: []Effect,
+    expr_effects: []const ExprEffect,
     body_types: []Type,
     instantiated_structs: []const InstantiatedStruct,
     instantiated_struct_lookup: []lookup_index.NamedEntry,
@@ -822,14 +828,17 @@ pub const TypeCheckResult = struct {
     }
 
     pub fn patternInitializer(self: *const TypeCheckResult, id: ast.PatternId) ?ast.ExprId {
+        if (id.index() >= self.pattern_initializers.len) return null;
         return self.pattern_initializers[id.index()];
     }
 
     pub fn patternBindingKind(self: *const TypeCheckResult, id: ast.PatternId) ?ast.BindingKind {
+        if (id.index() >= self.pattern_binding_kinds.len) return null;
         return self.pattern_binding_kinds[id.index()];
     }
 
     pub fn exprCallResolution(self: *const TypeCheckResult, id: ast.ExprId) ?ResolvedCall {
+        if (id.index() >= self.call_resolutions.len) return null;
         return self.call_resolutions[id.index()];
     }
 
@@ -841,7 +850,10 @@ pub const TypeCheckResult = struct {
     }
 
     pub fn exprEffect(self: *const TypeCheckResult, id: ast.ExprId) Effect {
-        return self.expr_effects[id.index()];
+        for (self.expr_effects) |entry| {
+            if (entry.expr_id == id) return entry.effect;
+        }
+        return .pure;
     }
 
     pub fn itemEffect(self: *const TypeCheckResult, id: ast.ItemId) Effect {

@@ -16,18 +16,30 @@ pub const ParseResult = struct {
     }
 };
 
+pub const ParseOptions = struct {
+    preserve_trivia: bool = true,
+};
+
 pub fn parse(allocator: std.mem.Allocator, file_id: source.FileId, source_text: []const u8) !ParseResult {
+    return parseWithOptions(allocator, file_id, source_text, .{});
+}
+
+pub fn parseWithOptions(allocator: std.mem.Allocator, file_id: source.FileId, source_text: []const u8, options: ParseOptions) !ParseResult {
     var result = ParseResult{
         .tree = undefined,
         .diagnostics = diagnostics.DiagnosticList.init(allocator),
     };
     errdefer result.diagnostics.deinit();
 
-    var lex = lexer.Lexer.initWithRecovery(allocator, source_text);
-    defer lex.deinit();
+    var lexer_config = lexer.LexerConfig.development();
+    lexer_config.preserve_trivia = options.preserve_trivia;
+    lexer_config.enable_string_interning = false;
+    lexer_config.store_token_values = false;
+    var lex = try lexer.Lexer.initWithConfig(allocator, source_text, lexer_config);
+    var lex_live = true;
+    defer if (lex_live) lex.deinit();
 
-    const token_slice = try lex.scanTokens();
-    defer allocator.free(token_slice);
+    const token_slice = try lex.scanTokensBorrowed();
     const trivia_slice = lex.getTrivia();
 
     for (lex.getDiagnostics()) |diag| {
@@ -40,6 +52,8 @@ pub fn parse(allocator: std.mem.Allocator, file_id: source.FileId, source_text: 
     errdefer allocator.free(copied_trivia);
 
     const copied_tokens = try copyTokens(allocator, token_slice);
+    lex.deinit();
+    lex_live = false;
 
     var parser = Parser.init(allocator, file_id, source_text, copied_trivia, copied_tokens, &result.diagnostics);
     result.tree = try parser.parseTree();
@@ -48,8 +62,43 @@ pub fn parse(allocator: std.mem.Allocator, file_id: source.FileId, source_text: 
 
 const ChildRef = green.GreenChild;
 
+const ChildList = struct {
+    const inline_capacity = 20;
+
+    inline_buffer: [inline_capacity]ChildRef = undefined,
+    inline_len: usize = 0,
+    spill: std.ArrayList(ChildRef) = .{},
+    items: []const ChildRef = &.{},
+
+    fn init() ChildList {
+        return .{};
+    }
+
+    fn deinit(self: *ChildList, allocator: std.mem.Allocator) void {
+        self.spill.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn append(self: *ChildList, allocator: std.mem.Allocator, child: ChildRef) !void {
+        if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+            self.inline_buffer[self.inline_len] = child;
+            self.inline_len += 1;
+            self.items = self.inline_buffer[0..self.inline_len];
+            return;
+        }
+
+        if (self.spill.capacity == 0) {
+            try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+            try self.spill.appendSlice(allocator, self.inline_buffer[0..self.inline_len]);
+        }
+        try self.spill.append(allocator, child);
+        self.items = self.spill.items;
+    }
+};
+
 const Parser = struct {
     allocator: std.mem.Allocator,
+    scratch_arena: std.heap.ArenaAllocator,
     file_id: source.FileId,
     source_text: []const u8,
     trivia: []green.GreenTrivia,
@@ -65,15 +114,16 @@ const Parser = struct {
         file_id: source.FileId,
         source_text: []const u8,
         trivia: []green.GreenTrivia,
-        tokens: []green.GreenToken,
+        tokens: std.ArrayList(green.GreenToken),
         diags: *diagnostics.DiagnosticList,
     ) Parser {
         return .{
             .allocator = allocator,
+            .scratch_arena = std.heap.ArenaAllocator.init(allocator),
             .file_id = file_id,
             .source_text = source_text,
             .trivia = trivia,
-            .tokens = std.ArrayList(green.GreenToken).fromOwnedSlice(tokens),
+            .tokens = tokens,
             .diagnostics = diags,
             .nodes = .{},
             .children = .{},
@@ -83,29 +133,54 @@ const Parser = struct {
     }
 
     fn parseTree(self: *Parser) anyerror!green.SyntaxTree {
-        defer self.tokens.deinit(self.allocator);
-        defer self.nodes.deinit(self.allocator);
-        defer self.children.deinit(self.allocator);
+        errdefer self.tokens.deinit(self.allocator);
+        errdefer self.nodes.deinit(self.allocator);
+        errdefer self.children.deinit(self.allocator);
+        defer self.scratch_arena.deinit();
 
-        var root_children: std.ArrayList(ChildRef) = .{};
-        defer root_children.deinit(self.allocator);
-
-        while (!self.at(.Eof)) {
-            const child = try self.parseTopLevelElement();
-            try root_children.append(self.allocator, child);
+        const token_count = self.tokens.items.len;
+        const min_presized_tokens = 80;
+        if (token_count >= min_presized_tokens) {
+            const node_extra = if (token_count >= 1280) token_count / 10 else token_count / 8;
+            const node_capacity = token_count / 2 + node_extra;
+            const half = token_count / 2;
+            const child_extra = if (token_count >= 512) token_count / 5 else token_count / 4;
+            const child_capacity = std.math.add(usize, token_count, half + child_extra) catch return error.OutOfMemory;
+            try self.nodes.ensureTotalCapacityPrecise(self.allocator, node_capacity);
+            try self.children.ensureTotalCapacityPrecise(self.allocator, child_capacity);
         }
 
-        const root = try self.finishNode(SyntaxKind.SourceFile, root_children.items);
-        return .{
+        var root: green.GreenNodeId = undefined;
+        {
+            var root_children = ChildList.init();
+            defer root_children.deinit(self.scratch_arena.allocator());
+
+            while (!self.at(.Eof)) {
+                const child = try self.parseTopLevelElement();
+                try root_children.append(self.scratch_arena.allocator(), child);
+            }
+
+            root = try self.finishNode(SyntaxKind.SourceFile, root_children.items);
+        }
+
+        const tree: green.SyntaxTree = .{
             .allocator = self.allocator,
             .file_id = self.file_id,
             .source_text = self.source_text,
             .trivia = self.trivia,
-            .tokens = try self.tokens.toOwnedSlice(self.allocator),
-            .children = try self.children.toOwnedSlice(self.allocator),
-            .nodes = try self.nodes.toOwnedSlice(self.allocator),
+            .trivia_capacity = self.trivia.len,
+            .tokens = self.tokens.items,
+            .tokens_capacity = self.tokens.capacity,
+            .children = self.children.items,
+            .children_capacity = self.children.capacity,
+            .nodes = self.nodes.items,
+            .nodes_capacity = self.nodes.capacity,
             .root = root,
         };
+        self.tokens = .{};
+        self.children = .{};
+        self.nodes = .{};
+        return tree;
     }
 
     fn parseTopLevelElement(self: *Parser) anyerror!ChildRef {
@@ -185,23 +260,23 @@ const Parser = struct {
     }
 
     fn parseContractItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Pub)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
 
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!self.at(.LeftBrace)) {
@@ -209,13 +284,13 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.ContractItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, try self.parseContractMember());
+            try children.append(self.scratch_arena.allocator(), try self.parseContractMember());
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated contract body", children.items);
         }
@@ -224,32 +299,32 @@ const Parser = struct {
     }
 
     fn parseFunctionItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (self.looksLikeDecodePermissiveMarker()) {
-            try children.append(self.allocator, .{ .node = try self.parseDecodePermissiveMarkerNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseDecodePermissiveMarkerNode() });
         }
 
         if (self.at(.Pub)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Comptime)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Fn)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'fn' in function declaration");
         }
         try self.parseFunctionSignatureCore(&children, "function declaration");
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (!self.at(.Eof)) {
             try self.reportHere("expected function body");
         }
@@ -258,27 +333,27 @@ const Parser = struct {
     }
 
     fn parseDecodePermissiveMarkerNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         return self.finishNode(SyntaxKind.BuiltinExpr, children.items);
     }
 
     fn parseTraitMethodSignature(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Comptime)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.Call) or self.at(.Staticcall)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Fn)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'fn' in trait method declaration");
         }
@@ -288,7 +363,7 @@ const Parser = struct {
             _ = try self.parseBodyNode();
             try self.reportHere("trait methods cannot have a body");
         } else if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (!self.at(.Eof)) {
             try self.reportHere("expected ';' after trait method declaration");
         }
@@ -297,15 +372,15 @@ const Parser = struct {
     }
 
     fn parseTraitItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Extern)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!self.at(.LeftBrace)) {
@@ -313,26 +388,26 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.TraitItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
             if (self.at(.Ghost)) {
-                try children.append(self.allocator, .{ .node = try self.parseGhostItem() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseGhostItem() });
                 continue;
             }
             if (!self.at(.Comptime) and !self.at(.Fn) and !self.at(.Call) and !self.at(.Staticcall)) {
                 try self.reportHere("expected method signature in trait body");
-                try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseErrorItemNode(false) });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseTraitMethodSignature() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTraitMethodSignature() });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated trait body", children.items);
         }
@@ -341,14 +416,14 @@ const Parser = struct {
     }
 
     fn parseImplItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         var saw_for = false;
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             if (self.at(.For)) saw_for = true;
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!saw_for) {
@@ -360,21 +435,21 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.ImplItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
             if (self.at(.Fn) or self.at(.Comptime)) {
-                try children.append(self.allocator, .{ .node = try self.parseImplMethodItem() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseImplMethodItem() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseErrorItemNode(false) });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated impl body", children.items);
         }
@@ -383,26 +458,26 @@ const Parser = struct {
     }
 
     fn parseImplMethodItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Pub)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Comptime)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Fn)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'fn' in impl method declaration");
         }
         try self.parseFunctionSignatureCore(&children, "impl method declaration");
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else if (self.at(.Semicolon)) {
             _ = self.bump();
             try self.reportHere("impl methods must have a body");
@@ -413,13 +488,13 @@ const Parser = struct {
         return self.finishNode(SyntaxKind.FunctionItem, children.items);
     }
 
-    fn parseFunctionSignatureCore(self: *Parser, children: *std.ArrayList(ChildRef), comptime context: []const u8) anyerror!void {
+    fn parseFunctionSignatureCore(self: *Parser, children: *ChildList, comptime context: []const u8) anyerror!void {
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace) and !self.at(.Semicolon)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         } else {
             try self.reportHere("expected parameter list in " ++ context);
         }
@@ -427,43 +502,43 @@ const Parser = struct {
         while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Where) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies)) {
             if (self.at(.Semicolon)) break;
             if (self.at(.Arrow)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Errors, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .Semicolon }) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .LeftBrace, .Errors, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .Semicolon }) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.Where)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.LeftBrace) and !self.at(.Errors) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies) and !self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .node = try self.parseTraitBoundClauseNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTraitBoundClauseNode() });
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
         }
 
         if (self.at(.Errors)) {
-            try children.append(self.allocator, .{ .node = try self.parseErrorsClauseNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseErrorsClauseNode() });
         }
 
         while (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) {
-            try children.append(self.allocator, .{ .node = try self.parseSpecClauseNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSpecClauseNode() });
         }
     }
 
     fn parseErrorsClauseNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Errors)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'errors' clause");
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '(' after 'errors'");
             return self.finishNode(SyntaxKind.ErrorsClause, children.items);
@@ -471,17 +546,17 @@ const Parser = struct {
 
         while (!self.at(.Eof) and !self.at(.RightParen)) {
             if (self.at(.Identifier)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected error name in errors clause");
                 break;
             }
             if (!self.at(.Comma)) break;
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after errors clause");
         }
@@ -490,44 +565,44 @@ const Parser = struct {
     }
 
     fn parseTraitBoundClauseNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected type parameter name in trait bound");
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ':' in trait bound");
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .LeftBrace, .Semicolon }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies, .LeftBrace, .Semicolon }) });
         return self.finishNode(SyntaxKind.TraitBoundClause, children.items);
     }
 
     fn parseParameterListNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '(' to start parameter list");
             return self.finishNode(SyntaxKind.ParameterList, children.items);
         }
 
         while (!self.at(.Eof) and !self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterNode() });
             if (!self.at(.Comma)) break;
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after parameter list");
         }
@@ -536,38 +611,38 @@ const Parser = struct {
     }
 
     fn parseParameterNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !self.at(.Comma) and !self.at(.RightParen)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         return self.finishNode(SyntaxKind.Parameter, children.items);
     }
 
     fn parseBodyNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '{' to start body");
             return self.finishNode(SyntaxKind.Body, children.items);
         }
 
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseStatementNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseStatementNode() });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated body", children.items);
         }
@@ -576,49 +651,49 @@ const Parser = struct {
     }
 
     fn parseSpecClauseNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected specification clause");
             return self.finishNode(SyntaxKind.SpecClause, children.items);
         }
 
         if (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.LeftBrace) and !self.at(.Requires) and !self.at(.Guard) and !self.at(.Ensures) and !self.at(.EnsuresOk) and !self.at(.EnsuresErr) and !self.at(.Modifies)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
             while (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (self.at(.Eof) or self.at(.Semicolon) or self.at(.LeftBrace) or self.at(.Requires) or self.at(.Guard) or self.at(.Ensures) or self.at(.EnsuresOk) or self.at(.EnsuresErr) or self.at(.Modifies)) break;
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .LeftBrace, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Modifies }) });
             }
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         return self.finishNode(SyntaxKind.SpecClause, children.items);
     }
 
     fn parseContractInvariantItemNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Invariant)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected contract invariant");
             return self.finishNode(SyntaxKind.ContractInvariantItem, children.items);
         }
 
         if (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -629,16 +704,16 @@ const Parser = struct {
     }
 
     fn parseGhostItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else if (self.startsTopLevelItem()) {
-            try children.append(self.allocator, .{ .node = try self.parseTopLevelItem() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTopLevelItem() });
         } else {
-            try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseErrorItemNode(false) });
         }
 
         return self.finishNode(SyntaxKind.GhostItem, children.items);
@@ -649,51 +724,51 @@ const Parser = struct {
     }
 
     fn parseImportItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Comptime)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.Const)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (tokenIsIdentifierLike(self.current().kind)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected import alias");
             }
             if (self.at(.Equal)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected '=' after import alias");
             }
         }
 
         if (self.at(.At)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.Import)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected import keyword");
         }
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '(' after import");
         }
         if (self.at(.StringLiteral)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected import path string");
         }
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after import path");
         }
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after import");
         }
@@ -705,38 +780,38 @@ const Parser = struct {
     }
 
     fn parseConstantItemWithOptions(self: *Parser, allow_comptime_prefix: bool, allow_pub_prefix: bool) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (allow_pub_prefix and self.at(.Pub)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (allow_comptime_prefix and self.at(.Comptime)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.Const)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'const'");
             return self.finishNode(SyntaxKind.ConstantItem, children.items);
         }
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected constant name");
         }
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon }) });
         }
         if (self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
         } else {
             try self.reportHere("expected '=' after constant name");
         }
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after constant");
         }
@@ -744,24 +819,24 @@ const Parser = struct {
     }
 
     fn parseFieldItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !self.at(.Semicolon)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon }) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon }) });
                 continue;
             }
             if (self.at(.Equal)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
                 break;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated field item", children.items);
         }
@@ -769,50 +844,50 @@ const Parser = struct {
     }
 
     fn parseLogDeclItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected log name");
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '(' after log name");
             return self.finishNode(SyntaxKind.LogDeclItem, children.items);
         }
 
         while (!self.at(.Eof) and !self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseLogFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseLogFieldNode() });
             if (!self.at(.Comma)) break;
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after log fields");
         }
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightBrace)) {
                 if ((self.at(.Pub) and self.peekKind(1) == .Const) or self.at(.Const)) {
-                    try children.append(self.allocator, .{ .node = try self.parseConstantItemWithOptions(false, true) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseConstantItemWithOptions(false, true) });
                 } else {
-                    try children.append(self.allocator, .{ .node = try self.parseErrorItemNode(false) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseErrorItemNode(false) });
                 }
             }
             if (self.at(.RightBrace)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportUnterminated("unterminated log metadata body", children.items);
             }
         } else if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' or metadata body after log declaration");
         }
@@ -820,21 +895,21 @@ const Parser = struct {
     }
 
     fn parseLogFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (tokenIsIdentifierLike(self.current().kind) and std.mem.eql(u8, self.source_text[self.current().range.start..self.current().range.end], "indexed")) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected log field name");
             return self.finishNode(SyntaxKind.LogField, children.items);
         }
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
         } else {
             try self.reportHere("expected ':' after log field name");
         }
@@ -842,20 +917,20 @@ const Parser = struct {
     }
 
     fn parseErrorDeclItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected error name");
         }
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after error declaration");
         }
@@ -863,20 +938,20 @@ const Parser = struct {
     }
 
     fn parseStructItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
 
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!self.at(.LeftBrace)) {
@@ -884,21 +959,21 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.StructItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
             if ((self.at(.Pub) and self.peekKind(1) == .Const) or self.at(.Const)) {
-                try children.append(self.allocator, .{ .node = try self.parseConstantItemWithOptions(false, true) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseConstantItemWithOptions(false, true) });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseStructFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseStructFieldNode() });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated braced item body", children.items);
         }
@@ -907,30 +982,30 @@ const Parser = struct {
     }
 
     fn parseBitfieldItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
 
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!self.at(.LeftBrace)) {
@@ -938,17 +1013,17 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.BitfieldItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseBitfieldFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBitfieldFieldNode() });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated braced item body", children.items);
         }
@@ -957,30 +1032,30 @@ const Parser = struct {
     }
 
     fn parseEnumItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.LeftParen) and !self.at(.LeftBrace)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
 
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.LeftBrace}) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (!self.at(.LeftBrace)) {
@@ -988,17 +1063,17 @@ const Parser = struct {
             return self.finishNode(SyntaxKind.EnumItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma) or self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseEnumVariantNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseEnumVariantNode() });
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated braced item body", children.items);
         }
@@ -1007,37 +1082,37 @@ const Parser = struct {
     }
 
     fn parseTypeAliasItem(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected 'type' in type alias declaration");
         }
 
         if (tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected alias name");
             return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseParameterListNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
         }
 
         if (self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '=' in type alias declaration");
             return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.Semicolon}) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.Semicolon}) });
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after type alias");
         }
@@ -1046,11 +1121,11 @@ const Parser = struct {
     }
 
     fn parseMemberNode(self: *Parser, kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.Comma) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (children.items.len == 0) {
@@ -1062,56 +1137,56 @@ const Parser = struct {
     }
 
     fn parseEnumVariantNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected enum variant");
             if (!self.at(.Eof) and !self.at(.Comma) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             return self.finishNode(SyntaxKind.EnumVariant, children.items);
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (!self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 while (self.at(.Comma)) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                     if (self.at(.RightParen)) break;
-                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 }
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after enum variant payload");
             }
         } else if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightBrace)) {
                 if (self.at(.Comma) or self.at(.Semicolon)) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                     continue;
                 }
-                try children.append(self.allocator, .{ .node = try self.parseAnonymousStructFieldNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseAnonymousStructFieldNode() });
             }
             if (self.at(.RightBrace)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected '}' after enum variant payload");
             }
         }
 
         if (self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (self.at(.Eof) or self.at(.Comma) or self.at(.Semicolon) or self.at(.RightBrace)) {
                 try self.reportHere("expected enum variant value");
             } else {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .RightBrace }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .Semicolon, .RightBrace }) });
             }
         }
 
@@ -1119,19 +1194,19 @@ const Parser = struct {
     }
 
     fn parseStructFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected struct field");
             return self.finishNode(SyntaxKind.StructField, children.items);
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Semicolon, .RightBrace }) });
         } else {
             try self.reportHere("expected ':' after field name");
         }
@@ -1140,25 +1215,25 @@ const Parser = struct {
     }
 
     fn parseBitfieldFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected bitfield field");
             return self.finishNode(SyntaxKind.BitfieldField, children.items);
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .LeftParen, .At, .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .LeftParen, .At, .Semicolon, .RightBrace }) });
         } else {
             try self.reportHere("expected ':' after field name");
         }
 
         while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.Comma) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         return self.finishNode(SyntaxKind.BitfieldField, children.items);
@@ -1170,22 +1245,22 @@ const Parser = struct {
         opener: green.TokenKind,
         closing: green.TokenKind,
     ) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(opener)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected delimiter");
             return self.finishNode(kind, children.items);
         }
 
         while (!self.at(.Eof) and !self.at(closing)) {
-            try children.append(self.allocator, try self.parseElement(closing));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(closing));
         }
 
         if (self.at(closing)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated delimited node", children.items);
         }
@@ -1219,19 +1294,19 @@ const Parser = struct {
     }
 
     fn parseComptimeStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var comptime_children: std.ArrayList(ChildRef) = .{};
-        defer comptime_children.deinit(self.allocator);
+        var comptime_children = ChildList.init();
+        defer comptime_children.deinit(self.scratch_arena.allocator());
 
-        try comptime_children.append(self.allocator, .{ .token = self.bump() });
+        try comptime_children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
 
-        var body_children: std.ArrayList(ChildRef) = .{};
-        defer body_children.deinit(self.allocator);
+        var body_children = ChildList.init();
+        defer body_children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.LeftBrace)) {
-            try comptime_children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try comptime_children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else if (!self.at(.Eof) and !self.at(.RightBrace)) {
-            try body_children.append(self.allocator, .{ .node = try self.parseStatementNode() });
-            try comptime_children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Body, body_children.items) });
+            try body_children.append(self.scratch_arena.allocator(), .{ .node = try self.parseStatementNode() });
+            try comptime_children.append(self.scratch_arena.allocator(), .{ .node = try self.finishNode(SyntaxKind.Body, body_children.items) });
         } else {
             try self.reportHere("expected body or statement after comptime");
         }
@@ -1242,31 +1317,31 @@ const Parser = struct {
     }
 
     fn parseLabeledBlockStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected label name");
             return self.finishNode(SyntaxKind.LabeledBlockStmt, children.items);
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ':' after label");
             return self.finishNode(SyntaxKind.LabeledBlockStmt, children.items);
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else if (self.at(.While)) {
-            try children.append(self.allocator, .{ .node = try self.parseWhileStmtNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseWhileStmtNode() });
         } else if (self.at(.For)) {
-            try children.append(self.allocator, .{ .node = try self.parseForStmtNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseForStmtNode() });
         } else if (self.at(.Switch)) {
-            try children.append(self.allocator, .{ .node = try self.parseSwitchStmtNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSwitchStmtNode() });
         } else {
             try self.reportHere("expected block, while, for, or switch after label");
         }
@@ -1275,26 +1350,26 @@ const Parser = struct {
     }
 
     fn parseJumpStmtNode(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (self.at(.Identifier)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected label name after ':'");
             }
         }
 
         if (!self.at(.Semicolon) and !self.at(.RightBrace) and !self.at(.Eof)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.Semicolon}) });
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1305,39 +1380,39 @@ const Parser = struct {
     }
 
     fn parseBlockStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         return self.finishNode(SyntaxKind.BlockStmt, children.items);
     }
 
     fn parseIfStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
             try self.reportHere("expected '(' after if");
             if (!self.at(.LeftBrace) and !self.at(.Else) and !self.at(.RightBrace) and !self.at(.Eof)) {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Else, .RightBrace }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Else, .RightBrace }) });
             }
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected body after if condition");
         }
 
         if (self.at(.Else)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (self.at(.If)) {
-                try children.append(self.allocator, .{ .node = try self.parseIfStmtNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseIfStmtNode() });
             } else if (self.at(.LeftBrace)) {
-                try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
             } else {
                 try self.reportHere("expected 'if' or body after else");
             }
@@ -1347,25 +1422,25 @@ const Parser = struct {
     }
 
     fn parseWhileStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
             try self.reportHere("expected '(' after while");
             if (!self.at(.LeftBrace) and !self.at(.Invariant) and !self.at(.RightBrace) and !self.at(.Eof)) {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Invariant, .RightBrace }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .LeftBrace, .Invariant, .RightBrace }) });
             }
         }
 
         while (self.at(.Invariant)) {
-            try children.append(self.allocator, .{ .node = try self.parseInvariantClauseNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseInvariantClauseNode() });
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected body after while condition");
         }
@@ -1374,12 +1449,12 @@ const Parser = struct {
     }
 
     fn parseForStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (!self.at(.RightParen)) {
                 const start_expr = try self.parseExpressionNode(&.{ .RightParen, .DotDot, .DotDotDot });
                 if (self.at(.DotDot) or self.at(.DotDotDot)) {
@@ -1388,13 +1463,13 @@ const Parser = struct {
                         .{ .token = self.bump() },
                         .{ .node = try self.parseExpressionNode(&.{.RightParen}) },
                     };
-                    try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.RangeExpr, &range_children) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.finishNode(SyntaxKind.RangeExpr, &range_children) });
                 } else {
-                    try children.append(self.allocator, .{ .node = start_expr });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = start_expr });
                 }
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after condition");
             }
@@ -1404,15 +1479,15 @@ const Parser = struct {
 
         while (!self.at(.Eof) and !self.at(.LeftBrace)) {
             if (self.at(.Semicolon) or self.at(.RightBrace) or self.at(.Invariant)) break;
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         while (self.at(.Invariant)) {
-            try children.append(self.allocator, .{ .node = try self.parseInvariantClauseNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseInvariantClauseNode() });
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected body after for clause");
         }
@@ -1421,16 +1496,20 @@ const Parser = struct {
     }
 
     fn parseSwitchStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchStmt else .SwitchStmt;
         const keyword = self.bump();
-        try children.append(self.allocator, .{ .token = keyword });
+        try children.append(self.scratch_arena.allocator(), .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
             try self.reportHere("expected '(' after switch");
+        }
+
+        while (self.at(.Invariant)) {
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseInvariantClauseNode() });
         }
 
         if (!self.at(.LeftBrace)) {
@@ -1438,60 +1517,60 @@ const Parser = struct {
             return self.finishNode(node_kind, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseSwitchArmNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSwitchArmNode() });
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
         }
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated switch body", children.items);
         }
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         return self.finishNode(node_kind, children.items);
     }
 
     fn parseTryStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected body after try");
         }
 
         if (self.at(.Catch)) {
-            try children.append(self.allocator, .{ .node = try self.parseCatchClauseNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseCatchClauseNode() });
         }
 
         return self.finishNode(SyntaxKind.TryStmt, children.items);
     }
 
     fn parseCatchClauseNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Catch)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected catch");
             return self.finishNode(SyntaxKind.CatchClause, children.items);
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseDelimited(SyntaxKind.GroupParen, .RightParen) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseDelimited(SyntaxKind.GroupParen, .RightParen) });
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected catch body");
         }
@@ -1500,60 +1579,60 @@ const Parser = struct {
     }
 
     fn parseInvariantClauseNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Invariant)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected invariant clause");
             return self.finishNode(SyntaxKind.InvariantClause, children.items);
         }
 
         if (!self.at(.Semicolon) and !self.at(.LeftBrace) and !self.at(.Invariant) and !self.at(.Eof)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .LeftBrace, .Invariant }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .LeftBrace, .Invariant }) });
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         return self.finishNode(SyntaxKind.InvariantClause, children.items);
     }
 
     fn parseSwitchArmNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = try self.parseSwitchPatternExprNode() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSwitchPatternExprNode() });
 
         if (self.at(.Arrow)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '=>' in switch arm");
             return self.finishNode(SyntaxKind.SwitchArm, children.items);
         }
 
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
-            try children.append(self.allocator, .{ .node = try self.parseExprStmtNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExprStmtNode() });
         }
 
         return self.finishNode(SyntaxKind.SwitchArm, children.items);
     }
 
     fn parseReturnStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (!self.at(.Semicolon) and !self.at(.RightBrace) and !self.at(.Eof)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1564,25 +1643,25 @@ const Parser = struct {
     }
 
     fn parseLogStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected log name");
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after log arguments");
             }
@@ -1591,7 +1670,7 @@ const Parser = struct {
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after log statement");
         }
@@ -1608,34 +1687,34 @@ const Parser = struct {
     }
 
     fn parseParenExprStatementNode(self: *Parser, kind: SyntaxKind, keyword: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (!self.at(.LeftParen)) {
             _ = keyword;
             try self.reportHere("expected '(' after statement keyword");
             return self.finishNode(kind, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (!self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
             while (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (self.at(.RightParen)) break;
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
             }
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after statement arguments");
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' after statement");
         }
@@ -1644,25 +1723,25 @@ const Parser = struct {
     }
 
     fn parseVariableDeclStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.Equal) and !self.at(.RightBrace)) {
             if (self.at(.Colon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon, .RightBrace }) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Equal, .Semicolon, .RightBrace }) });
                 continue;
             }
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1673,29 +1752,29 @@ const Parser = struct {
     }
 
     fn parseDestructuringAssignStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !(self.at(.Dot) and self.peekKind(1) == .LeftBrace) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.Dot) and self.peekKind(1) == .LeftBrace) {
-            try children.append(self.allocator, .{ .node = try self.parseDestructuringPatternNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseDestructuringPatternNode() });
         } else {
             try self.reportHere("expected destructuring pattern");
             return self.finishNode(SyntaxKind.DestructuringAssignStmt, children.items);
         }
 
         if (self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
         } else {
             try self.reportHere("expected '=' after destructuring pattern");
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1706,12 +1785,12 @@ const Parser = struct {
     }
 
     fn parseDestructuringPatternNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '{' after '.' in destructuring pattern");
             return self.finishNode(SyntaxKind.DestructuringPattern, children.items);
@@ -1722,23 +1801,23 @@ const Parser = struct {
             if (self.at(.DotDot)) {
                 if (has_rest) try self.reportHere("duplicate '..' in destructuring pattern");
                 has_rest = true;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (!self.at(.Comma) and !self.at(.RightBrace)) {
                     try self.reportHere("expected ',' or '}' after '..' in destructuring pattern");
                 }
                 if (self.at(.Comma)) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 }
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseDestructuringFieldNode() });
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else break;
         }
 
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated destructuring pattern", children.items);
         }
@@ -1747,20 +1826,20 @@ const Parser = struct {
     }
 
     fn parseDestructuringFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name in destructuring pattern");
             return self.finishNode(SyntaxKind.DestructuringField, children.items);
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (self.at(.Identifier)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected binding name after ':' in destructuring pattern");
             }
@@ -1770,15 +1849,15 @@ const Parser = struct {
     }
 
     fn parseDelimitedStatementNode(self: *Parser, kind: SyntaxKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1789,30 +1868,30 @@ const Parser = struct {
     }
 
     fn parseDirectiveStmtNode(self: *Parser, kind: SyntaxKind, comptime name: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.At)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '@' before directive");
             return self.finishNode(kind, children.items);
         }
 
         if (self.at(.Identifier) and std.mem.eql(u8, self.source_text[self.current().range.start..self.current().range.end], name)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected directive name");
             return self.finishNode(kind, children.items);
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (!self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after directive argument");
             }
@@ -1821,7 +1900,7 @@ const Parser = struct {
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1832,17 +1911,17 @@ const Parser = struct {
     }
 
     fn parseExprOrAssignStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
 
         if (isAssignmentToken(self.current().kind)) {
             const assign_kind = self.current().kind;
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .RightBrace }) });
             if (self.at(.Semicolon)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else if (self.at(.RightBrace)) {
                 try self.reportHere("expected ';' before '}'");
             } else {
@@ -1852,7 +1931,7 @@ const Parser = struct {
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else if (self.at(.RightBrace)) {
             try self.reportHere("expected ';' before '}'");
         } else {
@@ -1863,12 +1942,12 @@ const Parser = struct {
     }
 
     fn parseExprStmtNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .Comma, .RightBrace }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Semicolon, .Comma, .RightBrace }) });
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         return self.finishNode(SyntaxKind.ExprStmt, children.items);
     }
@@ -1977,30 +2056,30 @@ const Parser = struct {
     }
 
     fn parseErrorReturnExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Dot)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected error name after 'error'");
             return self.finishNode(SyntaxKind.ErrorReturnExpr, children.items);
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseCallArgumentNode() });
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after error arguments");
             }
@@ -2013,25 +2092,25 @@ const Parser = struct {
     }
 
     fn parseAnonymousStructLiteralExprNode(self: *Parser, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '{' after '.'");
             return self.finishNode(SyntaxKind.StructLiteral, children.items);
         }
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseStructLiteralFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseStructLiteralFieldNode() });
         }
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '}' after struct literal");
         }
@@ -2040,12 +2119,12 @@ const Parser = struct {
     }
 
     fn parseComptimeExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseBodyNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseBodyNode() });
         } else {
             try self.reportHere("expected body after comptime");
         }
@@ -2053,68 +2132,68 @@ const Parser = struct {
     }
 
     fn parseExternalProxyExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Less)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '<' after external");
             return self.finishNode(SyntaxKind.ExternalProxyExpr, children.items);
         }
 
         if (tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected extern trait name");
         }
 
         if (self.typeAtGreaterToken()) {
-            try children.append(self.allocator, .{ .token = self.bumpTypeGreater() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bumpTypeGreater() });
         } else {
             try self.reportHere("expected '>' after extern trait name");
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '(' after external trait");
             return self.finishNode(SyntaxKind.ExternalProxyExpr, children.items);
         }
 
         if (!self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
         } else {
             try self.reportHere("expected address expression in external proxy");
         }
 
         if (self.at(.Comma)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ', gas: ...' in external proxy");
         }
 
         if (self.at(.Identifier) and self.currentTokenTextEql("gas")) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected gas argument in external proxy");
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ':' after gas");
         }
 
         if (!self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
         } else {
             try self.reportHere("expected gas expression in external proxy");
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after external proxy arguments");
         }
@@ -2129,14 +2208,14 @@ const Parser = struct {
 
     fn parseTypeExprInnerNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
         if (self.at(.Bang)) {
-            var children: std.ArrayList(ChildRef) = .{};
-            defer children.deinit(self.allocator);
+            var children = ChildList.init();
+            defer children.deinit(self.scratch_arena.allocator());
 
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypePrimaryNode(stops) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypePrimaryNode(stops) });
             while (self.at(.Pipe)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
-                try children.append(self.allocator, .{ .node = try self.parseTypePrimaryNode(stops) });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypePrimaryNode(stops) });
             }
             return self.finishNode(SyntaxKind.ErrorUnionType, children.items);
         }
@@ -2154,12 +2233,12 @@ const Parser = struct {
     ) anyerror!green.GreenNodeId {
         try self.reportHere("error-union types must start with '!'");
 
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = primary });
+        try children.append(self.scratch_arena.allocator(), .{ .node = primary });
         while (!self.at(.Eof) and !self.atAny(stops) and !self.typeAtGreaterToken()) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
         return self.finishNode(SyntaxKind.Error, children.items);
     }
@@ -2179,20 +2258,20 @@ const Parser = struct {
     }
 
     fn parseTupleTypeNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (!self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
             while (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (self.at(.RightParen)) break;
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
             }
         }
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after tuple type");
         }
@@ -2200,23 +2279,23 @@ const Parser = struct {
     }
 
     fn parseArrayTypeNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
-        try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Semicolon, .RightBracket }) });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Semicolon, .RightBracket }) });
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ';' in array type");
         }
         if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral) or tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected array size");
         }
         if (self.at(.RightBracket)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ']' after array type");
         }
@@ -2224,15 +2303,15 @@ const Parser = struct {
     }
 
     fn parseSliceTypeNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBracket)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{.RightBracket}) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.RightBracket}) });
             if (self.at(.RightBracket)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ']' after slice element type");
             }
@@ -2243,21 +2322,21 @@ const Parser = struct {
     }
 
     fn parseAnonymousStructTypeNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightBrace)) {
                 if (self.at(.Comma) or self.at(.Semicolon)) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                     continue;
                 }
-                try children.append(self.allocator, .{ .node = try self.parseAnonymousStructFieldNode() });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseAnonymousStructFieldNode() });
             }
             if (self.at(.RightBrace)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected '}' after anonymous struct type");
             }
@@ -2268,18 +2347,18 @@ const Parser = struct {
     }
 
     fn parseAnonymousStructFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name in anonymous struct type");
             return self.finishNode(SyntaxKind.AnonymousStructField, children.items);
         }
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Semicolon, .RightBrace }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .Semicolon, .RightBrace }) });
         } else {
             try self.reportHere("expected ':' after field name");
         }
@@ -2287,51 +2366,51 @@ const Parser = struct {
     }
 
     fn parsePathOrGenericTypeNode(self: *Parser, stops: []const green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (self.at(.Dot) and isIdentifierLike(self.peekKind(1))) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.Less)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.typeAtGreaterToken()) {
                 if (self.atSignedIntegerTypeArg()) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 } else if (self.atIntegerTypeArg()) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 } else {
-                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .GreaterGreater }) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .GreaterGreater }) });
                 }
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             if (self.typeAtGreaterToken()) {
-                try children.append(self.allocator, .{ .token = self.bumpTypeGreater() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bumpTypeGreater() });
             } else {
                 try self.reportHere("expected '>' after generic arguments");
             }
             return self.finishNode(SyntaxKind.GenericType, children.items);
         }
         if (!std.mem.containsAtLeast(green.TokenKind, stops, 1, &.{.LeftParen}) and self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             while (!self.at(.Eof) and !self.at(.RightParen)) {
                 if (self.atSignedIntegerTypeArg()) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 } else if (self.atIntegerTypeArg()) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 } else {
-                    try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                    try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 }
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after generic arguments");
             }
@@ -2353,10 +2432,10 @@ const Parser = struct {
 
     fn parseTypeErrorNode(self: *Parser, message: []const u8) anyerror!green.GreenNodeId {
         try self.reportHere(message);
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
         if (!self.at(.Eof)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
         return self.finishNode(SyntaxKind.Error, children.items);
     }
@@ -2380,24 +2459,24 @@ const Parser = struct {
     }
 
     fn parseParenLikeExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             return self.finishNode(SyntaxKind.TupleExpr, children.items);
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
         if (self.at(.Comma)) {
             while (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (self.at(.RightParen)) break;
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after tuple expression");
             }
@@ -2405,7 +2484,7 @@ const Parser = struct {
         }
 
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after grouped expression");
         }
@@ -2413,18 +2492,18 @@ const Parser = struct {
     }
 
     fn parseArrayLiteralExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBracket)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBracket }) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBracket }) });
             if (!self.at(.Comma)) break;
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.RightBracket)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ']' after array literal");
         }
@@ -2433,15 +2512,15 @@ const Parser = struct {
     }
 
     fn parseOldExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after old expression");
             }
@@ -2453,15 +2532,15 @@ const Parser = struct {
     }
 
     fn parseBuiltinExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         var builtin_name: ?[]const u8 = null;
         if (self.at(.Import)) {
             const name_token = self.bump();
             builtin_name = "import";
-            try children.append(self.allocator, .{ .token = name_token });
+            try children.append(self.scratch_arena.allocator(), .{ .token = name_token });
             try self.diagnostics.appendErrorWithDebug(
                 "@import(...) is only allowed in 'comptime const' declarations",
                 "builtin expression parser encountered reserved import syntax outside a top-level comptime import item",
@@ -2473,13 +2552,13 @@ const Parser = struct {
         } else if (self.at(.Identifier)) {
             const name_token = self.bump();
             builtin_name = self.source_text[self.tokens.items[name_token.index()].range.start..self.tokens.items[name_token.index()].range.end];
-            try children.append(self.allocator, .{ .token = name_token });
+            try children.append(self.scratch_arena.allocator(), .{ .token = name_token });
         } else {
             try self.reportHere("expected builtin name after '@'");
         }
 
         if (self.at(.LeftParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             if (builtin_name != null and
                 (std.mem.eql(u8, builtin_name.?, "cast") or
                     std.mem.eql(u8, builtin_name.?, "bitCast") or
@@ -2490,9 +2569,9 @@ const Parser = struct {
                     std.mem.eql(u8, builtin_name.?, "abiDecodePermissive")) and
                 !self.at(.RightParen))
             {
-                try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Comma, .RightParen }) });
                 if (self.at(.Comma)) {
-                    try children.append(self.allocator, .{ .token = self.bump() });
+                    try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 } else if (!self.at(.RightParen) and
                     (std.mem.eql(u8, builtin_name.?, "cast") or
                         std.mem.eql(u8, builtin_name.?, "bitCast") or
@@ -2502,12 +2581,12 @@ const Parser = struct {
                 }
             }
             while (!self.at(.Eof) and !self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
+                try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen }) });
                 if (!self.at(.Comma)) break;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
             if (self.at(.RightParen)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             } else {
                 try self.reportHere("expected ')' after builtin arguments");
             }
@@ -2519,48 +2598,48 @@ const Parser = struct {
     }
 
     fn parseQuantifiedExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected quantified variable name");
             return self.finishNode(SyntaxKind.QuantifiedExpr, children.items);
         }
 
         if (self.at(.Colon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseTypeExprNode(&.{ .Where, .Arrow }) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{ .Where, .Arrow }) });
         } else {
             try self.reportHere("expected ':' after quantified variable");
             return self.finishNode(SyntaxKind.QuantifiedExpr, children.items);
         }
 
         if (self.at(.Where)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.Arrow}) });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.Arrow}) });
         }
 
         if (self.at(.Arrow)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '=>' after quantified expression");
             return self.finishNode(SyntaxKind.QuantifiedExpr, children.items);
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen, .RightBracket, .RightBrace, .Semicolon }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightParen, .RightBracket, .RightBrace, .Semicolon }) });
         return self.finishNode(SyntaxKind.QuantifiedExpr, children.items);
     }
 
     fn parseSwitchExprNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         const node_kind: SyntaxKind = if (self.current().kind == .Match) .MatchExpr else .SwitchExpr;
         const keyword = self.bump();
-        try children.append(self.allocator, .{ .token = keyword });
+        try children.append(self.scratch_arena.allocator(), .{ .token = keyword });
         if (self.at(.LeftParen)) {
             try self.appendConditionExpr(&children);
         } else {
@@ -2572,15 +2651,15 @@ const Parser = struct {
             return self.finishNode(node_kind, children.items);
         }
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .node = try self.parseSwitchExprArmNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSwitchExprArmNode() });
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
             }
         }
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated switch expression", children.items);
         }
@@ -2588,18 +2667,18 @@ const Parser = struct {
     }
 
     fn parseSwitchExprArmNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = try self.parseSwitchPatternExprNode() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseSwitchPatternExprNode() });
         if (self.at(.Arrow)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '=>' in switch expression arm");
             return self.finishNode(SyntaxKind.SwitchExprArm, children.items);
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBrace }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBrace }) });
         return self.finishNode(SyntaxKind.SwitchExprArm, children.items);
     }
 
@@ -2626,30 +2705,30 @@ const Parser = struct {
     }
 
     fn parseSwitchStructPatternNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = base });
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = base });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         var has_rest = false;
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
             if (self.at(.DotDot)) {
                 if (has_rest) try self.reportHere("duplicate '..' in switch pattern");
                 has_rest = true;
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 if (!self.at(.Comma) and !self.at(.RightBrace)) {
                     try self.reportHere("expected ',' or '}' after '..' in switch pattern");
                 }
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseDestructuringFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseDestructuringFieldNode() });
         }
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated switch pattern", children.items);
         }
@@ -2657,18 +2736,18 @@ const Parser = struct {
     }
 
     fn parseCallExprNode(self: *Parser, callee: green.GreenNodeId, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = callee });
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = callee });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseCallArgumentNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseCallArgumentNode() });
             if (!self.at(.Comma)) break;
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after call arguments");
         }
@@ -2684,18 +2763,18 @@ const Parser = struct {
     }
 
     fn parseFieldExprNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = base });
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = base });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (self.at(.IntegerLiteral) or self.at(.BinaryLiteral) or self.at(.HexLiteral)) {
             const literal = [_]ChildRef{.{ .token = self.bump() }};
-            try children.append(self.allocator, .{ .node = try self.finishNode(SyntaxKind.Literal, &literal) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.finishNode(SyntaxKind.Literal, &literal) });
             return try self.finishNode(SyntaxKind.IndexExpr, children.items);
         }
         if (tokenIsIdentifierLike(self.current().kind)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name after '.'");
         }
@@ -2703,14 +2782,14 @@ const Parser = struct {
     }
 
     fn parseIndexExprNode(self: *Parser, base: green.GreenNodeId) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = base });
-        try children.append(self.allocator, .{ .token = self.bump() });
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightBracket}) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = base });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.RightBracket}) });
         if (self.at(.RightBracket)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ']' after index expression");
         }
@@ -2719,20 +2798,20 @@ const Parser = struct {
     }
 
     fn parseStructLiteralExprNode(self: *Parser, base: green.GreenNodeId, terminators: []const green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .node = base });
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .node = base });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(.RightBrace)) {
             if (self.at(.Comma)) {
-                try children.append(self.allocator, .{ .token = self.bump() });
+                try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
                 continue;
             }
-            try children.append(self.allocator, .{ .node = try self.parseStructLiteralFieldNode() });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseStructLiteralFieldNode() });
         }
         if (self.at(.RightBrace)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected '}' after struct literal");
         }
@@ -2741,57 +2820,57 @@ const Parser = struct {
     }
 
     fn parseStructLiteralFieldNode(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (self.at(.Dot)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         if (self.at(.Identifier)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected field name in struct literal");
             return self.finishNode(SyntaxKind.AnonymousStructLiteralField, children.items);
         }
 
         if (self.at(.Colon) or self.at(.Equal)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ':' or '=' after struct literal field name");
             return self.finishNode(SyntaxKind.AnonymousStructLiteralField, children.items);
         }
 
-        try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBrace }) });
+        try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{ .Comma, .RightBrace }) });
         return self.finishNode(SyntaxKind.AnonymousStructLiteralField, children.items);
     }
 
     fn parseExpressionErrorNode(self: *Parser, message: []const u8) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         try self.reportHere(message);
         if (!self.at(.Eof)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
         return self.finishNode(SyntaxKind.ErrorExpr, children.items);
     }
 
     fn parseErrorItemNode(self: *Parser, top_level: bool) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         if (!self.at(.Eof)) {
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         while (!self.at(.Eof) and !self.at(.Semicolon) and !self.at(.RightBrace)) {
             if (top_level and self.startsTopLevelItem()) break;
-            try children.append(self.allocator, try self.parseElement(null));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(null));
         }
 
         if (self.at(.Semicolon)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
         try self.diagnostics.appendError("unsupported top-level item", .{
@@ -2931,16 +3010,16 @@ const Parser = struct {
     }
 
     fn parseDelimited(self: *Parser, kind: SyntaxKind, closing: green.TokenKind) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
-        try children.append(self.allocator, .{ .token = self.bump() });
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         while (!self.at(.Eof) and !self.at(closing)) {
-            try children.append(self.allocator, try self.parseElement(closing));
+            try children.append(self.scratch_arena.allocator(), try self.parseElement(closing));
         }
 
         if (self.at(closing)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportUnterminated("unterminated delimiter group", children.items);
         }
@@ -2949,11 +3028,11 @@ const Parser = struct {
     }
 
     fn parseUnexpectedCloser(self: *Parser) anyerror!green.GreenNodeId {
-        var children: std.ArrayList(ChildRef) = .{};
-        defer children.deinit(self.allocator);
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
 
         const token_id = self.bump();
-        try children.append(self.allocator, .{ .token = token_id });
+        try children.append(self.scratch_arena.allocator(), .{ .token = token_id });
         try self.diagnostics.appendError("unexpected closing delimiter", .{
             .file_id = self.file_id,
             .range = self.tokens.items[token_id.index()].range,
@@ -3212,10 +3291,6 @@ const Parser = struct {
             self.tokens.append(self.allocator, .{
                 .kind = .Greater,
                 .range = synthetic_range,
-                .leading_trivia_start = original.leading_trivia_start,
-                .leading_trivia_len = 0,
-                .trailing_trivia_start = original.trailing_trivia_start,
-                .trailing_trivia_len = original.trailing_trivia_len,
             }) catch unreachable;
             return synthetic_id;
         }
@@ -3227,10 +3302,6 @@ const Parser = struct {
             self.tokens.append(self.allocator, .{
                 .kind = .Greater,
                 .range = source.TextRange.init(original.range.start, original.range.start + 1),
-                .leading_trivia_start = original.leading_trivia_start,
-                .leading_trivia_len = original.leading_trivia_len,
-                .trailing_trivia_start = original.trailing_trivia_start,
-                .trailing_trivia_len = 0,
             }) catch unreachable;
             self.pending_type_gt = 1;
             return synthetic_id;
@@ -3238,13 +3309,13 @@ const Parser = struct {
         return self.bump();
     }
 
-    fn appendConditionExpr(self: *Parser, children: *std.ArrayList(ChildRef)) anyerror!void {
-        try children.append(self.allocator, .{ .token = self.bump() });
+    fn appendConditionExpr(self: *Parser, children: *ChildList) anyerror!void {
+        try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         if (!self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseExpressionNode(&.{.RightParen}) });
         }
         if (self.at(.RightParen)) {
-            try children.append(self.allocator, .{ .token = self.bump() });
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         } else {
             try self.reportHere("expected ')' after condition");
         }
@@ -3320,20 +3391,26 @@ fn copyTrivia(allocator: std.mem.Allocator, trivia_slice: []const lexer.TriviaPi
     return trivia;
 }
 
-fn copyTokens(allocator: std.mem.Allocator, token_slice: []const lexer.Token) ![]green.GreenToken {
-    const tokens = try allocator.alloc(green.GreenToken, token_slice.len);
-    for (token_slice, 0..) |token, index| {
-        tokens[index] = .{
+fn copyTokens(allocator: std.mem.Allocator, token_slice: []const lexer.Token) !std.ArrayList(green.GreenToken) {
+    var split_greater_count: usize = 0;
+    for (token_slice) |token| {
+        if (token.type == .GreaterGreater) split_greater_count += 1;
+    }
+
+    const synthetic_greater_capacity = try std.math.mul(usize, split_greater_count, 2);
+    const token_capacity = try std.math.add(usize, token_slice.len, synthetic_greater_capacity);
+    var tokens: std.ArrayList(green.GreenToken) = .{};
+    errdefer tokens.deinit(allocator);
+    try tokens.ensureTotalCapacityPrecise(allocator, token_capacity);
+
+    for (token_slice) |token| {
+        tokens.appendAssumeCapacity(.{
             .kind = token.type,
             .range = .{
                 .start = token.range.start_offset,
                 .end = token.range.end_offset,
             },
-            .leading_trivia_start = token.leading_trivia_start,
-            .leading_trivia_len = token.leading_trivia_len,
-            .trailing_trivia_start = token.trailing_trivia_start,
-            .trailing_trivia_len = token.trailing_trivia_len,
-        };
+        });
     }
     return tokens;
 }

@@ -160,21 +160,41 @@ pub fn scanNumber(lexer: *Lexer) LexerError!void {
 
 pub fn addBinaryToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 2 .. lexer.current]; // skip 0b prefix
+    if (!lexer.config.store_token_values) {
+        _ = try parseBinaryToInteger(text);
+        try lexer.appendTokenWithValue(.BinaryLiteral, null);
+        return;
+    }
     try lexer.appendTokenWithValue(.BinaryLiteral, .{ .binary = try parseBinaryToInteger(text) });
 }
 
 pub fn addIntegerToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start..lexer.current];
+    if (!lexer.config.store_token_values) {
+        _ = try parseDecimalToInteger(text);
+        try lexer.appendTokenWithValue(.IntegerLiteral, null);
+        return;
+    }
     try lexer.appendTokenWithValue(.IntegerLiteral, .{ .integer = try parseDecimalToInteger(text) });
 }
 
 pub fn addHexToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 2 .. lexer.current]; // skip 0x prefix
+    if (!lexer.config.store_token_values) {
+        _ = try parseHexToInteger(text);
+        try lexer.appendTokenWithValue(.HexLiteral, null);
+        return;
+    }
     try lexer.appendTokenWithValue(.HexLiteral, .{ .hex = try parseHexToInteger(text) });
 }
 
 pub fn addAddressToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 2 .. lexer.current]; // skip 0x prefix
+    if (!lexer.config.store_token_values) {
+        _ = try parseAddressToBytes(text);
+        try lexer.appendTokenWithValue(.AddressLiteral, null);
+        return;
+    }
     try lexer.appendTokenWithValue(.AddressLiteral, .{ .address = try parseAddressToBytes(text) });
 }
 

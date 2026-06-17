@@ -347,12 +347,67 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
     }
 }
 
+pub fn typeMangleNameLen(ty: Type) usize {
+    return switch (ty) {
+        .never => "never".len,
+        .bool => "bool".len,
+        .address => "address".len,
+        .string => "string".len,
+        .bytes => "bytes".len,
+        .fixed_bytes => |fixed_bytes| "bytes".len + std.fmt.count("{d}", .{fixed_bytes.len}),
+        .external_proxy => |proxy| "external_".len + proxy.trait_name.len,
+        .void => "void".len,
+        .integer => |integer| integerTypeMangleNameLen(integer),
+        .comptime_integer => |integer| if (integer.spelling) |spelling| spelling.len else "comptime_int".len,
+        .named => |named| named.name.len,
+        .struct_ => |named| named.name.len,
+        .contract => |named| named.name.len,
+        .bitfield => |named| named.name.len,
+        .enum_ => |named| named.name.len,
+        .refinement => |refinement| refinement.name.len,
+        .anonymous_struct => |struct_type| blk: {
+            var len: usize = "anon_struct".len;
+            for (struct_type.fields) |field| {
+                len += 2 + field.name.len + typeMangleNameLen(field.ty);
+            }
+            break :blk len;
+        },
+        .slice => |slice| "slice_".len + typeMangleNameLen(slice.element_type.*),
+        .array => |array| blk: {
+            var len = "array_".len + typeMangleNameLen(array.element_type.*);
+            if (array.len) |array_len| {
+                len += 1 + std.fmt.count("{d}", .{array_len});
+            }
+            break :blk len;
+        },
+        .map => |map| blk: {
+            var len: usize = "map".len;
+            if (map.key_type) |key| len += 1 + typeMangleNameLen(key.*);
+            if (map.value_type) |value| len += 1 + typeMangleNameLen(value.*);
+            break :blk len;
+        },
+        .tuple => |elements| blk: {
+            var len: usize = "tuple".len;
+            for (elements) |element| len += 1 + typeMangleNameLen(element);
+            break :blk len;
+        },
+        .error_union => |error_union| "error_union_".len + typeMangleNameLen(error_union.payload_type.*),
+        .function => |function| if (function.name) |name| name.len else "fn".len,
+        .unknown => "type".len,
+    };
+}
+
 fn appendIntegerTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), integer: IntegerType) !void {
     if (integer.spelling) |spelling| {
         try buffer.appendSlice(allocator, spelling);
         return;
     }
     try buffer.writer(allocator).print("{c}{d}", .{ if (integer.signed) @as(u8, 'i') else @as(u8, 'u'), integer.bits });
+}
+
+fn integerTypeMangleNameLen(integer: IntegerType) usize {
+    if (integer.spelling) |spelling| return spelling.len;
+    return std.fmt.count("{c}{d}", .{ if (integer.signed) @as(u8, 'i') else @as(u8, 'u'), integer.bits });
 }
 
 pub const LocatedType = struct {
@@ -441,4 +496,37 @@ test "semantic type helpers expose refinement base type" {
     try std.testing.expectEqualStrings("MinValue", refinement.name().?);
     try std.testing.expect(refinement.refinementBaseType() != null);
     try std.testing.expectEqual(TypeKind.integer, refinement.refinementBaseType().?.kind());
+}
+
+test "type mangle length matches appended mangle name" {
+    const uint256_ty: Type = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } };
+    const bool_ty: Type = .{ .bool = {} };
+    const slice_bool: Type = .{ .slice = .{ .element_type = &bool_ty } };
+    const tuple_items = [_]Type{ uint256_ty, slice_bool };
+    const tuple_ty: Type = .{ .tuple = tuple_items[0..] };
+    const array_ty: Type = .{ .array = .{ .element_type = &tuple_ty, .len = 12 } };
+    const map_ty: Type = .{ .map = .{ .key_type = &uint256_ty, .value_type = &array_ty } };
+    const fields = [_]AnonymousStructField{
+        .{ .name = "owner", .ty = .{ .address = {} } },
+        .{ .name = "balances", .ty = map_ty },
+    };
+    const anon_ty: Type = .{ .anonymous_struct = .{ .fields = fields[0..] } };
+    const error_union_ty: Type = .{ .error_union = .{ .payload_type = &anon_ty, .error_types = &.{} } };
+    const cases = [_]Type{
+        uint256_ty,
+        .{ .fixed_bytes = .{ .len = 32 } },
+        .{ .external_proxy = .{ .trait_name = "IERC20" } },
+        array_ty,
+        map_ty,
+        anon_ty,
+        error_union_ty,
+        .{ .function = .{ .name = null } },
+    };
+
+    for (cases) |ty| {
+        var buffer: std.ArrayList(u8) = .{};
+        defer buffer.deinit(std.testing.allocator);
+        try appendTypeMangleName(std.testing.allocator, &buffer, ty);
+        try std.testing.expectEqual(buffer.items.len, typeMangleNameLen(ty));
+    }
 }

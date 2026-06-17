@@ -34,13 +34,6 @@
 // CHECK-NEXT:     sir.store %ptr_off_3 : !sir.ptr<1>, %10 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
 // CHECK-NEXT:     %12 = sir.keccak256 %ptr_2 : !sir.ptr<1>, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
 // CHECK-NEXT:     sir.sstore %12 : !sir.u256, %c500 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     %13 = sir.and %6 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":13:28)))
-// CHECK-NEXT:     %ptr_4 = sir.malloc %2 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     sir.store %ptr_4 : !sir.ptr<1>, %13 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     %ptr_off_5 = sir.addptr %ptr_4 : !sir.ptr<1>, %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     sir.store %ptr_off_5 : !sir.ptr<1>, %slot_allowances : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     %14 = sir.keccak256 %ptr_4 : !sir.ptr<1>, %2 : !sir.u256 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
-// CHECK-NEXT:     sir.sstore %14 : !sir.u256, %10 : !sir.u256 loc("ora.stmt.1"("ora.origin_stmt.1"("{{.*}}/ora-example/storage/storage_test_2.ora":19:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_2.ora":17:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_2.ora":17:5)
 // CHECK-NEXT:   func.func @getBalance(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":23:19)) -> !sir.u256 attributes {ora.effect = "reads", ora.param_names = ["account"], ora.read_slots = ["balances"], ora.visibility = "private"} {
@@ -103,7 +96,6 @@
 // CHECK-NEXT:     sir.store %ptr_off_1 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/storage/storage_test_2.ora":36:9)))
 // CHECK-NEXT:     %3 = sir.keccak256 %ptr_0 : !sir.ptr<1>, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/storage/storage_test_2.ora":36:9)))
 // CHECK-NEXT:     sir.sstore %3 : !sir.u256, %arg2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/storage/storage_test_2.ora":36:9)))
-// CHECK-NEXT:     sir.sstore %2 : !sir.u256, %2 : !sir.u256 loc("ora.stmt.5"("ora.origin_stmt.5"("{{.*}}/ora-example/storage/storage_test_2.ora":36:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/storage/storage_test_2.ora":35:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/storage/storage_test_2.ora":35:5)
 // CHECK-NEXT:   func.func @addToHistory(%arg0: !sir.u256 loc("{{.*}}/ora-example/storage/storage_test_2.ora":40:21)) attributes {ora.param_names = ["value"], ora.visibility = "private"} {

@@ -89,6 +89,8 @@ pub fn main() !void {
     const stdout = &stdout_writer.interface;
     var time_file: ?std.fs.File = if (options.time_output) |path| try std.fs.cwd().createFile(path, .{}) else null;
     defer if (time_file) |*file| file.close();
+    var time_buffer: [4096]u8 = undefined;
+    var time_writer = if (time_file) |*file| file.writer(&time_buffer) else null;
 
     for (paths.items) |path| {
         if (expectedFailure(path)) continue;
@@ -98,13 +100,11 @@ pub fn main() !void {
         };
         defer result.deinit(allocator);
         try emitSnapshot(stdout, path, &result);
-        if (time_file) |*file| {
-            var time_buffer: [4096]u8 = undefined;
-            var time_writer = file.writer(&time_buffer);
-            try emitTiming(&time_writer.interface, path, &result);
-            try time_writer.interface.flush();
+        if (time_writer) |*writer| {
+            try emitTiming(&writer.interface, path, &result);
         }
     }
+    if (time_writer) |*writer| try writer.interface.flush();
     try stdout.flush();
 }
 

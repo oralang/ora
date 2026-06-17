@@ -19,21 +19,30 @@ pub fn verificationFacts(allocator: std.mem.Allocator, file: *const ast.AstFile,
     const arena = result.arena.allocator();
     var facts: std.ArrayList(VerificationFact) = .{};
 
-    switch (key) {
-        .item => |item_id| try collectFactsForItem(arena, file, item_id, &facts),
-        .body => |body_id| {
-            for (file.items, 0..) |item, index| {
-                if (item == .Function and item.Function.body == body_id) {
-                    try collectFactsForItem(arena, file, ast.ItemId.fromIndex(index), &facts);
-                }
-            }
-        },
-        .trait_method => |owner| try collectFactsForTraitMethod(arena, file, owner, &facts),
-        .statement => |owner| try collectDirectFactsForStatement(arena, file, owner, &facts),
-    }
+    try appendVerificationFacts(arena, file, key, &facts);
 
     result.facts = try facts.toOwnedSlice(arena);
     return result;
+}
+
+pub fn appendVerificationFacts(
+    allocator: std.mem.Allocator,
+    file: *const ast.AstFile,
+    key: VerificationFactsKey,
+    facts: *std.ArrayList(VerificationFact),
+) !void {
+    switch (key) {
+        .item => |item_id| try collectFactsForItem(allocator, file, item_id, facts),
+        .body => |body_id| {
+            for (file.items, 0..) |item, index| {
+                if (item == .Function and item.Function.body == body_id) {
+                    try collectFactsForItem(allocator, file, ast.ItemId.fromIndex(index), facts);
+                }
+            }
+        },
+        .trait_method => |owner| try collectFactsForTraitMethod(allocator, file, owner, facts),
+        .statement => |owner| try collectDirectFactsForStatement(allocator, file, owner, facts),
+    }
 }
 
 fn collectFactsForItem(allocator: std.mem.Allocator, file: *const ast.AstFile, item_id: ast.ItemId, facts: *std.ArrayList(VerificationFact)) !void {
@@ -246,6 +255,16 @@ fn collectDirectFactsForStatement(
         },
         .For => |for_stmt| {
             for (for_stmt.invariants) |expr_id| {
+                try appendInvariantFact(allocator, file, facts, .{
+                    .kind = .loop_invariant,
+                    .owner = .{ .statement = owner },
+                    .range = source.TextRange.empty(0),
+                    .context = .loop,
+                }, expr_id);
+            }
+        },
+        .Switch => |switch_stmt| {
+            for (switch_stmt.invariants) |expr_id| {
                 try appendInvariantFact(allocator, file, facts, .{
                     .kind = .loop_invariant,
                     .owner = .{ .statement = owner },

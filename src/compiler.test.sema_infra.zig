@@ -339,14 +339,15 @@ test "compiler infers field and index access types" {
         \\
         \\contract Box {
         \\    storage var total: u256;
-        \\}
+        \\    storage var table: map<address, bool>;
         \\
-        \\pub fn probe(pair: Pair, values: [u256; 2], table: map<address, bool>) -> bool {
-        \\    let a = pair.first;
-        \\    let b = values[0];
-        \\    let c = table[0x1234567890abcdef1234567890abcdef12345678];
-        \\    let d = (1, false)[1];
-        \\    return c;
+        \\    pub fn probe(pair: Pair, values: [u256; 2]) -> bool {
+        \\        let a = pair.first;
+        \\        let b = values[0];
+        \\        let c = table[0x1234567890abcdef1234567890abcdef12345678];
+        \\        let d = (1, false)[1];
+        \\        return c;
+        \\    }
         \\}
     ;
 
@@ -355,9 +356,11 @@ test "compiler infers field and index access types" {
 
     const module = compilation.db.sources.module(compilation.root_module_id);
     const ast_file = try compilation.db.astFile(module.file_id);
-    const function = ast_file.item(ast_file.root_items[2]).Function;
+    const contract = ast_file.item(ast_file.root_items[1]).Contract;
+    const function_id = contract.members[2];
+    const function = ast_file.item(function_id).Function;
     const body = ast_file.body(function.body);
-    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = ast_file.root_items[2] });
+    const typecheck = try compilation.db.typeCheck(compilation.root_module_id, .{ .item = function_id });
 
     const a_stmt = ast_file.statement(body.statements[0]).VariableDecl;
     const b_stmt = ast_file.statement(body.statements[1]).VariableDecl;

@@ -235,7 +235,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 return base_symbol_name;
             }
 
-            const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return null;
+            var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
+            const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
             const mangled_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
             if (!self.monomorphized_function_names.contains(mangled_name)) {
                 try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, null, null);
@@ -325,7 +326,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 else blk: {
                     var binding_lowerer = imported_lowerer;
                     binding_lowerer.typecheck = self.typecheck;
-                    break :blk (try binding_lowerer.genericTypeBindingsForCall(function, call)) orelse return null;
+                    var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
+                    break :blk (try binding_lowerer.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
                 };
                 const symbol_name = try imported_lowerer.mangleGenericFunctionName(base_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
@@ -408,7 +410,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const parent_block = parent_block_override orelse @This().implParentBlock(self, target_name, self.module_body);
             if (function.is_generic) {
                 const method_call = call orelse return scoped_symbol_name;
-                const bindings = (try self.genericTypeBindingsForCall(function, method_call)) orelse return scoped_symbol_name;
+                var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
+                const bindings = (try self.genericTypeBindingsForCall(function, method_call, inline_bindings[0..])) orelse return scoped_symbol_name;
                 const runtime_parameters = try self.runtimeFunctionParameters(function);
                 const symbol_name = try self.mangleGenericFunctionName(scoped_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
@@ -450,6 +453,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
             var name = std.ArrayList(u8){};
+            try name.ensureTotalCapacityPrecise(self.allocator, trait_name.len + target_name.len + method_name.len + 2);
             try name.appendSlice(self.allocator, trait_name);
             try name.appendSlice(self.allocator, ".");
             try name.appendSlice(self.allocator, target_name);

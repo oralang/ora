@@ -12,7 +12,9 @@ pub const SyntaxToken = red.SyntaxToken;
 pub const SyntaxElement = red.SyntaxElement;
 pub const SyntaxNodePtr = red.SyntaxNodePtr;
 pub const ParseResult = parser.ParseResult;
+pub const ParseOptions = parser.ParseOptions;
 pub const parse = parser.parse;
+pub const parseWithOptions = parser.parseWithOptions;
 pub const isBuiltinTypeKeyword = lexer.isBuiltinTypeKeyword;
 pub const isTypeKeyword = lexer.isTypeKeyword;
 

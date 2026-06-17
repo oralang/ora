@@ -1499,7 +1499,7 @@ test "compiler accepts scaled returns from scaled arithmetic" {
     try testing.expectEqual(@as(usize, 0), diagnostics_list_mul.items.items.len);
 }
 
-test "compiler rethreads nested map assignment to outer map" {
+test "compiler stores nested map assignments only at the leaf" {
     const source_text =
         \\contract Test {
         \\    storage allowances: map<address, map<address, u256>>;
@@ -1517,7 +1517,7 @@ test "compiler rethreads nested map assignment to outer map" {
     const hir_text = try hir_result.renderText(testing.allocator);
     defer testing.allocator.free(hir_text);
 
-    try testing.expect(std.mem.count(u8, hir_text, "ora.map_store") >= 2);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, hir_text, "ora.map_store"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.map_get"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.index_access"));
 }

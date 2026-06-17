@@ -37,16 +37,27 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
 
     const arena = result.arena.allocator();
     var file_paths: std.StringHashMap(source.ModuleId) = .init(arena);
+    if (inputs.len > 1) try file_paths.ensureTotalCapacity(@intCast(inputs.len));
     for (inputs) |input| {
         compilerPhaseLog("build-module-graph normalize {s}", .{input.file_path});
         try file_paths.put(try normalizeModuleFilePath(arena, input.file_path), input.module_id);
     }
 
     var modules: std.ArrayList(ModuleSummary) = .{};
+    if (inputs.len != 0) try modules.ensureTotalCapacityPrecise(arena, inputs.len);
     for (inputs) |input| {
         compilerPhaseLog("build-module-graph module {s} scan-imports begin root-items={d}", .{ input.path, input.ast_file.root_items.len });
+        var import_count: usize = 0;
+        for (input.ast_file.root_items) |item_id| {
+            if (input.ast_file.item(item_id).* == .Import) import_count += 1;
+        }
+
         var imports: std.ArrayList(ModuleImport) = .{};
         var dependencies: std.ArrayList(source.ModuleId) = .{};
+        if (import_count != 0) {
+            try imports.ensureTotalCapacityPrecise(arena, import_count);
+            try dependencies.ensureTotalCapacityPrecise(arena, import_count);
+        }
         for (input.ast_file.root_items) |item_id| {
             const item = input.ast_file.item(item_id).*;
             if (item == .Import) {
@@ -69,11 +80,11 @@ pub fn buildModuleGraph(allocator: std.mem.Allocator, package_id: source.Package
             .module_id = input.module_id,
             .file_id = input.file_id,
             .path = input.path,
-            .imports = try imports.toOwnedSlice(arena),
-            .dependencies = try dependencies.toOwnedSlice(arena),
+            .imports = imports.items,
+            .dependencies = dependencies.items,
         });
     }
-    result.modules = try modules.toOwnedSlice(arena);
+    result.modules = modules.items;
     compilerPhaseLog("build-module-graph topo begin modules={d}", .{result.modules.len});
     result.topo_order = try buildTopoOrder(arena, result.modules, &result.has_cycles);
     compilerPhaseLog("build-module-graph topo done order={d} cycles={any}", .{ result.topo_order.len, result.has_cycles });
@@ -302,6 +313,7 @@ fn buildTopoOrder(allocator: std.mem.Allocator, modules: []const ModuleSummary, 
     const states = try allocator.alloc(VisitState, modules.len);
     @memset(states, .unvisited);
     var ordered: std.ArrayList(source.ModuleId) = .{};
+    if (modules.len != 0) try ordered.ensureTotalCapacityPrecise(allocator, modules.len);
 
     for (modules, 0..) |module_summary, index| {
         if (states[index] == .unvisited) {
@@ -309,7 +321,7 @@ fn buildTopoOrder(allocator: std.mem.Allocator, modules: []const ModuleSummary, 
         }
     }
 
-    return ordered.toOwnedSlice(allocator);
+    return ordered.items;
 }
 
 fn visitModule(

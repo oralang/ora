@@ -92,7 +92,8 @@ pub fn scanHexBytes(lexer: *Lexer) LexerError!void {
     _ = lexer.advance(); // consume closing "
 
     const hex_content = lexer.source[content_start..lexer.current];
-    try lexer.appendTokenWithValue(.BytesLiteral, .{ .string = hex_content });
+    const token_value: ?TokenValue = if (lexer.config.store_token_values) .{ .string = hex_content } else null;
+    try lexer.appendTokenWithValue(.BytesLiteral, token_value);
 }
 
 /// Scan a '.' character literal (one char or one escape sequence).
@@ -134,6 +135,23 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 1 .. lexer.current - 1]; // strip quotes
     const range = lexer.currentRange();
 
+    if (!lexer.config.store_token_values) {
+        StringProcessor.validateString(text) catch |err| {
+            if (lexer.error_recovery != null) {
+                const error_message = switch (err) {
+                    LexerError.InvalidEscapeSequence => "Invalid escape sequence in string literal",
+                    else => "Error processing string literal",
+                };
+                try lexer.reportLexError(err, range, error_message, "Use valid escape sequences: \\n, \\t, \\r, \\\\, \\\", \\', \\0, or \\xNN");
+                try lexer.appendTokenWithValue(.StringLiteral, null);
+                return;
+            }
+            return err;
+        };
+        try lexer.appendTokenWithValue(.StringLiteral, null);
+        return;
+    }
+
     var string_processor = StringProcessor.init(lexer.arena.allocator());
     const processed_text = string_processor.processString(text) catch |err| {
         if (lexer.error_recovery != null) {
@@ -153,7 +171,8 @@ pub fn addStringToken(lexer: *Lexer) LexerError!void {
 
 pub fn addRawStringToken(lexer: *Lexer) LexerError!void {
     const text = lexer.source[lexer.start + 2 .. lexer.current - 1]; // strip r" and "
-    try lexer.appendTokenWithValue(.RawStringLiteral, .{ .string = text });
+    const token_value: ?TokenValue = if (lexer.config.store_token_values) .{ .string = text } else null;
+    try lexer.appendTokenWithValue(.RawStringLiteral, token_value);
 }
 
 pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
@@ -181,5 +200,6 @@ pub fn addCharacterToken(lexer: *Lexer) LexerError!void {
         return err;
     };
 
-    try lexer.appendTokenWithValue(.CharacterLiteral, .{ .character = char_value });
+    const token_value: ?TokenValue = if (lexer.config.store_token_values) .{ .character = char_value } else null;
+    try lexer.appendTokenWithValue(.CharacterLiteral, token_value);
 }

@@ -1572,11 +1572,17 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     var event_name = log_stmt.name;
                     var topic0: ?[]const u8 = null;
+                    var field_indexed_attrs: ?[]mlir.MlirAttribute = null;
                     if (self.parent.item_index.lookup(log_stmt.name)) |log_item_id| {
                         const item = self.parent.file.item(log_item_id).*;
                         if (item == .LogDecl) {
                             event_name = abi_support.eventWireNameFromLogDecl(self.parent.file, item.LogDecl) orelse log_stmt.name;
                             topic0 = try @This().eventTopic0Hex(self, event_name, item.LogDecl);
+                            const indexed = try self.parent.allocator.alloc(mlir.MlirAttribute, item.LogDecl.fields.len);
+                            for (item.LogDecl.fields, 0..) |field, index| {
+                                indexed[index] = mlir.oraBoolAttrCreate(self.parent.context, field.indexed);
+                            }
+                            field_indexed_attrs = indexed;
                         }
                     }
                     const op = mlir.oraLogOpCreate(
@@ -1593,6 +1599,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             op,
                             strRef("ora.event_topic0"),
                             mlir.oraStringAttrCreate(self.parent.context, strRef(topic_hex)),
+                        );
+                    }
+                    if (field_indexed_attrs) |indexed| {
+                        mlir.oraOperationSetAttributeByName(
+                            op,
+                            strRef("ora.field_indexed"),
+                            mlir.oraArrayAttrCreate(self.parent.context, @intCast(indexed.len), indexed.ptr),
                         );
                     }
                     appendOp(self.block, op);
@@ -1645,13 +1658,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .If => |if_stmt| return self.lowerIfStmt(if_stmt, locals),
                 .While => |while_stmt| return self.lowerWhileStmt(statement_id, while_stmt, locals),
                 .For => |for_stmt| return @This().lowerForStmt(self, statement_id, for_stmt, locals),
-                .Switch => |switch_stmt| return self.lowerSwitchStmt(switch_stmt, locals),
+                .Switch => |switch_stmt| return self.lowerSwitchStmt(statement_id, switch_stmt, locals),
                 .Try => |try_stmt| return self.lowerTryStmt(try_stmt, locals),
                 .Break => |jump| {
                     if (jump.label != null) {
                         if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
                             const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                                 current_region_locals
+                            else if (@This().currentSwitchRegionCarriedLocals(self, switch_context)) |current_switch_locals|
+                                current_switch_locals
                             else if (self.deferred_return_kind == .ora_yield)
                                 self.deferred_return_carried_locals
                             else
@@ -1690,6 +1705,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (@This().findTargetSwitchContext(self, jump.label)) |switch_context| {
                         const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                             current_region_locals
+                        else if (@This().currentSwitchRegionCarriedLocals(self, switch_context)) |current_switch_locals|
+                            current_switch_locals
                         else if (self.deferred_return_kind == .ora_yield)
                             self.deferred_return_carried_locals
                         else
@@ -1745,6 +1762,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
                                 if (mlir.oraOperationIsNull(store)) return error.MlirOperationCreationFailed;
                                 appendOp(self.block, store);
+                                try @This().mirrorSwitchConditionLocal(switch_context, locals, value);
                             }
                             const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                             const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
@@ -1752,6 +1770,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             appendOp(self.block, set_continue);
                             const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                                 current_region_locals
+                            else if (@This().currentSwitchRegionCarriedLocals(self, switch_context)) |current_switch_locals|
+                                current_switch_locals
                             else if (self.deferred_return_kind == .ora_yield)
                                 self.deferred_return_carried_locals
                             else
@@ -1798,6 +1818,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             const store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, value, switch_context.value_slot.?, null, 0);
                             if (mlir.oraOperationIsNull(store)) return error.MlirOperationCreationFailed;
                             appendOp(self.block, store);
+                            try @This().mirrorSwitchConditionLocal(switch_context, locals, value);
                         }
                         const true_value = appendValueOp(self.block, createIntegerConstant(self.parent.context, loc, boolType(self.parent.context), 1));
                         const set_continue = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, true_value, switch_context.continue_flag.?, null, 0);
@@ -1805,6 +1826,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         appendOp(self.block, set_continue);
                         const carried_locals = if (self.current_scf_carried_locals) |current_region_locals|
                             current_region_locals
+                        else if (@This().currentSwitchRegionCarriedLocals(self, switch_context)) |current_switch_locals|
+                            current_switch_locals
                         else if (self.deferred_return_kind == .ora_yield)
                             self.deferred_return_carried_locals
                         else
@@ -2145,6 +2168,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .LabeledBlock => |node| node.range,
                 .Error => |node| node.range,
             };
+        }
+
+        fn mirrorSwitchConditionLocal(switch_context: *const SwitchContext, locals: *LocalEnv, value: mlir.MlirValue) !void {
+            const local_id = switch_context.condition_local orelse return;
+            if (!locals.hasLocal(local_id)) return;
+            try locals.setValue(local_id, value);
+        }
+
+        fn currentSwitchRegionCarriedLocals(self: *FunctionLowerer, target: *const SwitchContext) ?[]const LocalId {
+            const current = self.switch_context orelse return null;
+            if (current == target) return null;
+            return current.carried_locals;
         }
 
         fn findTargetSwitchContext(self: *FunctionLowerer, label: ?[]const u8) ?*const SwitchContext {
@@ -2768,9 +2803,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             try @This().maybeEmitGuardedIndexedStorageWrite(self, root_name, key_value, index.range);
                         }
                         try @This().appendMapStore(self, index.range, base_value, key_value, converted);
-                        if (self.parent.file.pattern(index.base).* == .Index) {
-                            try @This().storePatternWithCache(self, index.base, base_value, locals, cache);
-                        }
                         return;
                     }
                 },

@@ -77,8 +77,8 @@ pub const Cache = struct {
                 .lexeme = sourceLexeme(source, token),
                 .string_value = try cloneStringValue(result_allocator, token),
                 .range = token.range,
-                .line = token.line,
-                .column = token.column,
+                .line = token.range.start_line,
+                .column = token.range.start_column,
                 .leading_trivia_start = token.leading_trivia_start,
                 .leading_trivia_len = token.leading_trivia_len,
                 .trailing_trivia_start = token.trailing_trivia_start,
@@ -171,7 +171,7 @@ fn freeDiagnostics(allocator: Allocator, diagnostics: []Diagnostic) void {
 
 fn cloneStringValue(allocator: Allocator, token: lexer.Token) !?[]const u8 {
     const value = token.value orelse return null;
-    return switch (value) {
+    return switch (value.*) {
         .string => |string| try allocator.dupe(u8, string),
         else => null,
     };

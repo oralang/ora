@@ -14,12 +14,19 @@ contract StateMachine {
     storage var accumulated: u256;
 
     // Simple state machine using labeled switch
-    pub fn run_machine(input: u256) -> u256 {
+    pub fn run_machine(input: u256) -> u256
+        requires input <= 1000
+    {
         var state: u256 = 0;
         var res: u256 = 0;
         var fuel: u256 = input;
 
-        machine: switch (state) {
+        machine: switch (state)
+            invariant fuel <= 1000
+            invariant res <= 1000000
+            invariant fuel * fuel <= 1000000
+            invariant res + fuel * fuel <= 1000000
+        {
             0 => {
                 // INIT: set up
                 res = 0;
@@ -27,12 +34,13 @@ contract StateMachine {
             }
             1 => {
                 // RUNNING: process
-                if (fuel == 0) {
+                if (fuel > 0) {
+                    res += fuel;
+                    fuel -= 1;
+                    continue :machine (1); // keep running
+                } else {
                     continue :machine (3); // done
                 }
-                res += fuel;
-                fuel -= 1;
-                continue :machine (1); // keep running
             }
             2 => {
                 // PAUSED: skip and resume
@@ -54,13 +62,20 @@ contract StateMachine {
         var phase: u256 = 0;
         var data: u256 = x;
         var output: u256 = 0;
+        var normalized: bool = false;
 
-        processor: switch (phase) {
+        processor: switch (phase)
+            invariant phase <= 1
+            invariant phase == 0 || data <= 1000
+            invariant !normalized || data <= 1000
+            invariant output <= 1000000
+        {
             0 => {
                 // Phase 0: validate
                 if (data > 1000) {
                     data = 1000; // clamp
                 }
+                normalized = true;
                 continue :processor (1);
             }
             1 => {
@@ -75,11 +90,17 @@ contract StateMachine {
     }
 
     // Counter state machine: counts down by different steps
-    pub fn stepping_counter(start: u256) -> u256 {
+    pub fn stepping_counter(start: u256) -> u256
+        requires start <= 100
+    {
         var val: u256 = start;
         var steps: u256 = 0;
 
-        counter: switch (val) {
+        counter: switch (val)
+            invariant val <= 100
+            invariant steps <= 100
+            invariant steps + val <= 100
+        {
             0 => {
                 // Terminal state
             }
@@ -104,12 +125,18 @@ contract StateMachine {
     }
 
     // Accumulator state machine
-    pub fn accumulate(n: u256) -> u256 {
+    pub fn accumulate(n: u256) -> u256
+        requires n <= 1000000
+    {
         var state: u256 = 0;
         var i: u256 = n;
         var acc: u256 = 0;
 
-        fsm: switch (state) {
+        fsm: switch (state)
+            invariant i <= 1000000
+            invariant acc <= 1000000
+            invariant acc + i <= 1000000
+        {
             0 => {
                 // Check if done
                 if (i == 0) {

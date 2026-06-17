@@ -489,6 +489,7 @@ pub fn build(b: *std.Build) void {
     const evm_debug_tui_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",
+        "-Ddebug-ui=true",
         "debug-tui",
         "--",
     });
@@ -505,6 +506,7 @@ pub fn build(b: *std.Build) void {
     const evm_debug_dap_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",
+        "-Ddebug-ui=true",
         "debug-dap",
         "--",
     });

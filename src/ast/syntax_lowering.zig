@@ -34,6 +34,59 @@ const CatchClause = nodes.CatchClause;
 const TypeIntegerLiteral = nodes.TypeIntegerLiteral;
 const stripQuotes = support.stripQuotes;
 
+fn InlineList(comptime T: type, comptime inline_capacity: usize) type {
+    return struct {
+        inline_buffer: [inline_capacity]T = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(T) = .{},
+        items: []const T = &.{},
+
+        fn append(self: *@This(), allocator: std.mem.Allocator, item: T) !void {
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_buffer[self.inline_len] = item;
+                self.inline_len += 1;
+                self.items = self.inline_buffer[0..self.inline_len];
+                return;
+            }
+
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_buffer[0..self.inline_len]);
+            }
+            try self.spill.append(allocator, item);
+            self.items = self.spill.items;
+        }
+
+        fn appendSlice(self: *@This(), allocator: std.mem.Allocator, slice: []const T) !void {
+            for (slice) |item| try self.append(allocator, item);
+        }
+
+        fn mutableItems(self: *@This()) []T {
+            if (self.spill.capacity != 0) return self.spill.items;
+            return self.inline_buffer[0..self.inline_len];
+        }
+
+        fn toOwnedSlice(self: *@This(), allocator: std.mem.Allocator) ![]T {
+            if (self.spill.capacity != 0) {
+                const owned = try self.spill.toOwnedSlice(allocator);
+                self.spill = .{};
+                self.items = &.{};
+                return owned;
+            }
+            if (self.inline_len == 0) return @constCast(@as([]const T, &.{}));
+
+            const owned = try allocator.alloc(T, self.inline_len);
+            @memcpy(owned, self.inline_buffer[0..self.inline_len]);
+            return owned;
+        }
+
+        fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            self.spill.deinit(allocator);
+            self.* = .{};
+        }
+    };
+}
+
 pub fn mixin(Builder: type) type {
     const Support = support.mixin(Builder);
 
@@ -99,8 +152,8 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
-            var members: std.ArrayList(ItemId) = .{};
-            var invariants: std.ArrayList(ExprId) = .{};
+            var members: InlineList(ItemId, 10) = .{};
+            var invariants: InlineList(ExprId, 4) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
@@ -180,8 +233,8 @@ pub fn mixin(Builder: type) type {
                 _ = try Lowering.malformedItem(self, node, "@decodePermissive is only supported on public functions");
             }
 
-            var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
-            var clauses: std.ArrayList(nodes.SpecClause) = .{};
+            var trait_bounds: InlineList(nodes.TraitBound, 4) = .{};
+            var clauses: InlineList(nodes.SpecClause, 4) = .{};
             var body: ?BodyId = null;
 
             var it = node.children();
@@ -249,8 +302,8 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
-            var fields: std.ArrayList(StructField) = .{};
-            var metadata: std.ArrayList(ItemId) = .{};
+            var fields: InlineList(StructField, 8) = .{};
+            var metadata: InlineList(ItemId, 2) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
@@ -283,7 +336,7 @@ pub fn mixin(Builder: type) type {
                 try Lowering.lowerParameterListNode(self, params_node, false)
             else
                 &.{};
-            var fields: std.ArrayList(BitfieldField) = .{};
+            var fields: InlineList(BitfieldField, 8) = .{};
             const base_type = firstDirectTypeChild(node);
 
             var it = node.children();
@@ -315,7 +368,7 @@ pub fn mixin(Builder: type) type {
             else
                 &.{};
             const base_type = firstDirectTypeChild(node);
-            var variants: std.ArrayList(EnumVariant) = .{};
+            var variants: InlineList(EnumVariant, 8) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
@@ -348,8 +401,8 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerEnumVariantPayloadNode(self: *Builder, node: SyntaxNode) !nodes.EnumVariantPayload {
-            var named_fields: std.ArrayList(nodes.EnumVariantPayloadField) = .{};
-            var positional_types: std.ArrayList(TypeExprId) = .{};
+            var named_fields: InlineList(nodes.EnumVariantPayloadField, 4) = .{};
+            var positional_types: InlineList(TypeExprId, 4) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
@@ -406,7 +459,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerTraitItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing trait name"));
-            var methods: std.ArrayList(TraitMethod) = .{};
+            var methods: InlineList(TraitMethod, 8) = .{};
             var ghost_block: ?ItemId = null;
             const is_extern = firstDirectTokenOfKind(node, .Extern) != null;
 
@@ -424,7 +477,7 @@ pub fn mixin(Builder: type) type {
                 }
             }
 
-            Lowering.normalizeTraitMethodReceiverKinds(self, methods.items, is_extern);
+            Lowering.normalizeTraitMethodReceiverKinds(self, methods.mutableItems(), is_extern);
 
             return Support.pushItem(self, .{ .Trait = .{
                 .range = node.range(),
@@ -438,7 +491,7 @@ pub fn mixin(Builder: type) type {
         fn lowerImplItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const trait_name = tokenText(firstDirectTokenOfKind(node, .Identifier) orelse return Lowering.malformedItem(self, node, "missing impl trait name"));
             const target_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedItem(self, node, "missing impl target name");
-            var methods: std.ArrayList(ItemId) = .{};
+            var methods: InlineList(ItemId, 8) = .{};
 
             var it = node.children();
             while (it.next()) |child| {
@@ -490,7 +543,7 @@ pub fn mixin(Builder: type) type {
                 _ = try Lowering.malformedItem(self, node, "missing trait method parameter list");
                 break :blk node;
             };
-            var parameters: std.ArrayList(Parameter) = .{};
+            var parameters: InlineList(Parameter, 8) = .{};
             var receiver_kind: ReceiverKind = .none;
 
             var params_it = params_node.children();
@@ -513,9 +566,9 @@ pub fn mixin(Builder: type) type {
                 }
             }
 
-            var trait_bounds: std.ArrayList(nodes.TraitBound) = .{};
-            var errors: std.ArrayList([]const u8) = .{};
-            var clauses: std.ArrayList(nodes.SpecClause) = .{};
+            var trait_bounds: InlineList(nodes.TraitBound, 4) = .{};
+            var errors: InlineList([]const u8, 4) = .{};
+            var clauses: InlineList(nodes.SpecClause, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -813,7 +866,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerParameterListNode(self: *Builder, node: SyntaxNode, allow_bare_self: bool) ![]Parameter {
-            var params: std.ArrayList(Parameter) = .{};
+            var params: InlineList(Parameter, 8) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -873,7 +926,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerBodyNode(self: *Builder, node: SyntaxNode) !BodyId {
-            var statements: std.ArrayList(StmtId) = .{};
+            var statements: InlineList(StmtId, 24) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1012,7 +1065,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerInvariantClauses(self: *Builder, node: SyntaxNode) ![]ExprId {
-            var invariants: std.ArrayList(ExprId) = .{};
+            var invariants: InlineList(ExprId, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1032,7 +1085,8 @@ pub fn mixin(Builder: type) type {
 
         fn lowerSwitchStmtNodeWithLabel(self: *Builder, node: SyntaxNode, label: ?[]const u8) !StmtId {
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedStmt(self, node, "missing switch condition");
-            var arms: std.ArrayList(nodes.SwitchArm) = .{};
+            const invariants = try Lowering.lowerInvariantClauses(self, node);
+            var arms: InlineList(nodes.SwitchArm, 4) = .{};
             var else_body: ?BodyId = null;
 
             var it = node.children();
@@ -1054,6 +1108,7 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .label = label,
                 .condition = try Lowering.lowerExpressionNode(self, condition_node),
+                .invariants = invariants,
                 .arms = try arms.toOwnedSlice(self.allocator),
                 .else_body = else_body,
             } });
@@ -1130,7 +1185,7 @@ pub fn mixin(Builder: type) type {
             const lhs_node = nthDirectNode(node, 0) orelse return null;
             const rhs_node = nthDirectNode(node, 1) orelse return null;
 
-            var alternatives: std.ArrayList(SwitchPattern) = .{};
+            var alternatives: InlineList(SwitchPattern, 4) = .{};
             defer alternatives.deinit(self.allocator);
             try Lowering.appendOrSwitchPatternAlternative(self, lhs_node, &alternatives);
             try Lowering.appendOrSwitchPatternAlternative(self, rhs_node, &alternatives);
@@ -1140,7 +1195,7 @@ pub fn mixin(Builder: type) type {
             } };
         }
 
-        fn appendOrSwitchPatternAlternative(self: *Builder, node: SyntaxNode, alternatives: *std.ArrayList(SwitchPattern)) anyerror!void {
+        fn appendOrSwitchPatternAlternative(self: *Builder, node: SyntaxNode, alternatives: *InlineList(SwitchPattern, 4)) anyerror!void {
             if (try Lowering.lowerOrSwitchPatternNode(self, node)) |pattern| {
                 try alternatives.appendSlice(self.allocator, pattern.Or.alternatives);
                 return;
@@ -1162,7 +1217,7 @@ pub fn mixin(Builder: type) type {
                 else => return null,
             };
 
-            var bindings: std.ArrayList(PatternId) = .{};
+            var bindings: InlineList(PatternId, 2) = .{};
             defer bindings.deinit(self.allocator);
 
             var arg_index: usize = 1;
@@ -1187,7 +1242,7 @@ pub fn mixin(Builder: type) type {
             return .{ .NamedError = .{
                 .range = node.range(),
                 .callee = callee_expr,
-                .bindings = try self.allocator.dupe(PatternId, bindings.items),
+                .bindings = try bindings.toOwnedSlice(self.allocator),
             } };
         }
 
@@ -1199,7 +1254,7 @@ pub fn mixin(Builder: type) type {
                 else => return null,
             }
 
-            var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            var fields: InlineList(nodes.StructDestructureField, 4) = .{};
             defer fields.deinit(self.allocator);
             var has_rest = false;
 
@@ -1287,7 +1342,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerLogStmtNode(self: *Builder, node: SyntaxNode) !StmtId {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedStmt(self, node, "missing log name");
-            var args: std.ArrayList(ExprId) = .{};
+            var args: InlineList(ExprId, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1399,7 +1454,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerDestructuringPatternNode(self: *Builder, node: SyntaxNode) !PatternId {
-            var fields: std.ArrayList(nodes.StructDestructureField) = .{};
+            var fields: InlineList(nodes.StructDestructureField, 4) = .{};
             var has_rest = false;
             var it = node.children();
             while (it.next()) |child| {
@@ -1613,7 +1668,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerErrorReturnExprNode(self: *Builder, node: SyntaxNode) !ExprId {
             const name_token = nthDirectIdentifierLikeToken(node, 1) orelse return Lowering.malformedExpr(self, node, "missing error name");
-            var args: std.ArrayList(ExprId) = .{};
+            var args: InlineList(ExprId, 4) = .{};
             var ordinal: usize = 0;
             while (nthDirectNode(node, ordinal)) |arg_node| : (ordinal += 1) {
                 try args.append(self.allocator, try Lowering.lowerExpressionNode(self, arg_node));
@@ -1628,7 +1683,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerCallExprNode(self: *Builder, node: SyntaxNode) !ExprId {
             const callee_node = nthDirectNode(node, 0) orelse return Lowering.malformedExpr(self, node, "missing call callee");
-            var args: std.ArrayList(ExprId) = .{};
+            var args: InlineList(ExprId, 4) = .{};
             var ordinal: usize = 1;
             while (nthDirectNode(node, ordinal)) |arg_node| : (ordinal += 1) {
                 try args.append(self.allocator, try Lowering.lowerExpressionNode(self, arg_node));
@@ -1687,7 +1742,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerTupleExprNode(self: *Builder, node: SyntaxNode) !ExprId {
-            var elements: std.ArrayList(ExprId) = .{};
+            var elements: InlineList(ExprId, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1704,7 +1759,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerArrayLiteralExprNode(self: *Builder, node: SyntaxNode) !ExprId {
-            var elements: std.ArrayList(ExprId) = .{};
+            var elements: InlineList(ExprId, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1741,7 +1796,7 @@ pub fn mixin(Builder: type) type {
                 break :blk .{ .type_expr = type_expr, .type_name = type_name };
             } else .{ .type_expr = null, .type_name = "" };
 
-            var fields: std.ArrayList(nodes.StructFieldInit) = .{};
+            var fields: InlineList(nodes.StructFieldInit, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -1801,7 +1856,7 @@ pub fn mixin(Builder: type) type {
                 else => null,
             } orelse return null;
 
-            var args: std.ArrayList(TypeArg) = .{};
+            var args: InlineList(TypeArg, 4) = .{};
             for (call.args) |arg_expr_id| {
                 try args.append(self.allocator, try Lowering.callStyleTypeArg(self, arg_expr_id) orelse return null);
             }
@@ -1914,7 +1969,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerSwitchExprNode(self: *Builder, node: SyntaxNode) !ExprId {
             const condition_node = firstDirectExprChild(node) orelse return Lowering.malformedExpr(self, node, "missing switch expression condition");
-            var arms: std.ArrayList(nodes.SwitchExprArm) = .{};
+            var arms: InlineList(nodes.SwitchExprArm, 4) = .{};
             var else_expr: ?ExprId = null;
 
             var it = node.children();
@@ -1985,7 +2040,7 @@ pub fn mixin(Builder: type) type {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedExpr(self, node, "missing builtin name");
             const name = tokenText(name_token);
             const type_node = firstDirectTypeChild(node);
-            var args: std.ArrayList(ExprId) = .{};
+            var args: InlineList(ExprId, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -2031,7 +2086,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerAnonymousStructTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            var fields: std.ArrayList(nodes.AnonymousStructFieldType) = .{};
+            var fields: InlineList(nodes.AnonymousStructFieldType, 4) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -2066,7 +2121,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerGenericTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             const name = qualifiedTypeName(self, node) orelse return Lowering.malformedType(self, node, "missing generic type name");
-            var args: std.ArrayList(TypeArg) = .{};
+            var args: InlineList(TypeArg, 4) = .{};
             var pending_minus: ?SyntaxToken = null;
             var it = node.children();
             while (it.next()) |child| {
@@ -2106,7 +2161,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn lowerTupleTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
-            var elements: std.ArrayList(TypeExprId) = .{};
+            var elements: InlineList(TypeExprId, 4) = .{};
             var comma_count: usize = 0;
             var it = node.children();
             while (it.next()) |child| {
@@ -2158,7 +2213,7 @@ pub fn mixin(Builder: type) type {
 
         fn lowerErrorUnionTypeNode(self: *Builder, node: SyntaxNode) !TypeExprId {
             const payload_node = nthDirectTypeChild(node, 0) orelse return Lowering.malformedType(self, node, "missing error union payload type");
-            var errors: std.ArrayList(TypeExprId) = .{};
+            var errors: InlineList(TypeExprId, 4) = .{};
             var ordinal: usize = 1;
             while (nthDirectTypeChild(node, ordinal)) |error_node| : (ordinal += 1) {
                 try errors.append(self.allocator, try Lowering.lowerTypeNode(self, error_node));
@@ -2231,8 +2286,8 @@ pub fn mixin(Builder: type) type {
 
         fn lowerLogDeclItemNode(self: *Builder, node: SyntaxNode) !ItemId {
             const name_token = nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing log declaration name");
-            var fields: std.ArrayList(nodes.LogField) = .{};
-            var metadata: std.ArrayList(ItemId) = .{};
+            var fields: InlineList(nodes.LogField, 4) = .{};
+            var metadata: InlineList(ItemId, 2) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -2323,7 +2378,7 @@ pub fn mixin(Builder: type) type {
                 _ = try Lowering.malformedExpr(self, node, "missing specification keyword");
                 break :blk .requires;
             };
-            var exprs: std.ArrayList(ExprId) = .{};
+            var exprs: InlineList(ExprId, 2) = .{};
             var it = node.children();
             while (it.next()) |child| {
                 switch (child) {
@@ -2349,7 +2404,7 @@ pub fn mixin(Builder: type) type {
         }
 
         fn wrapStmtAsBody(self: *Builder, stmt: StmtId, range: source.TextRange) !BodyId {
-            var statements: std.ArrayList(StmtId) = .{};
+            var statements: InlineList(StmtId, 1) = .{};
             try statements.append(self.allocator, stmt);
             return Support.pushBody(self, .{
                 .range = range,
@@ -2765,7 +2820,7 @@ fn tokenText(token: SyntaxToken) []const u8 {
 }
 
 fn qualifiedTypeName(self: anytype, node: SyntaxNode) ?[]const u8 {
-    var parts: std.ArrayList([]const u8) = .{};
+    var parts: InlineList([]const u8, 4) = .{};
     defer parts.deinit(self.allocator);
 
     var it = node.children();

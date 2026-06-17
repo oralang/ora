@@ -26,11 +26,13 @@ const LocatedType = model.LocatedType;
 const Region = model.Region;
 const Provenance = model.Provenance;
 const Effect = model.Effect;
+const ExprEffect = model.ExprEffect;
 const EffectFlags = model.EffectFlags;
 const EffectSlot = model.EffectSlot;
 const KeySegment = model.KeySegment;
 const GenericBindingValue = model.GenericBindingValue;
 const GenericTypeBinding = model.GenericTypeBinding;
+const inline_generic_binding_capacity = 8;
 const ResolvedCall = model.ResolvedCall;
 const appendModelTypeMangleName = model.appendTypeMangleName;
 const InstantiatedStruct = model.InstantiatedStruct;
@@ -41,6 +43,9 @@ const InstantiatedBitfieldField = model.InstantiatedBitfieldField;
 const TraitMethodSignature = model.TraitMethodSignature;
 const TraitInterface = model.TraitInterface;
 const ImplInterface = model.ImplInterface;
+const external_call_failed_error_types = [_]Type{
+    .{ .named = .{ .name = "ExternalCallFailed" } },
+};
 const EffectSummaryState = enum { unvisited, visiting, done };
 const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
@@ -49,7 +54,6 @@ const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const refinementArgsFromAst = descriptors.refinementArgsFromAst;
-const inferItemType = descriptors.inferItemType;
 const mergeExprType = descriptors.mergeExprType;
 const typeEql = descriptors.typeEql;
 const typesAssignable = descriptors.typesAssignable;
@@ -124,6 +128,44 @@ fn typeContainsUnknown(ty: Type) bool {
             break :blk false;
         },
         .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn typeContainsMap(ty: Type) bool {
+    return switch (ty) {
+        .map => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsMap(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsMap(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsMap(array.element_type.*),
+        .slice => |slice| typeContainsMap(slice.element_type.*),
+        .error_union => |error_union| blk: {
+            if (typeContainsMap(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsMap(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .function => |function| blk: {
+            for (function.param_types) |param_type| {
+                if (typeContainsMap(param_type)) break :blk true;
+            }
+            for (function.return_types) |return_type| {
+                if (typeContainsMap(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsMap(refinement.base_type.*),
         else => false,
     };
 }
@@ -449,33 +491,29 @@ pub fn typeCheck(
     const item_effects = try arena.alloc(Effect, file.items.len);
     const item_modifies = try arena.alloc(?[]EffectSlot, file.items.len);
     var pattern_types = try arena.alloc(LocatedType, file.patterns.len);
-    const pattern_initializers = try arena.alloc(?ast.ExprId, file.patterns.len);
-    const pattern_binding_kinds = try arena.alloc(?ast.BindingKind, file.patterns.len);
+    var pattern_initializers: []?ast.ExprId = &.{};
+    var pattern_binding_kinds: []?ast.BindingKind = &.{};
     const expr_types = try arena.alloc(Type, file.expressions.len);
-    const call_resolutions = try arena.alloc(?ResolvedCall, file.expressions.len);
-    const expr_effects = try arena.alloc(Effect, file.expressions.len);
+    const call_resolutions: []?ResolvedCall = &.{};
+    const expr_effects = ExprEffectList{};
     var body_types = try arena.alloc(Type, file.bodies.len);
-    const effect_states = try arena.alloc(EffectSummaryState, file.items.len);
-    const catch_error_tag_patterns = try arena.alloc(bool, file.patterns.len);
-    const opaque_multi_error_patterns = try arena.alloc(bool, file.patterns.len);
+    const effect_states: []EffectSummaryState = &.{};
+    const catch_error_tag_patterns: []bool = &.{};
+    const opaque_multi_error_patterns: []bool = &.{};
     @memset(item_types, .{ .unknown = {} });
     @memset(item_regions, .none);
     @memset(item_effects, .pure);
     @memset(item_modifies, null);
     @memset(pattern_types, LocatedType.unlocated(.{ .unknown = {} }));
-    @memset(pattern_initializers, null);
-    @memset(pattern_binding_kinds, null);
     @memset(expr_types, .{ .unknown = {} });
-    @memset(call_resolutions, null);
-    @memset(expr_effects, .pure);
     @memset(body_types, .{ .void = {} });
-    @memset(effect_states, .unvisited);
-    @memset(catch_error_tag_patterns, false);
-    @memset(opaque_multi_error_patterns, false);
 
+    var trait_interface_capacity: usize = 0;
     for (file.items, 0..) |item, index| {
-        item_types[index] = try inferItemType(arena, file, item_index, item);
         switch (item) {
+            .Contract => |contract| {
+                item_types[index] = .{ .contract = .{ .name = contract.name } };
+            },
             .Function => |function| {
                 for (function.parameters) |parameter| {
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(.{ .unknown = {} }, .memory, .calldata);
@@ -484,10 +522,21 @@ pub fn typeCheck(
             },
             .Field => |field| {
                 item_regions[index] = declarationRegion(field.storage_class);
-                if (field.type_expr) |_| item_types[index] = .{ .unknown = {} };
             },
-            .Constant => |constant| {
-                if (constant.type_expr) |_| item_types[index] = .{ .unknown = {} };
+            .Struct => |struct_item| {
+                item_types[index] = .{ .struct_ = .{ .name = struct_item.name } };
+            },
+            .Bitfield => |bitfield_item| {
+                item_types[index] = .{ .bitfield = .{ .name = bitfield_item.name } };
+            },
+            .Enum => |enum_item| {
+                item_types[index] = .{ .enum_ = .{ .name = enum_item.name } };
+            },
+            .ErrorDecl => |error_decl| {
+                item_types[index] = .{ .named = .{ .name = error_decl.name } };
+            },
+            .Trait => {
+                trait_interface_capacity += 1;
             },
             else => {},
         }
@@ -496,6 +545,12 @@ pub fn typeCheck(
     for (file.statements) |statement| {
         if (statement == .VariableDecl) {
             const decl = statement.VariableDecl;
+            if (pattern_initializers.len == 0) {
+                pattern_initializers = try arena.alloc(?ast.ExprId, file.patterns.len);
+                pattern_binding_kinds = try arena.alloc(?ast.BindingKind, file.patterns.len);
+                @memset(pattern_initializers, null);
+                @memset(pattern_binding_kinds, null);
+            }
             if (decl.value) |expr_id| {
                 pattern_initializers[decl.pattern.index()] = expr_id;
             }
@@ -507,8 +562,12 @@ pub fn typeCheck(
         }
     }
 
+    var scratch_arena = std.heap.ArenaAllocator.init(arena);
+    defer scratch_arena.deinit();
+
     var typechecker = TypeChecker{
         .arena = arena,
+        .scratch_arena = &scratch_arena,
         .module_id = module_id,
         .file_id = file_id,
         .file = file,
@@ -539,6 +598,12 @@ pub fn typeCheck(
         .opaque_multi_error_patterns = opaque_multi_error_patterns,
         .diagnostics = &result.diagnostics,
     };
+    if (trait_interface_capacity != 0) {
+        try typechecker.trait_interfaces.ensureTotalCapacityPrecise(arena, trait_interface_capacity);
+    }
+    if (item_index.impl_entries.len != 0) {
+        try typechecker.impl_interfaces.ensureTotalCapacityPrecise(arena, item_index.impl_entries.len);
+    }
 
     for (file.items, 0..) |item, index| {
         switch (item) {
@@ -560,27 +625,28 @@ pub fn typeCheck(
     for (file.items, 0..) |item, index| {
         switch (item) {
             .Function => |function| {
-                const function_bindings = try typechecker.genericBindingsForFunctionTemplate(function);
+                var inline_function_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+                const function_bindings = try typechecker.genericBindingsForFunctionTemplateScratch(function, inline_function_bindings[0..]);
                 const resolved_params = try arena.alloc(Type, function.parameters.len);
                 for (function.parameters, 0..) |parameter, param_index| {
                     const resolved_type = try typechecker.declaredParameterType(ast.ItemId.fromIndex(index), parameter, function_bindings);
                     resolved_params[param_index] = resolved_type;
                     pattern_types[parameter.pattern.index()] = LocatedType.withRegionAndProvenance(resolved_type, .memory, .calldata);
                 }
-                const resolved_returns = if (function.return_type) |type_expr| blk_returns: {
-                    const slice = try arena.alloc(Type, 1);
-                    slice[0] = try typechecker.resolveTypeExprWithBindings(type_expr, function_bindings);
-                    break :blk_returns slice;
-                } else &.{};
+                const resolved_return_type: ?Type = if (function.return_type) |type_expr|
+                    try typechecker.resolveTypeExprWithBindings(type_expr, function_bindings)
+                else
+                    null;
+                body_types[function.body.index()] = resolved_return_type orelse .{ .void = {} };
+                const resolved_returns = if (resolved_return_type != null)
+                    body_types[function.body.index()..][0..1]
+                else
+                    &.{};
                 item_types[index] = .{ .function = .{
                     .name = function.name,
                     .param_types = resolved_params,
                     .return_types = resolved_returns,
                 } };
-                body_types[function.body.index()] = if (function.return_type) |type_expr|
-                    try typechecker.resolveTypeExprWithBindings(type_expr, function_bindings)
-                else
-                    .{ .void = {} };
             },
             .Field => |field| {
                 if (field.type_expr) |type_expr| {
@@ -639,24 +705,56 @@ pub fn typeCheck(
     result.pattern_initializers = pattern_initializers;
     result.pattern_binding_kinds = pattern_binding_kinds;
     result.expr_types = expr_types;
-    result.call_resolutions = call_resolutions;
-    result.expr_effects = expr_effects;
+    result.call_resolutions = typechecker.call_resolutions;
+    result.expr_effects = try typechecker.expr_effects.toOwnedSlice(arena);
     result.body_types = body_types;
-    result.instantiated_structs = try typechecker.instantiated_structs.toOwnedSlice(arena);
+    result.instantiated_structs = typechecker.instantiated_structs.items;
     result.instantiated_struct_lookup = try lookup_index.buildNamed(InstantiatedStruct, arena, result.instantiated_structs, "mangled_name");
-    result.instantiated_enums = try typechecker.instantiated_enums.toOwnedSlice(arena);
+    result.instantiated_enums = typechecker.instantiated_enums.items;
     result.instantiated_enum_lookup = try lookup_index.buildNamed(InstantiatedEnum, arena, result.instantiated_enums, "mangled_name");
-    result.instantiated_bitfields = try typechecker.instantiated_bitfields.toOwnedSlice(arena);
+    result.instantiated_bitfields = typechecker.instantiated_bitfields.items;
     result.instantiated_bitfield_lookup = try lookup_index.buildNamed(InstantiatedBitfield, arena, result.instantiated_bitfields, "mangled_name");
-    result.trait_interfaces = try typechecker.trait_interfaces.toOwnedSlice(arena);
+    result.trait_interfaces = typechecker.trait_interfaces.items;
     result.trait_interface_lookup = try lookup_index.buildNamed(TraitInterface, arena, result.trait_interfaces, "name");
-    result.impl_interfaces = try typechecker.impl_interfaces.toOwnedSlice(arena);
+    result.impl_interfaces = typechecker.impl_interfaces.items;
     result.impl_interface_lookup = try lookup_index.buildPair(ImplInterface, arena, result.impl_interfaces, "trait_name", "target_name");
     return result;
 }
 
+const ExprEffectList = struct {
+    const inline_capacity = 8;
+
+    inline_buffer: [inline_capacity]ExprEffect = undefined,
+    inline_len: usize = 0,
+    spill: std.ArrayList(ExprEffect) = .{},
+
+    fn append(self: *ExprEffectList, allocator: std.mem.Allocator, entry: ExprEffect) !void {
+        if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+            self.inline_buffer[self.inline_len] = entry;
+            self.inline_len += 1;
+            return;
+        }
+
+        if (self.spill.capacity == 0) {
+            try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+            try self.spill.appendSlice(allocator, self.inline_buffer[0..self.inline_len]);
+        }
+        try self.spill.append(allocator, entry);
+    }
+
+    fn toOwnedSlice(self: *ExprEffectList, allocator: std.mem.Allocator) ![]const ExprEffect {
+        if (self.spill.capacity != 0) return self.spill.toOwnedSlice(allocator);
+        if (self.inline_len == 0) return &.{};
+
+        const owned = try allocator.alloc(ExprEffect, self.inline_len);
+        @memcpy(owned, self.inline_buffer[0..self.inline_len]);
+        return owned;
+    }
+};
+
 const TypeChecker = struct {
     arena: std.mem.Allocator,
+    scratch_arena: *std.heap.ArenaAllocator,
     module_id: source.ModuleId,
     file_id: source.FileId,
     file: *const ast.AstFile,
@@ -673,7 +771,7 @@ const TypeChecker = struct {
     pattern_binding_kinds: []?ast.BindingKind,
     expr_types: []Type,
     call_resolutions: []?ResolvedCall,
-    expr_effects: []Effect,
+    expr_effects: ExprEffectList,
     effect_states: []EffectSummaryState,
     instantiated_structs: std.ArrayList(InstantiatedStruct),
     instantiated_struct_lookup: std.StringHashMap(usize),
@@ -686,13 +784,86 @@ const TypeChecker = struct {
     catch_error_tag_patterns: []bool = &.{},
     opaque_multi_error_patterns: []bool = &.{},
     try_scope_depth: usize = 0,
-    active_aliases: std.ArrayList(ast.ItemId) = .{},
+    active_aliases: InlineItemIdStack = .{},
     current_return_type: ?Type = null,
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
     comptime_depth: usize = 0,
+    effect_scratch_depth: usize = 0,
     diagnostics: *diagnostics.DiagnosticList,
+
+    fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
+        if (self.call_resolutions.len == 0) {
+            self.call_resolutions = try self.arena.alloc(?ResolvedCall, self.file.expressions.len);
+            @memset(self.call_resolutions, null);
+        }
+        self.call_resolutions[expr_id.index()] = resolved;
+    }
+
+    fn setExprEffect(self: *TypeChecker, expr_id: ast.ExprId, effect: Effect) !void {
+        if (comptime !zig_builtin.is_test) return;
+
+        switch (effect) {
+            .pure => {},
+            else => try self.expr_effects.append(self.arena, .{
+                .expr_id = expr_id,
+                .effect = try self.copyEffect(effect),
+            }),
+        }
+    }
+
+    fn copyEffectSlots(self: *TypeChecker, slots: []const EffectSlot) ![]const EffectSlot {
+        if (slots.len == 0) return &.{};
+        const owned = try self.arena.alloc(EffectSlot, slots.len);
+        @memcpy(owned, slots);
+        return owned;
+    }
+
+    fn copyEffect(self: *TypeChecker, effect: Effect) !Effect {
+        return switch (effect) {
+            .pure => .pure,
+            .external => .external,
+            .side_effects => |flags| .{ .side_effects = flags },
+            .reads => |reads| .{ .reads = .{
+                .slots = try self.copyEffectSlots(reads.slots),
+                .flags = reads.flags,
+            } },
+            .writes => |writes| .{ .writes = .{
+                .slots = try self.copyEffectSlots(writes.slots),
+                .flags = writes.flags,
+            } },
+            .reads_writes => |reads_writes| .{ .reads_writes = .{
+                .reads = try self.copyEffectSlots(reads_writes.reads),
+                .writes = try self.copyEffectSlots(reads_writes.writes),
+                .flags = reads_writes.flags,
+            } },
+        };
+    }
+
+    fn setCatchErrorTagPattern(self: *TypeChecker, pattern_id: ast.PatternId, value: bool) !void {
+        if (self.catch_error_tag_patterns.len == 0) {
+            self.catch_error_tag_patterns = try self.arena.alloc(bool, self.file.patterns.len);
+            @memset(self.catch_error_tag_patterns, false);
+        }
+        self.catch_error_tag_patterns[pattern_id.index()] = value;
+    }
+
+    fn isCatchErrorTagPattern(self: *const TypeChecker, pattern_id: ast.PatternId) bool {
+        return pattern_id.index() < self.catch_error_tag_patterns.len and self.catch_error_tag_patterns[pattern_id.index()];
+    }
+
+    fn setOpaqueMultiErrorPattern(self: *TypeChecker, pattern_id: ast.PatternId) !void {
+        if (self.opaque_multi_error_patterns.len == 0) {
+            self.opaque_multi_error_patterns = try self.arena.alloc(bool, self.file.patterns.len);
+            @memset(self.opaque_multi_error_patterns, false);
+        }
+        self.opaque_multi_error_patterns[pattern_id.index()] = true;
+    }
+
+    fn isOpaqueMultiErrorPattern(self: *const TypeChecker, pattern_id: ast.PatternId) bool {
+        return pattern_id.index() < self.opaque_multi_error_patterns.len and self.opaque_multi_error_patterns[pattern_id.index()];
+    }
 
     fn importedModuleForExpr(self: *const TypeChecker, expr_id: ast.ExprId) !?source.ModuleId {
         const query = self.import_query orelse return null;
@@ -771,7 +942,7 @@ const TypeChecker = struct {
             break :blk inferred;
         } else &.{};
 
-        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(target_module_id, target_file, function, bindings)) orelse return null;
+        const runtime_parameter_types = (try self.importedRuntimeParameterTypes(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
         if (!function.is_generic and call.args.len != runtime_parameter_types.len) return null;
         const return_type = (try self.importedFunctionReturnType(target_module_id, target_file, target_item_id, function, bindings)) orelse return null;
         return .{
@@ -787,6 +958,7 @@ const TypeChecker = struct {
         self: *TypeChecker,
         target_module_id: source.ModuleId,
         target_file: *const ast.AstFile,
+        target_item_id: ast.ItemId,
         function: ast.FunctionItem,
         bindings: []const GenericTypeBinding,
     ) !?[]const Type {
@@ -796,6 +968,10 @@ const TypeChecker = struct {
         const query = self.import_query orelse return null;
         const target_item_index = try query.itemIndex(target_module_id);
         const target_typecheck = try query.moduleTypeCheck(target_module_id);
+        if (!function.is_generic and runtime_params.len == function.parameters.len) {
+            const item_type = target_typecheck.item_types[target_item_id.index()];
+            if (item_type.kind() == .function) return item_type.function.param_types;
+        }
 
         var imported_checker = self.*;
         imported_checker.module_id = target_module_id;
@@ -811,7 +987,7 @@ const TypeChecker = struct {
         imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
-        imported_checker.expr_effects = target_typecheck.expr_effects;
+        imported_checker.expr_effects = .{};
         imported_checker.current_contract = null;
         imported_checker.current_function_item = null;
 
@@ -860,7 +1036,7 @@ const TypeChecker = struct {
             imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
             imported_checker.expr_types = target_typecheck.expr_types;
             imported_checker.call_resolutions = target_typecheck.call_resolutions;
-            imported_checker.expr_effects = target_typecheck.expr_effects;
+            imported_checker.expr_effects = .{};
             imported_checker.current_contract = null;
             imported_checker.current_function_item = null;
             return try imported_checker.resolveTypeExprWithBindings(type_expr, bindings);
@@ -970,7 +1146,8 @@ const TypeChecker = struct {
                 try self.validateConstructorFunction(function);
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
-                const function_bindings = try self.genericBindingsForFunctionTemplate(function);
+                var inline_function_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+                const function_bindings = try self.genericBindingsForFunctionTemplateScratch(function, inline_function_bindings[0..]);
                 self.current_return_type = if (function.return_type) |type_expr|
                     try self.resolveTypeExprWithBindings(type_expr, function_bindings)
                 else
@@ -979,8 +1156,9 @@ const TypeChecker = struct {
                 defer self.current_function_item = previous_function_item;
                 defer self.current_return_type = previous_return_type;
                 try self.validatePublicFunctionAbi(function);
+                try self.validateRuntimeMapFunctionBoundary(function);
                 try self.checkDuplicateTraitBounds(function.trait_bounds);
-                var declared_modifies: std.ArrayList(EffectSlot) = .{};
+                var declared_modifies = InlineEffectSlotList{};
                 var has_modifies_clause = false;
                 var has_empty_modifies_clause = false;
                 var has_nonempty_modifies_clause = false;
@@ -1008,15 +1186,20 @@ const TypeChecker = struct {
                 }
                 try self.visitBody(function.body);
                 try self.ensureFunctionEffectSummary(item_id, function);
+                const function_effect = self.item_effects[item_id.index()];
                 if (has_modifies_clause) {
-                    try self.validateModifiesSubset(function.range, declared_modifies.items, self.item_effects[item_id.index()].writeSlots());
+                    try self.validateModifiesSubset(function.range, declared_modifies.items(), function_effect.writeSlots());
                     self.item_modifies[item_id.index()] = try declared_modifies.toOwnedSlice(self.arena);
                 }
-                var locked_slots: std.ArrayList(EffectSlot) = .{};
-                try self.validateBodyLocks(function.body, &locked_slots);
-                var external_call_state = try self.initExternalCallValidationState();
-                defer external_call_state.deinit(self.arena);
-                try self.validateBodyExternalCalls(function.body, &external_call_state);
+                if (function_effect.hasLock() or function_effect.hasUnlock()) {
+                    var locked_slots = InlineEffectSlotList{};
+                    try self.validateBodyLocks(function.body, &locked_slots);
+                }
+                if (function_effect.hasExternal() and self.effectHasStorageWrite(function_effect)) {
+                    var external_call_state = try self.initExternalCallValidationState();
+                    defer external_call_state.deinit(self.arena);
+                    try self.validateBodyExternalCalls(function.body, &external_call_state);
+                }
             },
             .Trait => |trait_item| {
                 if (trait_item.is_extern and trait_item.ghost_block != null) {
@@ -1053,7 +1236,14 @@ const TypeChecker = struct {
                         }
                     }
                     for (method.parameters) |parameter| {
-                        self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(try self.resolveTypeExpr(parameter.type_expr));
+                        const parameter_type = try self.resolveTypeExpr(parameter.type_expr);
+                        self.pattern_types[parameter.pattern.index()] = LocatedType.unlocated(parameter_type);
+                        if (!parameter.is_comptime) {
+                            try self.checkRuntimeMapParameter(parameter.range, parameter.pattern, parameter_type);
+                        }
+                    }
+                    if (method.return_type != null) {
+                        try self.checkRuntimeMapReturn(method.range, method.name, self.current_return_type.?);
                     }
                     for (method.clauses) |clause| {
                         if (clause.kind == .modifies) {
@@ -1443,10 +1633,8 @@ const TypeChecker = struct {
                 }
             },
             .TypeAlias => |type_alias| {
-                for (self.active_aliases.items) |active_alias| {
-                    if (active_alias == item_id) return null;
-                }
-                try self.active_aliases.append(self.arena, item_id);
+                if (self.active_aliases.contains(item_id)) return null;
+                try self.active_aliases.push(self.arena, item_id);
                 defer _ = self.active_aliases.pop();
                 if (try self.typeExprContainsActiveRuntimeAdt(type_alias.target_type, active)) |cycle_name| return cycle_name;
             },
@@ -1503,6 +1691,60 @@ const TypeChecker = struct {
                 diagnosticTypeDisplayName(self, self.current_return_type.?),
             });
         }
+    }
+
+    fn validateRuntimeMapFunctionBoundary(self: *TypeChecker, function: ast.FunctionItem) !void {
+        for (function.parameters) |parameter| {
+            if (parameter.is_comptime) continue;
+            if (self.parameterIsBareSelf(parameter)) continue;
+            const parameter_type = self.pattern_types[parameter.pattern.index()].type;
+            try self.checkRuntimeMapParameter(parameter.range, parameter.pattern, parameter_type);
+        }
+
+        if (function.return_type != null) {
+            try self.checkRuntimeMapReturn(function.range, function.name, self.current_return_type.?);
+        }
+    }
+
+    fn checkRuntimeMapParameter(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!typeContainsMap(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<param>";
+        try self.emitRangeError(range, "function parameter '{s}' cannot have map type '{s}' as a runtime value; index storage maps directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeMapReturn(
+        self: *TypeChecker,
+        range: source.TextRange,
+        function_name: []const u8,
+        ty: Type,
+    ) !void {
+        if (!typeContainsMap(ty)) return;
+        try self.emitRangeError(range, "function '{s}' cannot return map type '{s}'; maps are storage roots, not first-class runtime values", .{
+            function_name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeMapLocal(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!typeContainsMap(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<local>";
+        try self.emitRangeError(range, "local '{s}' cannot have map type '{s}' as a runtime value; index storage maps directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
     }
 
     fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
@@ -1866,7 +2108,11 @@ const TypeChecker = struct {
         return try self.resolveTypeExprWithBindings(parameter.type_expr, bindings);
     }
 
-    fn genericBindingsForFunctionTemplate(self: *TypeChecker, function: ast.FunctionItem) ![]const GenericTypeBinding {
+    fn genericBindingsForFunctionTemplateScratch(
+        self: *TypeChecker,
+        function: ast.FunctionItem,
+        scratch: []GenericTypeBinding,
+    ) ![]const GenericTypeBinding {
         if (!function.is_generic) return &.{};
 
         var count: usize = 0;
@@ -1876,7 +2122,7 @@ const TypeChecker = struct {
             count += 1;
         }
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, count);
+        const bindings = try self.genericTypeBindingBuffer(count, scratch);
         var index: usize = 0;
         for (function.parameters) |parameter| {
             if (!parameter.is_comptime) continue;
@@ -1900,15 +2146,13 @@ const TypeChecker = struct {
         return bindings[0..index];
     }
 
-    fn currentFunctionGenericBindings(self: *TypeChecker) ![]const GenericTypeBinding {
-        const function_item_id = self.current_function_item orelse return &.{};
-        const item = self.file.item(function_item_id).*;
-        if (item != .Function) return &.{};
-        return self.genericBindingsForFunctionTemplate(item.Function);
-    }
-
     fn resolveTypeExprInCurrentContext(self: *TypeChecker, type_expr: ast.TypeExprId) !Type {
-        return self.resolveTypeExprWithBindings(type_expr, try self.currentFunctionGenericBindings());
+        const function_item_id = self.current_function_item orelse return self.resolveTypeExprWithBindings(type_expr, &.{});
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function) return self.resolveTypeExprWithBindings(type_expr, &.{});
+        var inline_function_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = try self.genericBindingsForFunctionTemplateScratch(item.Function, inline_function_bindings[0..]);
+        return self.resolveTypeExprWithBindings(type_expr, bindings);
     }
 
     fn checkExplicitTypeExprResolved(self: *TypeChecker, type_expr: ast.TypeExprId, bindings: []const GenericTypeBinding) !void {
@@ -1940,7 +2184,8 @@ const TypeChecker = struct {
             if (!self.diagnostics.isEmpty()) return;
             switch (item) {
                 .Function => |function| {
-                    const bindings = try self.genericBindingsForFunctionTemplate(function);
+                    var inline_function_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+                    const bindings = try self.genericBindingsForFunctionTemplateScratch(function, inline_function_bindings[0..]);
                     for (function.parameters) |parameter| {
                         if (self.parameterTypeForFunctionItem(ast.ItemId.fromIndex(index), parameter) != null) continue;
                         if (self.isGenericTypeParameter(parameter)) continue;
@@ -2073,12 +2318,55 @@ const TypeChecker = struct {
         };
     }
 
+    const ImplKey = struct {
+        trait_name: []const u8,
+        target_name: []const u8,
+    };
+
+    const InlineImplKeySet = struct {
+        const inline_capacity = 8;
+
+        inline_items: [inline_capacity]ImplKey = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(ImplKey) = .{},
+
+        fn contains(self: *const InlineImplKeySet, key: ImplKey) bool {
+            for (self.inline_items[0..self.inline_len]) |seen| {
+                if (implKeyEql(seen, key)) return true;
+            }
+            for (self.spill.items) |seen| {
+                if (implKeyEql(seen, key)) return true;
+            }
+            return false;
+        }
+
+        fn append(self: *InlineImplKeySet, allocator: std.mem.Allocator, key: ImplKey) !void {
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = key;
+                self.inline_len += 1;
+                return;
+            }
+
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_items[0..self.inline_len]);
+                self.inline_len = 0;
+            }
+            try self.spill.append(allocator, key);
+        }
+    };
+
+    fn implKeyEql(lhs: ImplKey, rhs: ImplKey) bool {
+        return std.mem.eql(u8, lhs.trait_name, rhs.trait_name) and
+            std.mem.eql(u8, lhs.target_name, rhs.target_name);
+    }
+
     fn checkDuplicateImplsAcrossVisibleModules(self: *TypeChecker) anyerror!void {
         // Impl declarations currently store only simple trait/type identifiers, not
         // qualified nominal origins. Enforce coherence over the visible simple-name
         // pair until the AST grows origin-aware impl targets.
-        var seen = std.StringHashMap(void).init(self.arena);
-        var reported = std.StringHashMap(void).init(self.arena);
+        var seen = InlineImplKeySet{};
+        var reported = InlineImplKeySet{};
 
         for (self.item_index.impl_entries) |entry| {
             const item = self.file.item(entry.item_id).*;
@@ -2090,14 +2378,16 @@ const TypeChecker = struct {
         }
 
         const query = self.import_query orelse return;
-        var imported_modules = std.AutoHashMap(source.ModuleId, void).init(self.arena);
+        var imported_modules = InlineIndexSet.init(self.arena);
+        defer imported_modules.deinit();
         for (self.file.root_items) |item_id| {
             const item = self.file.item(item_id).*;
             if (item != .Import) continue;
             const alias = item.Import.alias orelse continue;
             const module_id = (try query.resolveImportAlias(self.module_id, alias)) orelse continue;
-            if (imported_modules.contains(module_id)) continue;
-            try imported_modules.put(module_id, {});
+            const module_index = module_id.index();
+            if (imported_modules.contains(module_index)) continue;
+            try imported_modules.put(module_index);
 
             const imported_typecheck = try query.moduleTypeCheck(module_id);
             for (imported_typecheck.impl_interfaces) |impl_interface| {
@@ -2108,19 +2398,19 @@ const TypeChecker = struct {
 
     fn recordVisibleImplKey(
         self: *TypeChecker,
-        seen: *std.StringHashMap(void),
-        reported: *std.StringHashMap(void),
+        seen: *InlineImplKeySet,
+        reported: *InlineImplKeySet,
         trait_name: []const u8,
         target_name: []const u8,
         range: source.TextRange,
     ) anyerror!void {
-        const key = try std.fmt.allocPrint(self.arena, "{s}\x00{s}", .{ trait_name, target_name });
+        const key: ImplKey = .{ .trait_name = trait_name, .target_name = target_name };
         if (!seen.contains(key)) {
-            try seen.put(key, {});
+            try seen.append(self.arena, key);
             return;
         }
         if (reported.contains(key)) return;
-        try reported.put(key, {});
+        try reported.append(self.arena, key);
         try self.emitRangeError(range, "duplicate impl for trait '{s}' and type '{s}'", .{
             trait_name,
             target_name,
@@ -2240,6 +2530,7 @@ const TypeChecker = struct {
                     }
                 }
                 if (decl.storage_class != .storage) {
+                    try self.checkRuntimeMapLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
                     try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
@@ -2287,6 +2578,10 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.visitExpr(switch_stmt.condition);
+                if (switch_stmt.invariants.len != 0 and switch_stmt.label == null) {
+                    try self.emitRangeMessage(switch_stmt.range, "switch invariants require a labeled switch");
+                }
+                for (switch_stmt.invariants) |expr_id| try self.visitExpr(expr_id);
                 const condition_type = self.expr_types[switch_stmt.condition.index()];
                 try self.validateMatchPatternFamily(condition_type, switch_stmt.arms, switch_stmt.range);
                 for (switch_stmt.arms) |arm| {
@@ -2307,7 +2602,7 @@ const TypeChecker = struct {
                     if (catch_clause.error_pattern) |pattern_id| {
                         const inferred = try self.inferCatchPatternType(try_stmt.try_body);
                         self.pattern_types[pattern_id.index()] = LocatedType.unlocated(inferred.ty);
-                        self.catch_error_tag_patterns[pattern_id.index()] = inferred.ty.kind() == .integer;
+                        try self.setCatchErrorTagPattern(pattern_id, inferred.ty.kind() == .integer);
                     }
                     try self.visitBody(catch_clause.body);
                 }
@@ -2571,8 +2866,14 @@ const TypeChecker = struct {
                         return;
                     }
                 }
-                self.call_resolutions[expr_id.index()] = try self.importedFunctionCallResolution(call);
-                const result_type = try self.callReturnType(call);
+                const imported_resolution = try self.importedFunctionCallResolution(call);
+                if (imported_resolution) |resolved| {
+                    try self.setCallResolution(expr_id, resolved);
+                }
+                const result_type = if (imported_resolution) |resolved|
+                    resolved.return_type
+                else
+                    try self.callReturnType(call);
                 self.expr_types[expr_id.index()] = result_type;
                 if (try self.checkEnumVariantConstructorCall(expr_id, call)) {
                     return;
@@ -2599,7 +2900,8 @@ const TypeChecker = struct {
                             };
                             if (function) |resolved_function| {
                                 if (resolved_function.is_generic) {
-                                    const bindings = try self.genericTypeBindingsForCall(resolved_function, call);
+                                    var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+                                    const bindings = try self.genericTypeBindingsForCall(resolved_function, call, inline_bindings[0..]);
                                     if (bindings == null) {
                                         try self.emitExprError(expr_id, "could not infer generic type arguments", .{});
                                     } else {
@@ -2616,12 +2918,10 @@ const TypeChecker = struct {
                                 try self.emitExprError(expr_id, "expected {d} arguments, found {d}", .{ expected_args, call.args.len });
                             }
                         }
+                    } else if (imported_resolution) |resolved| {
+                        try self.checkImportedCallArguments(call, resolved);
                     } else {
-                        if (self.call_resolutions[expr_id.index()]) |resolved| {
-                            try self.checkImportedCallArguments(call, resolved);
-                        } else {
-                            try self.checkCallArguments(call, callee_type);
-                        }
+                        try self.checkCallArguments(call, callee_type);
                     }
                 }
             },
@@ -2760,13 +3060,12 @@ const TypeChecker = struct {
     fn logIndexedFieldTypeSupported(self: *const TypeChecker, ty: Type) bool {
         _ = self;
         return switch (unwrapRefinement(ty).kind()) {
-            .struct_, .tuple, .array, .slice, .map => false,
+            .string, .bytes, .struct_, .tuple, .array, .slice, .map => false,
             else => true,
         };
     }
 
     fn callReturnType(self: *TypeChecker, call: ast.CallExpr) !Type {
-        if (try self.importedCallReturnType(call)) |result| return result;
         if (try self.genericCallReturnType(call)) |result| return result;
         if (try self.externProxyCallReturnType(call)) |result| return result;
         if (self.enumVariantConstructorInfo(call.callee)) |info| return info.enum_type;
@@ -2865,11 +3164,6 @@ const TypeChecker = struct {
         return true;
     }
 
-    fn importedCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
-        const resolved = (try self.importedFunctionCallResolution(call)) orelse return null;
-        return resolved.return_type;
-    }
-
     fn callableType(self: *const TypeChecker, expr_id: ast.ExprId) Type {
         switch (self.file.expression(expr_id).*) {
             .Name => {
@@ -2915,7 +3209,8 @@ const TypeChecker = struct {
         };
         if (!function.is_generic) return null;
 
-        const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse return .{ .unknown = {} };
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return .{ .unknown = {} };
         const runtime_parameters = try self.runtimeFunctionParameters(function);
         const comptime_count = self.leadingComptimeParameterCount(function);
         const method_receiver_supplied = self.callSuppliesMethodReceiver(call.callee) and self.functionHasRuntimeSelf(function);
@@ -2934,13 +3229,16 @@ const TypeChecker = struct {
 
     fn externProxyCallReturnType(self: *TypeChecker, call: ast.CallExpr) !?Type {
         const method = self.externProxyMethodSignature(call.callee) orelse return null;
-        const error_types = try self.arena.alloc(Type, method.errors.len + 1);
-        error_types[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
-        for (method.errors, 0..) |error_name, index| {
-            error_types[index + 1] = .{ .named = .{ .name = error_name } };
-        }
+        const error_types = if (method.errors.len == 0) external_call_failed_error_types[0..] else blk: {
+            const errors = try self.arena.alloc(Type, method.errors.len + 1);
+            errors[0] = .{ .named = .{ .name = "ExternalCallFailed" } };
+            for (method.errors, 0..) |error_name, index| {
+                errors[index + 1] = .{ .named = .{ .name = error_name } };
+            }
+            break :blk errors;
+        };
         return .{ .error_union = .{
-            .payload_type = try self.storeType(method.return_type),
+            .payload_type = &method.return_type,
             .error_types = error_types,
         } };
     }
@@ -2955,7 +3253,12 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn genericTypeBindingsForCall(self: *TypeChecker, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
+    fn genericTypeBindingsForCall(
+        self: *TypeChecker,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        scratch: []GenericTypeBinding,
+    ) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCount(function);
         if (comptime_count == 0) return &.{};
@@ -2964,7 +3267,7 @@ const TypeChecker = struct {
         const effective_runtime_count = runtime_params.len - @as(usize, if (method_receiver_supplied) 1 else 0);
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
+            const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const name = self.patternName(parameter.pattern) orelse return null;
                 const value = (try self.genericBindingValueForCallArg(parameter, call.args[index])) orelse return null;
@@ -2977,7 +3280,7 @@ const TypeChecker = struct {
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, comptime_count);
+        const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
         for (bindings) |*binding| {
             binding.* = .{ .name = "", .value = .{ .ty = .{ .unknown = {} } } };
         }
@@ -3029,6 +3332,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.validateGenericExprInstantiation(switch_stmt.condition, bindings);
+                for (switch_stmt.invariants) |expr_id| try self.validateGenericExprInstantiation(expr_id, bindings);
                 for (switch_stmt.arms) |arm| {
                     try self.validateGenericSwitchPatternInstantiation(arm.pattern, bindings);
                     try self.validateGenericBodyInstantiation(arm.body, bindings);
@@ -3142,7 +3446,7 @@ const TypeChecker = struct {
     }
 
     fn validateModifiesClause(self: *TypeChecker, clause: ast.SpecClause) !void {
-        var slots: std.ArrayList(EffectSlot) = .{};
+        var slots = InlineEffectSlotList{};
         try self.collectModifiesClauseSlots(clause, &slots);
     }
 
@@ -3154,7 +3458,7 @@ const TypeChecker = struct {
         };
     }
 
-    fn collectModifiesClauseSlots(self: *TypeChecker, clause: ast.SpecClause, slots: *std.ArrayList(EffectSlot)) !void {
+    fn collectModifiesClauseSlots(self: *TypeChecker, clause: ast.SpecClause, slots: *InlineEffectSlotList) !void {
         // This helper only validates and collects declared paths. HIR lowering
         // exports them for verifier framing only after the caller stores them
         // in item_modifies, which happens after the compiler-derived write-set
@@ -3217,7 +3521,7 @@ const TypeChecker = struct {
                 (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin")));
     }
 
-    fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *std.ArrayList(EffectSlot)) !void {
+    fn collectModifiesExprSlots(self: *TypeChecker, expr_id: ast.ExprId, slots: *InlineEffectSlotList) !void {
         switch (self.file.expression(expr_id).*) {
             .Group => |group| try self.collectModifiesExprSlots(group.expr, slots),
             .Tuple => |tuple| {
@@ -3230,7 +3534,7 @@ const TypeChecker = struct {
                     } else if (slot.field_path != null and slot.key_path != null) {
                         try self.emitExprError(expr_id, "`modifies` v1 does not support mixed indexed-field storage paths such as `users[user].balance`", .{});
                     } else {
-                        try self.appendUniqueSlot(slots, slot);
+                        try self.appendUniqueEffectSlot(slots, slot);
                     }
                 } else {
                     try self.emitExprError(expr_id, "`modifies` v1 only supports current-contract storage paths such as `total`, `config.owner`, `balances[user]`, or `allowances[owner][spender]`", .{});
@@ -3453,12 +3757,28 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn runtimeFunctionParameters(self: *const TypeChecker, function: ast.FunctionItem) ![]ast.Parameter {
+    fn runtimeFunctionParameters(self: *const TypeChecker, function: ast.FunctionItem) ![]const ast.Parameter {
+        var first_runtime: ?usize = null;
+        var runtime_count: usize = 0;
+        var has_comptime_after_runtime = false;
+        for (function.parameters, 0..) |parameter, index| {
+            if (parameter.is_comptime) {
+                if (first_runtime != null) has_comptime_after_runtime = true;
+                continue;
+            }
+            if (first_runtime == null) first_runtime = index;
+            runtime_count += 1;
+        }
+
+        const start = first_runtime orelse return &.{};
+        if (!has_comptime_after_runtime) return function.parameters[start..];
+
         var parameters: std.ArrayList(ast.Parameter) = .{};
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.arena, parameter);
         }
+        std.debug.assert(parameters.items.len == runtime_count);
         return parameters.toOwnedSlice(self.arena);
     }
 
@@ -3519,8 +3839,9 @@ const TypeChecker = struct {
             };
             const comptime_count = self.leadingComptimeParameterCount(function);
             const runtime_parameters = try self.runtimeFunctionParameters(function);
+            var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
             const bindings = if (function.is_generic)
-                (try self.genericTypeBindingsForCall(function, call)) orelse return
+                (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return
             else
                 &.{};
             if (function.is_generic) {
@@ -4109,7 +4430,7 @@ const TypeChecker = struct {
         imported_checker.pattern_binding_kinds = target_typecheck.pattern_binding_kinds;
         imported_checker.expr_types = target_typecheck.expr_types;
         imported_checker.call_resolutions = target_typecheck.call_resolutions;
-        imported_checker.expr_effects = target_typecheck.expr_effects;
+        imported_checker.expr_effects = .{};
         imported_checker.current_contract = null;
         imported_checker.current_function_item = null;
 
@@ -4463,13 +4784,11 @@ const TypeChecker = struct {
         };
     }
 
-    fn sanitizeGenericMangleSegment(self: *TypeChecker, text: []const u8) ![]const u8 {
+    fn appendSanitizedGenericMangleSegment(self: *TypeChecker, buffer: *std.ArrayList(u8), text: []const u8) !void {
         const trimmed = std.mem.trim(u8, text, " \t\n\r");
-        var result = std.ArrayList(u8){};
         for (trimmed) |ch| {
-            try result.append(self.arena, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+            try buffer.append(self.arena, if (std.ascii.isAlphanumeric(ch)) ch else '_');
         }
-        return result.toOwnedSlice(self.arena);
     }
 
     fn substituteGenericType(self: *TypeChecker, ty: Type, bindings: []const GenericTypeBinding) !Type {
@@ -4594,27 +4913,34 @@ const TypeChecker = struct {
         }
     }
 
-    fn checkErrorUnionErrorNames(self: *TypeChecker, eu: ast.ErrorUnionTypeExpr, valid_errors: []bool) !void {
-        for (eu.errors, 0..) |error_type, index| {
-            valid_errors[index] = try self.checkErrorUnionErrorName(error_type);
-        }
-    }
-
     fn substituteGenericArgs(self: *TypeChecker, args: []const ast.TypeArg, bindings: []const GenericTypeBinding) ![]const ast.TypeArg {
-        const resolved = try self.arena.alloc(ast.TypeArg, args.len);
+        if (bindings.len == 0) return args;
+
+        var resolved: ?[]ast.TypeArg = null;
         for (args, 0..) |arg, index| {
-            resolved[index] = switch (arg) {
-                .Integer => arg,
+            const replacement: ?ast.TypeArg = switch (arg) {
+                .Integer => null,
                 .Type => |type_expr| if (self.typeExprIntegerBinding(type_expr, bindings)) |integer|
                     .{ .Integer = .{
                         .range = self.typeExprRange(type_expr),
                         .text = integer,
                     } }
                 else
-                    arg,
+                    null,
             };
+
+            if (replacement) |value| {
+                if (resolved == null) {
+                    const items = try self.arena.alloc(ast.TypeArg, args.len);
+                    @memcpy(items[0..index], args[0..index]);
+                    resolved = items;
+                }
+                resolved.?[index] = value;
+            } else if (resolved) |items| {
+                items[index] = arg;
+            }
         }
-        return resolved;
+        return resolved orelse args;
     }
 
     fn resolveArraySize(self: *const TypeChecker, size: ast.TypeArraySize, bindings: []const GenericTypeBinding) ?u32 {
@@ -4713,11 +5039,9 @@ const TypeChecker = struct {
                 .element_type = try self.storeType(try self.resolveTypeExprWithBindings(slice.element, bindings)),
             } },
             .ErrorUnion => |error_union| blk: {
-                const valid_errors = try self.arena.alloc(bool, error_union.errors.len);
-                try self.checkErrorUnionErrorNames(error_union, valid_errors);
                 const errors = try self.arena.alloc(Type, error_union.errors.len);
                 for (error_union.errors, 0..) |error_type, index| {
-                    if (!valid_errors[index]) {
+                    if (!try self.checkErrorUnionErrorName(error_type)) {
                         errors[index] = self.errorUnionErrorDisplayType(error_type);
                         continue;
                     }
@@ -4997,6 +5321,20 @@ const TypeChecker = struct {
         };
     }
 
+    fn structFieldInitByName(fields: []const ast.StructFieldInit, name: []const u8) ?ast.StructFieldInit {
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field;
+        }
+        return null;
+    }
+
+    fn structDestructureFieldByName(fields: []const ast.nodes.StructDestructureField, name: []const u8) ?ast.nodes.StructDestructureField {
+        for (fields) |field| {
+            if (std.mem.eql(u8, field.name, name)) return field;
+        }
+        return null;
+    }
+
     fn checkEnumVariantStructLiteral(self: *TypeChecker, expr_id: ast.ExprId, struct_literal: ast.StructLiteralExpr) !void {
         const info = self.enumVariantStructLiteralInfo(struct_literal.type_name) orelse return;
         const payload_type = info.payload_type orelse {
@@ -5010,19 +5348,17 @@ const TypeChecker = struct {
             return;
         }
 
-        var seen_fields = std.StringHashMap(void).init(self.arena);
-        defer seen_fields.deinit();
-        for (struct_literal.fields) |init| {
-            const existing = try seen_fields.fetchPut(init.name, {});
-            if (existing != null) {
+        for (struct_literal.fields, 0..) |init, index| {
+            for (struct_literal.fields[0..index]) |previous| {
+                if (!std.mem.eql(u8, previous.name, init.name)) continue;
                 try self.emitAdtVariantFieldRange(init.range, .duplicate, init.name, info.variant_name);
+                break;
             }
         }
 
         const payload_fields = payload_type.anonymous_struct.fields;
-        const init_lookup = try lookup_index.buildNamed(ast.StructFieldInit, self.arena, struct_literal.fields, "name");
         for (payload_fields) |field| {
-            const init = lookup_index.findNamedItem(ast.StructFieldInit, struct_literal.fields, init_lookup, field.name) orelse {
+            const init = structFieldInitByName(struct_literal.fields, field.name) orelse {
                 try self.emitAdtVariantFieldExpr(expr_id, .missing, field.name, info.variant_name);
                 continue;
             };
@@ -5193,7 +5529,8 @@ const TypeChecker = struct {
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
     ) anyerror!Type {
-        const bindings = try self.genericTypeBindingsForStruct(struct_item, generic, outer_bindings);
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = try self.genericTypeBindingsForStruct(struct_item, generic, outer_bindings, inline_bindings[0..]);
         const mangled_name = try self.mangleGenericStructName(struct_item.name, bindings);
 
         if (self.instantiatedStructByName(mangled_name) == null) {
@@ -5220,10 +5557,11 @@ const TypeChecker = struct {
         struct_item: ast.StructItem,
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
+        scratch: []GenericTypeBinding,
     ) anyerror![]const GenericTypeBinding {
         if (struct_item.template_parameters.len != generic.args.len) return error.InvalidGenericStructInstantiation;
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, struct_item.template_parameters.len);
+        const bindings = try self.genericTypeBindingBuffer(struct_item.template_parameters.len, scratch);
         for (struct_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericStructInstantiation;
             const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericStructInstantiation);
@@ -5235,14 +5573,27 @@ const TypeChecker = struct {
         return bindings;
     }
 
+    fn genericTypeBindingBuffer(self: *TypeChecker, count: usize, scratch: []GenericTypeBinding) ![]GenericTypeBinding {
+        if (count <= scratch.len) return scratch[0..count];
+        return self.arena.alloc(GenericTypeBinding, count);
+    }
+
     fn mangleGenericStructName(self: *TypeChecker, base_name: []const u8, bindings: []const GenericTypeBinding) anyerror![]const u8 {
         var name = std.ArrayList(u8){};
+        var total_len = base_name.len;
+        for (bindings) |binding| {
+            total_len += 2 + switch (binding.value) {
+                .ty => |ty| model.typeMangleNameLen(ty),
+                .integer => |integer| std.mem.trim(u8, integer, " \t\n\r").len,
+            };
+        }
+        try name.ensureTotalCapacityPrecise(self.arena, total_len);
         try name.appendSlice(self.arena, base_name);
         for (bindings) |binding| {
             try name.appendSlice(self.arena, "__");
             switch (binding.value) {
                 .ty => |ty| try appendModelTypeMangleName(self.arena, &name, ty),
-                .integer => |integer| try name.appendSlice(self.arena, try self.sanitizeGenericMangleSegment(integer)),
+                .integer => |integer| try self.appendSanitizedGenericMangleSegment(&name, integer),
             }
         }
         return name.toOwnedSlice(self.arena);
@@ -5267,7 +5618,8 @@ const TypeChecker = struct {
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
     ) anyerror!Type {
-        const bindings = try self.genericTypeBindingsForEnum(enum_item, generic, outer_bindings);
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = try self.genericTypeBindingsForEnum(enum_item, generic, outer_bindings, inline_bindings[0..]);
         const mangled_name = try self.mangleGenericStructName(enum_item.name, bindings);
 
         if (self.instantiatedEnumByName(mangled_name) == null) {
@@ -5349,10 +5701,11 @@ const TypeChecker = struct {
         enum_item: ast.EnumItem,
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
+        scratch: []GenericTypeBinding,
     ) anyerror![]const GenericTypeBinding {
         if (enum_item.template_parameters.len != generic.args.len) return error.InvalidGenericEnumInstantiation;
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, enum_item.template_parameters.len);
+        const bindings = try self.genericTypeBindingBuffer(enum_item.template_parameters.len, scratch);
         for (enum_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericEnumInstantiation;
             const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericEnumInstantiation);
@@ -5401,7 +5754,8 @@ const TypeChecker = struct {
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
     ) anyerror!Type {
-        const bindings = try self.genericTypeBindingsForBitfield(bitfield_item, generic, outer_bindings);
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = try self.genericTypeBindingsForBitfield(bitfield_item, generic, outer_bindings, inline_bindings[0..]);
         const mangled_name = try self.mangleGenericStructName(bitfield_item.name, bindings);
 
         if (self.instantiatedBitfieldByName(mangled_name) == null) {
@@ -5436,7 +5790,8 @@ const TypeChecker = struct {
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
     ) anyerror!Type {
-        const bindings = try self.genericTypeBindingsForAlias(type_alias, generic, outer_bindings);
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = try self.genericTypeBindingsForAlias(type_alias, generic, outer_bindings, inline_bindings[0..]);
         return self.resolveTypeAliasTarget(item_id, type_alias, bindings);
     }
 
@@ -5445,10 +5800,11 @@ const TypeChecker = struct {
         type_alias: ast.TypeAliasItem,
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
+        scratch: []GenericTypeBinding,
     ) anyerror![]const GenericTypeBinding {
         if (type_alias.template_parameters.len != generic.args.len) return error.InvalidGenericTypeAliasInstantiation;
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, type_alias.template_parameters.len);
+        const bindings = try self.genericTypeBindingBuffer(type_alias.template_parameters.len, scratch);
         for (type_alias.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericTypeAliasInstantiation;
             const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericTypeAliasInstantiation);
@@ -5466,13 +5822,11 @@ const TypeChecker = struct {
         type_alias: ast.TypeAliasItem,
         bindings: []const GenericTypeBinding,
     ) anyerror!Type {
-        for (self.active_aliases.items) |active_id| {
-            if (active_id == item_id) {
-                try self.emitRangeError(type_alias.range, "recursive type alias '{s}' is not supported", .{type_alias.name});
-                return .{ .unknown = {} };
-            }
+        if (self.active_aliases.contains(item_id)) {
+            try self.emitRangeError(type_alias.range, "recursive type alias '{s}' is not supported", .{type_alias.name});
+            return .{ .unknown = {} };
         }
-        try self.active_aliases.append(self.arena, item_id);
+        try self.active_aliases.push(self.arena, item_id);
         defer _ = self.active_aliases.pop();
         return self.resolveTypeExprWithBindings(type_alias.target_type, bindings);
     }
@@ -5482,10 +5836,11 @@ const TypeChecker = struct {
         bitfield_item: ast.BitfieldItem,
         generic: ast.GenericTypeExpr,
         outer_bindings: []const GenericTypeBinding,
+        scratch: []GenericTypeBinding,
     ) anyerror![]const GenericTypeBinding {
         if (bitfield_item.template_parameters.len != generic.args.len) return error.InvalidGenericBitfieldInstantiation;
 
-        const bindings = try self.arena.alloc(GenericTypeBinding, bitfield_item.template_parameters.len);
+        const bindings = try self.genericTypeBindingBuffer(bitfield_item.template_parameters.len, scratch);
         for (bitfield_item.template_parameters, generic.args, 0..) |parameter, arg, index| {
             const name = self.patternName(parameter.pattern) orelse return error.InvalidGenericBitfieldInstantiation;
             const value = try self.genericBindingValueForTypeArg(parameter, arg, outer_bindings, error.InvalidGenericBitfieldInstantiation);
@@ -5694,10 +6049,11 @@ const TypeChecker = struct {
             }
         }
         try self.collectBodyEffects(function.body, &state);
-        return self.effectFromState(state);
+        return self.ownedEffectFromState(&state);
     }
 
     fn ensureFunctionEffectSummary(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) !void {
+        try self.ensureEffectStates();
         switch (self.effect_states[item_id.index()]) {
             .done => return,
             .visiting => return,
@@ -5705,71 +6061,96 @@ const TypeChecker = struct {
         }
         _ = function;
 
+        const scratch = self.enterEffectScratch();
+        defer self.leaveEffectScratch();
+
         const node_count = self.file.items.len;
-        const indexes = try self.arena.alloc(?u32, node_count);
-        const lowlinks = try self.arena.alloc(u32, node_count);
-        const on_stack = try self.arena.alloc(bool, node_count);
-        @memset(indexes, null);
-        @memset(lowlinks, 0);
-        @memset(on_stack, false);
-        var stack: std.ArrayList(ast.ItemId) = .{};
+        const nodes = try scratch.alloc(EffectGraphNode, node_count);
+        @memset(nodes, .{});
+        var stack = InlineItemIdStack{};
         var next_index: u32 = 0;
 
-        try self.strongConnectEffectFunction(item_id, &next_index, indexes, lowlinks, on_stack, &stack);
+        try self.strongConnectEffectFunction(scratch, item_id, &next_index, nodes, &stack);
+    }
+
+    fn ensureEffectStates(self: *TypeChecker) !void {
+        if (self.effect_states.len != 0) return;
+        self.effect_states = try self.arena.alloc(EffectSummaryState, self.file.items.len);
+        @memset(self.effect_states, .unvisited);
+    }
+
+    const EffectGraphNode = struct {
+        index: ?u32 = null,
+        lowlink: u32 = 0,
+        on_stack: bool = false,
+    };
+
+    fn enterEffectScratch(self: *TypeChecker) std.mem.Allocator {
+        if (self.effect_scratch_depth == 0) {
+            _ = self.scratch_arena.reset(.retain_capacity);
+        }
+        self.effect_scratch_depth += 1;
+        return self.scratch_arena.allocator();
+    }
+
+    fn leaveEffectScratch(self: *TypeChecker) void {
+        self.effect_scratch_depth -= 1;
+        if (self.effect_scratch_depth == 0) {
+            _ = self.scratch_arena.reset(.retain_capacity);
+        }
     }
 
     fn strongConnectEffectFunction(
         self: *TypeChecker,
+        scratch: std.mem.Allocator,
         item_id: ast.ItemId,
         next_index: *u32,
-        indexes: []?u32,
-        lowlinks: []u32,
-        on_stack: []bool,
-        stack: *std.ArrayList(ast.ItemId),
+        nodes: []EffectGraphNode,
+        stack: *InlineItemIdStack,
     ) !void {
         if (self.effect_states[item_id.index()] == .done) return;
-        if (indexes[item_id.index()] != null) return;
+        if (nodes[item_id.index()].index != null) return;
 
         const function = switch (self.file.item(item_id).*) {
             .Function => |function| function,
             else => return,
         };
 
-        indexes[item_id.index()] = next_index.*;
-        lowlinks[item_id.index()] = next_index.*;
+        nodes[item_id.index()].index = next_index.*;
+        nodes[item_id.index()].lowlink = next_index.*;
         next_index.* += 1;
         self.effect_states[item_id.index()] = .visiting;
         self.item_effects[item_id.index()] = .pure;
-        try stack.append(self.arena, item_id);
-        on_stack[item_id.index()] = true;
+        try stack.push(scratch, item_id);
+        nodes[item_id.index()].on_stack = true;
 
-        var callees: std.ArrayList(ast.ItemId) = .{};
-        try self.collectFunctionDirectCallees(item_id, function, &callees);
-        for (callees.items) |callee_id| {
+        var callees = InlineItemIdList{};
+        try self.collectFunctionDirectCallees(scratch, item_id, function, &callees);
+        for (callees.items()) |callee_id| {
             if (self.file.item(callee_id).* != .Function) continue;
             if (self.effect_states[callee_id.index()] == .done) continue;
-            if (indexes[callee_id.index()] == null) {
-                try self.strongConnectEffectFunction(callee_id, next_index, indexes, lowlinks, on_stack, stack);
-                lowlinks[item_id.index()] = @min(lowlinks[item_id.index()], lowlinks[callee_id.index()]);
-            } else if (on_stack[callee_id.index()]) {
-                lowlinks[item_id.index()] = @min(lowlinks[item_id.index()], indexes[callee_id.index()].?);
+            if (nodes[callee_id.index()].index == null) {
+                try self.strongConnectEffectFunction(scratch, callee_id, next_index, nodes, stack);
+                nodes[item_id.index()].lowlink = @min(nodes[item_id.index()].lowlink, nodes[callee_id.index()].lowlink);
+            } else if (nodes[callee_id.index()].on_stack) {
+                nodes[item_id.index()].lowlink = @min(nodes[item_id.index()].lowlink, nodes[callee_id.index()].index.?);
             }
         }
 
-        if (lowlinks[item_id.index()] != indexes[item_id.index()].?) return;
+        if (nodes[item_id.index()].lowlink != nodes[item_id.index()].index.?) return;
 
-        var component: std.ArrayList(ast.ItemId) = .{};
-        while (stack.items.len > 0) {
+        var component = InlineItemIdStack{};
+        while (stack.len() > 0) {
             const member = stack.pop().?;
-            on_stack[member.index()] = false;
-            try component.append(self.arena, member);
+            nodes[member.index()].on_stack = false;
+            try component.push(scratch, member);
             if (member.index() == item_id.index()) break;
         }
 
         var changed = true;
         while (changed) {
             changed = false;
-            for (component.items) |member_id| {
+            for (component.items()) |member_id| {
                 const member_function = switch (self.file.item(member_id).*) {
                     .Function => |member_function| member_function,
                     else => continue,
@@ -5782,12 +6163,12 @@ const TypeChecker = struct {
             }
         }
 
-        for (component.items) |member_id| {
+        for (component.items()) |member_id| {
             self.effect_states[member_id.index()] = .done;
         }
     }
 
-    fn validateBodyLocks(self: *TypeChecker, body_id: ast.BodyId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+    fn validateBodyLocks(self: *TypeChecker, body_id: ast.BodyId, locked_slots: *InlineEffectSlotList) anyerror!void {
         const body = self.file.body(body_id).*;
         for (body.statements) |statement_id| {
             try self.validateStmtLocks(statement_id, locked_slots);
@@ -5795,8 +6176,8 @@ const TypeChecker = struct {
     }
 
     const ExternalCallValidationState = struct {
-        current_writes: std.ArrayList(EffectSlot) = .{},
-        frozen_pre_call_writes: std.ArrayList(EffectSlot) = .{},
+        current_writes: InlineEffectSlotList = .{},
+        frozen_pre_call_writes: InlineEffectSlotList = .{},
 
         fn deinit(self: *ExternalCallValidationState, allocator: std.mem.Allocator) void {
             self.current_writes.deinit(allocator);
@@ -5811,16 +6192,16 @@ const TypeChecker = struct {
 
     fn cloneExternalCallValidationState(self: *TypeChecker, src: ExternalCallValidationState) !ExternalCallValidationState {
         return .{
-            .current_writes = try self.cloneEffectSlots(src.current_writes.items),
-            .frozen_pre_call_writes = try self.cloneEffectSlots(src.frozen_pre_call_writes.items),
+            .current_writes = try self.cloneEffectSlots(src.current_writes.items()),
+            .frozen_pre_call_writes = try self.cloneEffectSlots(src.frozen_pre_call_writes.items()),
         };
     }
 
     fn mergeExternalCallValidationState(self: *TypeChecker, dst: *ExternalCallValidationState, src: ExternalCallValidationState) !void {
-        const intersected_current = try self.intersectStorageSlots(dst.current_writes.items, src.current_writes.items);
+        const intersected_current = try self.intersectStorageSlots(dst.current_writes.items(), src.current_writes.items());
         dst.current_writes.deinit(self.arena);
         dst.current_writes = intersected_current;
-        try self.mergeStorageSlots(&dst.frozen_pre_call_writes, src.frozen_pre_call_writes.items);
+        try self.mergeStorageSlots(&dst.frozen_pre_call_writes, src.frozen_pre_call_writes.items());
     }
 
     fn validateBodyExternalCalls(self: *TypeChecker, body_id: ast.BodyId, state: *ExternalCallValidationState) anyerror!void {
@@ -5870,6 +6251,7 @@ const TypeChecker = struct {
             },
             .Switch => |switch_stmt| {
                 try self.validateExprExternalCalls(switch_stmt.condition, state);
+                for (switch_stmt.invariants) |expr_id| try self.validateExprExternalCalls(expr_id, state);
                 var merged_state = try self.cloneExternalCallValidationState(state.*);
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPatternExternalCalls(arm.pattern, state);
@@ -5908,8 +6290,8 @@ const TypeChecker = struct {
                 try self.validateExprExternalCalls(assign.value, state);
                 var effects = EffectCollectorState.init();
                 try self.collectPatternTargetEffects(assign.target, assign.op, &effects);
-                try self.emitExternalCallWriteDiagnostics(assign.range, effects.writes.items, state.frozen_pre_call_writes.items);
-                try self.mergeStorageSlots(&state.current_writes, effects.writes.items);
+                try self.emitExternalCallWriteDiagnostics(assign.range, effects.writes.items(), state.frozen_pre_call_writes.items());
+                try self.mergeStorageSlots(&state.current_writes, effects.writes.items());
             },
         }
     }
@@ -5946,7 +6328,7 @@ const TypeChecker = struct {
                 .Call => |call| {
                     if (self.checker.externProxyMethodSignature(call.callee)) |method| {
                         if (method.extern_call_kind == .call) {
-                            try self.checker.mergeStorageSlots(&self.state.frozen_pre_call_writes, self.state.current_writes.items);
+                            try self.checker.mergeStorageSlots(&self.state.frozen_pre_call_writes, self.state.current_writes.items());
                         }
                         return;
                     }
@@ -5956,7 +6338,7 @@ const TypeChecker = struct {
                             .Function => |function| {
                                 try self.checker.ensureFunctionEffectSummary(callee_id, function);
                                 const writes = self.checker.item_effects[callee_id.index()].writeSlots();
-                                try self.checker.emitExternalCallWriteDiagnostics(call.range, writes, self.state.frozen_pre_call_writes.items);
+                                try self.checker.emitExternalCallWriteDiagnostics(call.range, writes, self.state.frozen_pre_call_writes.items());
                                 try self.checker.mergeStorageSlots(&self.state.current_writes, writes);
                             },
                             else => {},
@@ -5968,89 +6350,90 @@ const TypeChecker = struct {
         }
     };
 
-    fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+    fn validateStmtLocks(self: *TypeChecker, statement_id: ast.StmtId, locked_slots: *InlineEffectSlotList) anyerror!void {
         switch (self.file.statement(statement_id).*) {
             .VariableDecl, .Return, .Assert, .Assume, .Expr, .Havoc, .Break, .Continue, .Error => {
                 if (self.statementExpr(statement_id)) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
             },
             .If => |if_stmt| {
                 try self.validateExprLocks(if_stmt.condition, locked_slots);
-                var then_locked = try self.cloneEffectSlots(locked_slots.items);
-                var else_locked = try self.cloneEffectSlots(locked_slots.items);
+                var then_locked = try self.cloneEffectSlots(locked_slots.items());
+                var else_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer then_locked.deinit(self.arena);
                 defer else_locked.deinit(self.arena);
                 try self.validateBodyLocks(if_stmt.then_body, &then_locked);
                 if (if_stmt.else_body) |else_body| try self.validateBodyLocks(else_body, &else_locked);
-                locked_slots.* = try self.intersectLockedSlots(then_locked.items, else_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(then_locked.items(), else_locked.items());
             },
             .While => |while_stmt| {
                 try self.validateExprLocks(while_stmt.condition, locked_slots);
                 for (while_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
-                var loop_locked = try self.cloneEffectSlots(locked_slots.items);
+                var loop_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(while_stmt.body, &loop_locked);
-                locked_slots.* = try self.intersectLockedSlots(locked_slots.items, loop_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(locked_slots.items(), loop_locked.items());
             },
             .For => |for_stmt| {
                 try self.validateExprLocks(for_stmt.iterable, locked_slots);
                 if (for_stmt.range_end) |end_expr| try self.validateExprLocks(end_expr, locked_slots);
                 for (for_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
-                var loop_locked = try self.cloneEffectSlots(locked_slots.items);
+                var loop_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer loop_locked.deinit(self.arena);
                 try self.validateBodyLocks(for_stmt.body, &loop_locked);
-                locked_slots.* = try self.intersectLockedSlots(locked_slots.items, loop_locked.items);
+                locked_slots.* = try self.intersectLockedSlots(locked_slots.items(), loop_locked.items());
             },
             .Switch => |switch_stmt| {
                 try self.validateExprLocks(switch_stmt.condition, locked_slots);
-                var merged_locked = try self.cloneEffectSlots(locked_slots.items);
+                for (switch_stmt.invariants) |expr_id| try self.validateExprLocks(expr_id, locked_slots);
+                var merged_locked = try self.cloneEffectSlots(locked_slots.items());
                 for (switch_stmt.arms) |arm| {
                     try self.validateSwitchPatternLocks(arm.pattern, locked_slots);
-                    var case_locked = try self.cloneEffectSlots(locked_slots.items);
+                    var case_locked = try self.cloneEffectSlots(locked_slots.items());
                     defer case_locked.deinit(self.arena);
                     try self.validateBodyLocks(arm.body, &case_locked);
-                    const next = try self.intersectLockedSlots(merged_locked.items, case_locked.items);
+                    const next = try self.intersectLockedSlots(merged_locked.items(), case_locked.items());
                     merged_locked.deinit(self.arena);
                     merged_locked = next;
                 }
                 if (switch_stmt.else_body) |else_body| {
-                    var else_locked = try self.cloneEffectSlots(locked_slots.items);
+                    var else_locked = try self.cloneEffectSlots(locked_slots.items());
                     defer else_locked.deinit(self.arena);
                     try self.validateBodyLocks(else_body, &else_locked);
-                    const next = try self.intersectLockedSlots(merged_locked.items, else_locked.items);
+                    const next = try self.intersectLockedSlots(merged_locked.items(), else_locked.items());
                     merged_locked.deinit(self.arena);
                     merged_locked = next;
                 }
                 locked_slots.* = merged_locked;
             },
             .Try => |try_stmt| {
-                var try_locked = try self.cloneEffectSlots(locked_slots.items);
+                var try_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer try_locked.deinit(self.arena);
                 try self.validateBodyLocks(try_stmt.try_body, &try_locked);
                 if (try_stmt.catch_clause) |catch_clause| {
-                    var catch_locked = try self.cloneEffectSlots(locked_slots.items);
+                    var catch_locked = try self.cloneEffectSlots(locked_slots.items());
                     defer catch_locked.deinit(self.arena);
                     try self.validateBodyLocks(catch_clause.body, &catch_locked);
-                    locked_slots.* = try self.intersectLockedSlots(try_locked.items, catch_locked.items);
+                    locked_slots.* = try self.intersectLockedSlots(try_locked.items(), catch_locked.items());
                 } else {
-                    locked_slots.* = try self.cloneEffectSlots(try_locked.items);
+                    locked_slots.* = try self.cloneEffectSlots(try_locked.items());
                 }
             },
             .Log => |log_stmt| for (log_stmt.args) |arg| try self.validateExprLocks(arg, locked_slots),
             .Block => |block| {
-                var nested_locked = try self.cloneEffectSlots(locked_slots.items);
+                var nested_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer nested_locked.deinit(self.arena);
                 try self.validateBodyLocks(block.body, &nested_locked);
-                locked_slots.* = try self.cloneEffectSlots(nested_locked.items);
+                locked_slots.* = try self.cloneEffectSlots(nested_locked.items());
             },
             .LabeledBlock => |block| {
-                var nested_locked = try self.cloneEffectSlots(locked_slots.items);
+                var nested_locked = try self.cloneEffectSlots(locked_slots.items());
                 defer nested_locked.deinit(self.arena);
                 try self.validateBodyLocks(block.body, &nested_locked);
-                locked_slots.* = try self.cloneEffectSlots(nested_locked.items);
+                locked_slots.* = try self.cloneEffectSlots(nested_locked.items());
             },
             .Lock => |lock_stmt| {
                 try self.validateExprLocks(lock_stmt.path, locked_slots);
-                if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueSlot(locked_slots, slot);
+                if (try self.runtimeLockSlotForExpr(lock_stmt.path, "`@lock`")) |slot| try self.appendUniqueEffectSlot(locked_slots, slot);
             },
             .Unlock => |unlock_stmt| {
                 try self.validateExprLocks(unlock_stmt.path, locked_slots);
@@ -6060,12 +6443,12 @@ const TypeChecker = struct {
                 try self.validateExprLocks(assign.value, locked_slots);
                 var state = EffectCollectorState.init();
                 try self.collectPatternTargetEffects(assign.target, assign.op, &state);
-                try self.emitLockedWriteDiagnostics(assign.range, state.writes.items, locked_slots.items);
+                try self.emitLockedWriteDiagnostics(assign.range, state.writes.items(), locked_slots.items());
             },
         }
     }
 
-    fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+    fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *InlineEffectSlotList) anyerror!void {
         _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
@@ -6073,7 +6456,7 @@ const TypeChecker = struct {
         try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
-    fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *std.ArrayList(EffectSlot)) anyerror!void {
+    fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *InlineEffectSlotList) anyerror!void {
         _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
@@ -6192,9 +6575,79 @@ const TypeChecker = struct {
         }
     }
 
+    fn effectHasStorageWrite(self: *const TypeChecker, effect: Effect) bool {
+        _ = self;
+        for (effect.writeSlots()) |slot| {
+            if (slot.region == .storage) return true;
+        }
+        return false;
+    }
+
+    const InlineEffectSlotList = struct {
+        const inline_capacity = 4;
+
+        inline_items: [inline_capacity]EffectSlot = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(EffectSlot) = .{},
+
+        fn items(self: *const InlineEffectSlotList) []const EffectSlot {
+            if (self.spill.capacity != 0) return self.spill.items;
+            return self.inline_items[0..self.inline_len];
+        }
+
+        fn appendUnique(self: *InlineEffectSlotList, allocator: std.mem.Allocator, slot: EffectSlot) !void {
+            for (self.items()) |existing| {
+                if (effectSlotEql(existing, slot)) return;
+            }
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = slot;
+                self.inline_len += 1;
+                return;
+            }
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_items[0..self.inline_len]);
+            }
+            try self.spill.append(allocator, slot);
+        }
+
+        fn deinit(self: *InlineEffectSlotList, allocator: std.mem.Allocator) void {
+            if (self.spill.capacity != 0) self.spill.deinit(allocator);
+            self.* = .{};
+        }
+
+        fn remove(self: *InlineEffectSlotList, slot: EffectSlot) void {
+            if (self.spill.capacity != 0) {
+                var index: usize = 0;
+                while (index < self.spill.items.len) : (index += 1) {
+                    if (!effectSlotEql(self.spill.items[index], slot)) continue;
+                    _ = self.spill.swapRemove(index);
+                    return;
+                }
+                return;
+            }
+
+            var index: usize = 0;
+            while (index < self.inline_len) : (index += 1) {
+                if (!effectSlotEql(self.inline_items[index], slot)) continue;
+                self.inline_len -= 1;
+                self.inline_items[index] = self.inline_items[self.inline_len];
+                return;
+            }
+        }
+
+        fn toOwnedSlice(self: *InlineEffectSlotList, allocator: std.mem.Allocator) ![]EffectSlot {
+            if (self.spill.capacity != 0) return self.spill.items;
+            if (self.inline_len == 0) return &.{};
+            const owned = try allocator.alloc(EffectSlot, self.inline_len);
+            @memcpy(owned, self.inline_items[0..self.inline_len]);
+            return owned;
+        }
+    };
+
     const EffectCollectorState = struct {
-        reads: std.ArrayList(EffectSlot) = .{},
-        writes: std.ArrayList(EffectSlot) = .{},
+        reads: InlineEffectSlotList = .{},
+        writes: InlineEffectSlotList = .{},
         flags: EffectFlags = .{},
 
         fn init() EffectCollectorState {
@@ -6206,6 +6659,46 @@ const TypeChecker = struct {
         }
     };
 
+    const EffectStateStack = struct {
+        const inline_capacity = 16;
+
+        inline_buffer: [inline_capacity]EffectCollectorState = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(EffectCollectorState) = .{},
+
+        fn current(self: *EffectStateStack) ?*EffectCollectorState {
+            if (self.spill.capacity == 0) {
+                if (self.inline_len == 0) return null;
+                return &self.inline_buffer[self.inline_len - 1];
+            }
+            if (self.spill.items.len == 0) return null;
+            return &self.spill.items[self.spill.items.len - 1];
+        }
+
+        fn append(self: *EffectStateStack, allocator: std.mem.Allocator, state: EffectCollectorState) !void {
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_buffer[self.inline_len] = state;
+                self.inline_len += 1;
+                return;
+            }
+
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_buffer[0..self.inline_len]);
+            }
+            try self.spill.append(allocator, state);
+        }
+
+        fn pop(self: *EffectStateStack) ?EffectCollectorState {
+            if (self.spill.capacity == 0) {
+                if (self.inline_len == 0) return null;
+                self.inline_len -= 1;
+                return self.inline_buffer[self.inline_len];
+            }
+            return self.spill.pop();
+        }
+    };
+
     const effect_collector_walk_options: ast.walk.WalkOptions = .{
         .walk_assignment_target_patterns = false,
         .walk_pattern_bindings = false,
@@ -6213,31 +6706,46 @@ const TypeChecker = struct {
         .walk_old_exprs = false,
     };
 
-    fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        return unique_list.clone(EffectSlot, self.arena, items);
+    fn cloneEffectSlots(self: *TypeChecker, items: []const EffectSlot) !InlineEffectSlotList {
+        var result = InlineEffectSlotList{};
+        for (items) |item| try result.appendUnique(self.arena, item);
+        return result;
     }
 
-    fn mergeStorageSlots(self: *TypeChecker, dst: *std.ArrayList(EffectSlot), src: []const EffectSlot) !void {
-        try unique_list.mergeUnique(EffectSlot, self.arena, dst, src, effectSlotEql, effectSlotIsStorage);
-    }
-
-    fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, null);
-    }
-
-    fn intersectStorageSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !std.ArrayList(EffectSlot) {
-        return unique_list.intersect(EffectSlot, self.arena, lhs, rhs, effectSlotEql, effectSlotIsStorage);
-    }
-
-    fn removeLockedSlot(self: *TypeChecker, slots: *std.ArrayList(EffectSlot), slot: EffectSlot) void {
-        _ = self;
-        var index: usize = 0;
-        while (index < slots.items.len) : (index += 1) {
-            const existing = slots.items[index];
-            if (!effectSlotEql(existing, slot)) continue;
-            _ = slots.swapRemove(index);
-            return;
+    fn mergeStorageSlots(self: *TypeChecker, dst: *InlineEffectSlotList, src: []const EffectSlot) !void {
+        for (src) |slot| {
+            if (effectSlotIsStorage(slot)) try dst.appendUnique(self.arena, slot);
         }
+    }
+
+    fn intersectLockedSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !InlineEffectSlotList {
+        var result = InlineEffectSlotList{};
+        for (lhs) |left| {
+            for (rhs) |right| {
+                if (!effectSlotEql(left, right)) continue;
+                try result.appendUnique(self.arena, left);
+                break;
+            }
+        }
+        return result;
+    }
+
+    fn intersectStorageSlots(self: *TypeChecker, lhs: []const EffectSlot, rhs: []const EffectSlot) !InlineEffectSlotList {
+        var result = InlineEffectSlotList{};
+        for (lhs) |left| {
+            if (!effectSlotIsStorage(left)) continue;
+            for (rhs) |right| {
+                if (!effectSlotEql(left, right)) continue;
+                try result.appendUnique(self.arena, left);
+                break;
+            }
+        }
+        return result;
+    }
+
+    fn removeLockedSlot(self: *TypeChecker, slots: *InlineEffectSlotList, slot: EffectSlot) void {
+        _ = self;
+        slots.remove(slot);
     }
 
     fn buildEffect(reads: []const EffectSlot, writes: []const EffectSlot, flags: EffectFlags) Effect {
@@ -6261,23 +6769,41 @@ const TypeChecker = struct {
         } };
     }
 
-    fn effectFromState(self: *TypeChecker, state: EffectCollectorState) Effect {
+    fn effectFromState(self: *TypeChecker, state: *const EffectCollectorState) Effect {
         _ = self;
-        return buildEffect(state.reads.items, state.writes.items, state.flags);
+        return buildEffect(state.reads.items(), state.writes.items(), state.flags);
+    }
+
+    fn ownedEffectFromState(self: *TypeChecker, state: *EffectCollectorState) !Effect {
+        return buildEffect(
+            try state.reads.toOwnedSlice(self.arena),
+            try state.writes.toOwnedSlice(self.arena),
+            state.flags,
+        );
     }
 
     fn collectBodyEffects(self: *TypeChecker, body_id: ast.BodyId, state: *EffectCollectorState) anyerror!void {
+        const entered_scratch = self.effect_scratch_depth == 0;
+        const scratch = if (entered_scratch) self.enterEffectScratch() else self.scratch_arena.allocator();
+        defer if (entered_scratch) self.leaveEffectScratch();
+
         var visitor = EffectCollector{
             .checker = self,
             .root = state,
+            .stack_allocator = scratch,
         };
         try ast.walk.walkBody(EffectCollector, &visitor, self.file, body_id, effect_collector_walk_options);
     }
 
     fn collectExprEffects(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) anyerror!void {
+        const entered_scratch = self.effect_scratch_depth == 0;
+        const scratch = if (entered_scratch) self.enterEffectScratch() else self.scratch_arena.allocator();
+        defer if (entered_scratch) self.leaveEffectScratch();
+
         var visitor = EffectCollector{
             .checker = self,
             .root = state,
+            .stack_allocator = scratch,
         };
         try ast.walk.walkExpr(EffectCollector, &visitor, self.file, expr_id, effect_collector_walk_options);
     }
@@ -6285,11 +6811,11 @@ const TypeChecker = struct {
     const EffectCollector = struct {
         checker: *TypeChecker,
         root: *EffectCollectorState,
-        expr_stack: std.ArrayList(EffectCollectorState) = .{},
+        stack_allocator: std.mem.Allocator,
+        expr_stack: EffectStateStack = .{},
 
         fn current(self: *@This()) *EffectCollectorState {
-            if (self.expr_stack.items.len == 0) return self.root;
-            return &self.expr_stack.items[self.expr_stack.items.len - 1];
+            return self.expr_stack.current() orelse self.root;
         }
 
         pub fn enterStmt(self: *@This(), file: *const ast.AstFile, statement_id: ast.StmtId) anyerror!ast.walk.WalkControl {
@@ -6317,12 +6843,12 @@ const TypeChecker = struct {
         }
 
         pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
-            try self.expr_stack.append(self.checker.arena, EffectCollectorState.init());
+            try self.expr_stack.append(self.stack_allocator, EffectCollectorState.init());
             switch (file.expression(expr_id).*) {
                 .Index => |index| {
                     try ast.walk.walkExpr(EffectCollector, self, file, index.index, effect_collector_walk_options);
                     if (self.checker.lockSlotForExpr(expr_id)) |slot| {
-                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                        try self.checker.appendUniqueEffectSlot(&self.current().reads, slot);
                     } else {
                         try ast.walk.walkExpr(EffectCollector, self, file, index.base, effect_collector_walk_options);
                     }
@@ -6336,7 +6862,7 @@ const TypeChecker = struct {
             switch (file.expression(expr_id).*) {
                 .Name => {
                     if (self.checker.fieldSlotForBinding(self.checker.resolution.expr_bindings[expr_id.index()])) |slot| {
-                        try self.checker.appendUniqueSlot(&self.current().reads, slot);
+                        try self.checker.appendUniqueEffectSlot(&self.current().reads, slot);
                     }
                 },
                 .Call => |call| {
@@ -6356,8 +6882,8 @@ const TypeChecker = struct {
             }
 
             const expr_state = self.expr_stack.pop() orelse unreachable;
-            const effect = self.checker.effectFromState(expr_state);
-            self.checker.expr_effects[expr_id.index()] = effect;
+            const effect = self.checker.effectFromState(&expr_state);
+            try self.checker.setExprEffect(expr_id, effect);
             try self.checker.mergeEffect(self.current(), effect);
         }
     };
@@ -6366,14 +6892,14 @@ const TypeChecker = struct {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot);
-                    try self.appendUniqueSlot(&state.writes, slot);
+                    if (op != .assign) try self.appendUniqueEffectSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.writes, slot);
                 }
             },
             .Field => |field| {
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    if (op != .assign) try self.appendUniqueSlot(&state.reads, slot);
-                    try self.appendUniqueSlot(&state.writes, slot);
+                    if (op != .assign) try self.appendUniqueEffectSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.writes, slot);
                 } else {
                     try self.collectPatternTargetEffects(field.base, .add_assign, state);
                 }
@@ -6381,8 +6907,8 @@ const TypeChecker = struct {
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
-                    try self.appendUniqueSlot(&state.writes, slot);
+                    try self.appendUniqueEffectSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.writes, slot);
                 } else {
                     try self.collectPatternExprReads(index.base, state);
                 }
@@ -6396,12 +6922,12 @@ const TypeChecker = struct {
         switch (self.file.pattern(pattern_id).*) {
             .Name => {
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.reads, slot);
                 }
             },
             .Field => |field| {
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.reads, slot);
                 } else {
                     try self.collectPatternExprReads(field.base, state);
                 }
@@ -6409,7 +6935,7 @@ const TypeChecker = struct {
             .Index => |index| {
                 try self.collectExprEffects(index.index, state);
                 if (self.patternFieldSlot(pattern_id)) |slot| {
-                    try self.appendUniqueSlot(&state.reads, slot);
+                    try self.appendUniqueEffectSlot(&state.reads, slot);
                 } else {
                     try self.collectPatternExprReads(index.base, state);
                 }
@@ -6468,6 +6994,10 @@ const TypeChecker = struct {
         try unique_list.appendUnique(EffectSlot, self.arena, slots, slot, effectSlotEql);
     }
 
+    fn appendUniqueEffectSlot(self: *TypeChecker, slots: *InlineEffectSlotList, slot: EffectSlot) !void {
+        try slots.appendUnique(self.arena, slot);
+    }
+
     fn slotWithIndexKey(self: *TypeChecker, base: EffectSlot, index_expr: ast.ExprId) ?EffectSlot {
         const segment = self.keySegmentForExpr(index_expr);
         const base_len: usize = if (base.key_path) |path| path.len else 0;
@@ -6514,6 +7044,7 @@ const TypeChecker = struct {
     }
 
     fn localAliasEnvironmentKeySegment(self: *TypeChecker, pattern_id: ast.PatternId) ?KeySegment {
+        if (pattern_id.index() >= self.pattern_binding_kinds.len) return null;
         const binding_kind = self.pattern_binding_kinds[pattern_id.index()] orelse return null;
         switch (binding_kind) {
             .let_, .constant, .immutable => {},
@@ -6619,8 +7150,8 @@ const TypeChecker = struct {
 
     fn mergeEffect(self: *TypeChecker, state: *EffectCollectorState, effect: Effect) !void {
         state.mergeFlags(effect.flags());
-        for (effect.readSlots()) |slot| try self.appendUniqueSlot(&state.reads, slot);
-        for (effect.writeSlots()) |slot| try self.appendUniqueSlot(&state.writes, slot);
+        for (effect.readSlots()) |slot| try self.appendUniqueEffectSlot(&state.reads, slot);
+        for (effect.writeSlots()) |slot| try self.appendUniqueEffectSlot(&state.writes, slot);
     }
 
     fn calleeFunctionItem(self: *const TypeChecker, expr_id: ast.ExprId) ?ast.ItemId {
@@ -6646,13 +7177,20 @@ const TypeChecker = struct {
         };
     }
 
-    fn collectFunctionDirectCallees(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem, callees: *std.ArrayList(ast.ItemId)) anyerror!void {
+    fn collectFunctionDirectCallees(
+        self: *TypeChecker,
+        allocator: std.mem.Allocator,
+        item_id: ast.ItemId,
+        function: ast.FunctionItem,
+        callees: *InlineItemIdList,
+    ) anyerror!void {
         const previous_function_item = self.current_function_item;
         self.current_function_item = item_id;
         defer self.current_function_item = previous_function_item;
 
         var visitor = DirectCalleeCollector{
             .checker = self,
+            .allocator = allocator,
             .callees = callees,
         };
         try ast.walk.walkBody(DirectCalleeCollector, &visitor, self.file, function.body, .{
@@ -6664,24 +7202,98 @@ const TypeChecker = struct {
 
     const DirectCalleeCollector = struct {
         checker: *TypeChecker,
-        callees: *std.ArrayList(ast.ItemId),
+        allocator: std.mem.Allocator,
+        callees: *InlineItemIdList,
 
         pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
             _ = file;
             switch (self.checker.file.expression(expr_id).*) {
                 .Call => |call| if (self.checker.calleeFunctionItem(call.callee)) |callee_id| {
-                    try self.checker.appendUniqueItemId(self.callees, callee_id);
+                    try self.callees.appendUnique(self.allocator, callee_id);
                 },
                 else => {},
             }
         }
     };
 
-    fn appendUniqueItemId(self: *TypeChecker, items: *std.ArrayList(ast.ItemId), item_id: ast.ItemId) !void {
-        try unique_list.appendUnique(ast.ItemId, self.arena, items, item_id, itemIdEql);
-    }
+    const InlineItemIdStack = struct {
+        const inline_capacity = 8;
+
+        inline_items: [inline_capacity]ast.ItemId = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(ast.ItemId) = .{},
+
+        fn items(self: *const InlineItemIdStack) []const ast.ItemId {
+            if (self.spill.capacity != 0) return self.spill.items;
+            return self.inline_items[0..self.inline_len];
+        }
+
+        fn len(self: *const InlineItemIdStack) usize {
+            return self.items().len;
+        }
+
+        fn contains(self: *const InlineItemIdStack, item_id: ast.ItemId) bool {
+            for (self.items()) |existing| {
+                if (existing == item_id) return true;
+            }
+            return false;
+        }
+
+        fn push(self: *InlineItemIdStack, allocator: std.mem.Allocator, item_id: ast.ItemId) !void {
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = item_id;
+                self.inline_len += 1;
+                return;
+            }
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_items[0..self.inline_len]);
+                self.inline_len = 0;
+            }
+            try self.spill.append(allocator, item_id);
+        }
+
+        fn pop(self: *InlineItemIdStack) ?ast.ItemId {
+            if (self.spill.capacity != 0) {
+                return self.spill.pop();
+            }
+            if (self.inline_len == 0) return null;
+            self.inline_len -= 1;
+            return self.inline_items[self.inline_len];
+        }
+    };
+
+    const InlineItemIdList = struct {
+        const inline_capacity = 8;
+
+        inline_items: [inline_capacity]ast.ItemId = undefined,
+        inline_len: usize = 0,
+        spill: std.ArrayList(ast.ItemId) = .{},
+
+        fn items(self: *const InlineItemIdList) []const ast.ItemId {
+            if (self.spill.capacity != 0) return self.spill.items;
+            return self.inline_items[0..self.inline_len];
+        }
+
+        fn appendUnique(self: *InlineItemIdList, allocator: std.mem.Allocator, item_id: ast.ItemId) !void {
+            for (self.items()) |existing| {
+                if (itemIdEql(existing, item_id)) return;
+            }
+            if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = item_id;
+                self.inline_len += 1;
+                return;
+            }
+            if (self.spill.capacity == 0) {
+                try self.spill.ensureTotalCapacity(allocator, inline_capacity * 2);
+                try self.spill.appendSlice(allocator, self.inline_items[0..self.inline_len]);
+            }
+            try self.spill.append(allocator, item_id);
+        }
+    };
 
     fn initializerExprForPattern(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.ExprId {
+        if (pattern_id.index() >= self.pattern_initializers.len) return null;
         return self.pattern_initializers[pattern_id.index()];
     }
 
@@ -6913,7 +7525,7 @@ const TypeChecker = struct {
         return try self.functionTypeFromTraitSignature(method);
     }
 
-    fn externProxyMethodSignature(self: *const TypeChecker, expr_id: ast.ExprId) ?TraitMethodSignature {
+    fn externProxyMethodSignature(self: *const TypeChecker, expr_id: ast.ExprId) ?*const TraitMethodSignature {
         const field = switch (self.file.expression(expr_id).*) {
             .Field => |field| field,
             .Group => |group| return self.externProxyMethodSignature(group.expr),
@@ -6944,7 +7556,7 @@ const TypeChecker = struct {
             else => null,
         } orelse return false;
         if (binding != .pattern) return false;
-        if (!self.catch_error_tag_patterns[binding.pattern.index()]) return false;
+        if (!self.isCatchErrorTagPattern(binding.pattern)) return false;
         try self.emitExprError(expr_id, "catch binding represents multiple possible error types; field access is not supported", .{});
         return true;
     }
@@ -6959,7 +7571,7 @@ const TypeChecker = struct {
             else => null,
         } orelse return false;
         if (binding != .pattern) return false;
-        if (!self.opaque_multi_error_patterns[binding.pattern.index()]) return false;
+        if (!self.isOpaqueMultiErrorPattern(binding.pattern)) return false;
         try self.emitExprError(expr_id, "Err(binding) over multiple possible error types is opaque; field access is not supported", .{});
         return true;
     }
@@ -7157,7 +7769,7 @@ const TypeChecker = struct {
             else => return null,
         };
 
-        var matched: ?TraitMethodSignature = null;
+        var matched: ?*const TraitMethodSignature = null;
         for (function.trait_bounds) |bound| {
             if (!std.mem.eql(u8, bound.parameter_name, parameter_name)) continue;
             const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
@@ -7171,13 +7783,13 @@ const TypeChecker = struct {
 
     fn concreteAssociatedMethodType(self: *const TypeChecker, base_expr_id: ast.ExprId, field_name: []const u8) !?Type {
         const target_name = self.concreteTypeNameForExpr(base_expr_id) orelse return null;
-        var matched: ?TraitMethodSignature = null;
+        var matched: ?*const TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
             const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .none);
             if (method_count == 0) continue;
             if (matched != null or method_count > 1) return null;
-            const method = impl_interface.methodByNameAndReceiver(field_name, .none) orelse continue;
+            const method = self.implMethodSignatureByNameAndReceiver(impl_interface, field_name, .none) orelse continue;
             matched = method;
         }
         return try self.functionTypeFromTraitSignature(matched orelse return null);
@@ -7222,13 +7834,16 @@ const TypeChecker = struct {
         };
     }
 
-    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: TraitMethodSignature) !Type {
-        const returns = try self.arena.alloc(Type, 1);
-        returns[0] = method_signature.return_type;
+    fn singleTypeSlice(ty: *const Type) []const Type {
+        return ty[0..1];
+    }
+
+    fn functionTypeFromTraitSignature(self: *const TypeChecker, method_signature: *const TraitMethodSignature) !Type {
+        _ = self;
         return .{ .function = .{
             .name = method_signature.name,
             .param_types = method_signature.param_types,
-            .return_types = returns,
+            .return_types = singleTypeSlice(&method_signature.return_type),
         } };
     }
 
@@ -7240,7 +7855,7 @@ const TypeChecker = struct {
             else => return null,
         };
 
-        var matched: ?TraitMethodSignature = null;
+        var matched: ?*const TraitMethodSignature = null;
         for (function.trait_bounds) |bound| {
             if (!std.mem.eql(u8, bound.parameter_name, type_name)) continue;
             const trait_interface = self.traitInterfaceByName(bound.trait_name) orelse continue;
@@ -7251,25 +7866,19 @@ const TypeChecker = struct {
         }
 
         const method_signature = matched orelse return null;
-        const returns = try self.arena.alloc(Type, 1);
-        returns[0] = method_signature.return_type;
-        return .{ .function = .{
-            .name = method_signature.name,
-            .param_types = method_signature.param_types,
-            .return_types = returns,
-        } };
+        return try self.functionTypeFromTraitSignature(method_signature);
     }
 
     fn concreteImplMethodType(self: *const TypeChecker, base_type: Type, field_name: []const u8) !?Type {
         const target_name = base_type.name() orelse return null;
         if (try self.currentImplMethodType(target_name, field_name)) |method_type| return method_type;
-        var matched: ?TraitMethodSignature = null;
+        var matched: ?*const TraitMethodSignature = null;
         for (self.impl_interfaces.items) |impl_interface| {
             if (!std.mem.eql(u8, impl_interface.target_name, target_name)) continue;
             const method_count = impl_interface.methodCountByNameAndReceiver(field_name, .value_self);
             if (method_count == 0) continue;
             if (matched != null or method_count > 1) return null;
-            const method = impl_interface.methodByNameAndReceiver(field_name, .value_self) orelse continue;
+            const method = self.implMethodSignatureByNameAndReceiver(impl_interface, field_name, .value_self) orelse continue;
             matched = method;
         }
         return try self.functionTypeFromTraitSignature(matched orelse return null);
@@ -7307,9 +7916,23 @@ const TypeChecker = struct {
         return null;
     }
 
-    fn findTraitMethodSignature(self: *const TypeChecker, trait_interface: TraitInterface, name: []const u8) ?TraitMethodSignature {
+    fn findTraitMethodSignature(self: *const TypeChecker, trait_interface: TraitInterface, name: []const u8) ?*const TraitMethodSignature {
         _ = self;
-        return trait_interface.methodByName(name);
+        const index = lookup_index.findNamed(trait_interface.method_lookup, name) orelse return null;
+        if (index >= trait_interface.methods.len) return null;
+        return &trait_interface.methods[index];
+    }
+
+    fn implMethodSignatureByNameAndReceiver(
+        self: *const TypeChecker,
+        impl_interface: ImplInterface,
+        name: []const u8,
+        receiver_kind: ast.ReceiverKind,
+    ) ?*const TraitMethodSignature {
+        _ = self;
+        const index = impl_interface.methodIndexByNameAndReceiver(name, receiver_kind) orelse return null;
+        if (index >= impl_interface.methods.len) return null;
+        return &impl_interface.methods[index];
     }
 
     fn indexAccessType(self: *const TypeChecker, base_type: Type, index_expr_id: ast.ExprId) Type {
@@ -7387,19 +8010,21 @@ const TypeChecker = struct {
     }
 
     fn inferCatchPatternType(self: *TypeChecker, body_id: ast.BodyId) anyerror!struct { ty: Type, multiple_error_types: bool } {
-        var error_types: std.ArrayList(Type) = .{};
-        try self.collectBodyErrorTypes(body_id, &error_types);
-        if (error_types.items.len == 1) return .{ .ty = error_types.items[0], .multiple_error_types = false };
+        var summary = ErrorTypeSummary{};
+        try self.collectBodyErrorTypeSummary(body_id, &summary);
+        if (summary.first) |ty| {
+            if (!summary.multiple) return .{ .ty = ty, .multiple_error_types = false };
+        }
         return .{
             .ty = .{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } },
-            .multiple_error_types = error_types.items.len > 1,
+            .multiple_error_types = summary.multiple,
         };
     }
 
-    fn collectBodyErrorTypes(self: *TypeChecker, body_id: ast.BodyId, error_types: *std.ArrayList(Type)) anyerror!void {
+    fn collectBodyErrorTypeSummary(self: *TypeChecker, body_id: ast.BodyId, summary: *ErrorTypeSummary) anyerror!void {
         var visitor = ErrorTypeCollector{
             .checker = self,
-            .error_types = error_types,
+            .summary = summary,
         };
         try ast.walk.walkBody(ErrorTypeCollector, &visitor, self.file, body_id, .{
             .walk_assignment_target_patterns = false,
@@ -7411,23 +8036,32 @@ const TypeChecker = struct {
         });
     }
 
+    const ErrorTypeSummary = struct {
+        first: ?Type = null,
+        multiple: bool = false,
+
+        fn append(self: *ErrorTypeSummary, error_type: Type) void {
+            if (self.first) |first| {
+                if (!typeEql(first, error_type)) self.multiple = true;
+                return;
+            }
+            self.first = error_type;
+        }
+    };
+
     const ErrorTypeCollector = struct {
         checker: *TypeChecker,
-        error_types: *std.ArrayList(Type),
+        summary: *ErrorTypeSummary,
 
         pub fn enterExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!ast.walk.WalkControl {
             _ = file;
             const expr_type = self.checker.expr_types[expr_id.index()];
             if (expr_type.kind() == .error_union) {
-                for (expr_type.errorTypes()) |error_type| try self.checker.appendUniqueErrorType(self.error_types, error_type);
+                for (expr_type.errorTypes()) |error_type| self.summary.append(error_type);
             }
             return .descend;
         }
     };
-
-    fn appendUniqueErrorType(self: *TypeChecker, error_types: *std.ArrayList(Type), error_type: Type) anyerror!void {
-        try unique_list.appendUnique(Type, self.arena, error_types, error_type, typeEql);
-    }
 
     fn hasInvalidConstantShiftAmount(self: *TypeChecker, expr_id: ast.ExprId, op: ast.BinaryOp, lhs_type: Type, rhs_expr_id: ast.ExprId) !bool {
         switch (op) {
@@ -7646,7 +8280,7 @@ const TypeChecker = struct {
         }
 
         self.pattern_types[pattern_id.index()] = LocatedType.unlocated(.{ .integer = .{ .bits = 256, .signed = false, .spelling = "u256" } });
-        self.opaque_multi_error_patterns[pattern_id.index()] = true;
+        try self.setOpaqueMultiErrorPattern(pattern_id);
     }
 
     fn visitSwitchPattern(self: *TypeChecker, pattern: ast.SwitchPattern, condition_type: Type, range: source.TextRange) !void {
@@ -7895,9 +8529,8 @@ const TypeChecker = struct {
         }
 
         if (!destructure.has_rest) {
-            const binding_lookup = try lookup_index.buildNamed(ast.nodes.StructDestructureField, self.arena, destructure.fields, "name");
             for (fields) |field| {
-                if (lookup_index.findNamed(binding_lookup, field.name) == null) {
+                if (structDestructureFieldByName(destructure.fields, field.name) == null) {
                     try self.emitRangeError(range, "missing ADT payload field '{s}'", .{field.name});
                 }
             }
@@ -7926,6 +8559,63 @@ const TypeChecker = struct {
 
         fn namedVariantsExhaustive(self: SumMatchCoverage) bool {
             return self.named_variants_covered == self.named_variant_count;
+        }
+    };
+
+    const InlineIndexSet = struct {
+        const inline_capacity = 16;
+
+        allocator: std.mem.Allocator,
+        inline_items: [inline_capacity]usize = undefined,
+        inline_len: usize = 0,
+        spill: ?std.AutoHashMap(usize, void) = null,
+
+        fn init(allocator: std.mem.Allocator) InlineIndexSet {
+            return .{ .allocator = allocator };
+        }
+
+        fn deinit(self: *InlineIndexSet) void {
+            if (self.spill) |*spill| {
+                spill.deinit();
+            }
+        }
+
+        fn contains(self: *const InlineIndexSet, index: usize) bool {
+            if (self.spill) |*spill| return spill.contains(index);
+            for (self.inline_items[0..self.inline_len]) |seen| {
+                if (seen == index) return true;
+            }
+            return false;
+        }
+
+        fn put(self: *InlineIndexSet, index: usize) !void {
+            if (self.spill) |*spill| {
+                try spill.put(index, {});
+                return;
+            }
+
+            for (self.inline_items[0..self.inline_len]) |seen| {
+                if (seen == index) return;
+            }
+
+            if (self.inline_len < inline_capacity) {
+                self.inline_items[self.inline_len] = index;
+                self.inline_len += 1;
+                return;
+            }
+
+            var spill = std.AutoHashMap(usize, void).init(self.allocator);
+            errdefer spill.deinit();
+            try spill.ensureTotalCapacity(inline_capacity + 1);
+            for (self.inline_items[0..self.inline_len]) |seen| {
+                spill.putAssumeCapacity(seen, {});
+            }
+            spill.putAssumeCapacity(index, {});
+            self.spill = spill;
+        }
+
+        fn count(self: *const InlineIndexSet) usize {
+            return if (self.spill) |*spill| spill.count() else self.inline_len;
         }
     };
 
@@ -8016,7 +8706,7 @@ const TypeChecker = struct {
             .named_variant_count = 1,
             .named_variants_covered = 0,
         };
-        var seen = std.AutoHashMap(usize, void).init(self.arena);
+        var seen = InlineIndexSet.init(self.arena);
         defer seen.deinit();
 
         for (arms) |arm| {
@@ -8041,7 +8731,7 @@ const TypeChecker = struct {
         return enum_item.variants.len;
     }
 
-    fn collectEnumPatternVariantIndexes(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, seen: *std.AutoHashMap(usize, void)) void {
+    fn collectEnumPatternVariantIndexes(self: *const TypeChecker, condition_type: Type, pattern: ast.SwitchPattern, seen: *InlineIndexSet) void {
         switch (pattern) {
             .Or => |or_pattern| {
                 for (or_pattern.alternatives) |alternative| {
@@ -8050,13 +8740,13 @@ const TypeChecker = struct {
             },
             else => {
                 const variant_index = self.enumPatternVariantIndex(condition_type, pattern) orelse return;
-                seen.put(variant_index, {}) catch return;
+                seen.put(variant_index) catch return;
             },
         }
     }
 
     fn errorUnionMatchCoverage(self: *const TypeChecker, condition_type: Type, arms: anytype) SumMatchCoverage {
-        var seen_errors = std.AutoHashMap(usize, void).init(self.arena);
+        var seen_errors = InlineIndexSet.init(self.arena);
         defer seen_errors.deinit();
 
         var coverage: SumMatchCoverage = .{
@@ -8076,7 +8766,7 @@ const TypeChecker = struct {
         condition_type: Type,
         pattern: ast.SwitchPattern,
         coverage: *SumMatchCoverage,
-        seen_errors: *std.AutoHashMap(usize, void),
+        seen_errors: *InlineIndexSet,
     ) void {
         switch (pattern) {
             .Ok => coverage.success_covered = true,
@@ -8092,7 +8782,7 @@ const TypeChecker = struct {
                 const item = self.file.item(named_error.item_id).*;
                 if (item != .ErrorDecl) return;
                 const index = self.errorUnionErrorIndex(condition_type, item.ErrorDecl.name) orelse return;
-                seen_errors.put(index, {}) catch return;
+                seen_errors.put(index) catch return;
             },
         }
     }

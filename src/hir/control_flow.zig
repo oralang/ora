@@ -34,6 +34,7 @@ const namedStringAttr = support.namedStringAttr;
 const strRef = support.strRef;
 const bodyContainsStructuredLoopControl = analysis.bodyContainsStructuredLoopControl;
 const bodyContainsLoopControl = analysis.bodyContainsLoopControl;
+const bodyContainsContinueToLabel = analysis.bodyContainsContinueToLabel;
 const bodyContainsSwitchBreak = analysis.bodyContainsSwitchBreak;
 const bodyMayReturn = analysis.bodyMayReturn;
 const collectIfCarriedLocals = analysis.collectIfCarriedLocals;
@@ -371,6 +372,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 result_types.items.len,
             );
             if (mlir.oraOperationIsNull(while_op)) return error.MlirOperationCreationFailed;
+            if (!bodyContainsContinueToLabel(self.parent.file, block_stmt.body, block_stmt.label)) {
+                mlir.oraOperationSetAttributeByName(
+                    while_op,
+                    strRef("ora.single_iteration_labeled_block"),
+                    namedBoolAttr(self.parent.context, "ora.single_iteration_labeled_block", true).attribute,
+                );
+            }
             appendOp(self.block, while_op);
 
             const before_block = mlir.oraScfWhileOpGetBeforeBlock(while_op);
@@ -826,9 +834,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
         }
 
-        pub fn lowerSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
+        pub fn lowerSwitchStmt(self: *FunctionLowerer, statement_id: ast.StmtId, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
             if (switch_stmt.label != null) {
-                return @This().lowerLabeledSwitchStmt(self, switch_stmt, locals);
+                return @This().lowerLabeledSwitchStmt(self, statement_id, switch_stmt, locals);
             }
             const raw_condition = try @This().lowerSwitchRawCondition(self, switch_stmt.condition, locals);
             const condition = try @This().lowerSwitchCondition(self, raw_condition, switch_stmt.range);
@@ -1133,7 +1141,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             return true;
         }
 
-        fn lowerLabeledSwitchStmt(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
+        fn lowerLabeledSwitchStmt(self: *FunctionLowerer, statement_id: ast.StmtId, switch_stmt: ast.SwitchStmt, locals: *LocalEnv) anyerror!bool {
             const loc = self.parent.location(switch_stmt.range);
             const has_return = switchMayReturn(self.parent.file, switch_stmt);
             const created_deferred_return = has_return and self.deferred_return_flag == null;
@@ -1164,6 +1172,13 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (!try collectSwitchCarriedLocals(self.parent.allocator, self.parent.file, switch_stmt, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
                 return false;
+            }
+            const condition_local = @This().switchConditionLocal(self, switch_stmt.condition, locals);
+            if (condition_local) |local_id| {
+                if (locals.hasLocal(local_id) and !carried_seen.contains(local_id)) {
+                    try carried_seen.put(local_id, {});
+                    try carried_locals.append(self.parent.allocator, local_id);
+                }
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
@@ -1246,6 +1261,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .continue_flag = continue_flag,
                 .value_slot = value_slot,
                 .value_type = condition_type,
+                .condition_local = condition_local,
                 .carried_locals = carried_locals.items,
             };
             body_lowerer.switch_context = &labeled_switch_context;
@@ -1257,14 +1273,26 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const clear_continue_store = mlir.oraMemrefStoreOpCreate(self.parent.context, loc, clear_continue, continue_flag, null, 0);
             if (mlir.oraOperationIsNull(clear_continue_store)) return error.MlirOperationCreationFailed;
             appendOp(after_block, clear_continue_store);
-            const current_condition = appendValueOp(after_block, blk: {
-                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, value_slot, null, 0, condition_type);
-                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
-                break :blk load;
-            });
+            const current_condition = blk: {
+                if (condition_local) |local_id| {
+                    if (body_locals.getValue(local_id)) |value| break :blk value;
+                }
+                break :blk appendValueOp(after_block, load: {
+                    const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, value_slot, null, 0, condition_type);
+                    if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                    break :load load;
+                });
+            };
+            if (condition_local) |local_id| {
+                if (body_locals.hasLocal(local_id)) {
+                    try body_locals.setValue(local_id, current_condition);
+                }
+            }
+            try FunctionLowerer.lowerStatementInvariants(&body_lowerer, statement_id, &body_locals);
             var unlabeled_switch = switch_stmt;
             unlabeled_switch.label = null;
             const body_terminated = try @This().lowerSwitchStmtWithCondition(&body_lowerer, unlabeled_switch, current_condition, current_condition, &body_locals);
+            try @This().mergeContinuedSwitchConditionLocal(&body_lowerer, &labeled_switch_context, switch_stmt.range, condition_type, &body_locals);
             if (!blockEndsWithTerminator(after_block)) {
                 try body_lowerer.appendScfYieldFromLocals(after_block, switch_stmt.range, &body_locals, carried_locals.items);
             }
@@ -1280,6 +1308,68 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return body_terminated;
+        }
+
+        fn switchConditionLocal(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *const LocalEnv) ?LocalId {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().switchConditionLocal(self, group.expr, locals),
+                .Name => |name| blk: {
+                    if (self.parent.resolution.expr_bindings[expr_id.index()]) |binding| {
+                        switch (binding) {
+                            .pattern => |pattern_id| break :blk pattern_id,
+                            .item => break :blk null,
+                        }
+                    }
+                    break :blk locals.lookupName(name.name);
+                },
+                else => null,
+            };
+        }
+
+        fn mergeContinuedSwitchConditionLocal(
+            self: *FunctionLowerer,
+            switch_context: *const SwitchContext,
+            range: source.TextRange,
+            condition_type: mlir.MlirType,
+            locals: *LocalEnv,
+        ) !void {
+            const local_id = switch_context.condition_local orelse return;
+            if (!locals.hasLocal(local_id)) return;
+            const current_value = locals.getValue(local_id) orelse return;
+            const continue_flag = switch_context.continue_flag orelse return;
+            const value_slot = switch_context.value_slot orelse return;
+            const loc = self.parent.location(range);
+
+            const continue_value = appendValueOp(self.block, load: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, continue_flag, null, 0, boolType(self.parent.context));
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :load load;
+            });
+            const if_op = mlir.oraScfIfOpCreate(
+                self.parent.context,
+                loc,
+                continue_value,
+                &[_]mlir.MlirType{condition_type},
+                1,
+                true,
+            );
+            if (mlir.oraOperationIsNull(if_op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, if_op);
+
+            const then_block = mlir.oraScfIfOpGetThenBlock(if_op);
+            const else_block = mlir.oraScfIfOpGetElseBlock(if_op);
+            if (mlir.oraBlockIsNull(then_block) or mlir.oraBlockIsNull(else_block)) {
+                return error.MlirOperationCreationFailed;
+            }
+
+            const continued_value = appendValueOp(then_block, load: {
+                const load = mlir.oraMemrefLoadOpCreate(self.parent.context, loc, value_slot, null, 0, condition_type);
+                if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
+                break :load load;
+            });
+            try appendScfYieldValues(self.parent.context, then_block, loc, &[_]mlir.MlirValue{continued_value});
+            try appendScfYieldValues(self.parent.context, else_block, loc, &[_]mlir.MlirValue{current_value});
+            try locals.setValue(local_id, mlir.oraOperationGetResult(if_op, 0));
         }
 
         pub fn buildSwitchPatternData(self: *FunctionLowerer, switch_stmt: ast.SwitchStmt, synthesize_default_case: bool) anyerror!?SwitchPatternData {

@@ -278,14 +278,15 @@ fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
             continue;
         }
 
-        const string_value = switch (path_token.value orelse continue) {
+        const value_ptr = path_token.value orelse continue;
+        const string_value = switch (value_ptr.*) {
             .string => |value| value,
             else => continue,
         };
         const specifier_range = specifierTextRange(source, path_token.range, string_value);
         const specifier = try allocator.dupe(u8, string_value);
         errdefer allocator.free(specifier);
-        const alias = try allocator.dupe(u8, alias_token.lexeme);
+        const alias = try allocator.dupe(u8, lexer.tokenLexeme(source, alias_token));
 
         var end_offset = path_token.range.end_offset;
         if (index + 7 < tokens.len and tokens[index + 7].type == .RightParen) {

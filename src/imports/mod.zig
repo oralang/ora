@@ -362,7 +362,7 @@ const Resolver = struct {
             return ImportValidationError.ParseFailed;
         };
         defer self.allocator.free(tokens);
-        try self.scanImportTokens(module, tokens);
+        try self.scanImportTokens(module, source, tokens);
     }
 
     fn isStdRootModule(self: *const Resolver, resolved_path: []const u8) bool {
@@ -375,7 +375,7 @@ const Resolver = struct {
         return std.fs.path.basename(module.logical_path);
     }
 
-    fn scanImportTokens(self: *Resolver, module: *ModuleRecord, tokens: []const lexer.Token) ImportValidationError!void {
+    fn scanImportTokens(self: *Resolver, module: *ModuleRecord, source: []const u8, tokens: []const lexer.Token) ImportValidationError!void {
         var index: usize = 0;
         while (index < tokens.len) {
             var cursor = index;
@@ -413,7 +413,7 @@ const Resolver = struct {
                 std.log.warn("Invalid import path literal in '{s}'", .{module.resolved_path});
                 return ImportValidationError.ParseFailed;
             };
-            const alias = tokens[cursor + 1].lexeme;
+            const alias = lexer.tokenLexeme(source, tokens[cursor + 1]);
 
             const dependency_descriptor_opt = try self.resolveImportSpecifier(module, specifier);
             if (dependency_descriptor_opt) |dependency_descriptor| {
@@ -428,7 +428,8 @@ const Resolver = struct {
     }
 
     fn tokenStringValue(token: lexer.Token) ?[]const u8 {
-        return switch (token.value orelse return null) {
+        const value_ptr = token.value orelse return null;
+        return switch (value_ptr.*) {
             .string => |value| value,
             else => null,
         };
