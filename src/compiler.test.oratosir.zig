@@ -153,6 +153,34 @@ fn expectOrderedNeedles(haystack: []const u8, needles: []const []const u8) !void
     }
 }
 
+test "compiler lowers indexed event fields as EVM log topics" {
+    const source_text =
+        \\contract Logs {
+        \\    log Transfer(indexed from: address, indexed to: address, amount: u256);
+        \\
+        \\    pub fn run(from: address, to: address, amount: u256) {
+        \\        log Transfer(from, to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(std.mem.containsAtLeast(u8, run_fn, 1, "log3"));
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "log1"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, run_fn, "mstore256"));
+    try expectOrderedNeedles(run_fn, &.{ "const 0x20", "malloc", "mstore256", "log3" });
+}
+
 const SirDotNode = struct {
     id: []const u8,
     term: []const u8,
@@ -2398,7 +2426,7 @@ test "OraToSIR preserves explicit narrow integer truncation mask" {
     try testing.expect(!std.mem.containsAtLeast(u8, narrow_fn, 1, "bitcast"));
 }
 
-test "frontend reuses storage roots for compound map assignments" {
+test "frontend reuses storage roots for compound map assignments without parent handle rewrites" {
     const source_text =
         \\contract MapCounter {
         \\    storage var balances: map<address, u256>;
@@ -2419,7 +2447,7 @@ test "frontend reuses storage roots for compound map assignments" {
 
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"balances\""));
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "ora.sload \"allowances\""));
-    try testing.expectEqual(@as(usize, 3), std.mem.count(u8, rendered, "ora.map_store"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, rendered, "ora.map_store"));
 }
 
 test "compiler lowers dynamic byte concat and slice through OraToSIR" {
@@ -5718,6 +5746,43 @@ test "compiler storage layout manifest matches SIR slot usage" {
         "mul",
         "add slot_history",
         "sload",
+    });
+}
+
+test "compiler does not store nested map handles back to parent slots" {
+    const source_text =
+        \\contract NestedMapProbe {
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn direct(owner: address, spender: address, amount: u256) {
+        \\        allowances[owner][spender] = amount;
+        \\    }
+        \\}
+    ;
+
+    const ora_text = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(ora_text);
+
+    const direct_ora = try oraFunctionSlice(ora_text, "direct");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, direct_ora, "ora.map_store"));
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const direct_sir = try functionSlice(rendered, "direct");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, direct_sir, "sstore"));
+    try expectOrderedNeedles(direct_sir, &.{
+        "slot_allowances",
+        "keccak256",
+        "keccak256",
+        "sstore",
     });
 }
 

@@ -26,6 +26,10 @@ slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,map(address,0xf39
 value = 11
 
 [[call.storage]]
+slot = "map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0)"
+value = 0
+
+[[call.storage]]
 slot = "map(address,0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc,map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,0))"
 value = 0
 
@@ -47,6 +51,10 @@ value = 11
 [[call.storage]]
 slot = "map(address,0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266,map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0))"
 value = 13
+
+[[call.storage]]
+slot = "map(address,0x70997970c51812dc3a010c7d01b50e0d17dc79c8,0)"
+value = 0
 
 [[call]]
 fn = "get_allowance(address,address)"

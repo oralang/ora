@@ -142,7 +142,6 @@
 // CHECK-NEXT:     sir.store %ptr_off_1 : !sir.ptr<1>, %2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":56:9)))
 // CHECK-NEXT:     %3 = sir.keccak256 %ptr_0 : !sir.ptr<1>, %1 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":56:9)))
 // CHECK-NEXT:     sir.sstore %3 : !sir.u256, %arg2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":56:9)))
-// CHECK-NEXT:     sir.sstore %2 : !sir.u256, %2 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":56:9)))
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":55:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":55:5)
 // CHECK-NEXT: } loc("{{.*}}/ora-example/regions/effects/storage_write_effect.ora":9:1)

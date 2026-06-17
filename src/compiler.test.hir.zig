@@ -2553,6 +2553,86 @@ test "compiler lowers labeled switch continue through a real loop" {
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
 }
 
+test "compiler resolves labeled switch condition names to continued values" {
+    const source_text =
+        \\pub fn run(input: u256) -> u256 {
+        \\    var val: u256 = input;
+        \\    var count: u256 = 0;
+        \\    process: switch (val) {
+        \\        0 => {
+        \\            return count;
+        \\        },
+        \\        1...100 => {
+        \\            count += 1;
+        \\            if (val > 1) {
+        \\                continue :process (val - 1);
+        \\            }
+        \\        },
+        \\        else => {
+        \\            continue :process (100);
+        \\        }
+        \\    }
+        \\    return count;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch %arg2"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi ugt, %arg2"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.subi %arg2"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.cmpi ugt, %arg0"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "arith.subi %arg0"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
+test "compiler lowers labeled switch invariants" {
+    const source_text =
+        \\pub fn run() -> u256 {
+        \\    var x: u256 = 5;
+        \\    var iterations: u256 = 0;
+        \\    outer: switch (x)
+        \\        invariant x <= 5
+        \\        invariant iterations <= 5
+        \\    {
+        \\        0 => {
+        \\            return iterations;
+        \\        },
+        \\        1...5 => {
+        \\            iterations += 1;
+        \\            x -= 1;
+        \\            continue :outer (x);
+        \\        },
+        \\        else => {
+        \\            return 999;
+        \\        }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "scf.while"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.invariant"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.switch_placeholder"));
+}
+
 test "compiler lowers switch arms with nested for carried locals" {
     const source_text =
         \\pub fn choose(flag: bool, values: slice[u256]) -> u256 {

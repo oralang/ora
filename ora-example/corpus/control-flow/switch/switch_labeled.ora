@@ -8,7 +8,11 @@ contract SwitchLabeled {
         var x: u256 = 5;
         var iterations: u256 = 0;
 
-        outer: switch (x) {
+        outer: switch (x)
+            invariant x <= 5
+            invariant iterations <= 5
+            invariant iterations + x == 5
+        {
             0 => {
                 return iterations;
             }
@@ -42,7 +46,10 @@ contract SwitchLabeled {
         var state: u256 = 0;
         var res: u256 = 0;
 
-        dispatch: switch (state) {
+        dispatch: switch (state)
+            invariant res <= 111
+            invariant (state == 0 && res == 0) || (state == 1 && res == 1) || (state == 2 && res == 11) || (state == 2 && res == 111)
+        {
             0 => {
                 res += 1;
                 continue :dispatch (1);
@@ -66,18 +73,25 @@ contract SwitchLabeled {
     pub fn test_conditional_continue(input: u256) -> u256 {
         var val: u256 = input;
         var count: u256 = 0;
+        var initialized: bool = false;
 
-        process: switch (val) {
+        process: switch (val)
+            invariant count <= 100
+            invariant !initialized || val <= 100
+            invariant !initialized || count + val <= 101
+        {
             0 => {
                 return count;
             }
             1...100 => {
+                initialized = true;
                 count += 1;
                 if (val > 1) {
                     continue :process (val - 1);
                 }
             }
             else => {
+                initialized = true;
                 continue :process (100); // clamp to 100
             }
         }

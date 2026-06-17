@@ -781,6 +781,8 @@ pub const VerificationPass = struct {
         const before_block = mlir.oraScfWhileOpGetBeforeBlock(parent_op);
         if (mlir.oraBlockIsNull(before_block)) return;
 
+        const bind_after_args_to_init = isSingleIterationLabeledBlockWhile(parent_op);
+        const init_operand_count = mlir.oraOperationGetNumOperands(parent_op);
         const bind_count = @min(
             @as(usize, @intCast(mlir.oraBlockGetNumArguments(before_block))),
             @as(usize, @intCast(mlir.oraBlockGetNumArguments(after_block))),
@@ -790,6 +792,10 @@ pub const VerificationPass = struct {
         while (i < bind_count) : (i += 1) {
             const before_arg = mlir.oraBlockGetArgument(before_block, @intCast(i));
             const after_arg = mlir.oraBlockGetArgument(after_block, @intCast(i));
+            const source_value = if (bind_after_args_to_init and i < init_operand_count)
+                mlir.oraOperationGetOperand(parent_op, i)
+            else
+                before_arg;
             const after_value_id = @intFromPtr(after_arg.ptr);
             if (self.encoder.value_bindings.get(after_value_id)) |old_binding| {
                 try saved_bindings.append(self.allocator, .{
@@ -804,7 +810,7 @@ pub const VerificationPass = struct {
                     .old_binding = undefined,
                 });
             }
-            try self.encoder.bindValue(after_arg, try self.encoder.encodeValue(before_arg));
+            try self.encoder.bindValue(after_arg, try self.encoder.encodeValue(source_value));
         }
     }
 
@@ -2984,7 +2990,9 @@ pub const VerificationPass = struct {
             else
                 parent_name_ref.data[0..parent_name_ref.length];
 
-            if (std.mem.eql(u8, parent_name, "scf.while") or std.mem.eql(u8, parent_name, "scf.for")) {
+            if (std.mem.eql(u8, parent_name, "scf.while")) {
+                if (!isSingleIterationLabeledBlockWhile(parent_op)) return parent_op;
+            } else if (std.mem.eql(u8, parent_name, "scf.for")) {
                 return parent_op;
             }
             current_block = mlir.mlirOperationGetBlock(parent_op);
@@ -5821,6 +5829,12 @@ const ActivePathAssume = struct {
     extra_constraints: []const z3.Z3_ast,
     owned_extra_constraints: bool = false,
 };
+
+fn isSingleIterationLabeledBlockWhile(op: mlir.MlirOperation) bool {
+    const attr_name = "ora.single_iteration_labeled_block";
+    const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(attr_name.ptr, attr_name.len));
+    return !mlir.oraAttributeIsNull(attr);
+}
 
 const EncodedAnnotation = struct {
     function_name: []const u8,

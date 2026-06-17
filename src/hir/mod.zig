@@ -92,7 +92,7 @@ fn verificationStatementFactEntryLessThan(_: void, lhs: VerificationStatementFac
 
 fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
     var entries: std.ArrayList(VerificationFactEntry) = .{};
-    defer entries.deinit(allocator);
+    errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
         const owner = fact.owner.itemId() orelse continue;
@@ -102,12 +102,12 @@ fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema
         });
     }
     std.mem.sort(VerificationFactEntry, entries.items, {}, verificationFactEntryLessThan);
-    return entries.toOwnedSlice(allocator);
+    return entries.items;
 }
 
 fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
     var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .{};
-    defer entries.deinit(allocator);
+    errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
         const owner = fact.owner.traitMethod() orelse continue;
@@ -118,12 +118,12 @@ fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: [
         });
     }
     std.mem.sort(VerificationTraitMethodFactEntry, entries.items, {}, verificationTraitMethodFactEntryLessThan);
-    return entries.toOwnedSlice(allocator);
+    return entries.items;
 }
 
 fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
     var entries: std.ArrayList(VerificationStatementFactEntry) = .{};
-    defer entries.deinit(allocator);
+    errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
         const owner = fact.owner.statementOwner() orelse continue;
@@ -134,7 +134,7 @@ fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []c
         });
     }
     std.mem.sort(VerificationStatementFactEntry, entries.items, {}, verificationStatementFactEntryLessThan);
-    return entries.toOwnedSlice(allocator);
+    return entries.items;
 }
 
 pub const HirSymbolKind = enum {
@@ -312,8 +312,8 @@ pub fn lowerModule(
         try lowerer.lowerItem(item_id, lowerer.module_body);
     }
 
-    result.items = try lowerer.items.toOwnedSlice(result.arena.allocator());
-    result.type_fallbacks = try lowerer.type_fallbacks.toOwnedSlice(result.arena.allocator());
+    result.items = lowerer.items.items;
+    result.type_fallbacks = lowerer.type_fallbacks.items;
     result.type_fallback_count = result.type_fallbacks.len;
     result.placeholder_count = lowerer.placeholder_count;
     result.default_value_count = lowerer.default_value_count;
@@ -321,6 +321,8 @@ pub fn lowerModule(
 }
 
 const Lowerer = struct {
+    pub const inline_generic_binding_capacity = 8;
+
     pub const GenericBindingValue = union(enum) {
         ty: sema.Type,
         integer: []const u8,
@@ -1082,12 +1084,28 @@ const Lowerer = struct {
         };
     }
 
-    pub fn runtimeFunctionParameters(self: *const Lowerer, function: ast.FunctionItem) ![]ast.Parameter {
+    pub fn runtimeFunctionParameters(self: *const Lowerer, function: ast.FunctionItem) ![]const ast.Parameter {
+        var first_runtime: ?usize = null;
+        var runtime_count: usize = 0;
+        var has_comptime_after_runtime = false;
+        for (function.parameters, 0..) |parameter, index| {
+            if (parameter.is_comptime) {
+                if (first_runtime != null) has_comptime_after_runtime = true;
+                continue;
+            }
+            if (first_runtime == null) first_runtime = index;
+            runtime_count += 1;
+        }
+
+        const start = first_runtime orelse return &.{};
+        if (!has_comptime_after_runtime) return function.parameters[start..];
+
         var parameters: std.ArrayList(ast.Parameter) = .{};
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.allocator, parameter);
         }
+        std.debug.assert(parameters.items.len == runtime_count);
         return parameters.toOwnedSlice(self.allocator);
     }
 
@@ -1096,7 +1114,8 @@ const Lowerer = struct {
             return self.typecheck.pattern_types[parameter.pattern.index()].type;
         }
 
-        const bindings = (try self.genericTypeBindingsForCall(function, call)) orelse {
+        var inline_bindings: [inline_generic_binding_capacity]GenericTypeBinding = undefined;
+        const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse {
             return self.typecheck.pattern_types[parameter.pattern.index()].type;
         };
 
@@ -1117,7 +1136,12 @@ const Lowerer = struct {
         return self.typecheck.pattern_types[parameter.pattern.index()].type;
     }
 
-    pub fn genericTypeBindingsForCall(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) !?[]const GenericTypeBinding {
+    pub fn genericTypeBindingsForCall(
+        self: *Lowerer,
+        function: ast.FunctionItem,
+        call: ast.CallExpr,
+        scratch: []GenericTypeBinding,
+    ) !?[]const GenericTypeBinding {
         const comptime_count = self.leadingComptimeParameterCount(function);
         const inferable_type_count = self.leadingGenericTypeParameterCount(function);
         if (comptime_count == 0) return &.{};
@@ -1129,30 +1153,30 @@ const Lowerer = struct {
         const effective_runtime_count = runtime_count - @as(usize, if (method_receiver_supplied) 1 else 0);
 
         if (call.args.len >= comptime_count + effective_runtime_count) {
-            var bindings: std.ArrayList(GenericTypeBinding) = .{};
+            const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
             for (function.parameters[0..comptime_count], 0..) |parameter, index| {
                 const type_name = self.patternName(parameter.pattern) orelse return null;
                 const binding = (try self.genericBindingForCallArg(parameter, type_name, call.args[index])) orelse return null;
-                try bindings.append(self.allocator, .{
+                bindings[index] = .{
                     .name = binding.name,
                     .value = binding.value,
                     .mangle_name = binding.mangle_name,
-                });
+                };
             }
-            return @constCast(try bindings.toOwnedSlice(self.allocator));
+            return bindings;
         }
 
         if (call.args.len != effective_runtime_count) return null;
         if (comptime_count != inferable_type_count) return null;
 
-        var bindings: std.ArrayList(GenericTypeBinding) = .{};
-        for (function.parameters[0..comptime_count]) |param| {
+        const bindings = try self.genericTypeBindingBuffer(comptime_count, scratch);
+        for (function.parameters[0..comptime_count], 0..) |param, index| {
             const name = self.patternName(param.pattern) orelse return null;
-            try bindings.append(self.allocator, .{
+            bindings[index] = .{
                 .name = name,
                 .value = .{ .ty = .{ .unknown = {} } },
                 .mangle_name = "",
-            });
+            };
         }
 
         var runtime_index: usize = 0;
@@ -1162,19 +1186,24 @@ const Lowerer = struct {
             if (runtime_index >= call.args.len) break;
             const arg_type = self.typecheck.exprType(call.args[runtime_index]);
             if (arg_type.kind() != .unknown) {
-                try self.inferHirBinding(function, inferable_type_count, parameter, arg_type, bindings.items);
+                try self.inferHirBinding(function, inferable_type_count, parameter, arg_type, bindings);
             }
             runtime_index += 1;
         }
 
-        for (bindings.items) |*binding| {
+        for (bindings) |*binding| {
             if (binding.mangle_name.len == 0) {
                 const ty = hirGenericBindingType(binding.*) orelse return null;
                 binding.mangle_name = try self.typeMangleName(ty);
             }
         }
 
-        return @constCast(try bindings.toOwnedSlice(self.allocator));
+        return bindings;
+    }
+
+    fn genericTypeBindingBuffer(self: *Lowerer, count: usize, scratch: []GenericTypeBinding) ![]GenericTypeBinding {
+        if (count <= scratch.len) return scratch[0..count];
+        return self.allocator.alloc(GenericTypeBinding, count);
     }
 
     pub fn stripGenericCallArgs(self: *Lowerer, function: ast.FunctionItem, call: ast.CallExpr) []const ast.ExprId {
@@ -1223,6 +1252,11 @@ const Lowerer = struct {
 
     pub fn mangleGenericFunctionName(self: *Lowerer, base_name: []const u8, bindings: []const GenericTypeBinding) ![]const u8 {
         var name = std.ArrayList(u8){};
+        var total_len = base_name.len;
+        for (bindings) |binding| {
+            total_len += 2 + binding.mangle_name.len;
+        }
+        try name.ensureTotalCapacityPrecise(self.allocator, total_len);
         try name.appendSlice(self.allocator, base_name);
         for (bindings) |binding| {
             try name.appendSlice(self.allocator, "__");

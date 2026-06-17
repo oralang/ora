@@ -1308,6 +1308,42 @@ test "compiler reports heterogeneous array literals and keeps tuple element type
     try testing.expectEqual(compiler.sema.TypeKind.bool, typecheck.exprType(ret_stmt.value.?).kind());
 }
 
+test "compiler rejects first-class runtime map handles" {
+    const source_text =
+        \\contract NestedMaps {
+        \\    storage var allowances: map<address, map<address, u256>>;
+        \\
+        \\    pub fn inferred(owner: address, spender: address, amount: u256) {
+        \\        let inner = allowances[owner];
+        \\        inner[spender] = amount;
+        \\    }
+        \\
+        \\    pub fn explicit(owner: address, spender: address, amount: u256) {
+        \\        let inner: map<address, u256> = allowances[owner];
+        \\        inner[spender] = amount;
+        \\    }
+        \\
+        \\    fn helper(inner: map<address, u256>, spender: address, amount: u256) {
+        \\        inner[spender] = amount;
+        \\    }
+        \\
+        \\    fn returns(owner: address) -> map<address, u256> {
+        \\        return allowances[owner];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const local_message = "local 'inner' cannot have map type 'map<address, u256>' as a runtime value; index storage maps directly";
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, local_message));
+    try testing.expectEqual(@as(usize, 2), countDiagnosticMessages(&typecheck.diagnostics, local_message));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "function parameter 'inner' cannot have map type 'map<address, u256>' as a runtime value; index storage maps directly"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "function 'returns' cannot return map type 'map<address, u256>'; maps are storage roots, not first-class runtime values"));
+}
+
 test "compiler rejects integer array literals assigned to bool arrays" {
     const source_text =
         \\pub fn build() -> [bool; 2] {
@@ -1376,6 +1412,21 @@ test "compiler rejects struct-typed indexed log fields" {
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(!typecheck.diagnostics.isEmpty());
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "indexed log field 'p' has unsupported type 'Pair'"));
+}
+
+test "compiler rejects dynamic indexed log fields until topic hashing is supported" {
+    const source_text =
+        \\contract C {
+        \\    log Bad(indexed label: string);
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(!typecheck.diagnostics.isEmpty());
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "indexed log field 'label' has unsupported type 'string'"));
 }
 
 test "compiler reports invalid constant shift amounts" {

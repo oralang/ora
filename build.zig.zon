@@ -37,8 +37,7 @@
     // internet connectivity.
     .dependencies = .{
         .lsp_kit = .{
-            .url = "git+https://github.com/zigtools/lsp-kit?ref=0.15.x#421ae644f53bd788e3699b5fc22b3e07b161e2b6",
-            .hash = "lsp_kit-0.1.0-bi_PL5wxCgB1_jRIZtcodh-x-_nteVzuOrul2ken-ZLE",
+            .path = "vendor/lsp_kit",
         },
         .voltaire = .{
             .path = "vendor/voltaire",

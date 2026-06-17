@@ -1,0 +1,15 @@
+.{
+    .name = .lsp_kit,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "metaModel.json",
+        "LICENSE",
+        "README.md",
+    },
+    .fingerprint = 0x91a538b12fcf2f6e, // Changing this has security and trust implications.
+}

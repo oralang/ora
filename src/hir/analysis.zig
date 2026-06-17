@@ -30,6 +30,14 @@ pub fn bodyContainsLabeledLoopControl(file: *const ast.AstFile, body_id: ast.Bod
     return false;
 }
 
+pub fn bodyContainsContinueToLabel(file: *const ast.AstFile, body_id: ast.BodyId, label: []const u8) bool {
+    const body = file.body(body_id).*;
+    for (body.statements) |statement_id| {
+        if (stmtContainsContinueToLabel(file, statement_id, label)) return true;
+    }
+    return false;
+}
+
 pub fn bodyContainsStructuredLoopControl(file: *const ast.AstFile, body_id: ast.BodyId) bool {
     return bodyContainsLoopControlInContext(file, body_id, false);
 }
@@ -347,6 +355,44 @@ fn stmtContainsLabeledLoopControl(file: *const ast.AstFile, statement_id: ast.St
             (try_stmt.catch_clause != null and bodyContainsLabeledLoopControl(file, try_stmt.catch_clause.?.body)),
         .Block => |block_stmt| bodyContainsLabeledLoopControl(file, block_stmt.body),
         .LabeledBlock => |block_stmt| bodyContainsLabeledLoopControl(file, block_stmt.body),
+        else => false,
+    };
+}
+
+fn stmtContainsContinueToLabel(file: *const ast.AstFile, statement_id: ast.StmtId, label: []const u8) bool {
+    return switch (file.statement(statement_id).*) {
+        .Continue => |jump| if (jump.label) |target| std.mem.eql(u8, target, label) else false,
+        .If => |if_stmt| bodyContainsContinueToLabel(file, if_stmt.then_body, label) or
+            (if_stmt.else_body != null and bodyContainsContinueToLabel(file, if_stmt.else_body.?, label)),
+        .While => |while_stmt| blk: {
+            if (while_stmt.label) |nested_label| {
+                if (std.mem.eql(u8, nested_label, label)) break :blk false;
+            }
+            break :blk bodyContainsContinueToLabel(file, while_stmt.body, label);
+        },
+        .For => |for_stmt| blk: {
+            if (for_stmt.label) |nested_label| {
+                if (std.mem.eql(u8, nested_label, label)) break :blk false;
+            }
+            break :blk bodyContainsContinueToLabel(file, for_stmt.body, label);
+        },
+        .Switch => |switch_stmt| blk: {
+            if (switch_stmt.label) |nested_label| {
+                if (std.mem.eql(u8, nested_label, label)) break :blk false;
+            }
+            for (switch_stmt.arms) |arm| {
+                if (bodyContainsContinueToLabel(file, arm.body, label)) break :blk true;
+            }
+            if (switch_stmt.else_body) |else_body| break :blk bodyContainsContinueToLabel(file, else_body, label);
+            break :blk false;
+        },
+        .Try => |try_stmt| bodyContainsContinueToLabel(file, try_stmt.try_body, label) or
+            (try_stmt.catch_clause != null and bodyContainsContinueToLabel(file, try_stmt.catch_clause.?.body, label)),
+        .Block => |block_stmt| bodyContainsContinueToLabel(file, block_stmt.body, label),
+        .LabeledBlock => |block_stmt| blk: {
+            if (std.mem.eql(u8, block_stmt.label, label)) break :blk false;
+            break :blk bodyContainsContinueToLabel(file, block_stmt.body, label);
+        },
         else => false,
     };
 }

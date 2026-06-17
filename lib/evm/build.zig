@@ -3,13 +3,10 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const debug_ui = b.option(bool, "debug-ui", "Build debugger TUI/DAP binaries that depend on vaxis") orelse false;
     const voltaire_root = "../../vendor/voltaire";
 
     const voltaire_dep = b.dependency("voltaire", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const vaxis_dep = b.dependency("vaxis", .{
         .target = target,
         .optimize = optimize,
     });
@@ -17,7 +14,6 @@ pub fn build(b: *std.Build) void {
     const crypto_mod = voltaire_dep.module("crypto");
     const precompiles_mod = voltaire_dep.module("precompiles");
     const blockchain_mod = voltaire_dep.module("blockchain");
-    const vaxis_mod = vaxis_dep.module("vaxis");
 
     const bootstrap_crypto = b.addSystemCommand(&.{
         "cargo",
@@ -58,51 +54,73 @@ pub fn build(b: *std.Build) void {
     const run_debug_probe = b.addRunArtifact(debug_probe_exe);
     if (b.args) |args| run_debug_probe.addArgs(args);
 
-    const debug_tui_exe = b.addExecutable(.{
-        .name = "ora-evm-debug-tui",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/debug_tui.zig"),
+    if (debug_ui) {
+        const vaxis_dep = b.dependency("vaxis", .{
             .target = target,
             .optimize = optimize,
-            .imports = &.{
-                .{ .name = "ora_evm", .module = evm_mod },
-                .{ .name = "voltaire", .module = primitives_mod },
-                .{ .name = "crypto", .module = crypto_mod },
-                .{ .name = "precompiles", .module = precompiles_mod },
-                .{ .name = "vaxis", .module = vaxis_mod },
-            },
-        }),
-    });
-    debug_tui_exe.step.dependOn(&bootstrap_crypto.step);
-    b.installArtifact(debug_tui_exe);
-    const run_debug_tui = b.addRunArtifact(debug_tui_exe);
-    if (b.args) |args| run_debug_tui.addArgs(args);
+        });
+        const vaxis_mod = vaxis_dep.module("vaxis");
 
-    // DAP server (see src/debug_dap.zig). Imports debug_tui.zig
-    // directly to reuse Session / SessionSeed / loadSeedFromConfig,
-    // which transitively pulls in vaxis at compile time even though
-    // the DAP binary doesn't render anything — cheaper than carving
-    // a shared loader module while the typed boundary is still
-    // moving.
-    const debug_dap_exe = b.addExecutable(.{
-        .name = "ora-evm-debug-dap",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/debug_dap.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "ora_evm", .module = evm_mod },
-                .{ .name = "voltaire", .module = primitives_mod },
-                .{ .name = "crypto", .module = crypto_mod },
-                .{ .name = "precompiles", .module = precompiles_mod },
-                .{ .name = "vaxis", .module = vaxis_mod },
-            },
-        }),
-    });
-    debug_dap_exe.step.dependOn(&bootstrap_crypto.step);
-    b.installArtifact(debug_dap_exe);
-    const run_debug_dap = b.addRunArtifact(debug_dap_exe);
-    if (b.args) |args| run_debug_dap.addArgs(args);
+        const debug_tui_exe = b.addExecutable(.{
+            .name = "ora-evm-debug-tui",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/debug_tui.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "ora_evm", .module = evm_mod },
+                    .{ .name = "voltaire", .module = primitives_mod },
+                    .{ .name = "crypto", .module = crypto_mod },
+                    .{ .name = "precompiles", .module = precompiles_mod },
+                    .{ .name = "vaxis", .module = vaxis_mod },
+                },
+            }),
+        });
+        debug_tui_exe.step.dependOn(&bootstrap_crypto.step);
+        b.installArtifact(debug_tui_exe);
+        const run_debug_tui = b.addRunArtifact(debug_tui_exe);
+        if (b.args) |args| run_debug_tui.addArgs(args);
+
+        // DAP server (see src/debug_dap.zig). Imports debug_tui.zig
+        // directly to reuse Session / SessionSeed / loadSeedFromConfig,
+        // which transitively pulls in vaxis at compile time even though
+        // the DAP binary doesn't render anything — cheaper than carving
+        // a shared loader module while the typed boundary is still
+        // moving.
+        const debug_dap_exe = b.addExecutable(.{
+            .name = "ora-evm-debug-dap",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/debug_dap.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "ora_evm", .module = evm_mod },
+                    .{ .name = "voltaire", .module = primitives_mod },
+                    .{ .name = "crypto", .module = crypto_mod },
+                    .{ .name = "precompiles", .module = precompiles_mod },
+                    .{ .name = "vaxis", .module = vaxis_mod },
+                },
+            }),
+        });
+        debug_dap_exe.step.dependOn(&bootstrap_crypto.step);
+        b.installArtifact(debug_dap_exe);
+        const run_debug_dap = b.addRunArtifact(debug_dap_exe);
+        if (b.args) |args| run_debug_dap.addArgs(args);
+
+        const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
+        debug_tui_step.dependOn(&run_debug_tui.step);
+
+        const debug_dap_step = b.step("debug-dap", "Run the Ora EVM DAP server (Content-Length-framed JSON-RPC over stdio)");
+        debug_dap_step.dependOn(&run_debug_dap.step);
+    } else {
+        const debug_tui_disabled = b.addFail("debug-tui requires -Ddebug-ui=true");
+        const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
+        debug_tui_step.dependOn(&debug_tui_disabled.step);
+
+        const debug_dap_disabled = b.addFail("debug-dap requires -Ddebug-ui=true");
+        const debug_dap_step = b.step("debug-dap", "Run the Ora EVM DAP server (Content-Length-framed JSON-RPC over stdio)");
+        debug_dap_step.dependOn(&debug_dap_disabled.step);
+    }
 
     const unit_tests = b.addTest(.{
         .name = "ora-evm-unit-tests",
@@ -139,12 +157,6 @@ pub fn build(b: *std.Build) void {
 
     const debug_probe_step = b.step("debug-probe", "Run the Ora EVM debugger probe against emitted bytecode");
     debug_probe_step.dependOn(&run_debug_probe.step);
-
-    const debug_tui_step = b.step("debug-tui", "Run the Ora EVM debugger TUI against emitted bytecode");
-    debug_tui_step.dependOn(&run_debug_tui.step);
-
-    const debug_dap_step = b.step("debug-dap", "Run the Ora EVM DAP server (Content-Length-framed JSON-RPC over stdio)");
-    debug_dap_step.dependOn(&run_debug_dap.step);
 
     // Per-step debugger micro-benchmark. Tracks the per-step wall-clock cost
     // of stepOpcode + statement-boundary check; fails if it exceeds the

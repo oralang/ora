@@ -48,6 +48,7 @@ pub const SwitchContext = struct {
     continue_flag: ?mlir.MlirValue = null,
     value_slot: ?mlir.MlirValue = null,
     value_type: ?mlir.MlirType = null,
+    condition_local: ?hir_locals.LocalId = null,
     carried_locals: []const hir_locals.LocalId = &.{},
 };
 
