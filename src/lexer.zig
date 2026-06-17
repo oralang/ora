@@ -314,14 +314,9 @@ pub const TokenType = enum {
 /// Token with enhanced location and value information
 pub const Token = struct {
     type: TokenType,
-    lexeme: []const u8,
     range: SourceRange,
     // for literals, store processed value separately from raw lexeme
-    value: ?TokenValue = null,
-
-    // line and column for convenience
-    line: u32,
-    column: u32,
+    value: ?*const TokenValue = null,
 
     // lossless parsing trivia attachment (leading trivia captured; trailing optional)
     leading_trivia_start: u32 = 0,
@@ -334,17 +329,34 @@ pub const Token = struct {
         _ = options;
         try writer.writeAll("Token{ .type = ");
         try writer.writeAll(@tagName(self.type));
-        try writer.writeAll(", .lexeme = \"");
-        try writer.writeAll(self.lexeme);
-        try writer.writeAll("\", .range = ");
+        try writer.writeAll(", .range = ");
         try self.range.format("", .{}, writer);
         if (self.value) |val| {
             try writer.writeAll(", .value = ");
-            try val.format("", .{}, writer);
+            try val.*.format("", .{}, writer);
         }
         try writer.writeAll(" }");
     }
 };
+
+pub const OwnedTokens = struct {
+    allocator: Allocator,
+    tokens: []Token,
+    value_arena: std.heap.ArenaAllocator,
+
+    pub fn deinit(self: *OwnedTokens) void {
+        self.allocator.free(self.tokens);
+        self.value_arena.deinit();
+        self.* = undefined;
+    }
+};
+
+pub fn tokenLexeme(source: []const u8, token: Token) []const u8 {
+    const start: usize = @intCast(token.range.start_offset);
+    const end: usize = @intCast(token.range.end_offset);
+    if (start <= end and end <= source.len) return source[start..end];
+    return "";
+}
 
 /// Configuration validation errors
 pub const LexerConfigError = error{
@@ -379,7 +391,9 @@ pub const LexerConfig = struct {
     enable_resync: bool = true,
     resync_max_lookahead: u32 = 256,
 
+    preserve_trivia: bool = true,
     enable_string_interning: bool = true,
+    store_token_values: bool = true,
     string_pool_initial_capacity: u32 = 256,
 
     enable_performance_monitoring: bool = false,
@@ -849,11 +863,10 @@ pub const Lexer = struct {
         return string;
     }
 
-    /// Tokenize the entire source
-    pub fn scanTokens(self: *Lexer) LexerError![]Token {
-        // pre-allocate capacity based on source length estimate (1 token per ~8 characters)
-        const estimated_tokens = @max(32, self.source.len / 8);
-        try self.tokens.ensureTotalCapacity(self.allocator, estimated_tokens);
+    fn scanTokensIntoBuffer(self: *Lexer) LexerError!void {
+        // Pre-allocate capacity based on the Ora corpus token density.
+        const estimated_tokens = @max(32, self.source.len / 5 + 8);
+        try self.tokens.ensureTotalCapacityPrecise(self.allocator, estimated_tokens);
 
         while (!self.isAtEnd()) {
             self.start = self.current;
@@ -908,15 +921,24 @@ pub const Lexer = struct {
 
         try self.tokens.append(self.allocator, Token{
             .type = .Eof,
-            .lexeme = "",
             .range = eof_range,
             .value = null,
-            // legacy fields for backward compatibility
-            .line = self.line,
-            .column = self.column,
         });
+    }
 
+    /// Tokenize the entire source and transfer ownership of the token buffer.
+    /// Literal token values remain owned by the lexer and are valid until
+    /// `deinit` or `reset`.
+    pub fn scanTokens(self: *Lexer) LexerError![]Token {
+        try self.scanTokensIntoBuffer();
         return self.tokens.toOwnedSlice(self.allocator);
+    }
+
+    /// Tokenize the entire source and return a view owned by the lexer.
+    /// The slice is valid until the lexer is deinitialized or reset.
+    pub fn scanTokensBorrowed(self: *Lexer) LexerError![]const Token {
+        try self.scanTokensIntoBuffer();
+        return self.tokens.items;
     }
 
     fn scanToken(self: *Lexer) LexerError!void {
@@ -1296,37 +1318,44 @@ pub const Lexer = struct {
     pub fn appendTokenWithValue(self: *Lexer, token_type: TokenType, value: ?TokenValue) LexerError!void {
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
-            .lexeme = self.source[self.start..self.current],
             .range = self.currentRange(),
-            .value = value,
-            .line = self.line,
-            .column = self.start_column,
+            .value = try self.ownTokenValue(value),
         });
     }
 
+    fn ownTokenValue(self: *Lexer, value: ?TokenValue) LexerError!?*const TokenValue {
+        const actual = value orelse return null;
+        const owned = self.arena.allocator().create(TokenValue) catch return LexerError.OutOfMemory;
+        owned.* = actual;
+        return owned;
+    }
+
     pub fn addToken(self: *Lexer, token_type: TokenType) LexerError!void {
-        const token_value: ?TokenValue = switch (token_type) {
-            .True => .{ .boolean = true },
-            .False => .{ .boolean = false },
-            else => null,
-        };
+        const token_value: ?TokenValue = if (self.config.store_token_values)
+            switch (token_type) {
+                .True => .{ .boolean = true },
+                .False => .{ .boolean = false },
+                else => null,
+            }
+        else
+            null;
         try self.appendTokenWithValue(token_type, token_value);
     }
 
     pub fn addTokenWithInterning(self: *Lexer, token_type: TokenType) LexerError!void {
-        const interned_text = try self.internString(self.source[self.start..self.current]);
-        const token_value: ?TokenValue = switch (token_type) {
-            .True => .{ .boolean = true },
-            .False => .{ .boolean = false },
-            else => null,
-        };
+        _ = try self.internString(self.source[self.start..self.current]);
+        const token_value: ?TokenValue = if (self.config.store_token_values)
+            switch (token_type) {
+                .True => .{ .boolean = true },
+                .False => .{ .boolean = false },
+                else => null,
+            }
+        else
+            null;
         try self.tokens.append(self.allocator, Token{
             .type = token_type,
-            .lexeme = interned_text,
             .range = self.currentRange(),
-            .value = token_value,
-            .line = self.line,
-            .column = self.start_column,
+            .value = try self.ownTokenValue(token_value),
         });
     }
 
@@ -1334,20 +1363,45 @@ pub const Lexer = struct {
     fn findNextTokenBoundary(self: *Lexer) u32 {
         return ErrorRecovery.findNextTokenBoundary(self.source, self.current);
     }
+
+    fn scanTokensOwned(self: *Lexer) LexerError!OwnedTokens {
+        try self.scanTokensIntoBuffer();
+
+        const tokens = try self.tokens.toOwnedSlice(self.allocator);
+        const value_arena = self.arena;
+
+        self.arena = std.heap.ArenaAllocator.init(self.allocator);
+        self.trivia.deinit(self.allocator);
+        self.trivia = .{};
+        if (self.error_recovery) |*recovery| {
+            recovery.deinit();
+            self.error_recovery = null;
+        }
+        if (self.string_pool) |*pool| {
+            pool.deinit();
+            self.string_pool = null;
+        }
+
+        return .{
+            .allocator = self.allocator,
+            .tokens = tokens,
+            .value_arena = value_arena,
+        };
+    }
 };
 
-/// Convenience function for testing - tokenizes source and returns tokens
-pub fn scan(source: []const u8, allocator: Allocator) LexerError![]Token {
+/// Convenience function for testing - tokenizes source and returns owned tokens.
+pub fn scan(source: []const u8, allocator: Allocator) LexerError!OwnedTokens {
     var lexer = Lexer.init(allocator, source);
-    defer lexer.deinit();
-    return lexer.scanTokens();
+    errdefer lexer.deinit();
+    return lexer.scanTokensOwned();
 }
 
 /// Convenience function with configuration - tokenizes source with custom config.
-pub fn scanWithConfig(source: []const u8, allocator: Allocator, config: LexerConfig) (LexerError || LexerConfigError)![]Token {
+pub fn scanWithConfig(source: []const u8, allocator: Allocator, config: LexerConfig) (LexerError || LexerConfigError)!OwnedTokens {
     var lexer = try Lexer.initWithConfig(allocator, source, config);
-    defer lexer.deinit();
-    return lexer.scanTokens();
+    errdefer lexer.deinit();
+    return lexer.scanTokensOwned();
 }
 
 // Character classification lookup tables for performance optimization

@@ -107,7 +107,7 @@ pub const Formatter = struct {
             },
             else => {
                 try self.emitPreTokenSpacing(token);
-                try self.writer.write(token.lexeme);
+                try self.writer.write(self.originalSpan(token));
                 try self.emitPostTokenSpacing(token, next);
             },
         }
@@ -255,7 +255,7 @@ pub const Formatter = struct {
     }
 
     fn emitPostTokenSpacing(self: *Formatter, token: lib.Token, next: ?lib.Token) FormatError!void {
-        if (isKeywordThatNeedsSpaceAfter(token, next)) {
+        if (isKeywordThatNeedsSpaceAfter(self.source, token, next)) {
             self.pending_space = true;
             return;
         }
@@ -277,7 +277,7 @@ pub const Formatter = struct {
         const start: usize = @intCast(token.range.start_offset);
         const end: usize = @intCast(token.range.end_offset);
         if (start <= end and end <= self.source.len) return self.source[start..end];
-        return token.lexeme;
+        return "";
     }
 
     fn ensureSpaceBefore(self: *Formatter) FormatError!void {
@@ -323,9 +323,9 @@ fn shouldForceLeadingSpace(current: lib.TokenType, previous: ?lib.TokenType) boo
     };
 }
 
-fn isKeywordThatNeedsSpaceAfter(token: lib.Token, next: ?lib.Token) bool {
+fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib.Token) bool {
     _ = next;
-    if (token.type == .Identifier and std.mem.eql(u8, token.lexeme, "type")) return true;
+    if (token.type == .Identifier and std.mem.eql(u8, lib.lexer.tokenLexeme(source, token), "type")) return true;
     return switch (token.type) {
         .Contract,
         .Pub,

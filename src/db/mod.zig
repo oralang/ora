@@ -388,12 +388,14 @@ pub const CompilerDb = struct {
             return self.typeCheck(module_id, .{ .body = ast.BodyId.fromIndex(0) });
         }
 
-        var primary: ?*const sema.TypeCheckResult = null;
         for (ast_file.root_items) |item_id| {
-            const result = try self.typeCheck(module_id, .{ .item = item_id });
-            if (primary == null) primary = result;
+            if (self.typecheck_slots.items[module_id.index()].lookup(.{ .item = item_id })) |cached| {
+                return cached;
+            }
         }
-        return primary.?;
+        // sema.typeCheck currently computes whole-module tables regardless of key.
+        // Running it once is enough for module-level consumers.
+        return self.typeCheck(module_id, .{ .item = ast_file.root_items[0] });
     }
 
     pub fn constEval(self: *CompilerDb, module_id: source.ModuleId) !*const ConstEvalResult {
@@ -464,16 +466,11 @@ pub const CompilerDb = struct {
             var facts: std.ArrayList(sema.VerificationFact) = .{};
             defer facts.deinit(arena);
 
-            if (ast_file.root_items.len == 0) {
-                // Empty modules have no real body. This sentinel key is only used to cache/query
-                // the empty-module result and must never be dereferenced as file.bodies[0].
-                const root = try self.verificationFacts(module_id, .{ .body = ast.BodyId.fromIndex(0) });
-                try facts.appendSlice(arena, root.facts);
-            } else {
+            if (ast_file.root_items.len != 0) {
                 const visited_items = try arena.alloc(bool, ast_file.items.len);
                 @memset(visited_items, false);
                 for (ast_file.root_items) |item_id| {
-                    try self.appendVerificationFactsForItemTree(module_id, ast_file, item_id, visited_items, arena, &facts);
+                    try self.appendVerificationFactsForItemTree(ast_file, item_id, visited_items, arena, &facts);
                 }
             }
 
@@ -485,7 +482,6 @@ pub const CompilerDb = struct {
 
     fn appendVerificationFactsForItemTree(
         self: *CompilerDb,
-        module_id: source.ModuleId,
         ast_file: *const ast.AstFile,
         item_id: ast.ItemId,
         visited_items: []bool,
@@ -496,29 +492,28 @@ pub const CompilerDb = struct {
         if (item_index >= visited_items.len or visited_items[item_index]) return;
         visited_items[item_index] = true;
 
-        const item_facts = try self.verificationFacts(module_id, .{ .item = item_id });
-        try facts.appendSlice(allocator, item_facts.facts);
+        try sema.appendVerificationFacts(allocator, ast_file, .{ .item = item_id }, facts);
 
         switch (ast_file.item(item_id).*) {
             .Contract => |contract| {
                 for (contract.members) |member_id| {
-                    try self.appendVerificationFactsForItemTree(module_id, ast_file, member_id, visited_items, allocator, facts);
+                    try self.appendVerificationFactsForItemTree(ast_file, member_id, visited_items, allocator, facts);
                 }
             },
             .Impl => |impl_item| {
                 for (impl_item.methods) |method_id| {
-                    try self.appendVerificationFactsForItemTree(module_id, ast_file, method_id, visited_items, allocator, facts);
+                    try self.appendVerificationFactsForItemTree(ast_file, method_id, visited_items, allocator, facts);
                 }
             },
             .Trait => {},
             .Struct => |struct_item| {
                 for (struct_item.metadata) |metadata_id| {
-                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                    try self.appendVerificationFactsForItemTree(ast_file, metadata_id, visited_items, allocator, facts);
                 }
             },
             .LogDecl => |log_decl| {
                 for (log_decl.metadata) |metadata_id| {
-                    try self.appendVerificationFactsForItemTree(module_id, ast_file, metadata_id, visited_items, allocator, facts);
+                    try self.appendVerificationFactsForItemTree(ast_file, metadata_id, visited_items, allocator, facts);
                 }
             },
             else => {},
@@ -556,7 +551,9 @@ pub const CompilerDb = struct {
         if (slot.* == null) {
             compilerPhaseLog("syntax file={d} begin", .{file_id.index()});
             const result = try self.allocator.create(syntax.ParseResult);
-            result.* = try syntax.parse(self.allocator, file_id, self.sources.sourceText(file_id));
+            result.* = try syntax.parseWithOptions(self.allocator, file_id, self.sources.sourceText(file_id), .{
+                .preserve_trivia = false,
+            });
             compilerPhaseLog("syntax file={d} done", .{file_id.index()});
             slot.* = result;
         }
@@ -722,11 +719,11 @@ pub const CompilerDb = struct {
         const item_effects = try arena_allocator.alloc(sema.Effect, ast_file.items.len);
         const item_modifies = try arena_allocator.alloc(?[]sema.EffectSlot, ast_file.items.len);
         const pattern_types = try arena_allocator.alloc(sema.LocatedType, ast_file.patterns.len);
-        const pattern_initializers = try arena_allocator.alloc(?ast.ExprId, ast_file.patterns.len);
-        const pattern_binding_kinds = try arena_allocator.alloc(?ast.BindingKind, ast_file.patterns.len);
+        const pattern_initializers: []?ast.ExprId = &.{};
+        const pattern_binding_kinds: []?ast.BindingKind = &.{};
         const expr_types = try arena_allocator.alloc(sema.Type, ast_file.expressions.len);
-        const call_resolutions = try arena_allocator.alloc(?sema.ResolvedCall, ast_file.expressions.len);
-        const expr_effects = try arena_allocator.alloc(sema.Effect, ast_file.expressions.len);
+        const call_resolutions: []?sema.ResolvedCall = &.{};
+        const expr_effects: []const sema.ExprEffect = &.{};
         const body_types = try arena_allocator.alloc(sema.Type, ast_file.bodies.len);
 
         for (item_types) |*item_type| item_type.* = .{ .unknown = {} };
@@ -734,11 +731,7 @@ pub const CompilerDb = struct {
         for (item_effects) |*effect| effect.* = .pure;
         @memset(item_modifies, null);
         for (pattern_types) |*pattern_type| pattern_type.* = sema.LocatedType.unlocated(.{ .unknown = {} });
-        @memset(pattern_initializers, null);
-        @memset(pattern_binding_kinds, null);
         for (expr_types) |*expr_type| expr_type.* = .{ .unknown = {} };
-        @memset(call_resolutions, null);
-        for (expr_effects) |*effect| effect.* = .pure;
         for (body_types) |*body_type| body_type.* = .{ .unknown = {} };
 
         result.* = .{

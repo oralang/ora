@@ -118,6 +118,7 @@ pub fn walkStmt(
         },
         .Switch => |switch_stmt| {
             try walkExpr(Visitor, visitor, ast_file, switch_stmt.condition, options);
+            for (switch_stmt.invariants) |expr_id| try walkExpr(Visitor, visitor, ast_file, expr_id, options);
             for (switch_stmt.arms) |arm| {
                 if (options.walk_switch_patterns) try walkSwitchPattern(Visitor, visitor, ast_file, arm.pattern, options);
                 try walkBody(Visitor, visitor, ast_file, arm.body, options);

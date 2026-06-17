@@ -46,7 +46,7 @@ const parseIntegerLiteral = bridge.parseIntegerLiteral;
 const wrapIntegerConstToType = bridge.wrapIntegerConstToType;
 const named_type_id_module_stride: u32 = 100_000;
 
-fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]const u8 {
+fn selectorFixedBytes(allocator: std.mem.Allocator, selector: u32) ![]u8 {
     const bytes = try allocator.alloc(u8, 4);
     std.mem.writeInt(u32, bytes[0..4], selector, .big);
     return bytes;
@@ -546,7 +546,7 @@ const ConstEvaluator = struct {
             },
             .BytesLiteral => |literal| blk: {
                 const bytes = try self.decodeHexBytesLiteral(literal.text);
-                const heap_id = try self.env.heap.allocBytes(bytes);
+                const heap_id = try self.env.heap.allocBytesOwned(bytes);
                 break :blk CtValue{ .bytes_ref = heap_id };
             },
             .Name => |name| self.env.lookupValue(name.name) orelse blk: {
@@ -578,7 +578,7 @@ const ConstEvaluator = struct {
                     _ = try self.evalExprImpl(element_id, use_cache);
                     elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                 }
-                const heap_id = try self.env.heap.allocArray(elems);
+                const heap_id = try self.env.heap.allocArrayOwned(elems);
                 break :blk CtValue{ .array_ref = heap_id };
             },
             .Tuple => |tuple| blk: {
@@ -587,7 +587,7 @@ const ConstEvaluator = struct {
                     _ = try self.evalExprImpl(element_id, use_cache);
                     elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                 }
-                const heap_id = try self.env.heap.allocTuple(elems);
+                const heap_id = try self.env.heap.allocTupleOwned(elems);
                 break :blk CtValue{ .tuple_ref = heap_id };
             },
             .StructLiteral => |struct_literal| blk: {
@@ -606,7 +606,7 @@ const ConstEvaluator = struct {
                         .value = value,
                     };
                 }
-                const heap_id = try self.env.heap.allocStruct(type_id, fields);
+                const heap_id = try self.env.heap.allocStructOwned(type_id, fields);
                 break :blk CtValue{ .struct_ref = heap_id };
             },
             .Index => |index| blk: {
@@ -797,7 +797,7 @@ const ConstEvaluator = struct {
                         _ = try self.evalExprImpl(element_id, use_cache);
                         elems[idx] = (try self.evalExprCtValueImpl(element_id, use_cache, true)) orelse break :blk null;
                     }
-                    const heap_id = try self.env.heap.allocSlice(elems);
+                    const heap_id = try self.env.heap.allocSliceOwned(elems);
                     break :blk CtValue{ .slice_ref = heap_id };
                 },
                 else => try self.evalExprCtValueImpl(expr_id, use_cache, true),
@@ -805,7 +805,7 @@ const ConstEvaluator = struct {
             .map => switch (self.file.expression(expr_id).*) {
                 .ArrayLiteral, .Tuple => blk: {
                     const entries = (try self.evalMapEntries(expr_id)) orelse break :blk null;
-                    const heap_id = try self.env.heap.allocMap(entries);
+                    const heap_id = try self.env.heap.allocMapOwned(entries);
                     break :blk CtValue{ .map_ref = heap_id };
                 },
                 else => try self.evalExprCtValueImpl(expr_id, use_cache, true),
@@ -976,7 +976,7 @@ const ConstEvaluator = struct {
         if (call.args.len != 1) return null;
 
         const payload_value = (try self.evalExprAsCtValue(call.args[0], use_cache)) orelse return null;
-        const payload_id = try self.env.heap.allocTuple(try self.allocator.dupe(CtValue, &.{payload_value}));
+        const payload_id = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{payload_value}));
         return CtValue{ .error_union_val = CtErrorUnion{
             .is_error = std.mem.eql(u8, name, "Err"),
             .payload = payload_id,
@@ -987,11 +987,13 @@ const ConstEvaluator = struct {
         const item_id = self.lookupNamedItem(error_return.name) orelse return null;
         const item = self.file.item(item_id).*;
         if (item != .ErrorDecl) return null;
-        const elems = try self.allocator.alloc(CtValue, error_return.args.len);
-        for (error_return.args, 0..) |arg, index| {
-            elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
-        }
-        const payload_id: ?comptime_mod.HeapId = if (elems.len == 0) null else try self.env.heap.allocTuple(elems);
+        const payload_id: ?comptime_mod.HeapId = if (error_return.args.len == 0) null else blk: {
+            const elems = try self.allocator.alloc(CtValue, error_return.args.len);
+            for (error_return.args, 0..) |arg, index| {
+                elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
+            }
+            break :blk try self.env.heap.allocTupleOwned(elems);
+        };
         return CtValue{ .adt_val = CtEnum{
             .type_id = self.namedTypeId(item_id),
             .variant_id = 0,
@@ -1005,11 +1007,13 @@ const ConstEvaluator = struct {
         const item = self.file.item(item_id).*;
         if (item != .ErrorDecl) return null;
 
-        const elems = try self.allocator.alloc(CtValue, call.args.len);
-        for (call.args, 0..) |arg, index| {
-            elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
-        }
-        const payload_id: ?comptime_mod.HeapId = if (elems.len == 0) null else try self.env.heap.allocTuple(elems);
+        const payload_id: ?comptime_mod.HeapId = if (call.args.len == 0) null else blk: {
+            const elems = try self.allocator.alloc(CtValue, call.args.len);
+            for (call.args, 0..) |arg, index| {
+                elems[index] = (try self.evalExprAsCtValue(arg, use_cache)) orelse return null;
+            }
+            break :blk try self.env.heap.allocTupleOwned(elems);
+        };
         return CtValue{ .adt_val = .{
             .type_id = self.namedTypeId(item_id),
             .variant_id = 0,
@@ -1044,7 +1048,7 @@ const ConstEvaluator = struct {
             elems[index] = value;
         }
 
-        const payload_id = try self.env.heap.allocTuple(elems);
+        const payload_id = try self.env.heap.allocTupleOwned(elems);
         return CtValue{ .adt_val = .{
             .type_id = self.namedTypeId(variant_ref.item_id),
             .variant_id = variant_ref.variant_id,
@@ -1063,7 +1067,7 @@ const ConstEvaluator = struct {
                 }
                 elems[index] = value;
             }
-            break :blk try self.env.heap.allocTuple(elems);
+            break :blk try self.env.heap.allocTupleOwned(elems);
         };
         return CtValue{ .adt_val = .{
             .type_id = self.namedTypeId(variant_ref.item_id),
@@ -2001,7 +2005,7 @@ const ConstEvaluator = struct {
                 CtValue{ .type_val = type_id },
             });
         }
-        return .{ .slice_ref = try self.env.heap.allocSlice(elems) };
+        return .{ .slice_ref = try self.env.heap.allocSliceOwned(elems) };
     }
 
     fn buildTraitMethodsCtValue(self: *ConstEvaluator, trait_ref: ReflectionTraitReference) !CtValue {
@@ -2036,20 +2040,20 @@ const ConstEvaluator = struct {
             // Keep this tuple order in sync with traitMethodReflectionType.
             elems[index] = try self.reflectionTuple(&.{
                 CtValue{ .string_ref = try self.env.heap.allocString(method.name) },
-                CtValue{ .slice_ref = try self.env.heap.allocSlice(params) },
+                CtValue{ .slice_ref = try self.env.heap.allocSliceOwned(params) },
                 CtValue{ .type_val = self.typeIdForModelType(method.return_type) orelse return error.NotComptime },
                 CtValue{ .boolean = method.receiver_kind != .none },
                 CtValue{ .string_ref = try self.env.heap.allocString(externCallKindName(method.extern_call_kind)) },
-                CtValue{ .slice_ref = try self.env.heap.allocSlice(declared_errors) },
-                CtValue{ .bytes_ref = try self.env.heap.allocBytes(try selectorFixedBytes(self.allocator, selector)) },
+                CtValue{ .slice_ref = try self.env.heap.allocSliceOwned(declared_errors) },
+                CtValue{ .bytes_ref = try self.env.heap.allocBytesOwned(try selectorFixedBytes(self.allocator, selector)) },
             });
         }
-        return .{ .slice_ref = try self.env.heap.allocSlice(elems) };
+        return .{ .slice_ref = try self.env.heap.allocSliceOwned(elems) };
     }
 
     fn reflectionTuple(self: *ConstEvaluator, values: []const CtValue) !CtValue {
         const copied = try self.allocator.dupe(CtValue, values);
-        return .{ .tuple_ref = try self.env.heap.allocTuple(copied) };
+        return .{ .tuple_ref = try self.env.heap.allocTupleOwned(copied) };
     }
 
     fn anonymousStructFieldIndexForExpr(self: *ConstEvaluator, expr_id: ast.ExprId, field_name: []const u8) !?usize {
@@ -2452,7 +2456,7 @@ const ConstEvaluator = struct {
     }
 
     fn abiDecodeOk(self: *ConstEvaluator, value: CtValue) !CtValue {
-        const payload_id = try self.env.heap.allocTuple(try self.allocator.dupe(CtValue, &.{value}));
+        const payload_id = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{value}));
         return .{ .error_union_val = .{
             .is_error = false,
             .payload = payload_id,
@@ -2465,7 +2469,7 @@ const ConstEvaluator = struct {
             .variant_id = @intFromEnum(err),
             .payload = null,
         } };
-        const payload_id = try self.env.heap.allocTuple(try self.allocator.dupe(CtValue, &.{err_value}));
+        const payload_id = try self.env.heap.allocTupleOwned(try self.allocator.dupe(CtValue, &.{err_value}));
         return .{ .error_union_val = .{
             .is_error = true,
             .payload = payload_id,
@@ -3968,7 +3972,7 @@ const ConstEvaluator = struct {
                 for (array.elements, 0..) |element_id, idx| {
                     elems[idx] = (try self.evalIterableCtValue(element_id)) orelse break :blk null;
                 }
-                const heap_id = try self.env.heap.allocArray(elems);
+                const heap_id = try self.env.heap.allocArrayOwned(elems);
                 break :blk CtValue{ .array_ref = heap_id };
             },
             .Tuple => |tuple| blk: {
@@ -3976,7 +3980,7 @@ const ConstEvaluator = struct {
                 for (tuple.elements, 0..) |element_id, idx| {
                     elems[idx] = (try self.evalIterableCtValue(element_id)) orelse break :blk null;
                 }
-                const heap_id = try self.env.heap.allocTuple(elems);
+                const heap_id = try self.env.heap.allocTupleOwned(elems);
                 break :blk CtValue{ .tuple_ref = heap_id };
             },
             .Builtin => |builtin| blk: {

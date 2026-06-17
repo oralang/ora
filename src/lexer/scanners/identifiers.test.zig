@@ -18,7 +18,7 @@ test "identifiers: simple identifier" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.Identifier, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "myVariable", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "myVariable", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "identifiers: identifier with underscore" {
@@ -32,7 +32,7 @@ test "identifiers: identifier with underscore" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.Identifier, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "my_variable", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "my_variable", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "identifiers: identifier with numbers" {
@@ -46,7 +46,7 @@ test "identifiers: identifier with numbers" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.Identifier, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "var123", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "var123", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "identifiers: keywords vs identifiers" {
@@ -96,5 +96,5 @@ test "identifiers: unknown @ name tokenizes for later semantic validation" {
     try testing.expect(tokens.len >= 2);
     try testing.expectEqual(lexer.TokenType.At, tokens[0].type);
     try testing.expectEqual(lexer.TokenType.Identifier, tokens[1].type);
-    try testing.expectEqualStrings("someDirective", tokens[1].lexeme);
+    try testing.expectEqualStrings("someDirective", lexer.tokenLexeme(source, tokens[1]));
 }

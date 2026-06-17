@@ -138,63 +138,117 @@ pub const CtHeap = struct {
     /// Allocate a bytes array
     pub fn allocBytes(self: *CtHeap, data: []const u8) !HeapId {
         const copy = try self.allocator.dupe(u8, data);
-        self.total_bytes += copy.len;
+        return self.allocBytesOwned(copy);
+    }
+
+    /// Allocate a bytes array, taking ownership of an allocator-owned buffer.
+    pub fn allocBytesOwned(self: *CtHeap, data: []u8) !HeapId {
+        errdefer self.allocator.free(data);
+        self.total_bytes += data.len;
+        errdefer self.total_bytes -= data.len;
         return self.alloc(.{
-            .data = .{ .bytes = copy },
+            .data = .{ .bytes = data },
         });
     }
 
     /// Allocate a string
     pub fn allocString(self: *CtHeap, data: []const u8) !HeapId {
         const copy = try self.allocator.dupe(u8, data);
-        self.total_bytes += copy.len;
+        return self.allocStringOwned(copy);
+    }
+
+    /// Allocate a string, taking ownership of an allocator-owned buffer.
+    pub fn allocStringOwned(self: *CtHeap, data: []u8) !HeapId {
+        errdefer self.allocator.free(data);
+        self.total_bytes += data.len;
+        errdefer self.total_bytes -= data.len;
         return self.alloc(.{
-            .data = .{ .string = copy },
+            .data = .{ .string = data },
         });
     }
 
     /// Allocate an array
     pub fn allocArray(self: *CtHeap, elems: []const CtValue) !HeapId {
         const copy = try self.allocator.dupe(CtValue, elems);
-        self.total_bytes += copy.len * @sizeOf(CtValue);
+        return self.allocArrayOwned(copy);
+    }
+
+    /// Allocate an array, taking ownership of an allocator-owned element buffer.
+    pub fn allocArrayOwned(self: *CtHeap, elems: []CtValue) !HeapId {
+        errdefer self.allocator.free(elems);
+        const bytes = elems.len * @sizeOf(CtValue);
+        self.total_bytes += bytes;
+        errdefer self.total_bytes -= bytes;
         return self.alloc(.{
-            .data = .{ .array = .{ .elems = copy } },
+            .data = .{ .array = .{ .elems = elems } },
         });
     }
 
     /// Allocate a slice
     pub fn allocSlice(self: *CtHeap, elems: []const CtValue) !HeapId {
         const copy = try self.allocator.dupe(CtValue, elems);
-        self.total_bytes += copy.len * @sizeOf(CtValue);
+        return self.allocSliceOwned(copy);
+    }
+
+    /// Allocate a slice, taking ownership of an allocator-owned element buffer.
+    pub fn allocSliceOwned(self: *CtHeap, elems: []CtValue) !HeapId {
+        errdefer self.allocator.free(elems);
+        const bytes = elems.len * @sizeOf(CtValue);
+        self.total_bytes += bytes;
+        errdefer self.total_bytes -= bytes;
         return self.alloc(.{
-            .data = .{ .slice = .{ .elems = copy } },
+            .data = .{ .slice = .{ .elems = elems } },
         });
     }
 
     /// Allocate a map
     pub fn allocMap(self: *CtHeap, entries: []const CtAggregate.MapEntry) !HeapId {
         const copy = try self.allocator.dupe(CtAggregate.MapEntry, entries);
-        self.total_bytes += copy.len * @sizeOf(CtAggregate.MapEntry);
+        return self.allocMapOwned(copy);
+    }
+
+    /// Allocate a map, taking ownership of an allocator-owned entry buffer.
+    pub fn allocMapOwned(self: *CtHeap, entries: []CtAggregate.MapEntry) !HeapId {
+        errdefer self.allocator.free(entries);
+        const bytes = entries.len * @sizeOf(CtAggregate.MapEntry);
+        self.total_bytes += bytes;
+        errdefer self.total_bytes -= bytes;
         return self.alloc(.{
-            .data = .{ .map = .{ .entries = copy } },
+            .data = .{ .map = .{ .entries = entries } },
         });
     }
 
     /// Allocate a tuple
     pub fn allocTuple(self: *CtHeap, elems: []const CtValue) !HeapId {
         const copy = try self.allocator.dupe(CtValue, elems);
-        self.total_bytes += copy.len * @sizeOf(CtValue);
+        return self.allocTupleOwned(copy);
+    }
+
+    /// Allocate a tuple, taking ownership of an allocator-owned element buffer.
+    pub fn allocTupleOwned(self: *CtHeap, elems: []CtValue) !HeapId {
+        errdefer self.allocator.free(elems);
+        const bytes = elems.len * @sizeOf(CtValue);
+        self.total_bytes += bytes;
+        errdefer self.total_bytes -= bytes;
         return self.alloc(.{
-            .data = .{ .tuple = .{ .elems = copy } },
+            .data = .{ .tuple = .{ .elems = elems } },
         });
     }
 
     /// Allocate a struct
     pub fn allocStruct(self: *CtHeap, type_id: TypeId, fields: []const CtAggregate.StructField) !HeapId {
         const copy = try self.allocator.dupe(CtAggregate.StructField, fields);
-        self.total_bytes += copy.len * @sizeOf(CtAggregate.StructField);
+        return self.allocStructOwned(type_id, copy);
+    }
+
+    /// Allocate a struct, taking ownership of an allocator-owned field buffer.
+    pub fn allocStructOwned(self: *CtHeap, type_id: TypeId, fields: []CtAggregate.StructField) !HeapId {
+        errdefer self.allocator.free(fields);
+        const bytes = fields.len * @sizeOf(CtAggregate.StructField);
+        self.total_bytes += bytes;
+        errdefer self.total_bytes -= bytes;
         return self.alloc(.{
-            .data = .{ .struct_val = .{ .type_id = type_id, .fields = copy } },
+            .data = .{ .struct_val = .{ .type_id = type_id, .fields = fields } },
         });
     }
 

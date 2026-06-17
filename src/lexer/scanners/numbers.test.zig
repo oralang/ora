@@ -19,7 +19,7 @@ test "numbers: decimal literals" {
         defer allocator.free(tokens);
 
         try testing.expectEqual(lexer.TokenType.IntegerLiteral, tokens[0].type);
-        try testing.expect(std.mem.eql(u8, source, tokens[0].lexeme));
+        try testing.expect(std.mem.eql(u8, source, lexer.tokenLexeme(source, tokens[0])));
     }
 }
 
@@ -40,7 +40,7 @@ test "numbers: hex literals" {
         defer allocator.free(tokens);
 
         try testing.expectEqual(tc.expected, tokens[0].type);
-        try testing.expect(std.mem.eql(u8, tc.source, tokens[0].lexeme));
+        try testing.expect(std.mem.eql(u8, tc.source, lexer.tokenLexeme(tc.source, tokens[0])));
     }
 }
 
@@ -76,7 +76,7 @@ test "numbers: binary literals" {
         defer allocator.free(tokens);
 
         try testing.expectEqual(lexer.TokenType.BinaryLiteral, tokens[0].type);
-        try testing.expect(std.mem.eql(u8, source, tokens[0].lexeme));
+        try testing.expect(std.mem.eql(u8, source, lexer.tokenLexeme(source, tokens[0])));
     }
 }
 

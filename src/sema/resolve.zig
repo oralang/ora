@@ -26,7 +26,17 @@ pub fn resolveNames(
     const bindings = try arena.alloc(?ResolvedBinding, file.expressions.len);
     @memset(bindings, null);
 
-    var root_env = try Env.init(arena, null);
+    var root_binding_capacity: usize = 0;
+    for (item_index.entries) |entry| {
+        if (std.mem.indexOfScalar(u8, entry.name, '.')) |_| continue;
+        root_binding_capacity += 1;
+    }
+    for (file.root_items) |item_id| {
+        const item = file.item(item_id).*;
+        if (item == .Import and item.Import.alias != null) root_binding_capacity += 1;
+    }
+
+    var root_env = try Env.initCapacity(arena, null, root_binding_capacity);
     for (item_index.entries) |entry| {
         if (std.mem.indexOfScalar(u8, entry.name, '.')) |_| continue;
         try root_env.bindings.put(entry.name, .{ .item = entry.item_id });
@@ -67,6 +77,12 @@ const Env = struct {
         };
     }
 
+    fn initCapacity(allocator: std.mem.Allocator, parent: ?*const Env, capacity: usize) !Env {
+        var env = try init(allocator, parent);
+        if (capacity > 1) try env.bindings.ensureTotalCapacity(@intCast(capacity));
+        return env;
+    }
+
     fn lookup(self: *const Env, name: []const u8) ?ResolvedBinding {
         if (self.bindings.get(name)) |binding| return binding;
         if (self.parent) |parent| return parent.lookup(name);
@@ -85,7 +101,7 @@ const Resolver = struct {
     fn resolveItem(self: *Resolver, item_id: ast.ItemId, env: *const Env) anyerror!void {
         switch (self.file.item(item_id).*) {
             .Contract => |contract| {
-                var contract_env = try Env.init(self.arena, env);
+                var contract_env = try Env.initCapacity(self.arena, env, contract.members.len);
                 for (contract.members) |member_id| {
                     const member = self.file.item(member_id).*;
                     const name = switch (member) {
@@ -111,7 +127,7 @@ const Resolver = struct {
                 }
             },
             .Function => |function| {
-                var function_env = try Env.init(self.arena, env);
+                var function_env = try Env.initCapacity(self.arena, env, function.parameters.len);
                 for (function.parameters) |parameter| {
                     try self.bindPatternIfName(&function_env, parameter.pattern);
                 }
@@ -123,7 +139,7 @@ const Resolver = struct {
             .Trait => |trait_item| {
                 var trait_env = try Env.init(self.arena, env);
                 for (trait_item.methods) |method| {
-                    var method_env = try Env.init(self.arena, &trait_env);
+                    var method_env = try Env.initCapacity(self.arena, &trait_env, method.parameters.len);
                     for (method.parameters) |parameter| {
                         try self.bindPatternIfName(&method_env, parameter.pattern);
                     }
@@ -133,7 +149,7 @@ const Resolver = struct {
                 }
             },
             .Impl => |impl_item| {
-                var impl_env = try Env.init(self.arena, env);
+                var impl_env = try Env.initCapacity(self.arena, env, impl_item.methods.len + 1);
                 for (impl_item.methods) |method_id| {
                     const item = self.file.item(method_id).*;
                     if (item != .Function) continue;
@@ -181,8 +197,8 @@ const Resolver = struct {
     }
 
     fn resolveBody(self: *Resolver, body_id: ast.BodyId, env: *const Env) anyerror!void {
-        var body_env = try Env.init(self.arena, env);
         const body = self.file.body(body_id).*;
+        var body_env = try Env.initCapacity(self.arena, env, self.bodyBindingCapacity(body));
         for (body.statements) |statement_id| {
             try self.resolveStmt(statement_id, &body_env);
         }
@@ -236,6 +252,7 @@ const Resolver = struct {
             },
             .Switch => |switch_stmt| {
                 try self.resolveExpr(switch_stmt.condition, env);
+                for (switch_stmt.invariants) |expr_id| try self.resolveExpr(expr_id, env);
                 for (switch_stmt.arms) |arm| {
                     var arm_env = try Env.init(self.arena, env);
                     switch (arm.pattern) {
@@ -431,6 +448,29 @@ const Resolver = struct {
             },
             else => {},
         }
+    }
+
+    fn bodyBindingCapacity(self: *const Resolver, body: ast.Body) usize {
+        var count: usize = 0;
+        for (body.statements) |statement_id| {
+            switch (self.file.statement(statement_id).*) {
+                .VariableDecl => |decl| count += self.patternBindingCapacity(decl.pattern),
+                else => {},
+            }
+        }
+        return count;
+    }
+
+    fn patternBindingCapacity(self: *const Resolver, pattern_id: ast.PatternId) usize {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| if (std.mem.eql(u8, name.name, "_")) 0 else 1,
+            .StructDestructure => |destructure| blk: {
+                var count: usize = 0;
+                for (destructure.fields) |field| count += self.patternBindingCapacity(field.binding);
+                break :blk count;
+            },
+            else => 0,
+        };
     }
 
     fn firstImplSelfPattern(self: *Resolver, impl_item: ast.ImplItem) ?ast.PatternId {

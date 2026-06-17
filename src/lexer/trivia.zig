@@ -25,6 +25,11 @@ pub const TriviaPiece = struct {
     span: SourceRange,
 };
 
+inline fn appendTrivia(lexer: *Lexer, kind: TriviaKind, span: SourceRange) !void {
+    if (!lexer.config.preserve_trivia) return;
+    try lexer.trivia.append(lexer.allocator, .{ .kind = kind, .span = span });
+}
+
 /// String interning pool for deduplicating repeated strings
 pub const StringPool = struct {
     strings: std.HashMap(u64, []const u8, std.hash_map.AutoContext(u64), std.hash_map.default_max_load_percentage),
@@ -131,6 +136,25 @@ pub const StringProcessor = struct {
         return result.toOwnedSlice(self.allocator);
     }
 
+    pub fn validateString(raw_string: []const u8) LexerError!void {
+        var i: usize = 0;
+        while (i < raw_string.len) {
+            if (raw_string[i] > 127) {
+                return LexerError.InvalidCharacterInString;
+            }
+
+            if (raw_string[i] == '\\') {
+                if (i + 1 >= raw_string.len) {
+                    return LexerError.InvalidEscapeSequence;
+                }
+                const escaped_char = try StringProcessor.processEscapeSequence(raw_string[i + 1 ..]);
+                i += escaped_char.consumed + 1;
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     /// Process a single escape sequence starting after the backslash with simplified validation
     /// Only supports a minimal set of escape sequences appropriate for a smart contract language
     fn processEscapeSequence(sequence: []const u8) LexerError!struct { char: u8, consumed: usize } {
@@ -212,13 +236,13 @@ pub fn captureLeadingTrivia(lexer: *Lexer) !void {
                 lexer.line += 1;
                 lexer.column = 1;
                 const span = SourceRange{ .start_line = lexer.line - 1, .start_column = start_col, .end_line = lexer.line, .end_column = 1, .start_offset = start_off, .end_offset = lexer.current };
-                try lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = .Newline, .span = span });
+                try appendTrivia(lexer, .Newline, span);
             } else {
                 while (isWhitespace(lexer.peek()) and lexer.peek() != '\n' and !lexer.isAtEnd()) {
                     _ = lexer.advance();
                 }
                 const span = SourceRange{ .start_line = lexer.line, .start_column = start_col, .end_line = lexer.line, .end_column = lexer.column, .start_offset = start_off, .end_offset = lexer.current };
-                try lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = .Whitespace, .span = span });
+                try appendTrivia(lexer, .Whitespace, span);
             }
             continue;
         }
@@ -232,7 +256,7 @@ pub fn captureLeadingTrivia(lexer: *Lexer) !void {
             while (lexer.peek() != '\n' and !lexer.isAtEnd()) _ = lexer.advance();
             const span = SourceRange{ .start_line = lexer.line, .start_column = start_col, .end_line = lexer.line, .end_column = lexer.column, .start_offset = start_off, .end_offset = lexer.current };
             // treat entire '//' to line end as line comment trivia
-            try lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = if (is_doc) .DocLineComment else .LineComment, .span = span });
+            try appendTrivia(lexer, if (is_doc) .DocLineComment else .LineComment, span);
             continue;
         }
         if (c == '/' and lexer.current + 1 < lexer.source.len and lexer.source[lexer.current + 1] == '*') {
@@ -279,7 +303,7 @@ pub fn tryCaptureClosedBlockCommentTrivia(lexer: *Lexer) bool {
     }
     if (nesting == 0) {
         const span = SourceRange{ .start_line = save_line, .start_column = save_column, .end_line = lexer.line, .end_column = lexer.column, .start_offset = save_current, .end_offset = lexer.current };
-        lexer.trivia.append(lexer.allocator, TriviaPiece{ .kind = if (is_doc) .DocBlockComment else .BlockComment, .span = span }) catch return false;
+        appendTrivia(lexer, if (is_doc) .DocBlockComment else .BlockComment, span) catch return false;
         return true;
     }
     // not closed; restore and let main scanner handle error

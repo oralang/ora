@@ -439,6 +439,7 @@ pub const SwitchStmt = struct {
     range: source.TextRange,
     label: ?[]const u8,
     condition: ExprId,
+    invariants: []ExprId = &.{},
     arms: []SwitchArm,
     else_body: ?BodyId,
 };

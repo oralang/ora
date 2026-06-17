@@ -18,7 +18,7 @@ test "strings: basic string literal" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.StringLiteral, tokens[0].type);
-    try testing.expect(std.mem.indexOf(u8, tokens[0].lexeme, "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, lexer.tokenLexeme(source, tokens[0]), "hello") != null);
 }
 
 test "strings: empty string" {

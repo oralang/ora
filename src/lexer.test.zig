@@ -13,6 +13,32 @@ const lexer = ora_root.lexer;
 // Basic Tokenization Tests
 // ============================================================================
 
+test "scan convenience returns owned literal token values" {
+    const allocator = testing.allocator;
+    const source = "123 \"hello\\n\"";
+
+    var tokens = try lexer.scan(source, allocator);
+    defer tokens.deinit();
+
+    try testing.expectEqual(lexer.TokenType.IntegerLiteral, tokens.tokens[0].type);
+    try testing.expectEqual(@as(u256, 123), tokens.tokens[0].value.?.*.integer);
+    try testing.expectEqual(lexer.TokenType.StringLiteral, tokens.tokens[1].type);
+    try testing.expectEqualStrings("hello\n", tokens.tokens[1].value.?.*.string);
+}
+
+test "scanWithConfig convenience preserves owned values after configured scan" {
+    const allocator = testing.allocator;
+    const source = "true 0xff";
+
+    var tokens = try lexer.scanWithConfig(source, allocator, lexer.LexerConfig.default());
+    defer tokens.deinit();
+
+    try testing.expectEqual(lexer.TokenType.True, tokens.tokens[0].type);
+    try testing.expect(tokens.tokens[0].value.?.*.boolean);
+    try testing.expectEqual(lexer.TokenType.HexLiteral, tokens.tokens[1].type);
+    try testing.expectEqual(@as(u256, 0xff), tokens.tokens[1].value.?.*.hex);
+}
+
 test "keywords: contract token recognized" {
     const allocator = testing.allocator;
     const source = "contract";
@@ -25,7 +51,7 @@ test "keywords: contract token recognized" {
 
     try testing.expect(tokens.len >= 2); // contract + EOF
     try testing.expectEqual(lexer.TokenType.Contract, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "contract", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "contract", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "keywords: all keywords recognized" {
@@ -140,7 +166,7 @@ test "literals: integer literals" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.IntegerLiteral, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "123", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "123", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "literals: hex literals" {
@@ -154,7 +180,7 @@ test "literals: hex literals" {
     defer allocator.free(tokens);
 
     try testing.expectEqual(lexer.TokenType.HexLiteral, tokens[0].type);
-    try testing.expect(std.mem.eql(u8, "0xFF", tokens[0].lexeme));
+    try testing.expect(std.mem.eql(u8, "0xFF", lexer.tokenLexeme(source, tokens[0])));
 }
 
 test "literals: string literals" {
@@ -169,7 +195,7 @@ test "literals: string literals" {
 
     try testing.expectEqual(lexer.TokenType.StringLiteral, tokens[0].type);
     // lexeme contains the string content (without quotes)
-    try testing.expect(std.mem.indexOf(u8, tokens[0].lexeme, "hello") != null);
+    try testing.expect(std.mem.indexOf(u8, lexer.tokenLexeme(source, tokens[0]), "hello") != null);
 }
 
 // ============================================================================
