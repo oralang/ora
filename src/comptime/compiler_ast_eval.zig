@@ -299,7 +299,14 @@ const ConstEvaluator = struct {
                     self.visitBody(try_stmt.try_body);
                     if (try_stmt.catch_clause) |catch_clause| self.visitBody(catch_clause.body);
                 },
-                .Expr => |expr_stmt| _ = self.evalExpr(expr_stmt.expr) catch null,
+                .Expr => |expr_stmt| switch (self.file.expression(expr_stmt.expr).*) {
+                    .Comptime => |comptime_expr| {
+                        self.required_comptime_depth += 1;
+                        defer self.required_comptime_depth -= 1;
+                        _ = self.evalComptimeBody(comptime_expr.body) catch null;
+                    },
+                    else => _ = self.evalExpr(expr_stmt.expr) catch null,
+                },
                 .Assign => |assign| _ = self.evalComptimeAssign(assign, true) catch null,
                 .Log => |log_stmt| {
                     for (log_stmt.args) |arg| _ = self.evalExpr(arg) catch null;

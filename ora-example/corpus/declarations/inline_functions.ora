@@ -19,6 +19,18 @@ contract InlineFunctions {
         saved = value;
     }
 
+    inline fn chooseMode(comptime mode: u256) -> u256 {
+        var out: u256 = 0;
+        comptime {
+            if (mode == 1) {
+                out = 7;
+            } else {
+                out = 9;
+            }
+        }
+        return out;
+    }
+
     inline fn save(value: u256) {
         saved = identity(value);
     }
@@ -41,5 +53,13 @@ contract InlineFunctions {
 
     pub fn maybeSet(skip: bool, value: u256) {
         storeUnless(skip, value);
+    }
+
+    pub fn modeOne() -> u256 {
+        return chooseMode(1);
+    }
+
+    pub fn modeTwo() -> u256 {
+        return chooseMode(2);
     }
 }

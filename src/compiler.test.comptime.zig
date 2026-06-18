@@ -266,6 +266,37 @@ test "compiler supports comptime while statements" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c5_i256 : i256"));
 }
 
+test "compiler does not require statement-position comptime blocks in generic templates to produce values" {
+    const source_text =
+        \\contract Test {
+        \\    fn choose(comptime mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn one() -> u256 {
+        \\        return choose(1);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const consteval_diags = try compilation.db.constEvalDiagnostics(compilation.root_module_id);
+    try testing.expect(!diagnosticMessagesContain(consteval_diags, "comptime block did not produce a value"));
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+}
+
 test "compiler rejects runtime values inside statement-position comptime blocks" {
     const source_text =
         \\pub fn run(input: u256) -> u256 {

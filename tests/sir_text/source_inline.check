@@ -30,3 +30,13 @@
 // CHECK: =>
 // CHECK: sstore
 // CHECK: iret
+
+// CHECK-LABEL: fn modeOne:
+// CHECK-NOT: icall @chooseMode
+// CHECK: const 0x7
+// CHECK: iret
+
+// CHECK-LABEL: fn modeTwo:
+// CHECK-NOT: icall @chooseMode
+// CHECK: const 0x9
+// CHECK: iret

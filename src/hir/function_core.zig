@@ -108,7 +108,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                                 parent.lowerSemaType(parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range)
                             else
                                 parent.lowerTypeExpr(parameter.type_expr);
-                            const value = if (support.parseUnsignedIntegerLiteral(u256, integer_text)) |parsed|
+                            const parsed_integer = support.parseUnsignedIntegerLiteral(u256, integer_text);
+                            const value = if (parsed_integer) |parsed|
                                 @This().createTypedIntegerConstant(&self, param_type, parsed, parent.location(parameter.range)) catch blk: {
                                     parent.emitLoweringError(parameter.range, "failed to materialize integer literal '{s}' during HIR lowering", .{integer_text}) catch {};
                                     const placeholder = self.createAggregatePlaceholder("ora.lowering_error", parameter.range, &.{}, param_type) catch continue;
@@ -121,6 +122,11 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             };
                             @This().annotatePatternValue(&self, parameter.pattern, value);
                             self.locals.bindPattern(parent.file, parameter.pattern, value) catch {};
+                            if (parsed_integer) |parsed| {
+                                if (std.math.cast(i64, parsed)) |known_integer| {
+                                    self.locals.setPatternKnownInt(parent.file, parameter.pattern, known_integer) catch {};
+                                }
+                            }
                         }
                     }
                     continue;

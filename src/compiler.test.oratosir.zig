@@ -201,6 +201,53 @@ test "compiler expands void early-return source inline helper calls before SIR c
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler expands source inline helpers with comptime integer parameters" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn chooseMode(comptime mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn one() -> u256 {
+        \\        return chooseMode(1);
+        \\    }
+        \\
+        \\    pub fn two() -> u256 {
+        \\        return chooseMode(2);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const one_fn = try functionSlice(rendered, "one");
+    try testing.expect(!std.mem.containsAtLeast(u8, one_fn, 1, "icall @chooseMode"));
+    try testing.expect(std.mem.containsAtLeast(u8, one_fn, 1, "const 0x7"));
+
+    const two_fn = try functionSlice(rendered, "two");
+    try testing.expect(!std.mem.containsAtLeast(u8, two_fn, 1, "icall @chooseMode"));
+    try testing.expect(std.mem.containsAtLeast(u8, two_fn, 1, "const 0x9"));
+
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {
     const header = try std.fmt.allocPrint(testing.allocator, "fn {s}:", .{function_name});
     defer testing.allocator.free(header);

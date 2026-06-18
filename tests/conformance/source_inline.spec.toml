@@ -25,6 +25,20 @@ args = [false, 91]
 returns = { u256 = 0 }
 
 [[call]]
+fn = "modeOne()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 7 }
+
+[[call]]
+fn = "modeTwo()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
 fn = "set(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
