@@ -2630,43 +2630,37 @@ namespace mlir
             }
 
         private:
-            static bool containsNestedReturnsOrConditionalReturn(mlir::func::FuncOp funcOp)
+            static bool opContainsNestedReturn(Operation &op)
             {
-                auto &funcBody = funcOp.getBody();
-                if (funcBody.empty())
-                    return false;
-                Block *entryBlock = &funcBody.front();
                 bool foundUnsupported = false;
-                for (Operation &op : entryBlock->getOperations())
+                for (Region &region : op.getRegions())
                 {
-                    if (isa<ora::IfOp>(op))
-                    {
-                        foundUnsupported = true;
-                        break;
-                    }
-
-                    for (Region &region : op.getRegions())
-                    {
-                        region.walk([&](Operation *nestedOp)
-                                    {
+                    region.walk([&](Operation *nestedOp)
+                                {
                             if (isa<ora::ReturnOp, mlir::func::ReturnOp>(nestedOp))
                             {
                                 foundUnsupported = true;
                                 return WalkResult::interrupt();
                             }
-                            if (isa<ora::IfOp>(nestedOp))
-                            {
-                                foundUnsupported = true;
-                                return WalkResult::interrupt();
-                            }
                             return WalkResult::advance(); });
-                        if (foundUnsupported)
-                            break;
-                    }
                     if (foundUnsupported)
                         break;
                 }
                 return foundUnsupported;
+            }
+
+            static bool containsNestedReturn(mlir::func::FuncOp funcOp)
+            {
+                auto &funcBody = funcOp.getBody();
+                if (funcBody.empty())
+                    return false;
+                Block *entryBlock = &funcBody.front();
+                for (Operation &op : entryBlock->getOperations())
+                {
+                    if (opContainsNestedReturn(op))
+                        return true;
+                }
+                return false;
             }
 
             // Inline a function call by cloning the function body
@@ -2731,9 +2725,9 @@ namespace mlir
                         return false;
 
                     // Source inline expansion is semantic, not a best-effort
-                    // clone pass. Keep region-bearing shapes fail-closed until
-                    // each shape has an explicit return/value rewrite.
-                    if (op->getNumRegions() != 0)
+                    // clone pass. Region-bearing control flow is safe to clone
+                    // only while returns stay at the helper's top level.
+                    if (opContainsNestedReturn(*op))
                         return false;
 
                     builder.clone(*op, mapping);
@@ -2754,7 +2748,7 @@ namespace mlir
                         return false;
                     if (op->hasTrait<mlir::OpTrait::IsTerminator>())
                         return false;
-                    if (op->getNumRegions() != 0)
+                    if (opContainsNestedReturn(*op))
                         return false;
                     builder.clone(*op, mapping);
                 }
@@ -2870,7 +2864,7 @@ namespace mlir
                 Block *entryBlock = &funcBody.front();
                 if (entryBlock->empty() || funcBody.getBlocks().size() > 1)
                     return false;
-                if (containsNestedReturnsOrConditionalReturn(funcOp))
+                if (containsNestedReturn(funcOp))
                     return inlineEarlyReturnIfCall(callOp, funcOp);
 
                 IRMapping mapping;

@@ -141,7 +141,7 @@ test "compiler expands early-return source inline helper calls before SIR call c
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
-test "compiler rejects source inline helper calls with unsupported nested returns" {
+test "compiler expands nested early-return source inline helper calls before SIR call conversion" {
     const source_text =
         \\contract InlineLowering {
         \\    inline fn choose(flag: bool, other: bool, value: u256) -> u256 {
@@ -164,7 +164,15 @@ test "compiler rejects source inline helper calls with unsupported nested return
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(!mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @choose"));
+    try expectNoResidualOraRuntimeOps(rendered);
 }
 
 test "compiler expands void early-return source inline helper calls before SIR call conversion" {
@@ -245,6 +253,49 @@ test "compiler expands source inline helpers with comptime integer parameters" {
     try testing.expect(!std.mem.containsAtLeast(u8, two_fn, 1, "icall @chooseMode"));
     try testing.expect(std.mem.containsAtLeast(u8, two_fn, 1, "const 0x9"));
 
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler expands source inline helpers with structured non-returning regions" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn structuredChoice(flag: bool, tag: u256, value: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        if (flag) {
+        \\            out = value;
+        \\        } else {
+        \\            out = 4;
+        \\        }
+        \\        switch (tag) {
+        \\            1 => {
+        \\                out = out;
+        \\            }
+        \\            else => {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, tag: u256, value: u256) -> u256 {
+        \\        return structuredChoice(flag, tag, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @structuredChoice"));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 

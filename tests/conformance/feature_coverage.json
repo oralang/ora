@@ -424,7 +424,7 @@
     {
       "id": "functions.source_inline",
       "area": "functions",
-      "behavior": "Private source inline functions expand at call sites, including nested simple calls, explicit comptime parameters, and value/void one-arm early-return helpers",
+      "behavior": "Private source inline functions expand at call sites, including nested simple calls, nested early returns, explicit comptime parameters, structured region bodies, and value/void one-arm early-return helpers",
       "specs": [
         "tests/conformance/source_inline.spec.toml"
       ]

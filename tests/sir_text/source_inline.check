@@ -31,6 +31,12 @@
 // CHECK: sstore
 // CHECK: iret
 
+// CHECK-LABEL: fn nestedChoice:
+// CHECK-NOT: icall @chooseNested
+// CHECK: =>
+// CHECK: mstore256
+// CHECK: iret
+
 // CHECK-LABEL: fn modeOne:
 // CHECK-NOT: icall @chooseMode
 // CHECK: const 0x7
@@ -39,4 +45,9 @@
 // CHECK-LABEL: fn modeTwo:
 // CHECK-NOT: icall @chooseMode
 // CHECK: const 0x9
+// CHECK: iret
+
+// CHECK-LABEL: fn structured:
+// CHECK-NOT: icall @structuredChoice
+// CHECK: =>
 // CHECK: iret
