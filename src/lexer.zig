@@ -175,6 +175,7 @@ pub const TokenType = enum {
     Increases,
     Assume,
     Havoc,
+    Inline,
     Comptime,
     As, // reserved keyword (not currently used)
     Import,
@@ -479,6 +480,7 @@ pub const keywords = std.StaticStringMap(TokenType).initComptime(.{
     .{ "increases", .Increases },
     .{ "assume", .Assume },
     .{ "havoc", .Havoc },
+    .{ "inline", .Inline },
     .{ "ghost", .Ghost },
     .{ "switch", .Switch },
     .{ "match", .Match },
@@ -1489,7 +1491,7 @@ pub inline fn isWhitespace(c: u8) bool {
 pub fn isKeyword(token_type: TokenType) bool {
     if (isBuiltinTypeKeyword(token_type)) return true;
     return switch (token_type) {
-        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Switch, .Match, .Ghost, .Assert, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .Map, .Slice => true,
+        .Contract, .Pub, .Fn, .Let, .Var, .Const, .Immutable, .Storage, .Memory, .Tstore, .Init, .Log, .If, .Else, .While, .For, .Break, .Continue, .Return, .Requires, .Guard, .Ensures, .EnsuresOk, .EnsuresErr, .Invariant, .Old, .Result, .Modifies, .Decreases, .Increases, .Assume, .Havoc, .Inline, .Switch, .Match, .Ghost, .Assert, .Comptime, .As, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Call, .Staticcall, .Errors, .True, .False, .Error, .Try, .Catch, .From, .To, .Forall, .Exists, .Where, .Map, .Slice => true,
         else => false,
     };
 }

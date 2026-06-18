@@ -216,7 +216,25 @@ const Parser = struct {
         if (self.at(.Comptime) and self.peekKind(1) == .Fn) {
             return self.parseFunctionItem();
         }
+        if (self.at(.Comptime) and self.peekKind(1) == .Inline and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Inline) and self.peekKind(1) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Inline) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
         if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Inline and self.peekKind(2) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Comptime and self.peekKind(2) == .Inline and self.peekKind(3) == .Fn) {
+            return self.parseFunctionItem();
+        }
+        if (self.at(.Pub) and self.peekKind(1) == .Inline and self.peekKind(2) == .Comptime and self.peekKind(3) == .Fn) {
             return self.parseFunctionItem();
         }
         if (self.at(.Pub) and self.peekKind(1) == .Contract) {
@@ -227,7 +245,7 @@ const Parser = struct {
         }
         return switch (self.current().kind) {
             .Contract => self.parseContractItem(),
-            .Pub, .Fn => self.parseFunctionItem(),
+            .Pub, .Fn, .Inline => self.parseFunctionItem(),
             .Struct => self.parseStructItem(),
             .Bitfield => self.parseBitfieldItem(),
             .Enum => self.parseEnumItem(),
@@ -310,7 +328,7 @@ const Parser = struct {
             try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
-        if (self.at(.Comptime)) {
+        while (self.at(.Comptime) or self.at(.Inline)) {
             try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
         }
 
@@ -2884,8 +2902,8 @@ const Parser = struct {
         if (self.startsDecodePermissiveFunction()) return true;
         const kind = self.current().kind;
         return switch (kind) {
-            .Contract, .Pub, .Fn, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
-            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn,
+            .Contract, .Pub, .Fn, .Inline, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
+            .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn or (self.peekKind(1) == .Inline and self.peekKind(2) == .Fn),
             .Identifier => self.startsTypeAliasItem(),
             else => false,
         };
@@ -2895,7 +2913,7 @@ const Parser = struct {
         if (!self.looksLikeDecodePermissiveMarker()) return false;
         var cursor = self.index + 2;
         if (self.peekTokenKindAt(cursor) == .Pub) cursor += 1;
-        if (self.peekTokenKindAt(cursor) == .Comptime) cursor += 1;
+        while (self.peekTokenKindAt(cursor) == .Comptime or self.peekTokenKindAt(cursor) == .Inline) cursor += 1;
         return self.peekTokenKindAt(cursor) == .Fn;
     }
 

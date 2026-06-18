@@ -1,0 +1,34 @@
+contract SourceInlineConformance {
+    storage var saved: u256;
+
+    inline fn normalize(value: u256) -> u256 {
+        return value;
+    }
+
+    inline fn choose(flag: bool, value: u256) -> u256 {
+        if (flag) {
+            return value;
+        }
+        return 0;
+    }
+
+    inline fn writeSaved(value: u256) {
+        saved = normalize(value);
+    }
+
+    pub fn set(value: u256) {
+        writeSaved(value);
+    }
+
+    pub fn get() -> u256 {
+        return saved;
+    }
+
+    pub fn echo(value: u256) -> u256 {
+        return normalize(value);
+    }
+
+    pub fn chooseValue(flag: bool, value: u256) -> u256 {
+        return choose(flag, value);
+    }
+}

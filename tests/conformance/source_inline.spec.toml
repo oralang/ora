@@ -1,0 +1,43 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "echo(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [123]
+returns = { u256 = 123 }
+
+[[call]]
+fn = "chooseValue(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 91]
+returns = { u256 = 91 }
+
+[[call]]
+fn = "chooseValue(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 91]
+returns = { u256 = 0 }
+
+[[call]]
+fn = "set(uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [77]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x4d"
+
+[[call]]
+fn = "get()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 77 }

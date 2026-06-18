@@ -82,6 +82,113 @@ fn setModuleBoolAttr(ctx: mlir.MlirContext, module: mlir.MlirModule, name: []con
     );
 }
 
+test "compiler removes simple source inline helper calls before SIR call conversion" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn identity(value: u256) -> u256 {
+        \\        return value;
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return identity(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @identity"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler expands early-return source inline helper calls before SIR call conversion" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn choose(flag: bool, value: u256) -> u256 {
+        \\        if (flag) {
+        \\            return value;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, value: u256) -> u256 {
+        \\        return choose(flag, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @choose"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler rejects source inline helper calls with unsupported nested returns" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn choose(flag: bool, other: bool, value: u256) -> u256 {
+        \\        if (flag) {
+        \\            if (other) {
+        \\                return value;
+        \\            }
+        \\            return 1;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, other: bool, value: u256) -> u256 {
+        \\        return choose(flag, other, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(!mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
+test "compiler rejects source inline helper calls with void early returns" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn maybe(flag: bool) {
+        \\        if (flag) {
+        \\            return;
+        \\        }
+        \\    }
+        \\
+        \\    pub fn run(flag: bool) {
+        \\        maybe(flag);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(!mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+}
+
 fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {
     const header = try std.fmt.allocPrint(testing.allocator, "fn {s}:", .{function_name});
     defer testing.allocator.free(header);

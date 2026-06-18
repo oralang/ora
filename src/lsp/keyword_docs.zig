@@ -49,6 +49,7 @@ const docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "if", "Conditional branch." },
     .{ "immutable", "Declares immutable storage." },
     .{ "impl", "Implements a trait for a type." },
+    .{ "inline", "Declares a private function that must be expanded at each call site." },
     .{ "import", "Imports declarations from another module." },
     .{ "increases", "Declares an increasing termination measure." },
     .{ "init", "Declares a contract initializer." },

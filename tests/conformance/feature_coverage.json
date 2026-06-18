@@ -422,6 +422,14 @@
       ]
     },
     {
+      "id": "functions.source_inline",
+      "area": "functions",
+      "behavior": "Private source inline functions expand at call sites, including nested simple calls and one-arm early-return helpers",
+      "specs": [
+        "tests/conformance/source_inline.spec.toml"
+      ]
+    },
+    {
       "id": "refinements.runtime_guard_revert",
       "area": "refinements",
       "behavior": "MinValue/InRange refinement params: in-range args execute, violating args REVERT at the boundary guard",

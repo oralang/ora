@@ -25,6 +25,7 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlow.h"
@@ -2574,8 +2575,9 @@ namespace mlir
                         if (!symbolRef)
                             return;
 
-                        // Look up the function in the module
-                        auto funcOp = module.lookupSymbol<mlir::func::FuncOp>(symbolRef.getRootReference());
+                        // Look up the function from the call site so nested contract-local
+                        // function symbols are resolved as well as module-level helpers.
+                        auto funcOp = SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(callOp.getOperation(), symbolRef);
                         if (!funcOp)
                             return;
 
@@ -2598,6 +2600,31 @@ namespace mlir
                         } });
 
                 }
+
+                bool hasFailedSourceInline = false;
+                module.walk([&](mlir::func::CallOp callOp)
+                            {
+                    auto callee = callOp.getCallableForCallee();
+                    if (!callee)
+                        return;
+
+                    auto symbolRef = llvm::dyn_cast<SymbolRefAttr>(callee);
+                    if (!symbolRef)
+                        return;
+
+                    auto funcOp = SymbolTable::lookupNearestSymbolFrom<mlir::func::FuncOp>(callOp.getOperation(), symbolRef);
+                    if (!funcOp)
+                        return;
+
+                    auto sourceInlineAttr = funcOp->getAttrOfType<BoolAttr>("ora.source_inline");
+                    if (!sourceInlineAttr || !sourceInlineAttr.getValue())
+                        return;
+
+                    callOp.emitError("failed to inline function marked 'inline'");
+                    hasFailedSourceInline = true; });
+
+                if (hasFailedSourceInline)
+                    signalPassFailure();
 
                 DBG("Ora inlining pass completed");
             }
@@ -2645,7 +2672,33 @@ namespace mlir
             // Inline a function call by cloning the function body
             // NOTE: only handles single-block functions. Multi-block inlining
             // requires MLIR's InlinerInterface (not yet wired up).
-            static void replaceCallResultsFromReturnOperands(
+            static bool returnOperands(Operation &op, SmallVectorImpl<Value> &operands)
+            {
+                if (auto returnOp = dyn_cast<mlir::func::ReturnOp>(op))
+                {
+                    operands.append(returnOp.getOperands().begin(), returnOp.getOperands().end());
+                    return true;
+                }
+                if (auto returnOp = dyn_cast<ora::ReturnOp>(op))
+                {
+                    operands.append(returnOp.getOperands().begin(), returnOp.getOperands().end());
+                    return true;
+                }
+                return false;
+            }
+
+            static bool mapReturnOperands(
+                ValueRange operands,
+                IRMapping &mapping,
+                SmallVectorImpl<Value> &mappedOperands)
+            {
+                mappedOperands.clear();
+                for (Value operand : operands)
+                    mappedOperands.push_back(mapping.lookupOrDefault(operand));
+                return true;
+            }
+
+            static bool replaceCallResultsFromReturnOperands(
                 mlir::func::CallOp callOp,
                 ValueRange operands,
                 IRMapping &mapping)
@@ -2653,9 +2706,161 @@ namespace mlir
                 SmallVector<Value> returnValues;
                 for (auto operand : operands)
                     returnValues.push_back(mapping.lookupOrDefault(operand));
-                if (returnValues.size() == callOp.getNumResults())
-                    for (unsigned i = 0; i < returnValues.size(); ++i)
-                        callOp.getResult(i).replaceAllUsesWith(returnValues[i]);
+                if (returnValues.size() != callOp.getNumResults())
+                    return false;
+                for (unsigned i = 0; i < returnValues.size(); ++i)
+                    callOp.getResult(i).replaceAllUsesWith(returnValues[i]);
+                return true;
+            }
+
+            static bool cloneOpsUntilReturn(
+                Operation *first,
+                Operation *stopBefore,
+                OpBuilder &builder,
+                IRMapping &mapping,
+                SmallVectorImpl<Value> &mappedReturnOperands)
+            {
+                mappedReturnOperands.clear();
+                for (Operation *op = first; op && op != stopBefore; op = op->getNextNode())
+                {
+                    SmallVector<Value> rawReturnOperands;
+                    if (returnOperands(*op, rawReturnOperands))
+                        return mapReturnOperands(rawReturnOperands, mapping, mappedReturnOperands);
+
+                    if (op->hasTrait<mlir::OpTrait::IsTerminator>())
+                        return false;
+
+                    // Source inline expansion is semantic, not a best-effort
+                    // clone pass. Keep region-bearing shapes fail-closed until
+                    // each shape has an explicit return/value rewrite.
+                    if (op->getNumRegions() != 0)
+                        return false;
+
+                    builder.clone(*op, mapping);
+                }
+                return false;
+            }
+
+            static bool cloneOpsBefore(
+                Operation *first,
+                Operation *stopBefore,
+                OpBuilder &builder,
+                IRMapping &mapping)
+            {
+                for (Operation *op = first; op && op != stopBefore; op = op->getNextNode())
+                {
+                    SmallVector<Value> rawReturnOperands;
+                    if (returnOperands(*op, rawReturnOperands))
+                        return false;
+                    if (op->hasTrait<mlir::OpTrait::IsTerminator>())
+                        return false;
+                    if (op->getNumRegions() != 0)
+                        return false;
+                    builder.clone(*op, mapping);
+                }
+                return true;
+            }
+
+            static bool cloneBlockUntilReturn(
+                Block &block,
+                OpBuilder &builder,
+                IRMapping &mapping,
+                SmallVectorImpl<Value> &mappedReturnOperands)
+            {
+                Operation *first = block.empty() ? nullptr : &block.front();
+                return cloneOpsUntilReturn(first, nullptr, builder, mapping, mappedReturnOperands);
+            }
+
+            static bool isEmptyYieldOnlyElseRegion(ora::IfOp ifOp)
+            {
+                Region &elseRegion = ifOp.getElseRegion();
+                if (!elseRegion.hasOneBlock())
+                    return false;
+                Block &elseBlock = elseRegion.front();
+                if (elseBlock.getOperations().size() != 1)
+                    return false;
+                auto yieldOp = dyn_cast<ora::YieldOp>(elseBlock.getTerminator());
+                return yieldOp && yieldOp.getNumOperands() == 0;
+            }
+
+            bool inlineEarlyReturnIfCall(mlir::func::CallOp callOp, mlir::func::FuncOp funcOp)
+            {
+                if (callOp.getNumResults() == 0)
+                    return false;
+
+                auto &funcBody = funcOp.getBody();
+                if (funcBody.empty() || funcBody.getBlocks().size() > 1)
+                    return false;
+
+                Block *entryBlock = &funcBody.front();
+                ora::IfOp earlyIf;
+                for (Operation &op : entryBlock->getOperations())
+                {
+                    if (auto ifOp = dyn_cast<ora::IfOp>(op))
+                    {
+                        if (earlyIf)
+                            return false;
+                        earlyIf = ifOp;
+                    }
+                }
+                if (!earlyIf || !isEmptyYieldOnlyElseRegion(earlyIf))
+                    return false;
+                if (!earlyIf.getThenRegion().hasOneBlock())
+                    return false;
+
+                IRMapping mapping;
+                for (unsigned i = 0; i < callOp.getNumOperands(); ++i)
+                {
+                    if (i < entryBlock->getNumArguments())
+                        mapping.map(entryBlock->getArgument(i), callOp.getOperand(i));
+                }
+
+                OpBuilder outerBuilder(callOp);
+                if (!cloneOpsBefore(&entryBlock->front(), earlyIf.getOperation(), outerBuilder, mapping))
+                    return false;
+
+                Value mappedCondition = mapping.lookupOrDefault(earlyIf.getCondition());
+                auto scfIf = outerBuilder.create<mlir::scf::IfOp>(
+                    callOp.getLoc(),
+                    callOp.getResultTypes(),
+                    mappedCondition,
+                    /*withElseRegion=*/true);
+
+                IRMapping thenMapping = mapping;
+                OpBuilder thenBuilder = scfIf.getThenBodyBuilder();
+                SmallVector<Value> thenReturnOperands;
+                if (!cloneBlockUntilReturn(earlyIf.getThenRegion().front(), thenBuilder, thenMapping, thenReturnOperands))
+                {
+                    scfIf.erase();
+                    return false;
+                }
+                if (thenReturnOperands.size() != callOp.getNumResults())
+                {
+                    scfIf.erase();
+                    return false;
+                }
+                thenBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), thenReturnOperands);
+
+                IRMapping elseMapping = mapping;
+                OpBuilder elseBuilder = scfIf.getElseBodyBuilder();
+                SmallVector<Value> elseReturnOperands;
+                Operation *elseFirst = earlyIf->getNextNode();
+                if (!cloneOpsUntilReturn(elseFirst, nullptr, elseBuilder, elseMapping, elseReturnOperands))
+                {
+                    scfIf.erase();
+                    return false;
+                }
+                if (elseReturnOperands.size() != callOp.getNumResults())
+                {
+                    scfIf.erase();
+                    return false;
+                }
+                elseBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), elseReturnOperands);
+
+                for (unsigned i = 0; i < scfIf.getNumResults(); ++i)
+                    callOp.getResult(i).replaceAllUsesWith(scfIf.getResult(i));
+                callOp.erase();
+                return true;
             }
 
             bool inlineCall(mlir::func::CallOp callOp, mlir::func::FuncOp funcOp)
@@ -2667,7 +2872,7 @@ namespace mlir
                 if (entryBlock->empty() || funcBody.getBlocks().size() > 1)
                     return false;
                 if (containsNestedReturnsOrConditionalReturn(funcOp))
-                    return false;
+                    return inlineEarlyReturnIfCall(callOp, funcOp);
 
                 IRMapping mapping;
                 for (unsigned i = 0; i < callOp.getNumOperands(); ++i)
@@ -2681,12 +2886,14 @@ namespace mlir
                 {
                     if (auto returnOp = dyn_cast<mlir::func::ReturnOp>(op))
                     {
-                        replaceCallResultsFromReturnOperands(callOp, returnOp.getOperands(), mapping);
+                        if (!replaceCallResultsFromReturnOperands(callOp, returnOp.getOperands(), mapping))
+                            return false;
                         break;
                     }
                     if (auto returnOp = dyn_cast<ora::ReturnOp>(op))
                     {
-                        replaceCallResultsFromReturnOperands(callOp, returnOp.getOperands(), mapping);
+                        if (!replaceCallResultsFromReturnOperands(callOp, returnOp.getOperands(), mapping))
+                            return false;
                         break;
                     }
                     builder.clone(op, mapping);

@@ -1,0 +1,34 @@
+contract InlineFunctions {
+    storage var saved: u256;
+
+    inline fn identity(value: u256) -> u256 {
+        return value;
+    }
+
+    inline fn choose(flag: bool, value: u256) -> u256 {
+        if (flag) {
+            return value;
+        }
+        return 0;
+    }
+
+    inline fn save(value: u256) {
+        saved = identity(value);
+    }
+
+    pub fn set(value: u256) {
+        save(value);
+    }
+
+    pub fn get() -> u256 {
+        return saved;
+    }
+
+    pub fn echo(value: u256) -> u256 {
+        return identity(value);
+    }
+
+    pub fn chooseValue(flag: bool, value: u256) -> u256 {
+        return choose(flag, value);
+    }
+}

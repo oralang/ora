@@ -492,10 +492,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     .private => "private",
                 },
             ));
-            if (function.visibility == .private and std.mem.indexOfScalar(u8, symbol_name, '.') != null) {
-                // Imported private helpers are inlined before OraToSIR call conversion so
-                // generic/library code lowers through the caller's real value representation.
+            if (function.is_inline or (function.visibility == .private and std.mem.indexOfScalar(u8, symbol_name, '.') != null)) {
+                // Inline functions and imported private helpers are expanded before
+                // OraToSIR call conversion so call lowering sees the caller's value
+                // representation.
                 try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.inline", true));
+            }
+            if (function.is_inline) {
+                try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.source_inline", true));
             }
             if (std.mem.eql(u8, function.name, "init")) {
                 try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.init", true));

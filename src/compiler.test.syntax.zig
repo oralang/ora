@@ -468,3 +468,94 @@ test "compiler syntax parses payload-carrying enum variants" {
     try testing.expect(containsNodeOfKind(nthChildNodeOfKind(enum_item, .EnumVariant, 2).?, .PathType));
     try testing.expect(containsNodeOfKind(nthChildNodeOfKind(enum_item, .EnumVariant, 3).?, .AnonymousStructField));
 }
+
+test "compiler syntax carries inline function declarations into AST" {
+    const source_text =
+        \\contract InlineSurface {
+        \\    inline fn addOne(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return addOne(value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const ast_file = try compilation.db.astFile(module.file_id);
+    const contract = ast_file.item(ast_file.root_items[0]).Contract;
+    const helper = ast_file.item(contract.members[0]).Function;
+    const entry = ast_file.item(contract.members[1]).Function;
+
+    try testing.expect(helper.is_inline);
+    try testing.expect(!entry.is_inline);
+}
+
+test "compiler marks source inline functions for Ora MLIR inlining" {
+    const source_text =
+        \\contract InlineSurface {
+        \\    inline fn addOne(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return addOne(value);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.inline"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.source_inline"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "@addOne"));
+}
+
+test "compiler rejects invalid source inline function declarations" {
+    try expectDiagnosticProbeContains(
+        \\contract InlineSurface {
+        \\    pub inline fn run() {}
+        \\}
+    , .typecheck, "inline functions must be private");
+
+    try expectDiagnosticProbeContains(
+        \\contract InlineSurface {
+        \\    inline fn init() {}
+        \\}
+    , .typecheck, "constructor init() cannot be inline");
+
+    try expectDiagnosticProbeContains(
+        \\contract InlineSurface {
+        \\    inline fn a(value: u256) -> u256 {
+        \\        return b(value);
+        \\    }
+        \\
+        \\    inline fn b(value: u256) -> u256 {
+        \\        return a(value);
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return a(value);
+        \\    }
+        \\}
+    , .typecheck, "inline functions must not be recursive");
+}
+
+test "compiler rejects call-site inline syntax" {
+    try expectDiagnosticProbeContains(
+        \\contract InlineSurface {
+        \\    fn addOne(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return inline addOne(value);
+        \\    }
+        \\}
+    , .syntax, "expected expression");
+}

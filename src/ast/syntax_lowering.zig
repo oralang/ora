@@ -266,6 +266,7 @@ pub fn mixin(Builder: type) type {
                 .range = node.range(),
                 .name = name,
                 .is_comptime = firstDirectTokenOfKind(node, .Comptime) != null,
+                .is_inline = firstDirectTokenOfKind(node, .Inline) != null,
                 .is_generic = is_generic,
                 .abi_decode_permissive = abi_decode_permissive,
                 .visibility = visibility,

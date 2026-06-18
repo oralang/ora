@@ -1143,6 +1143,7 @@ const TypeChecker = struct {
                 try self.checkLogMetadata(log_decl);
             },
             .Function => |function| {
+                try self.validateInlineFunctionRules(item_id, function);
                 try self.validateConstructorFunction(function);
                 const previous_return_type = self.current_return_type;
                 const previous_function_item = self.current_function_item;
@@ -1658,6 +1659,62 @@ const TypeChecker = struct {
         if (function.return_type != null) {
             try self.emitRangeError(function.range, "constructor init() must not return values", .{});
         }
+    }
+
+    fn validateInlineFunctionRules(self: *TypeChecker, item_id: ast.ItemId, function: ast.FunctionItem) anyerror!void {
+        if (!function.is_inline) return;
+
+        if (function.visibility == .public) {
+            try self.emitRangeError(function.range, "inline functions must be private", .{});
+        }
+        if (std.mem.eql(u8, function.name, "init")) {
+            try self.emitRangeError(function.range, "constructor init() cannot be inline", .{});
+        }
+        if (try self.inlineFunctionReferencesTarget(item_id, item_id)) {
+            try self.emitRangeError(function.range, "inline functions must not be recursive", .{});
+        }
+    }
+
+    fn inlineFunctionReferencesTarget(
+        self: *TypeChecker,
+        target_id: ast.ItemId,
+        current_id: ast.ItemId,
+    ) anyerror!bool {
+        return try self.inlineFunctionReferencesTargetWithStack(target_id, current_id, &.{});
+    }
+
+    fn inlineFunctionReferencesTargetWithStack(
+        self: *TypeChecker,
+        target_id: ast.ItemId,
+        current_id: ast.ItemId,
+        stack: []const ast.ItemId,
+    ) anyerror!bool {
+        for (stack) |seen| {
+            if (itemIdEql(seen, current_id)) return false;
+        }
+
+        const current_function = switch (self.file.item(current_id).*) {
+            .Function => |function| function,
+            else => return false,
+        };
+
+        var callees = InlineItemIdList{};
+        try self.collectFunctionDirectCallees(self.arena, current_id, current_function, &callees);
+
+        var next_stack = try self.arena.alloc(ast.ItemId, stack.len + 1);
+        @memcpy(next_stack[0..stack.len], stack);
+        next_stack[stack.len] = current_id;
+
+        for (callees.items()) |callee_id| {
+            const callee_function = switch (self.file.item(callee_id).*) {
+                .Function => |function| function,
+                else => continue,
+            };
+            if (!callee_function.is_inline) continue;
+            if (itemIdEql(callee_id, target_id)) return true;
+            if (try self.inlineFunctionReferencesTargetWithStack(target_id, callee_id, next_stack)) return true;
+        }
+        return false;
     }
 
     fn validatePublicFunctionAbi(self: *TypeChecker, function: ast.FunctionItem) anyerror!void {

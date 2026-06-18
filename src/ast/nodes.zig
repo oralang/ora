@@ -635,6 +635,7 @@ pub const FunctionItem = struct {
     name: []const u8,
     is_ghost: bool = false,
     is_comptime: bool = false,
+    is_inline: bool = false,
     is_generic: bool = false,
     abi_decode_permissive: bool = false,
     visibility: Visibility,
