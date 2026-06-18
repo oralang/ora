@@ -31,6 +31,7 @@ pub const Symbol = struct {
     range: frontend.Range,
     selection_range: frontend.Range,
     parent: ?usize = null,
+    is_inline: bool = false,
 };
 
 pub const SemanticIndex = struct {
@@ -315,6 +316,7 @@ fn collectItem(
             const function_kind: SymbolKind = if (in_contract) .method else .function;
             const function_detail = try formatFunctionDetailAlloc(builder.result_allocator, file, function_decl);
             const function_index = try builder.addSymbol(function_decl.name, function_kind, function_decl.range, parent, function_detail);
+            builder.symbols.items[function_index].is_inline = function_decl.is_inline;
             for (function_decl.parameters) |parameter| {
                 const parameter_name = patternName(file, parameter.pattern) orelse continue;
                 const parameter_type = try formatTypeExprAlloc(builder.result_allocator, file, parameter.type_expr);

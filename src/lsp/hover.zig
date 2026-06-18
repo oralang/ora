@@ -57,10 +57,13 @@ fn appendSignature(buffer: []u8, cursor: *usize, symbol: semantic_index.Symbol) 
             appendBytes(buffer, cursor, "contract ");
             appendBytes(buffer, cursor, symbol.name);
         },
-        .function, .method => if (symbol.detail) |detail|
-            appendNameDetail(buffer, cursor, "fn ", symbol.name, detail, "")
-        else
-            appendNameDetail(buffer, cursor, "fn ", symbol.name, "", "()"),
+        .function, .method => {
+            const prefix = functionPrefix(symbol);
+            if (symbol.detail) |detail|
+                appendNameDetail(buffer, cursor, prefix, symbol.name, detail, "")
+            else
+                appendNameDetail(buffer, cursor, prefix, symbol.name, "", "()");
+        },
         .variable => if (symbol.detail) |detail|
             appendNameDetail(buffer, cursor, "var ", symbol.name, detail, ": ")
         else
@@ -128,6 +131,10 @@ fn appendBytes(buffer: []u8, cursor: *usize, value: []const u8) void {
     cursor.* += value.len;
 }
 
+fn functionPrefix(symbol: semantic_index.Symbol) []const u8 {
+    return if (symbol.is_inline) "inline fn " else "fn ";
+}
+
 fn hoverValueCapacity(symbol: semantic_index.Symbol) usize {
     var total: usize = "```ora\n".len + "\n```".len + signatureCapacity(symbol);
     if (symbol.doc_comment) |doc| total += "\n---\n".len + doc.len;
@@ -138,7 +145,7 @@ fn signatureCapacity(symbol: semantic_index.Symbol) usize {
     const detail_len = if (symbol.detail) |detail| detail.len else 0;
     return symbol.name.len + detail_len + switch (symbol.kind) {
         .contract => "contract ".len,
-        .function, .method => "fn ".len + if (symbol.detail == null) "()".len else 0,
+        .function, .method => functionPrefix(symbol).len + if (symbol.detail == null) "()".len else 0,
         .variable => "var ".len + if (symbol.detail != null) ": ".len else 0,
         .field => "field ".len + if (symbol.detail != null) ": ".len else 0,
         .constant => "const ".len + if (symbol.detail != null) ": ".len else 0,

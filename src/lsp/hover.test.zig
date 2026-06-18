@@ -53,6 +53,23 @@ test "lsp hover: indexed path uses caller-owned semantic index" {
     try testing.expect(std.mem.indexOf(u8, value.contents, "fn deposit(amount: u256) -> u256") != null);
 }
 
+test "lsp hover: marks inline function signatures" {
+    const source =
+        \\contract Math {
+        \\    inline fn choose(mode: u256) -> u256 { return mode; }
+        \\    pub fn run(mode: u256) -> u256 { return choose(mode); }
+        \\}
+    ;
+
+    const maybe_hover = try cachedHover(source, positionOf(source, "choose"));
+    try testing.expect(maybe_hover != null);
+
+    var value = maybe_hover.?;
+    defer value.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, value.contents, "inline fn choose(mode: u256) -> u256") != null);
+}
+
 test "lsp hover: uses /// docs and ignores // internal comments" {
     const source =
         \\// Internal note that must not become public docs.

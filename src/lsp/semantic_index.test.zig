@@ -82,6 +82,24 @@ test "lsp semantic index: parse failure returns no symbols" {
     try testing.expectEqual(@as(usize, 0), index.builderGrowthEvents());
 }
 
+test "lsp semantic index: marks inline function declarations" {
+    const source =
+        \\contract Math {
+        \\    inline fn choose(mode: u256) -> u256 { return mode; }
+        \\    pub fn run(mode: u256) -> u256 { return choose(mode); }
+        \\}
+    ;
+
+    var index = try test_analysis.semanticIndex(testing.allocator, source);
+    defer index.deinit(testing.allocator);
+
+    const choose_idx = findSymbolIndex(index.symbols, "choose", .method) orelse return error.TestExpectedEqual;
+    const run_idx = findSymbolIndex(index.symbols, "run", .method) orelse return error.TestExpectedEqual;
+
+    try testing.expect(index.symbols[choose_idx].is_inline);
+    try testing.expect(!index.symbols[run_idx].is_inline);
+}
+
 test "lsp semantic index: builds nested document symbols" {
     const source =
         \\contract Wallet {

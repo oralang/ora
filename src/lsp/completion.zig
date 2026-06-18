@@ -95,7 +95,7 @@ pub fn completionAtIndex(
         try seen.put(symbol.name, {});
         try items.append(allocator, .{
             .label = try allocator.dupe(u8, symbol.name),
-            .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+            .detail = try symbolDetailAlloc(allocator, symbol),
             .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
             .kind = symbolKindToCompletionKind(symbol.kind),
         });
@@ -122,6 +122,22 @@ fn appendKeywordCompletion(
         .documentation = if (keyword_docs.documentation(keyword)) |doc| try allocator.dupe(u8, doc) else null,
         .kind = .keyword,
     });
+}
+
+fn symbolDetailAlloc(allocator: Allocator, symbol: semantic_index.Symbol) !?[]u8 {
+    const detail = symbol.detail orelse return if (isInlineFunction(symbol))
+        try allocator.dupe(u8, "inline")
+    else
+        null;
+
+    if (isInlineFunction(symbol)) {
+        return try std.fmt.allocPrint(allocator, "inline {s}", .{detail});
+    }
+    return try allocator.dupe(u8, detail);
+}
+
+fn isInlineFunction(symbol: semantic_index.Symbol) bool {
+    return symbol.is_inline and (symbol.kind == .function or symbol.kind == .method);
 }
 
 pub fn isDotTrigger(trigger_char: ?[]const u8, source: []const u8, position: frontend.Position) bool {
@@ -166,7 +182,7 @@ fn memberCompletion(
 
                 try items.append(allocator, .{
                     .label = try allocator.dupe(u8, symbol.name),
-                    .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                    .detail = try symbolDetailAlloc(allocator, symbol),
                     .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                     .kind = symbolKindToCompletionKind(symbol.kind),
                 });
@@ -182,7 +198,7 @@ fn memberCompletion(
 
                         try items.append(allocator, .{
                             .label = try allocator.dupe(u8, symbol.name),
-                            .detail = if (symbol.detail) |detail| try allocator.dupe(u8, detail) else null,
+                            .detail = try symbolDetailAlloc(allocator, symbol),
                             .documentation = if (symbol.doc_comment) |doc| try allocator.dupe(u8, doc) else null,
                             .kind = symbolKindToCompletionKind(symbol.kind),
                         });

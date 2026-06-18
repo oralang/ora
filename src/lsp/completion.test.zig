@@ -84,6 +84,25 @@ test "lsp completion: includes symbols from semantic index" {
     try testing.expect(hasLabel(items, "helper"));
 }
 
+test "lsp completion: marks inline function details" {
+    const source =
+        \\contract Math {
+        \\    inline fn choose(mode: u256) -> u256 { return mode; }
+        \\    pub fn run(mode: u256) -> u256 { return cho; }
+        \\}
+    ;
+
+    const position = try positionAfterNth(source, "cho", 1);
+
+    const items = try completionItems(source, position, null);
+    defer completion.deinitItems(testing.allocator, items);
+
+    const choose = itemWithLabel(items, "choose") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(completion.Kind.method, choose.kind);
+    try testing.expect(choose.detail != null);
+    try testing.expectEqualStrings("inline (mode: u256) -> u256", choose.detail.?);
+}
+
 test "lsp completion: indexed path uses caller-owned semantic index" {
     const source =
         \\pub fn helper(x: u256) -> u256 { return x; }
