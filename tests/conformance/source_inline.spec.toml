@@ -36,8 +36,30 @@ slot = "0x0"
 value = "0x4d"
 
 [[call]]
+fn = "maybeSet(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [true, 33]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x4d"
+
+[[call]]
+fn = "maybeSet(bool,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = [false, 88]
+returns = {}
+
+[[call.storage]]
+slot = "0x0"
+value = "0x58"
+
+[[call]]
 fn = "get()"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
-returns = { u256 = 77 }
+returns = { u256 = 88 }

@@ -167,17 +167,20 @@ test "compiler rejects source inline helper calls with unsupported nested return
     try testing.expect(!mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
 }
 
-test "compiler rejects source inline helper calls with void early returns" {
+test "compiler expands void early-return source inline helper calls before SIR call conversion" {
     const source_text =
         \\contract InlineLowering {
-        \\    inline fn maybe(flag: bool) {
+        \\    storage var saved: u256;
+        \\
+        \\    inline fn storeUnless(flag: bool, value: u256) {
         \\        if (flag) {
         \\            return;
         \\        }
+        \\        saved = value;
         \\    }
         \\
-        \\    pub fn run(flag: bool) {
-        \\        maybe(flag);
+        \\    pub fn run(flag: bool, value: u256) {
+        \\        storeUnless(flag, value);
         \\    }
         \\}
     ;
@@ -186,7 +189,16 @@ test "compiler rejects source inline helper calls with void early returns" {
     defer compilation.deinit();
 
     const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
-    try testing.expect(!mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @storeUnless"));
+    try testing.expect(std.mem.containsAtLeast(u8, run_fn, 1, "sstore"));
+    try expectNoResidualOraRuntimeOps(rendered);
 }
 
 fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {

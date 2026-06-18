@@ -12,6 +12,13 @@ contract SourceInlineConformance {
         return 0;
     }
 
+    inline fn storeUnless(skip: bool, value: u256) {
+        if (skip) {
+            return;
+        }
+        saved = value;
+    }
+
     inline fn writeSaved(value: u256) {
         saved = normalize(value);
     }
@@ -30,5 +37,9 @@ contract SourceInlineConformance {
 
     pub fn chooseValue(flag: bool, value: u256) -> u256 {
         return choose(flag, value);
+    }
+
+    pub fn maybeSet(skip: bool, value: u256) {
+        storeUnless(skip, value);
     }
 }

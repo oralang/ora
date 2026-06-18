@@ -2785,9 +2785,6 @@ namespace mlir
 
             bool inlineEarlyReturnIfCall(mlir::func::CallOp callOp, mlir::func::FuncOp funcOp)
             {
-                if (callOp.getNumResults() == 0)
-                    return false;
-
                 auto &funcBody = funcOp.getBody();
                 if (funcBody.empty() || funcBody.getBlocks().size() > 1)
                     return false;
@@ -2839,7 +2836,8 @@ namespace mlir
                     scfIf.erase();
                     return false;
                 }
-                thenBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), thenReturnOperands);
+                if (callOp.getNumResults() != 0)
+                    thenBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), thenReturnOperands);
 
                 IRMapping elseMapping = mapping;
                 OpBuilder elseBuilder = scfIf.getElseBodyBuilder();
@@ -2855,7 +2853,8 @@ namespace mlir
                     scfIf.erase();
                     return false;
                 }
-                elseBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), elseReturnOperands);
+                if (callOp.getNumResults() != 0)
+                    elseBuilder.create<mlir::scf::YieldOp>(earlyIf.getLoc(), elseReturnOperands);
 
                 for (unsigned i = 0; i < scfIf.getNumResults(); ++i)
                     callOp.getResult(i).replaceAllUsesWith(scfIf.getResult(i));
