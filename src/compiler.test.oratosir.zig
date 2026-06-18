@@ -277,8 +277,22 @@ test "compiler expands source inline helpers with structured non-returning regio
         \\        return out;
         \\    }
         \\
+        \\    inline fn countThree() -> u256 {
+        \\        var count: u256 = 0;
+        \\        while (count < 3)
+        \\            invariant count <= 3
+        \\        {
+        \\            count = count + 1;
+        \\        }
+        \\        return count;
+        \\    }
+        \\
         \\    pub fn run(flag: bool, tag: u256, value: u256) -> u256 {
         \\        return structuredChoice(flag, tag, value);
+        \\    }
+        \\
+        \\    pub fn loopThree() -> u256 {
+        \\        return countThree();
         \\    }
         \\}
     ;
@@ -296,6 +310,9 @@ test "compiler expands source inline helpers with structured non-returning regio
 
     const run_fn = try functionSlice(rendered, "run");
     try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @structuredChoice"));
+
+    const loop_three_fn = try functionSlice(rendered, "loopThree");
+    try testing.expect(!std.mem.containsAtLeast(u8, loop_three_fn, 1, "icall @countThree"));
     try expectNoResidualOraRuntimeOps(rendered);
 }
 

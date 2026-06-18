@@ -51,3 +51,8 @@
 // CHECK-NOT: icall @structuredChoice
 // CHECK: =>
 // CHECK: iret
+
+// CHECK-LABEL: fn loopThree:
+// CHECK-NOT: icall @countThree
+// CHECK: const 0x3
+// CHECK: iret

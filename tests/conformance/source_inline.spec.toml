@@ -81,6 +81,13 @@ args = [true, 2, 55]
 returns = { u256 = 9 }
 
 [[call]]
+fn = "loopThree()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 3 }
+
+[[call]]
 fn = "set(uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
