@@ -50,3 +50,72 @@ test "lsp formatting: preserves type alias spacing" {
 
     try testing.expectEqualStrings(source ++ "\n", formatted);
 }
+
+test "lsp formatting: preserves keyword boundaries for inline impl and modifies" {
+    const source =
+        \\trait SettledBalance {
+        \\    fn settled(self: Settled) -> u256;
+        \\}
+        \\
+        \\struct Settled {
+        \\    value: u256;
+        \\}
+        \\
+        \\impl SettledBalance for Settled {
+        \\    fn settled(self: Settled) -> u256 {
+        \\        return self.value;
+        \\    }
+        \\}
+        \\
+        \\contract Token {
+        \\    inline fn amountDelta(amount: u256) -> u256 {
+        \\        return amount;
+        \\    }
+        \\
+        \\    pub fn approve(spender: address, amount: u256)
+        \\        modifies allowances[msg.sender][spender]
+        \\    {
+        \\        return;
+        \\    }
+        \\}
+    ;
+
+    const formatted_once = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_once);
+
+    const formatted_twice = try formatting.formatSourceAlloc(testing.allocator, formatted_once, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_twice);
+
+    try testing.expectEqualStrings(formatted_once, formatted_twice);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "inline fn amountDelta") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "impl SettledBalance for Settled") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "modifies allowances[msg.sender][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "forfor") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "inlinefn") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_twice, "modifiesallowances") == null);
+
+    const corrupted =
+        \\contract Token {
+        \\    pub fn approve(spender: address, amount: u256)
+        \\    modifiesallowances[msg.sender][spender]
+        \\    {
+        \\        return;
+        \\    }
+        \\}
+    ;
+
+    const repaired = try formatting.formatSourceAlloc(testing.allocator, corrupted, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(repaired);
+
+    try testing.expect(std.mem.indexOf(u8, repaired, "modifies allowances[msg.sender][spender]") != null);
+    try testing.expect(std.mem.indexOf(u8, repaired, "modifiesallowances") == null);
+}
