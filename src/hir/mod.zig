@@ -323,6 +323,16 @@ pub fn lowerModule(
 const Lowerer = struct {
     pub const inline_generic_binding_capacity = 8;
 
+    pub const InlineKnownArgValue = union(enum) {
+        integer: []const u8,
+        boolean: bool,
+    };
+
+    pub const InlineKnownArgBinding = struct {
+        parameter_name: []const u8,
+        value: InlineKnownArgValue,
+    };
+
     pub const GenericBindingValue = union(enum) {
         ty: sema.Type,
         integer: []const u8,
@@ -366,6 +376,7 @@ const Lowerer = struct {
     contract_body_blocks: []mlir.MlirBlock,
     monomorphized_function_names: std.StringHashMap(void),
     active_type_bindings: []const GenericTypeBinding = &.{},
+    active_inline_known_args: []const InlineKnownArgBinding = &.{},
     active_impl_contract_scope: ?ast.ItemId = null,
     active_impl_self_type: ?sema.Type = null,
     current_statement_id: ?ast.StmtId = null,
@@ -586,6 +597,13 @@ const Lowerer = struct {
                 .integer => |text| return text,
                 .ty => {},
             }
+        }
+        return null;
+    }
+
+    pub fn inlineKnownArg(self: *const Lowerer, name: []const u8) ?InlineKnownArgValue {
+        for (self.active_inline_known_args) |binding| {
+            if (std.mem.eql(u8, binding.parameter_name, name)) return binding.value;
         }
         return null;
     }

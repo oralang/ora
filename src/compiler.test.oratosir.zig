@@ -256,6 +256,81 @@ test "compiler expands source inline helpers with comptime integer parameters" {
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler expands source inline helpers with callsite-known runtime literals" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    inline fn chooseImplicit(mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    inline fn chooseBool(flag: bool) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (flag) {
+        \\                out = 11;
+        \\            } else {
+        \\                out = 12;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn one() -> u256 {
+        \\        return chooseImplicit(1);
+        \\    }
+        \\
+        \\    pub fn two() -> u256 {
+        \\        return chooseImplicit(2);
+        \\    }
+        \\
+        \\    pub fn yes() -> u256 {
+        \\        return chooseBool(true);
+        \\    }
+        \\
+        \\    pub fn no() -> u256 {
+        \\        return chooseBool(false);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const one_fn = try functionSlice(rendered, "one");
+    try testing.expect(!std.mem.containsAtLeast(u8, one_fn, 1, "icall @chooseImplicit"));
+    try testing.expect(std.mem.containsAtLeast(u8, one_fn, 1, "const 0x7"));
+
+    const two_fn = try functionSlice(rendered, "two");
+    try testing.expect(!std.mem.containsAtLeast(u8, two_fn, 1, "icall @chooseImplicit"));
+    try testing.expect(std.mem.containsAtLeast(u8, two_fn, 1, "const 0x9"));
+
+    const yes_fn = try functionSlice(rendered, "yes");
+    try testing.expect(!std.mem.containsAtLeast(u8, yes_fn, 1, "icall @chooseBool"));
+    try testing.expect(std.mem.containsAtLeast(u8, yes_fn, 1, "const 0xB"));
+
+    const no_fn = try functionSlice(rendered, "no");
+    try testing.expect(!std.mem.containsAtLeast(u8, no_fn, 1, "icall @chooseBool"));
+    try testing.expect(std.mem.containsAtLeast(u8, no_fn, 1, "const 0xC"));
+
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler expands source inline helpers with structured non-returning regions" {
     const source_text =
         \\contract InlineLowering {

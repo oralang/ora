@@ -60,6 +60,34 @@ args = []
 returns = { u256 = 9 }
 
 [[call]]
+fn = "implicitOne()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 7 }
+
+[[call]]
+fn = "implicitTwo()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 9 }
+
+[[call]]
+fn = "literalFlagTrue()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 11 }
+
+[[call]]
+fn = "literalFlagFalse()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 12 }
+
+[[call]]
 fn = "structured(bool,uint256,uint256)"
 caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0

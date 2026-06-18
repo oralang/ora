@@ -106,9 +106,9 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn lowerFunction(self: *Lowerer, item_id: ast.ItemId, function: ast.FunctionItem, parent_block: mlir.MlirBlock) anyerror!void {
-            if (function.is_generic or function.is_comptime) return;
+            if (function.is_generic or function.is_comptime or function.is_inline) return;
             const parameters = try self.runtimeFunctionParameters(function);
-            try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{}, null, null);
+            try @This().lowerConcreteFunction(self, item_id, function, function.name, parameters, parent_block, &.{}, &.{}, null, null);
         }
 
         pub fn lowerImpl(self: *Lowerer, impl_item: ast.ImplItem, parent_block: mlir.MlirBlock) anyerror!void {
@@ -122,7 +122,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (function.is_generic or function.is_comptime) continue;
                 const symbol_name = try @This().implMethodSymbolName(self, impl_item.trait_name, impl_item.target_name, function.name);
                 if (self.monomorphized_function_names.contains(symbol_name)) continue;
-                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, impl_parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
         }
@@ -202,6 +202,61 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             appendOp(parent_block, op);
         }
 
+        fn inlineKnownArgValueFromExpr(self: *Lowerer, expr_id: ast.ExprId) ?Lowerer.InlineKnownArgValue {
+            return switch (self.file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| .{ .integer = std.mem.trim(u8, literal.text, " \t\n\r") },
+                .BoolLiteral => |literal| .{ .boolean = literal.value },
+                .Group => |group| @This().inlineKnownArgValueFromExpr(self, group.expr),
+                else => null,
+            };
+        }
+
+        fn inlineKnownRuntimeArgBindings(
+            self: *Lowerer,
+            function: ast.FunctionItem,
+            runtime_args: []const ast.ExprId,
+            runtime_parameters: []const ast.Parameter,
+        ) anyerror![]const Lowerer.InlineKnownArgBinding {
+            if (!function.is_inline) return &.{};
+
+            var bindings: std.ArrayList(Lowerer.InlineKnownArgBinding) = .{};
+            for (runtime_parameters, 0..) |parameter, index| {
+                if (index >= runtime_args.len) break;
+                const name = self.patternName(parameter.pattern) orelse continue;
+                const value = @This().inlineKnownArgValueFromExpr(self, runtime_args[index]) orelse continue;
+                try bindings.append(self.allocator, .{ .parameter_name = name, .value = value });
+            }
+            return bindings.toOwnedSlice(self.allocator);
+        }
+
+        fn mangleInlineKnownFunctionName(
+            self: *Lowerer,
+            base_name: []const u8,
+            bindings: []const Lowerer.InlineKnownArgBinding,
+        ) anyerror![]const u8 {
+            if (bindings.len == 0) return base_name;
+
+            var name = std.ArrayList(u8){};
+            try name.appendSlice(self.allocator, base_name);
+            try name.appendSlice(self.allocator, "__inline");
+            for (bindings) |binding| {
+                try name.appendSlice(self.allocator, "__");
+                for (binding.parameter_name) |ch| {
+                    try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+                }
+                try name.append(self.allocator, '_');
+                switch (binding.value) {
+                    .integer => |text| {
+                        for (text) |ch| {
+                            try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+                        }
+                    },
+                    .boolean => |value| try name.appendSlice(self.allocator, if (value) "true" else "false"),
+                }
+            }
+            return name.toOwnedSlice(self.allocator);
+        }
+
         pub fn ensureMonomorphizedFunction(
             self: *Lowerer,
             item_id: ast.ItemId,
@@ -227,9 +282,19 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 self.module_body;
 
             if (!function.is_generic) {
+                if (function.is_inline) {
+                    const runtime_args = self.stripGenericCallArgs(function, call);
+                    const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
+                    const symbol_name = try @This().mangleInlineKnownFunctionName(self, base_symbol_name, known_args);
+                    if (!self.monomorphized_function_names.contains(symbol_name)) {
+                        try @This().lowerConcreteFunction(self, item_id, function, symbol_name, parameters, parent_block, &.{}, known_args, null, null);
+                        try self.monomorphized_function_names.put(symbol_name, {});
+                    }
+                    return symbol_name;
+                }
                 if (scoped_contract_id == null) return function.name;
                 if (!self.monomorphized_function_names.contains(base_symbol_name)) {
-                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, null, null);
+                    try @This().lowerConcreteFunction(self, item_id, function, base_symbol_name, parameters, parent_block, &.{}, &.{}, null, null);
                     try self.monomorphized_function_names.put(base_symbol_name, {});
                 }
                 return base_symbol_name;
@@ -237,9 +302,12 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
             const bindings = (try self.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
-            const mangled_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+            const generic_mangled_name = try self.mangleGenericFunctionName(base_symbol_name, bindings);
+            const runtime_args = self.stripGenericCallArgs(function, call);
+            const known_args = try @This().inlineKnownRuntimeArgBindings(self, function, runtime_args, parameters);
+            const mangled_name = try @This().mangleInlineKnownFunctionName(self, generic_mangled_name, known_args);
             if (!self.monomorphized_function_names.contains(mangled_name)) {
-                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, null, null);
+                try @This().lowerConcreteFunction(self, item_id, function, mangled_name, parameters, parent_block, bindings, known_args, null, null);
                 try self.monomorphized_function_names.put(mangled_name, {});
             }
             return mangled_name;
@@ -339,6 +407,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         runtime_parameters,
                         parent_block,
                         bindings,
+                        &.{},
                         if (resolved_call) |resolved| resolved.runtime_parameter_types else null,
                         if (resolved_call) |resolved| resolved.return_type else null,
                     );
@@ -352,7 +421,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             }
 
             if (!self.monomorphized_function_names.contains(base_symbol_name)) {
-                try @This().lowerConcreteFunction(&imported_lowerer, item_id, function, base_symbol_name, function.parameters, parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(&imported_lowerer, item_id, function, base_symbol_name, function.parameters, parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(base_symbol_name, {});
             }
             self.items = imported_lowerer.items;
@@ -421,7 +490,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                     defer self.active_impl_contract_scope = previous_impl_contract_scope;
                     defer self.active_impl_self_type = previous_impl_self_type;
-                    try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, null, null);
+                    try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, runtime_parameters, parent_block, bindings, &.{}, null, null);
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 return symbol_name;
@@ -435,7 +504,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 self.active_impl_self_type = descriptorFromPathName(self.file, self.item_index, target_name);
                 defer self.active_impl_contract_scope = previous_impl_contract_scope;
                 defer self.active_impl_self_type = previous_impl_self_type;
-                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, null, null);
+                try @This().lowerConcreteFunction(self, method_item_id, function, symbol_name, function.parameters, parent_block, &.{}, &.{}, null, null);
                 try self.monomorphized_function_names.put(symbol_name, {});
             }
             return symbol_name;
@@ -470,12 +539,17 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             parameters: []const ast.Parameter,
             parent_block: mlir.MlirBlock,
             type_bindings: []const Lowerer.GenericTypeBinding,
+            inline_known_args: []const Lowerer.InlineKnownArgBinding,
             concrete_runtime_parameter_types: ?[]const sema.Type,
             concrete_return_type: ?sema.Type,
         ) anyerror!void {
             const previous_type_bindings = self.active_type_bindings;
             self.active_type_bindings = type_bindings;
             defer self.active_type_bindings = previous_type_bindings;
+
+            const previous_inline_known_args = self.active_inline_known_args;
+            self.active_inline_known_args = inline_known_args;
+            defer self.active_inline_known_args = previous_inline_known_args;
 
             var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
             const return_type = if (function.return_type) |_| blk: {

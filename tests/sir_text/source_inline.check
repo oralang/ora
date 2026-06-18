@@ -1,16 +1,16 @@
 // INPUT: tests/conformance/source_inline.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 
-// CHECK-LABEL: fn writeSaved:
-// CHECK: slot_saved = const 0x0
-// CHECK: sstore slot_saved
-// CHECK-NOT: icall @normalize
-// CHECK: iret
-
 // CHECK-LABEL: fn set:
 // CHECK: slot_saved = const 0x0
 // CHECK: sstore slot_saved
 // CHECK-NOT: icall @writeSaved
+// CHECK-NOT: icall @normalize
+// CHECK: iret
+
+// CHECK-LABEL: fn writeSaved:
+// CHECK: slot_saved = const 0x0
+// CHECK: sstore slot_saved
 // CHECK-NOT: icall @normalize
 // CHECK: iret
 
@@ -45,6 +45,26 @@
 // CHECK-LABEL: fn modeTwo:
 // CHECK-NOT: icall @chooseMode
 // CHECK: const 0x9
+// CHECK: iret
+
+// CHECK-LABEL: fn implicitOne:
+// CHECK-NOT: icall @chooseImplicit
+// CHECK: const 0x7
+// CHECK: iret
+
+// CHECK-LABEL: fn implicitTwo:
+// CHECK-NOT: icall @chooseImplicit
+// CHECK: const 0x9
+// CHECK: iret
+
+// CHECK-LABEL: fn literalFlagTrue:
+// CHECK-NOT: icall @chooseLiteralFlag
+// CHECK: const 0xB
+// CHECK: iret
+
+// CHECK-LABEL: fn literalFlagFalse:
+// CHECK-NOT: icall @chooseLiteralFlag
+// CHECK: const 0xC
 // CHECK: iret
 
 // CHECK-LABEL: fn structured:

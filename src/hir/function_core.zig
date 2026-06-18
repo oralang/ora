@@ -132,6 +132,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     continue;
                 }
                 self.locals.bindPattern(parent.file, parameter.pattern, mlir.oraBlockGetArgument(block, runtime_index)) catch {};
+                if (parent.patternName(parameter.pattern)) |name| {
+                    if (parent.inlineKnownArg(name)) |known| switch (known) {
+                        .integer => |integer_text| {
+                            if (parseUnsignedIntegerLiteral(u256, integer_text)) |parsed| {
+                                if (std.math.cast(i64, parsed)) |known_integer| {
+                                    self.locals.setPatternKnownInt(parent.file, parameter.pattern, known_integer) catch {};
+                                }
+                            }
+                        },
+                        .boolean => |boolean| self.locals.setPatternKnownBool(parent.file, parameter.pattern, boolean) catch {},
+                    };
+                }
                 runtime_index += 1;
             }
             return self;

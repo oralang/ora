@@ -41,6 +41,30 @@ contract InlineFunctions {
         return out;
     }
 
+    inline fn chooseImplicit(mode: u256) -> u256 {
+        var out: u256 = 0;
+        comptime {
+            if (mode == 1) {
+                out = 7;
+            } else {
+                out = 9;
+            }
+        }
+        return out;
+    }
+
+    inline fn chooseLiteralFlag(flag: bool) -> u256 {
+        var out: u256 = 0;
+        comptime {
+            if (flag) {
+                out = 11;
+            } else {
+                out = 12;
+            }
+        }
+        return out;
+    }
+
     inline fn structuredChoice(flag: bool, tag: u256, value: u256) -> u256 {
         var out: u256 = 0;
         if (flag) {
@@ -103,6 +127,22 @@ contract InlineFunctions {
 
     pub fn modeTwo() -> u256 {
         return chooseMode(2);
+    }
+
+    pub fn implicitOne() -> u256 {
+        return chooseImplicit(1);
+    }
+
+    pub fn implicitTwo() -> u256 {
+        return chooseImplicit(2);
+    }
+
+    pub fn literalFlagTrue() -> u256 {
+        return chooseLiteralFlag(true);
+    }
+
+    pub fn literalFlagFalse() -> u256 {
+        return chooseLiteralFlag(false);
     }
 
     pub fn structured(flag: bool, tag: u256, value: u256) -> u256 {

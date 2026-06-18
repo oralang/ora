@@ -315,6 +315,34 @@ test "compiler rejects runtime values inside statement-position comptime blocks"
     try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime assignment value is not statically known during HIR lowering"));
 }
 
+test "compiler rejects dynamic arguments to inline helpers that require callsite-known values" {
+    const source_text =
+        \\contract InlineComptime {
+        \\    inline fn choose(mode: u256) -> u256 {
+        \\        var out: u256 = 0;
+        \\        comptime {
+        \\            if (mode == 1) {
+        \\                out = 7;
+        \\            } else {
+        \\                out = 9;
+        \\            }
+        \\        }
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn run(mode: u256) -> u256 {
+        \\        return choose(mode);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&hir_result.diagnostics, "comptime if condition is not statically known during HIR lowering"));
+}
+
 test "compiler folds comptime shifts before MLIR verification" {
     const source_text =
         \\contract ComptimeShiftProbe {
