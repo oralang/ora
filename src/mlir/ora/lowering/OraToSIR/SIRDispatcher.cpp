@@ -1024,6 +1024,7 @@ namespace mlir
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
                 SmallVector<ErrorInfo, 8> returnErrors;
+                bool hasReturnErrorMetadata = false;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -1383,6 +1384,7 @@ namespace mlir
                         }
                         if (auto returnErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.return_error_ids"))
                         {
+                            info.hasReturnErrorMetadata = true;
                             for (Attribute a : returnErrorIdsAttr)
                             {
                                 auto iattr = dyn_cast<IntegerAttr>(a);
@@ -1434,7 +1436,7 @@ namespace mlir
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
-                        if (info.returnsErrorUnion && info.returnErrors.empty())
+                        if (info.returnsErrorUnion && !info.hasReturnErrorMetadata)
                         {
                             func.emitError("public error-union function is missing ora.return_error_ids metadata");
                             signalPassFailure();

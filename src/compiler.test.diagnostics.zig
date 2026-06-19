@@ -1065,6 +1065,52 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
 }
 
+test "compiler build accepts public fallible returns with no declared custom errors" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn ok() -> !bool {
+        \\        return true;
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expectEqual(@as(u8, 0), code),
+        else => return error.TestUnexpectedResult,
+    }
+    try tmp.dir.access("out/bin/main.hex", .{});
+}
+
 test "compiler reports undefined type names at value resolution positions once" {
     const cases = [_]struct {
         name: []const u8,
