@@ -136,6 +136,7 @@ fn encodeAbiSequence(allocator: std.mem.Allocator, wires: []const []const u8, ar
 }
 
 fn encodeAbiValue(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgValue) anyerror![]u8 {
+    if (fixedArrayInfo(wire_type)) |info| return try encodeFixedArray(allocator, info, arg);
     if (arrayElementType(wire_type)) |element_type| return try encodeDynamicArray(allocator, element_type, arg);
     if (std.mem.eql(u8, wire_type, "bytes")) {
         const bytes = try parseHexBytes(allocator, try argAsLiteral(arg));
@@ -149,6 +150,31 @@ fn encodeAbiValue(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgV
     errdefer allocator.free(out);
     try encodeStaticAbiWord(out[0..32], wire_type, arg);
     return out;
+}
+
+const FixedArrayInfo = struct {
+    element_type: []const u8,
+    len: usize,
+};
+
+fn encodeFixedArray(allocator: std.mem.Allocator, info: FixedArrayInfo, arg: ArgValue) anyerror![]u8 {
+    if ((try staticAbiWordCount(allocator, info.element_type)) == null) return error.UnsupportedDynamicFixedArrayElement;
+
+    const elements = try parseDelimitedItems(allocator, try argAsLiteral(arg), '[', ']');
+    defer allocator.free(elements);
+    if (elements.len != info.len) return error.FixedArrayLengthMismatch;
+
+    const wires = try allocator.alloc([]const u8, elements.len);
+    defer allocator.free(wires);
+    const values = try allocator.alloc(ArgValue, elements.len);
+    defer allocator.free(values);
+
+    for (elements, 0..) |element, i| {
+        wires[i] = info.element_type;
+        values[i] = try parseArgValue(element);
+    }
+
+    return try encodeAbiSequence(allocator, wires, values);
 }
 
 fn encodeDynamicArray(allocator: std.mem.Allocator, element_type: []const u8, arg: ArgValue) anyerror![]u8 {
@@ -208,6 +234,10 @@ fn paddedAbiByteLen(len: usize) usize {
 }
 
 fn staticAbiWordCount(allocator: std.mem.Allocator, wire_type: []const u8) anyerror!?usize {
+    if (fixedArrayInfo(wire_type)) |info| {
+        const element_words = (try staticAbiWordCount(allocator, info.element_type)) orelse return error.UnsupportedDynamicFixedArrayElement;
+        return element_words * info.len;
+    }
     if (arrayElementType(wire_type) != null) return null;
     if (std.mem.eql(u8, wire_type, "bytes") or std.mem.eql(u8, wire_type, "string")) return null;
     if (tupleInner(wire_type) != null) {
@@ -235,6 +265,17 @@ fn isStaticAbiScalar(wire_type: []const u8) bool {
 fn arrayElementType(wire_type: []const u8) ?[]const u8 {
     if (!std.mem.endsWith(u8, wire_type, "[]")) return null;
     return wire_type[0 .. wire_type.len - 2];
+}
+
+fn fixedArrayInfo(wire_type: []const u8) ?FixedArrayInfo {
+    if (wire_type.len < 3 or wire_type[wire_type.len - 1] != ']') return null;
+    const open = std.mem.lastIndexOfScalar(u8, wire_type, '[') orelse return null;
+    if (open == 0) return null;
+    const len_text = wire_type[open + 1 .. wire_type.len - 1];
+    if (len_text.len == 0) return null;
+    const len = std.fmt.parseInt(usize, len_text, 10) catch return null;
+    if (len == 0) return null;
+    return .{ .element_type = wire_type[0..open], .len = len };
 }
 
 fn tupleInner(wire_type: []const u8) ?[]const u8 {

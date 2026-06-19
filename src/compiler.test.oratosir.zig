@@ -215,6 +215,163 @@ test "compiler expands nested early-return source inline helper calls before SIR
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler expands Result source inline helper calls before SIR call conversion" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract InlineLowering {
+        \\    inline fn pick(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        if (flag) {
+        \\            return Ok(value);
+        \\        }
+        \\        return Err(Failure());
+        \\    }
+        \\
+        \\    pub fn run(flag: bool, value: u256) -> Result<u256, Failure> {
+        \\        return pick(flag, value);
+        \\    }
+        \\
+        \\    pub fn unwrap(flag: bool, value: u256) -> !u256 | Failure {
+        \\        let out: u256 = try pick(flag, value);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @pick"));
+
+    const unwrap_fn = try functionSlice(rendered, "unwrap");
+    try testing.expect(!std.mem.containsAtLeast(u8, unwrap_fn, 1, "icall @pick"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler expands multiple fallible source inline early returns before SIR call conversion" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract InlineLowering {
+        \\    inline fn check(first: bool, second: bool) -> !u256 | Failure {
+        \\        if (first) {
+        \\            return Failure;
+        \\        }
+        \\        if (second) {
+        \\            return Failure;
+        \\        }
+        \\        return 7;
+        \\    }
+        \\
+        \\    pub fn run(first: bool, second: bool) -> !u256 | Failure {
+        \\        let out: u256 = try check(first, second);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @check"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler expands unsigned checked-prelude source inline helpers before SIR call conversion" {
+    const source_text =
+        \\comptime const constants = @import("std/constants");
+        \\
+        \\error Overflow;
+        \\
+        \\contract InlineLowering {
+        \\    inline fn checkedAdd(current: u256, delta: u256) -> !u256 | Overflow {
+        \\        if (current > constants.U256_MAX - delta) {
+        \\            return Overflow;
+        \\        }
+        \\        return current + delta;
+        \\    }
+        \\
+        \\    pub fn run(current: u256, delta: u256) -> !u256 | Overflow {
+        \\        let out: u256 = try checkedAdd(current, delta);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @checkedAdd"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
+test "compiler expands signed checked-prelude source inline helpers before SIR call conversion" {
+    const source_text =
+        \\comptime const constants = @import("std/constants");
+        \\
+        \\error Overflow;
+        \\
+        \\contract InlineLowering {
+        \\    inline fn checkedSignedAdd(current: i256, delta: i256) -> !i256 | Overflow {
+        \\        if (delta > 0 && current > constants.I256_MAX - delta) {
+        \\            return Overflow;
+        \\        }
+        \\        if (delta < 0 && current < constants.I256_MIN - delta) {
+        \\            return Overflow;
+        \\        }
+        \\        return current + delta;
+        \\    }
+        \\
+        \\    pub fn run(current: i256, delta: i256) -> !i256 | Overflow {
+        \\        let out: i256 = try checkedSignedAdd(current, delta);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @checkedSignedAdd"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler expands void early-return source inline helper calls before SIR call conversion" {
     const source_text =
         \\contract InlineLowering {
@@ -5699,6 +5856,52 @@ test "compiler preserves error selectors through OraToSIR" {
     const rendered = module_text_ref.data[0..module_text_ref.length];
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "cf479181"));
+}
+
+test "compiler limits public error-union dispatcher to declared return errors" {
+    const source_text =
+        \\error OnlyA();
+        \\error OnlyB();
+        \\error Payload(code: u256);
+        \\
+        \\contract Probe {
+        \\    pub fn one(flag: bool) -> !bool | OnlyA {
+        \\        if (flag) {
+        \\            return true;
+        \\        }
+        \\        return error OnlyA();
+        \\    }
+        \\
+        \\    pub fn two(flag: bool) -> !bool | OnlyB | Payload {
+        \\        if (flag) {
+        \\            return error OnlyB();
+        \\        }
+        \\        return error Payload(7);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const main_fn = try functionSlice(rendered, "main");
+    const only_a = try std.fmt.allocPrint(testing.allocator, "0x{X:0>8}", .{compiler.hir.abi.keccakSelectorValue("OnlyA()")});
+    defer testing.allocator.free(only_a);
+    const only_b = try std.fmt.allocPrint(testing.allocator, "0x{X:0>8}", .{compiler.hir.abi.keccakSelectorValue("OnlyB()")});
+    defer testing.allocator.free(only_b);
+    const payload = try std.fmt.allocPrint(testing.allocator, "0x{X:0>8}", .{compiler.hir.abi.keccakSelectorValue("Payload(uint256)")});
+    defer testing.allocator.free(payload);
+
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, only_a));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, only_b));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, main_fn, payload));
 }
 
 test "compiler lowers payload error return constructors through OraToSIR" {

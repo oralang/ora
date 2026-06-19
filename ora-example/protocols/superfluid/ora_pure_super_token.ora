@@ -1,29 +1,37 @@
-// Ora-native Pure SuperToken, phase 1.
+// Ora-native Pure SuperToken
 //
-// This intentionally models the Superfluid settled-balance core without ERC777
-// hooks/operators, an underlying wrapper, permit, proxies, or agreement logic.
-// The distinguishing state is signed settled balances; the public ERC20 view
-// exposes only the positive available balance.
-
-error InsufficientAllowance(required: u256, available: u256);
-error InsufficientBalance(required: u256, available: u256);
-error SignedBalanceOverflow;
+// This models the core pure SuperToken accounting surface without ERC777, permit, wrappers, proxies, or yield backends.
+// Agreement payloads are stored as bounded fixed-size word records through computed storage
+// That is an Ora language choice: agreement data is namespaced and explicit instead of hidden behind raw storage assembly
 
 comptime const std = @import("std");
+comptime const std_storage = @import("std/storage");
 
-// Superfluid settled balances are i256. Amounts that become signed deltas must
-// fit in i256.max before they can be added to or subtracted from settled state.
-type SuperTokenAmount = InRange<u256, 1, std.constants.I256_MAX>;
-type InitialSupply = InRange<u256, 1, std.constants.I256_MAX>;
+error AgreementAlreadyExists;
+error AgreementDoesNotExist;
+error AgreementStateDoesNotExist;
+error AgreementWordOutOfBounds(requested: u256, length: u256);
+error InsufficientAllowance(required: u256, available: u256);
+error InsufficientBalance(required: u256, available: u256);
+error OnlyAdmin;
+error OnlyAgreement;
+error SignedBalanceOverflow;
+error U256Overflow;
+
 type Account = NonZeroAddress;
+type AgreementClass = NonZeroAddress;
+type AgreementId = u256;
+type AgreementSlotId = u256;
+type AgreementWordIndex = InRange<u256, 0, 3>;
+type AgreementWordLength = InRange<u256, 1, 4>;
+type InitialSupply = InRange<u256, 1, std.constants.I256_MAX>;
 type Recipient = NonZeroAddress;
 type Spender = NonZeroAddress;
+type SuperTokenAmount = InRange<u256, 1, std.constants.I256_MAX>;
 
-// A settled balance is signed (Superfluid semantics); the spendable ("available")
-// balance is its non-negative part. The signed-balance rules live on the type via
-// a trait instead of free contract helpers, so the behavior travels with the value.
 trait SettledBalance {
     fn available(self) -> u256;
+    fn critical(self) -> bool;
 }
 
 struct Settled {
@@ -37,28 +45,107 @@ impl SettledBalance for Settled {
         }
         return @cast(u256, self.value);
     }
+
+    fn critical(self) -> bool
+        ensures(result == (self.value < 0))
+    {
+        return self.value < 0;
+    }
 }
-/*
+
 contract OraPureSuperToken {
+    storage var admin: address = std.constants.ZERO_ADDRESS;
     storage var token_name: string;
     storage var token_symbol: string;
     storage var total_supply: u256 = 0;
+
     storage var shared_settled_balances: map<address, i256>;
     storage var allowances: map<address, map<address, u256>>;
+    storage var listed_agreements: map<address, bool>;
 
     log Transfer(indexed from: address, indexed to: address, amount: u256);
     log Approval(indexed owner: address, indexed spender: address, amount: u256);
-    log TokenInitialized(indexed owner: address, initial_supply: u256);
+    log AgreementClassRegistered(indexed agreement_class: address);
+    log AgreementClassUnregistered(indexed agreement_class: address);
+    log AgreementCreated(indexed agreement_class: address, id: u256, data_length: u256);
+    log AgreementUpdated(indexed agreement_class: address, id: u256, data_length: u256);
+    log AgreementTerminated(indexed agreement_class: address, id: u256);
+    log AgreementStateUpdated(indexed agreement_class: address, indexed account: address, slot_id: u256, data_length: u256);
     log AgreementSettled(indexed agreement_class: address, indexed account: address, delta: i256, settled_balance: i256);
+    log TokenInitialized(indexed owner: address, initial_supply: u256);
 
-    inline fn amountDelta(amount: SuperTokenAmount) -> i256 {
+    inline fn amountDelta(amount: SuperTokenAmount) -> i256
+        ensures(result == @cast(i256, amount))
+    {
         return @cast(i256, amount);
     }
 
+    inline fn availableOf(account: Account) -> u256
+        ensures((shared_settled_balances[account] <= 0 && result == 0) || (shared_settled_balances[account] > 0 && result == @cast(u256, shared_settled_balances[account])))
+    {
+        let settled: Settled = .{
+            .value = shared_settled_balances[account]
+        };
+        return settled.available();
+    }
+
+    inline fn agreementDataSlot(agreement_class: AgreementClass, id: AgreementId) -> StorageSlot {
+        return std_storage.derive("ora.superfluid.pure.agreement.data.v1", agreement_class, id);
+    }
+
+    inline fn agreementStateSlot(agreement_class: AgreementClass, account: Account, slot_id: AgreementSlotId) -> StorageSlot {
+        return std_storage.derive("ora.superfluid.pure.agreement.state.v1", agreement_class, account, slot_id);
+    }
+
+    inline fn assertAdmin() -> !bool | OnlyAdmin
+        ensures_ok(result == true)
+    {
+        if (std.msg.sender() != admin) {
+            return OnlyAdmin;
+        }
+        return true;
+    }
+
+    inline fn requireListedAgreement(agreement_class: AgreementClass) -> !bool | OnlyAgreement
+        ensures_ok(result == true)
+    {
+        let caller: NonZeroAddress = std.msg.sender();
+        if (caller != agreement_class) {
+            return OnlyAgreement;
+        }
+        if (!listed_agreements[agreement_class]) {
+            return OnlyAgreement;
+        }
+        return true;
+    }
+
+    inline fn checkedSignedAdd(current: i256, delta: i256) -> !i256 | SignedBalanceOverflow
+        ensures_ok(result == current + delta)
+    {
+        let checked: struct { value: i256, overflow: bool } = @addWithOverflow(current, delta);
+        if (checked.overflow) {
+            return SignedBalanceOverflow;
+        }
+        return checked.value;
+    }
+
+    inline fn checkedAllowanceAdd(current: u256, delta: u256) -> !u256 | U256Overflow
+        ensures_ok(result == current + delta)
+    {
+        if (current > std.constants.U256_MAX - delta) {
+            return U256Overflow;
+        }
+        return current + delta;
+    }
+
     pub fn init(name: string, symbol: string, initial_supply: InitialSupply)
-    modifies token_name, token_symbol, total_supply, shared_settled_balances[msg.sender]
+    modifies admin, token_name, token_symbol, total_supply, shared_settled_balances[msg.sender]
+    ensures(admin == std.msg.sender())
+    ensures(total_supply == initial_supply)
+    ensures(shared_settled_balances[std.msg.sender()] == @cast(i256, initial_supply))
     {
         let deployer: NonZeroAddress = std.msg.sender();
+        admin = deployer;
         token_name = name;
         token_symbol = symbol;
         total_supply = initial_supply;
@@ -68,71 +155,120 @@ contract OraPureSuperToken {
         log TokenInitialized(deployer, initial_supply);
     }
 
+    pub fn getAdmin() -> address
+        ensures(result == admin)
+    {
+        return admin;
+    }
+
     pub fn name() -> string
+        ensures(result == token_name)
     {
         return token_name;
     }
 
     pub fn symbol() -> string
+        ensures(result == token_symbol)
     {
         return token_symbol;
     }
 
     pub fn decimals() -> u8
+        ensures(result == 18)
     {
         return 18;
     }
 
     pub fn totalSupply() -> u256
+        ensures(result == total_supply)
     {
         return total_supply;
     }
 
     pub fn settledBalanceOf(account: Account) -> i256
+        ensures(result == shared_settled_balances[account])
     {
         return shared_settled_balances[account];
     }
 
     pub fn balanceOf(account: Account) -> u256
+        ensures(result == availableOf(account))
+        ensures((shared_settled_balances[account] <= 0 && result == 0) || (shared_settled_balances[account] > 0 && result == @cast(u256, shared_settled_balances[account])))
     {
-        let settled: Settled = .{
-            .value = shared_settled_balances[account]
-        };
-        return settled.available();
+        return availableOf(account);
     }
 
     pub fn realtimeBalanceOf(account: Account, timestamp: u256) -> (i256, u256, u256)
+        ensures(result.0 == shared_settled_balances[account])
+        ensures(result.1 == 0)
+        ensures(result.2 == 0)
     {
         return (shared_settled_balances[account], 0, 0);
     }
 
+    pub fn realtimeBalanceOfNow(account: Account) -> (i256, u256, u256, u256)
+        ensures(result.0 == shared_settled_balances[account])
+        ensures(result.1 == 0)
+        ensures(result.2 == 0)
+        ensures(result.3 == std.block.timestamp)
+    {
+        return (shared_settled_balances[account], 0, 0, std.block.timestamp);
+    }
+
+    pub fn isAccountCritical(account: Account, timestamp: u256) -> bool
+        ensures(result == (shared_settled_balances[account] < 0))
+    {
+        let settled: Settled = .{
+            .value = shared_settled_balances[account]
+        };
+        return settled.critical();
+    }
+
+    pub fn isAccountCriticalNow(account: Account) -> bool
+        ensures(result == (shared_settled_balances[account] < 0))
+    {
+        return isAccountCritical(account, std.block.timestamp);
+    }
+
+    pub fn isAccountSolvent(account: Account, timestamp: u256) -> bool
+        ensures(result == (shared_settled_balances[account] >= 0))
+    {
+        return !isAccountCritical(account, timestamp);
+    }
+
+    pub fn isAccountSolventNow(account: Account) -> bool
+        ensures(result == (shared_settled_balances[account] >= 0))
+    {
+        return !isAccountCriticalNow(account);
+    }
+
     pub fn allowance(owner: Account, spender: Spender) -> u256
+        ensures(result == allowances[owner][spender])
     {
         return allowances[owner][spender];
     }
 
-    pub fn transfer(to: Recipient, amount: SuperTokenAmount) -> !bool|InsufficientBalance|SignedBalanceOverflow
+    pub fn transfer(to: Recipient, amount: SuperTokenAmount) -> !bool | InsufficientBalance | SignedBalanceOverflow
     modifies shared_settled_balances[msg.sender], shared_settled_balances[to]
+    ensures_ok(result == true)
+    ensures_ok((std.msg.sender() == to && shared_settled_balances[std.msg.sender()] == old(shared_settled_balances[std.msg.sender()])) || (std.msg.sender() != to && shared_settled_balances[std.msg.sender()] == old(shared_settled_balances[std.msg.sender()]) - @cast(i256, amount)))
+    ensures_ok(total_supply == old(total_supply))
     {
         let sender: NonZeroAddress = std.msg.sender();
-        let delta: i256 = amountDelta(amount);
-        let sender_before: i256 = shared_settled_balances[sender];
-        let sender_settled: Settled = .{
-            .value = sender_before
-        };
-        let sender_available: u256 = sender_settled.available();
-
-        if (sender_available<amount) {
+        let sender_available: u256 = availableOf(sender);
+        if (sender_available < amount) {
             return InsufficientBalance(amount, sender_available);
         }
+        if (sender != to) {
+            let delta: i256 = amountDelta(amount);
+            let sender_before: i256 = shared_settled_balances[sender];
+            let to_before: i256 = shared_settled_balances[to];
+            let sender_next: i256 = sender_before - delta;
+            let to_next: i256 = try checkedSignedAdd(to_before, delta);
 
-        let to_before: i256 = shared_settled_balances[to];
-        if (to_before>std.constants.I256_MAX - delta) {
-            return SignedBalanceOverflow;
+            shared_settled_balances[sender] = sender_next;
+            shared_settled_balances[to] = to_next;
         }
-
-        shared_settled_balances[sender] = sender_before - delta;
-        shared_settled_balances[to] = to_before + delta;
 
         log Transfer(sender, to, amount);
         return true;
@@ -140,6 +276,9 @@ contract OraPureSuperToken {
 
     pub fn approve(spender: Spender, amount: u256) -> bool
     modifies allowances[msg.sender][spender]
+    ensures(result == true)
+    ensures(allowances[std.msg.sender()][spender] == amount)
+    ensures(total_supply == old(total_supply))
     {
         let owner: NonZeroAddress = std.msg.sender();
         allowances[owner][spender] = amount;
@@ -147,152 +286,387 @@ contract OraPureSuperToken {
         return true;
     }
 
-    pub fn transferFrom(from: Account, to: Recipient, amount: SuperTokenAmount) -> !bool|InsufficientAllowance|InsufficientBalance|SignedBalanceOverflow
+    pub fn increaseAllowance(spender: Spender, added_value: u256) -> !bool | U256Overflow
+    modifies allowances[msg.sender][spender]
+    ensures_ok(result == true)
+    ensures_ok(allowances[std.msg.sender()][spender] == old(allowances[std.msg.sender()][spender]) + added_value)
+    ensures_ok(total_supply == old(total_supply))
+    {
+        let owner: NonZeroAddress = std.msg.sender();
+        let next: u256 = try checkedAllowanceAdd(allowances[owner][spender], added_value);
+        allowances[owner][spender] = next;
+        log Approval(owner, spender, next);
+        return true;
+    }
+
+    pub fn decreaseAllowance(spender: Spender, subtracted_value: u256) -> !bool | InsufficientAllowance
+    modifies allowances[msg.sender][spender]
+    ensures_ok(result == true)
+    ensures_ok(allowances[std.msg.sender()][spender] == old(allowances[std.msg.sender()][spender]) - subtracted_value)
+    ensures_ok(total_supply == old(total_supply))
+    {
+        let owner: NonZeroAddress = std.msg.sender();
+        let current_allowance: u256 = allowances[owner][spender];
+        if (current_allowance < subtracted_value) {
+            return InsufficientAllowance(subtracted_value, current_allowance);
+        }
+        let next: u256 = current_allowance - subtracted_value;
+        allowances[owner][spender] = next;
+        log Approval(owner, spender, next);
+        return true;
+    }
+
+    pub fn transferFrom(from: Account, to: Recipient, amount: SuperTokenAmount) -> !bool | InsufficientAllowance | InsufficientBalance | SignedBalanceOverflow
     modifies allowances[from][msg.sender], shared_settled_balances[from], shared_settled_balances[to]
+    ensures_ok(result == true)
+    ensures_ok(allowances[from][std.msg.sender()] == old(allowances[from][std.msg.sender()]) - amount)
+    ensures_ok((from == to && shared_settled_balances[from] == old(shared_settled_balances[from])) || (from != to && shared_settled_balances[from] == old(shared_settled_balances[from]) - @cast(i256, amount)))
+    ensures_ok(total_supply == old(total_supply))
     {
         let spender: NonZeroAddress = std.msg.sender();
         let current_allowance: u256 = allowances[from][spender];
-        if (current_allowance<amount) {
+        if (current_allowance < amount) {
             return InsufficientAllowance(amount, current_allowance);
         }
 
-        let delta: i256 = amountDelta(amount);
-        let from_before: i256 = shared_settled_balances[from];
-        let from_settled: Settled = .{
-            .value = from_before
-        };
-        let from_available: u256 = from_settled.available();
-        if (from_available<amount) {
+        let from_available: u256 = availableOf(from);
+        if (from_available < amount) {
             return InsufficientBalance(amount, from_available);
         }
+        let next_allowance: u256 = current_allowance - amount;
+        if (from != to) {
+            let delta: i256 = amountDelta(amount);
+            let from_before: i256 = shared_settled_balances[from];
+            let to_before: i256 = shared_settled_balances[to];
+            let from_next: i256 = from_before - delta;
+            let to_next: i256 = try checkedSignedAdd(to_before, delta);
 
-        let to_before: i256 = shared_settled_balances[to];
-        if (to_before>std.constants.I256_MAX - delta) {
-            return SignedBalanceOverflow;
+            shared_settled_balances[from] = from_next;
+            shared_settled_balances[to] = to_next;
         }
-
-        allowances[from][spender] = current_allowance - amount;
-        shared_settled_balances[from] = from_before - delta;
-        shared_settled_balances[to] = to_before + delta;
+        allowances[from][spender] = next_allowance;
 
         log Transfer(from, to, amount);
         return true;
     }
 
-    pub fn createAgreement(id: bytes32, data_hash: bytes32, data_length: u256) -> !bool|AgreementAlreadyExists
-    modifies agreement_exists[msg.sender][id], agreement_data_hash[msg.sender][id], agreement_data_length[msg.sender][id]
+    pub fn transferAll(to: Recipient) -> !bool | InsufficientBalance | SignedBalanceOverflow
+    modifies shared_settled_balances[msg.sender], shared_settled_balances[to]
+    ensures_ok(result == true)
+    ensures_ok(total_supply == old(total_supply))
     {
-        let agreement_class: NonZeroAddress = std.msg.sender();
-        if (agreement_exists[agreement_class][id]) {
-            return AgreementAlreadyExists;
+        let sender: NonZeroAddress = std.msg.sender();
+        let amount: u256 = availableOf(sender);
+        if (amount == 0) {
+            return InsufficientBalance(1, 0);
         }
+        return try transfer(to, amount);
+    }
 
-        agreement_exists[agreement_class][id] = true;
-        agreement_data_hash[agreement_class][id] = data_hash;
-        agreement_data_length[agreement_class][id] = data_length;
+    pub fn registerAgreementClass(agreement_class: AgreementClass) -> !bool | OnlyAdmin
+    modifies listed_agreements[agreement_class]
+    ensures_ok(result == true)
+    ensures_ok(listed_agreements[agreement_class] == true)
+    ensures_ok(total_supply == old(total_supply))
+    {
+        try assertAdmin();
+        listed_agreements[agreement_class] = true;
+        log AgreementClassRegistered(agreement_class);
+        return true;
+    }
+
+    pub fn unregisterAgreementClass(agreement_class: AgreementClass) -> !bool | OnlyAdmin
+    modifies listed_agreements[agreement_class]
+    ensures_ok(result == true)
+    ensures_ok(listed_agreements[agreement_class] == false)
+    ensures_ok(total_supply == old(total_supply))
+    {
+        try assertAdmin();
+        listed_agreements[agreement_class] = false;
+        log AgreementClassUnregistered(agreement_class);
+        return true;
+    }
+
+    pub fn isAgreementClassListed(agreement_class: AgreementClass) -> bool
+        ensures(result == listed_agreements[agreement_class])
+    {
+        return listed_agreements[agreement_class];
+    }
+
+    pub fn createAgreement(
+        id: AgreementId,
+        data_length: AgreementWordLength,
+        data: [u256; 4],
+    ) -> !bool | OnlyAgreement | AgreementAlreadyExists
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    ensures_ok(result == true)
+    ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == data[0])
+    ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == data[1])
+    ensures_ok(data_length < 3 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 2) == data[2])
+    ensures_ok(data_length < 4 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 3) == data[3])
+    ensures_ok(total_supply == old(total_supply))
+    {
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let slot: StorageSlot = agreementDataSlot(agreement_class, id);
+
+        switch (data_length) {
+            1 => {
+                if (std_storage.words.load(slot, 0) != 0) {
+                    return AgreementAlreadyExists;
+                }
+                std_storage.words.store(slot, 0, data[0]);
+            }
+            2 => {
+                if (std_storage.words.load(slot, 0) != 0 || std_storage.words.load(slot, 1) != 0) {
+                    return AgreementAlreadyExists;
+                }
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+            }
+            3 => {
+                if (std_storage.words.load(slot, 0) != 0 || std_storage.words.load(slot, 1) != 0 || std_storage.words.load(slot, 2) != 0) {
+                    return AgreementAlreadyExists;
+                }
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+                std_storage.words.store(slot, 2, data[2]);
+            }
+            4 => {
+                if (std_storage.words.load(slot, 0) != 0 || std_storage.words.load(slot, 1) != 0 || std_storage.words.load(slot, 2) != 0 || std_storage.words.load(slot, 3) != 0) {
+                    return AgreementAlreadyExists;
+                }
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+                std_storage.words.store(slot, 2, data[2]);
+                std_storage.words.store(slot, 3, data[3]);
+            }
+        }
 
         log AgreementCreated(agreement_class, id, data_length);
         return true;
     }
 
-    pub fn getAgreementDataLength(agreement_class: AgreementClass, id: bytes32) -> !u256|AgreementDoesNotExist
+    pub fn updateAgreementData(
+        id: AgreementId,
+        data_length: AgreementWordLength,
+        data: [u256; 4],
+    ) -> !bool | OnlyAgreement
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    ensures_ok(result == true)
+    ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == data[0])
+    ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == data[1])
+    ensures_ok(data_length < 3 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 2) == data[2])
+    ensures_ok(data_length < 4 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 3) == data[3])
+    ensures_ok(total_supply == old(total_supply))
     {
-        if (!agreement_exists[agreement_class][id]) {
-            return AgreementDoesNotExist;
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let slot: StorageSlot = agreementDataSlot(agreement_class, id);
+
+        switch (data_length) {
+            1 => {
+                std_storage.words.store(slot, 0, data[0]);
+            }
+            2 => {
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+            }
+            3 => {
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+                std_storage.words.store(slot, 2, data[2]);
+            }
+            4 => {
+                std_storage.words.store(slot, 0, data[0]);
+                std_storage.words.store(slot, 1, data[1]);
+                std_storage.words.store(slot, 2, data[2]);
+                std_storage.words.store(slot, 3, data[3]);
+            }
         }
-
-        return agreement_data_length[agreement_class][id];
-    }
-
-    pub fn getAgreementDataHash(agreement_class: AgreementClass, id: bytes32) -> !bytes32|AgreementDoesNotExist
-    {
-        if (!agreement_exists[agreement_class][id]) {
-            return AgreementDoesNotExist;
-        }
-
-        return agreement_data_hash[agreement_class][id];
-    }
-
-    pub fn updateAgreementData(id: bytes32, data_hash: bytes32, data_length: u256) -> !bool|AgreementDoesNotExist
-    modifies agreement_data_hash[msg.sender][id], agreement_data_length[msg.sender][id]
-    {
-        let agreement_class: NonZeroAddress = std.msg.sender();
-        if (!agreement_exists[agreement_class][id]) {
-            return AgreementDoesNotExist;
-        }
-
-        agreement_data_hash[agreement_class][id] = data_hash;
-        agreement_data_length[agreement_class][id] = data_length;
 
         log AgreementUpdated(agreement_class, id, data_length);
         return true;
     }
 
-    pub fn terminateAgreement(id: bytes32, data_length: u256) -> !bool|AgreementDoesNotExist|AgreementDataLengthMismatch
-    modifies agreement_exists[msg.sender][id], agreement_data_length[msg.sender][id]
+    pub fn terminateAgreement(id: AgreementId, data_length: AgreementWordLength) -> !bool | OnlyAgreement | AgreementDoesNotExist
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.data.v1", msg.sender, id), 4)
+    ensures_ok(result == true)
+    ensures_ok(data_length < 1 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 0) == 0)
+    ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 1) == 0)
+    ensures_ok(data_length < 3 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 2) == 0)
+    ensures_ok(data_length < 4 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", std.msg.sender(), id), 3) == 0)
+    ensures_ok(total_supply == old(total_supply))
     {
-        let agreement_class: NonZeroAddress = std.msg.sender();
-        if (!agreement_exists[agreement_class][id]) {
-            return AgreementDoesNotExist;
-        }
-        if (agreement_data_length[agreement_class][id] != data_length) {
-            return AgreementDataLengthMismatch;
-        }
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let slot: StorageSlot = agreementDataSlot(agreement_class, id);
 
-        agreement_exists[agreement_class][id] = false;
-        agreement_data_length[agreement_class][id] = 0;
+        switch (data_length) {
+            1 => {
+                if (std_storage.words.load(slot, 0) == 0) {
+                    return AgreementDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+            }
+            2 => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0) {
+                    return AgreementDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+            }
+            3 => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0 && std_storage.words.load(slot, 2) == 0) {
+                    return AgreementDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+                std_storage.words.store(slot, 2, 0);
+            }
+            else => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0 && std_storage.words.load(slot, 2) == 0 && std_storage.words.load(slot, 3) == 0) {
+                    return AgreementDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+                std_storage.words.store(slot, 2, 0);
+                std_storage.words.store(slot, 3, 0);
+            }
+        }
 
         log AgreementTerminated(agreement_class, id);
         return true;
     }
 
-    pub fn updateAgreementStateSlot(account: Account, slot_id: u256, state_hash: bytes32, data_length: u256) -> bool
-    modifies agreement_state_exists[msg.sender][account][slot_id], agreement_state_hash[msg.sender][account][slot_id], agreement_state_length[msg.sender][account][slot_id]
+    pub fn getAgreementWord(agreement_class: AgreementClass, id: AgreementId, data_length: AgreementWordLength, index: AgreementWordIndex) -> !u256 | AgreementWordOutOfBounds
+        ensures_ok(index < data_length)
+        ensures_ok(result == std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.data.v1", agreement_class, id), index))
     {
-        let agreement_class: NonZeroAddress = std.msg.sender();
+        if (index >= data_length) {
+            return AgreementWordOutOfBounds(index, data_length);
+        }
 
-        agreement_state_exists[agreement_class][account][slot_id] = true;
-        agreement_state_hash[agreement_class][account][slot_id] = state_hash;
-        agreement_state_length[agreement_class][account][slot_id] = data_length;
+        let slot: StorageSlot = agreementDataSlot(agreement_class, id);
+        return std_storage.words.load(slot, index);
+    }
+
+    pub fn updateAgreementStateSlot(
+        account: Account,
+        slot_id: AgreementSlotId,
+        data_length: AgreementWordLength,
+        slot_data: [u256; 4],
+    ) -> !bool | OnlyAgreement
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", msg.sender, account, slot_id), 4)
+    ensures_ok(result == true)
+    ensures_ok(std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 0) == slot_data[0])
+    ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 1) == slot_data[1])
+    ensures_ok(data_length < 3 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 2) == slot_data[2])
+    ensures_ok(data_length < 4 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 3) == slot_data[3])
+    ensures_ok(total_supply == old(total_supply))
+    {
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let slot: StorageSlot = agreementStateSlot(agreement_class, account, slot_id);
+
+        switch (data_length) {
+            1 => {
+                std_storage.words.store(slot, 0, slot_data[0]);
+            }
+            2 => {
+                std_storage.words.store(slot, 0, slot_data[0]);
+                std_storage.words.store(slot, 1, slot_data[1]);
+            }
+            3 => {
+                std_storage.words.store(slot, 0, slot_data[0]);
+                std_storage.words.store(slot, 1, slot_data[1]);
+                std_storage.words.store(slot, 2, slot_data[2]);
+            }
+            4 => {
+                std_storage.words.store(slot, 0, slot_data[0]);
+                std_storage.words.store(slot, 1, slot_data[1]);
+                std_storage.words.store(slot, 2, slot_data[2]);
+                std_storage.words.store(slot, 3, slot_data[3]);
+            }
+        }
 
         log AgreementStateUpdated(agreement_class, account, slot_id, data_length);
         return true;
     }
 
-    pub fn getAgreementStateSlotLength(agreement_class: AgreementClass, account: Account, slot_id: u256) -> !u256|AgreementStateDoesNotExist
+    pub fn clearAgreementStateSlot(account: Account, slot_id: AgreementSlotId, data_length: AgreementWordLength) -> !bool | OnlyAgreement | AgreementStateDoesNotExist
+    modifies std_storage.range(std_storage.derive("ora.superfluid.pure.agreement.state.v1", msg.sender, account, slot_id), 4)
+    ensures_ok(result == true)
+    ensures_ok(data_length < 1 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 0) == 0)
+    ensures_ok(data_length < 2 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 1) == 0)
+    ensures_ok(data_length < 3 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 2) == 0)
+    ensures_ok(data_length < 4 || std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", std.msg.sender(), account, slot_id), 3) == 0)
+    ensures_ok(total_supply == old(total_supply))
     {
-        if (!agreement_state_exists[agreement_class][account][slot_id]) {
-            return AgreementStateDoesNotExist;
-        }
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let slot: StorageSlot = agreementStateSlot(agreement_class, account, slot_id);
 
-        return agreement_state_length[agreement_class][account][slot_id];
+        switch (data_length) {
+            1 => {
+                if (std_storage.words.load(slot, 0) == 0) {
+                    return AgreementStateDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+            }
+            2 => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0) {
+                    return AgreementStateDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+            }
+            3 => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0 && std_storage.words.load(slot, 2) == 0) {
+                    return AgreementStateDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+                std_storage.words.store(slot, 2, 0);
+            }
+            else => {
+                if (std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0 && std_storage.words.load(slot, 2) == 0 && std_storage.words.load(slot, 3) == 0) {
+                    return AgreementStateDoesNotExist;
+                }
+                std_storage.words.store(slot, 0, 0);
+                std_storage.words.store(slot, 1, 0);
+                std_storage.words.store(slot, 2, 0);
+                std_storage.words.store(slot, 3, 0);
+            }
+        }
+        log AgreementStateUpdated(agreement_class, account, slot_id, 0);
+        return true;
     }
 
-    pub fn getAgreementStateSlotHash(agreement_class: AgreementClass, account: Account, slot_id: u256) -> !bytes32|AgreementStateDoesNotExist
+    pub fn getAgreementStateWord(agreement_class: AgreementClass, account: Account, slot_id: AgreementSlotId, data_length: AgreementWordLength, index: AgreementWordIndex) -> !u256 | AgreementWordOutOfBounds
+        ensures_ok(index < data_length)
+        ensures_ok(result == std_storage.words.load(std_storage.derive("ora.superfluid.pure.agreement.state.v1", agreement_class, account, slot_id), index))
     {
-        if (!agreement_state_exists[agreement_class][account][slot_id]) {
-            return AgreementStateDoesNotExist;
+        if (index >= data_length) {
+            return AgreementWordOutOfBounds(index, data_length);
         }
 
-        return agreement_state_hash[agreement_class][account][slot_id];
+        let slot: StorageSlot = agreementStateSlot(agreement_class, account, slot_id);
+        return std_storage.words.load(slot, index);
     }
 
-    pub fn settleBalance(account: Account, delta: i256) -> !bool|SignedBalanceOverflow
+    pub fn settleBalance(account: Account, delta: i256) -> !bool | OnlyAgreement | SignedBalanceOverflow
     modifies shared_settled_balances[account]
+    ensures_ok(result == true)
+    ensures_ok(shared_settled_balances[account] == old(shared_settled_balances[account]) + delta)
+    ensures_ok(total_supply == old(total_supply))
     {
-        let agreement_class: NonZeroAddress = std.msg.sender();
-        let current: i256 = shared_settled_balances[account];
-        let checked: struct { value: i256, overflow: bool } = @addWithOverflow(current, delta);
-        if (checked.overflow) {
-            return SignedBalanceOverflow;
-        }
-
-        let next: i256 = checked.value;
+        let agreement_class: AgreementClass = std.msg.sender();
+        try requireListedAgreement(agreement_class);
+        let next: i256 = try checkedSignedAdd(shared_settled_balances[account], delta);
         shared_settled_balances[account] = next;
 
         log AgreementSettled(agreement_class, account, delta, next);
         return true;
     }
-
 }
-    */

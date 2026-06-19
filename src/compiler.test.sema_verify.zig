@@ -73,6 +73,8 @@ test "compiler lowers ensures on implicit void returns" {
 
 test "compiler accepts v1 modifies storage paths" {
     const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
         \\contract Vault {
         \\    struct Config {
         \\        owner: address,
@@ -92,6 +94,7 @@ test "compiler accepts v1 modifies storage paths" {
         \\        modifies balances[tx.origin]
         \\        modifies buckets[42]
         \\        modifies allowances[owner][spender]
+        \\        modifies std_storage.range(std_storage.derive("ora.test.modifies.computed", msg.sender, value), 4)
         \\        ensures total == value
         \\    {
         \\        total = value;

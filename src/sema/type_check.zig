@@ -4432,6 +4432,7 @@ const TypeChecker = struct {
         }
 
         for (args[1..]) |arg| {
+            if (self.environmentKeySegmentForExpr(arg) != null) continue;
             try self.contextualizeLiteral(arg, u256Type());
             const arg_type = self.expr_types[arg.index()];
             if (self.storageDeriveKeyTypeSupported(arg_type)) continue;

@@ -1,6 +1,7 @@
 comptime const constants = @import("std/constants");
 
 error InlineFailure;
+error InlineOverflow;
 
 contract SourceInlineConformance {
     storage var saved: u256;
@@ -115,6 +116,40 @@ contract SourceInlineConformance {
         return InlineFailure;
     }
 
+    inline fn maybeResult(flag: bool, value: u256) -> Result<u256, InlineFailure> {
+        if (flag) {
+            return Ok(value);
+        }
+        return Err(InlineFailure());
+    }
+
+    inline fn checkTwo(first: bool, second: bool) -> !u256 | InlineFailure {
+        if (first) {
+            return InlineFailure;
+        }
+        if (second) {
+            return InlineFailure;
+        }
+        return 37;
+    }
+
+    inline fn checkedAddInline(current: u256, delta: u256) -> !u256 | InlineOverflow {
+        if (current > constants.U256_MAX - delta) {
+            return InlineOverflow;
+        }
+        return current + delta;
+    }
+
+    inline fn checkedSignedAddInline(current: i256, delta: i256) -> !i256 | InlineOverflow {
+        if (delta > 0 && current > constants.I256_MAX - delta) {
+            return InlineOverflow;
+        }
+        if (delta < 0 && current < constants.I256_MIN - delta) {
+            return InlineOverflow;
+        }
+        return current + delta;
+    }
+
     fn sideEffectArg() -> u256
         requires(saved < constants.U256_MAX)
         ensures result == 7
@@ -205,5 +240,25 @@ contract SourceInlineConformance {
     pub fn inlinePropagateErr() -> !u256 | InlineFailure {
         let value: u256 = try maybeInline(false);
         return value;
+    }
+
+    pub fn inlineResult(flag: bool, value: u256) -> !u256 | InlineFailure {
+        let out: u256 = try maybeResult(flag, value);
+        return out;
+    }
+
+    pub fn inlineCheckTwo(first: bool, second: bool) -> !u256 | InlineFailure {
+        let out: u256 = try checkTwo(first, second);
+        return out;
+    }
+
+    pub fn checkedAdd(current: u256, delta: u256) -> !u256 | InlineOverflow {
+        let out: u256 = try checkedAddInline(current, delta);
+        return out;
+    }
+
+    pub fn checkedSignedAdd(current: i256, delta: i256) -> !i256 | InlineOverflow {
+        let out: i256 = try checkedSignedAddInline(current, delta);
+        return out;
     }
 }

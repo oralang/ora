@@ -1002,6 +1002,13 @@ namespace mlir
                 return AbiReturnBuffer{retPtr, size};
             }
 
+            struct ErrorInfo
+            {
+                uint64_t id = 0;
+                uint32_t selector = 0;
+                uint64_t paramCount = 0;
+            };
+
             struct PubFuncInfo
             {
                 func::FuncOp func;
@@ -1016,6 +1023,7 @@ namespace mlir
                 SmallVector<std::string, 8> abiParamRefinements;
                 SmallVector<std::string, 8> resultInputModes;
                 SmallVector<int64_t, 8> resultInputErrorIds;
+                SmallVector<ErrorInfo, 8> returnErrors;
                 bool hasAbiReturn = false;
                 int64_t abiReturnWords = -1;
                 std::string abiReturnLayout;
@@ -1026,13 +1034,6 @@ namespace mlir
                     : func(func), provenanceLoc(provenanceLoc)
                 {
                 }
-            };
-
-            struct ErrorInfo
-            {
-                uint64_t id = 0;
-                uint32_t selector = 0;
-                uint64_t paramCount = 0;
             };
 
             static Value getShiftedSelectorConst(OpBuilder &builder, Location loc, MLIRContext *, uint32_t selector)
@@ -1380,6 +1381,30 @@ namespace mlir
                                 info.resultInputErrorIds.push_back(iattr.getInt());
                             }
                         }
+                        if (auto returnErrorIdsAttr = func->getAttrOfType<ArrayAttr>("ora.return_error_ids"))
+                        {
+                            for (Attribute a : returnErrorIdsAttr)
+                            {
+                                auto iattr = dyn_cast<IntegerAttr>(a);
+                                if (!iattr)
+                                {
+                                    func.emitError("ora.return_error_ids contains non-integer attr");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                uint64_t errorId = iattr.getValue().getZExtValue();
+                                auto found = llvm::find_if(abiErrors, [&](const ErrorInfo &errInfo) {
+                                    return errInfo.id == errorId;
+                                });
+                                if (found == abiErrors.end())
+                                {
+                                    func.emitError("ora.return_error_ids references unknown error id");
+                                    signalPassFailure();
+                                    return;
+                                }
+                                info.returnErrors.push_back(*found);
+                            }
+                        }
 
                         if (auto abiReturnAttr = func->getAttrOfType<StringAttr>("ora.abi_return"))
                         {
@@ -1409,6 +1434,12 @@ namespace mlir
 
                         if (auto returnsErrorUnionAttr = func->getAttrOfType<BoolAttr>("ora.returns_error_union"))
                             info.returnsErrorUnion = returnsErrorUnionAttr.getValue();
+                        if (info.returnsErrorUnion && info.returnErrors.empty())
+                        {
+                            func.emitError("public error-union function is missing ora.return_error_ids metadata");
+                            signalPassFailure();
+                            return;
+                        }
                         if (auto modeAttr = func->getAttrOfType<StringAttr>("ora.abi_decode_mode"))
                             info.permissiveAbiDecode = modeAttr.getValue() == "permissive";
                         if (!info.abiParamLayouts.empty() && info.resultInputModes.size() != info.abiParamLayouts.size())
@@ -4054,7 +4085,7 @@ namespace mlir
 
                             builder.setInsertionPointToEnd(errorDispatchBlock);
                             Block *nextErrorBlock = revertError;
-                            for (const ErrorInfo &errInfo : llvm::reverse(abiErrors))
+                            for (const ErrorInfo &errInfo : llvm::reverse(info.returnErrors))
                             {
                                 Block *compareBlock = mainFunc.addBlock();
                                 builder.setInsertionPointToEnd(compareBlock);

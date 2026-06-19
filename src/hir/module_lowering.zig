@@ -1101,9 +1101,27 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 }
 
-                if (function.return_type) |return_type_id| {
+                if (body_type.kind() == .error_union) {
+                    try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                    const error_union = body_type.error_union;
+                    var return_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+                    defer return_error_id_attrs.deinit(self.allocator);
+                    for (error_union.error_types) |error_type| {
+                        return_error_id_attrs.append(
+                            self.allocator,
+                            mlir.oraIntegerAttrCreateI64FromType(
+                                reprIntegerType(self.context),
+                                @intCast(try @This().publicReturnErrorId(self, error_type)),
+                            ),
+                        ) catch return error.OutOfMemory;
+                    }
+                    try attrs.append(self.allocator, .{
+                        .name = identifier(self.context, "ora.return_error_ids"),
+                        .attribute = mlir.oraArrayAttrCreate(self.context, @intCast(return_error_id_attrs.items.len), return_error_id_attrs.items.ptr),
+                    });
+                } else if (function.return_type) |return_type_id| {
                     if (self.file.typeExpr(return_type_id).* == .ErrorUnion) {
-                        try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
+                        return error.UnsupportedAbiType;
                     }
                 }
             }
@@ -1808,6 +1826,21 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn publicResultInputErrorIdAttrValue(self: *Lowerer, ty: sema.Type) anyerror!i64 {
             return (try @This().publicResultInputErrorId(self, ty)) orelse no_public_result_input_error_id;
+        }
+
+        fn publicReturnErrorId(self: *Lowerer, error_type: sema.Type) anyerror!i64 {
+            const error_name = error_type.name() orelse return error.UnsupportedAbiType;
+            if (self.item_index.lookup(error_name)) |item_id| {
+                if (self.file.item(item_id).* != .ErrorDecl) return error.UnsupportedAbiType;
+                return try @This().errorDeclRuntimeIdForItem(self, item_id);
+            }
+
+            // Preserve the existing selector-derived convention for imported
+            // payloadless errors whose declarations are not present in this
+            // file's item index.
+            var signature_buf: [256]u8 = undefined;
+            const signature = std.fmt.bufPrint(&signature_buf, "{s}()", .{error_name}) catch return error.UnsupportedAbiType;
+            return @intCast(abi_support.keccakSelectorValue(signature));
         }
 
         fn enumVariantCountForType(self: *Lowerer, ty: sema.Type) ?usize {

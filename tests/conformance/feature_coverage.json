@@ -466,7 +466,7 @@
     {
       "id": "functions.source_inline",
       "area": "functions",
-      "behavior": "Private source inline functions expand at call sites, including nested simple calls, nested early returns, explicit comptime parameters, structured region bodies, single-evaluation of side-effecting arguments, error-union try propagation, and value/void one-arm early-return helpers",
+      "behavior": "Private source inline functions expand at call sites, including nested simple calls, nested early returns, multiple fallible early returns, checked-condition preludes, explicit comptime parameters, structured region bodies, single-evaluation of side-effecting arguments, Result/error-union try propagation, and value/void one-arm early-return helpers",
       "specs": [
         "tests/conformance/source_inline.spec.toml"
       ]

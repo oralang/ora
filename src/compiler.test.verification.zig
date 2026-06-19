@@ -1313,6 +1313,49 @@ test "verification propagates inline requires and ensures through callers" {
     try testing.expectEqualStrings("", checked.soundness_losses);
 }
 
+test "verification propagates fallible inline requires and ensures_ok through callers" {
+    const source_text =
+        \\error Failure;
+        \\
+        \\contract V {
+        \\    inline fn plusOne(value: u256) -> !u256 | Failure
+        \\        requires(value < 10)
+        \\        ensures_ok(result == value + 1)
+        \\    {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn unchecked(value: u256) -> !u256 | Failure {
+        \\        let out: u256 = try plusOne(value);
+        \\        return out;
+        \\    }
+        \\
+        \\    pub fn checked(value: u256) -> !u256 | Failure
+        \\        requires(value < 10)
+        \\        ensures_ok(result > value)
+        \\    {
+        \\        let out: u256 = try plusOne(value);
+        \\        return out;
+        \\    }
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradation(source_text, "unchecked");
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(!unchecked.degraded);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("PreconditionViolation", unchecked.error_kinds);
+    try testing.expectEqualStrings("", unchecked.soundness_losses);
+
+    var checked = try verifyTextWithoutDegradation(source_text, "checked");
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+    try testing.expectEqual(@as(usize, 0), checked.errors_len);
+    try testing.expectEqualStrings("", checked.soundness_losses);
+}
+
 test "verification uses opaque modifies metadata for struct fields when internal summary inlining is disabled" {
     const source_text =
         \\contract V {

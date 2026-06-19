@@ -429,6 +429,16 @@ test "conformance arg encoder writes static ABI words" {
 }
 
 test "conformance arg encoder writes dynamic arrays and tuple aggregates" {
+    const fixed_array_wires = [_][]const u8{"uint256[4]"};
+    const fixed_array_args = [_]types.ArgValue{.{ .literal = "[3,5,8,13]" }};
+    const fixed_array = try abi.encodeArgs(testing.allocator, &fixed_array_wires, &fixed_array_args);
+    defer testing.allocator.free(fixed_array);
+    try testing.expectEqual(@as(usize, 128), fixed_array.len);
+    try testing.expectEqual(@as(u256, 3), std.mem.readInt(u256, fixed_array[0..32], .big));
+    try testing.expectEqual(@as(u256, 5), std.mem.readInt(u256, fixed_array[32..64], .big));
+    try testing.expectEqual(@as(u256, 8), std.mem.readInt(u256, fixed_array[64..96], .big));
+    try testing.expectEqual(@as(u256, 13), std.mem.readInt(u256, fixed_array[96..128], .big));
+
     const dynamic_array_wires = [_][]const u8{"uint256[]"};
     const dynamic_array_args = [_]types.ArgValue{.{ .literal = "[5,8,13]" }};
     const dynamic_array = try abi.encodeArgs(testing.allocator, &dynamic_array_wires, &dynamic_array_args);
