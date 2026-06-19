@@ -8,6 +8,7 @@ const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const abi_layout_context = @import("../abi/layout_context.zig");
 const abi_support = @import("abi.zig");
+const generic_call_args = @import("../generic_call_args.zig");
 const source = @import("../source/mod.zig");
 const support = @import("support.zig");
 
@@ -389,13 +390,15 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             if (function.is_generic) {
                 const runtime_parameters = try imported_lowerer.runtimeFunctionParameters(function);
-                const bindings = if (resolved_call) |resolved|
+                const sema_bindings = if (resolved_call) |resolved|
                     try @This().hirBindingsFromSema(self, resolved.generic_bindings)
+                else
+                    &.{};
+                const bindings = if (sema_bindings.len != 0)
+                    sema_bindings
                 else blk: {
-                    var binding_lowerer = imported_lowerer;
-                    binding_lowerer.typecheck = self.typecheck;
                     var inline_bindings: [Lowerer.inline_generic_binding_capacity]Lowerer.GenericTypeBinding = undefined;
-                    break :blk (try binding_lowerer.genericTypeBindingsForCall(function, call, inline_bindings[0..])) orelse return null;
+                    break :blk (try @This().explicitImportedComptimeBindings(self, target_file, function, call, inline_bindings[0..])) orelse return null;
                 };
                 const symbol_name = try imported_lowerer.mangleGenericFunctionName(base_symbol_name, bindings);
                 if (!self.monomorphized_function_names.contains(symbol_name)) {
@@ -436,6 +439,74 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (handle.kind == kind and std.mem.eql(u8, handle.symbol_name, symbol_name)) return true;
             }
             return false;
+        }
+
+        fn explicitImportedComptimeBindings(
+            self: *Lowerer,
+            target_file: *const ast.AstFile,
+            function: ast.FunctionItem,
+            call: ast.CallExpr,
+            scratch: []Lowerer.GenericTypeBinding,
+        ) anyerror!?[]const Lowerer.GenericTypeBinding {
+            const comptime_count = generic_call_args.comptimeParameterCount(function);
+            if (comptime_count == 0) return &.{};
+
+            if (call.args.len != generic_call_args.explicitArgumentCount(function, .{})) return null;
+
+            const bindings = if (comptime_count <= scratch.len)
+                scratch[0..comptime_count]
+            else
+                try self.allocator.alloc(Lowerer.GenericTypeBinding, comptime_count);
+            var iter = generic_call_args.iterator(function, call, .{});
+            while ((iter.next() catch return null)) |entry| {
+                const index = entry.comptime_index orelse continue;
+                if (index >= bindings.len) return null;
+                const name = @This().patternNameInFile(target_file, entry.parameter.pattern) orelse return null;
+                bindings[index] = (try @This().explicitImportedComptimeBinding(self, target_file, entry.parameter, name, entry.arg)) orelse return null;
+            }
+            return if (iter.comptime_index == bindings.len and iter.arg_index == call.args.len) bindings else null;
+        }
+
+        fn explicitImportedComptimeBinding(
+            self: *Lowerer,
+            target_file: *const ast.AstFile,
+            parameter: ast.Parameter,
+            name: []const u8,
+            arg_expr: ast.ExprId,
+        ) anyerror!?Lowerer.GenericTypeBinding {
+            if (@This().isTypeParameterInFile(target_file, parameter)) {
+                return null;
+            }
+
+            const integer_text = @This().integerArgTextInFile(self.file, arg_expr) orelse return null;
+            return .{
+                .name = name,
+                .value = .{ .integer = integer_text },
+                .mangle_name = try self.allocator.dupe(u8, integer_text),
+            };
+        }
+
+        fn integerArgTextInFile(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const u8 {
+            return switch (file.expression(expr_id).*) {
+                .IntegerLiteral => |literal| std.mem.trim(u8, literal.text, " \t\n\r"),
+                .Group => |group| @This().integerArgTextInFile(file, group.expr),
+                else => null,
+            };
+        }
+
+        fn patternNameInFile(file: *const ast.AstFile, pattern_id: ast.PatternId) ?[]const u8 {
+            return switch (file.pattern(pattern_id).*) {
+                .Name => |name| name.name,
+                else => null,
+            };
+        }
+
+        fn isTypeParameterInFile(file: *const ast.AstFile, parameter: ast.Parameter) bool {
+            if (!parameter.is_comptime) return false;
+            return switch (file.typeExpr(parameter.type_expr).*) {
+                .Path => |path| std.mem.eql(u8, path.name, "type"),
+                else => false,
+            };
         }
 
         fn hirBindingsFromSema(self: *Lowerer, bindings: []const sema.GenericTypeBinding) anyerror![]const Lowerer.GenericTypeBinding {
@@ -772,10 +843,17 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
             for (slots) |slot| {
                 switch (slot.region) {
-                    .storage => try slot_attrs.append(
-                        self.allocator,
-                        mlir.oraStringAttrCreate(self.context, strRef(slot.name)),
-                    ),
+                    .storage => {
+                        const slot_path = if (std.mem.eql(u8, slot.name, "$computed_storage"))
+                            try sema.formatEffectSlotPath(self.allocator, slot)
+                        else
+                            slot.name;
+                        defer if (std.mem.eql(u8, slot.name, "$computed_storage")) self.allocator.free(slot_path);
+                        try slot_attrs.append(
+                            self.allocator,
+                            mlir.oraStringAttrCreate(self.context, strRef(slot_path)),
+                        );
+                    },
                     .transient => {
                         const slot_name = try std.fmt.allocPrint(self.allocator, "transient:{s}", .{slot.name});
                         defer self.allocator.free(slot_name);

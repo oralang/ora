@@ -1,0 +1,298 @@
+// Ora-native Pure SuperToken, phase 1.
+//
+// This intentionally models the Superfluid settled-balance core without ERC777
+// hooks/operators, an underlying wrapper, permit, proxies, or agreement logic.
+// The distinguishing state is signed settled balances; the public ERC20 view
+// exposes only the positive available balance.
+
+error InsufficientAllowance(required: u256, available: u256);
+error InsufficientBalance(required: u256, available: u256);
+error SignedBalanceOverflow;
+
+comptime const std = @import("std");
+
+// Superfluid settled balances are i256. Amounts that become signed deltas must
+// fit in i256.max before they can be added to or subtracted from settled state.
+type SuperTokenAmount = InRange<u256, 1, std.constants.I256_MAX>;
+type InitialSupply = InRange<u256, 1, std.constants.I256_MAX>;
+type Account = NonZeroAddress;
+type Recipient = NonZeroAddress;
+type Spender = NonZeroAddress;
+
+// A settled balance is signed (Superfluid semantics); the spendable ("available")
+// balance is its non-negative part. The signed-balance rules live on the type via
+// a trait instead of free contract helpers, so the behavior travels with the value.
+trait SettledBalance {
+    fn available(self) -> u256;
+}
+
+struct Settled {
+    value: i256,
+}
+
+impl SettledBalance for Settled {
+    fn available(self) -> u256 {
+        if (self.value <= 0) {
+            return 0;
+        }
+        return @cast(u256, self.value);
+    }
+}
+/*
+contract OraPureSuperToken {
+    storage var token_name: string;
+    storage var token_symbol: string;
+    storage var total_supply: u256 = 0;
+    storage var shared_settled_balances: map<address, i256>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    log Transfer(indexed from: address, indexed to: address, amount: u256);
+    log Approval(indexed owner: address, indexed spender: address, amount: u256);
+    log TokenInitialized(indexed owner: address, initial_supply: u256);
+    log AgreementSettled(indexed agreement_class: address, indexed account: address, delta: i256, settled_balance: i256);
+
+    inline fn amountDelta(amount: SuperTokenAmount) -> i256 {
+        return @cast(i256, amount);
+    }
+
+    pub fn init(name: string, symbol: string, initial_supply: InitialSupply)
+    modifies token_name, token_symbol, total_supply, shared_settled_balances[msg.sender]
+    {
+        let deployer: NonZeroAddress = std.msg.sender();
+        token_name = name;
+        token_symbol = symbol;
+        total_supply = initial_supply;
+        shared_settled_balances[deployer] = @cast(i256, initial_supply);
+
+        log Transfer(std.constants.ZERO_ADDRESS, deployer, initial_supply);
+        log TokenInitialized(deployer, initial_supply);
+    }
+
+    pub fn name() -> string
+    {
+        return token_name;
+    }
+
+    pub fn symbol() -> string
+    {
+        return token_symbol;
+    }
+
+    pub fn decimals() -> u8
+    {
+        return 18;
+    }
+
+    pub fn totalSupply() -> u256
+    {
+        return total_supply;
+    }
+
+    pub fn settledBalanceOf(account: Account) -> i256
+    {
+        return shared_settled_balances[account];
+    }
+
+    pub fn balanceOf(account: Account) -> u256
+    {
+        let settled: Settled = .{
+            .value = shared_settled_balances[account]
+        };
+        return settled.available();
+    }
+
+    pub fn realtimeBalanceOf(account: Account, timestamp: u256) -> (i256, u256, u256)
+    {
+        return (shared_settled_balances[account], 0, 0);
+    }
+
+    pub fn allowance(owner: Account, spender: Spender) -> u256
+    {
+        return allowances[owner][spender];
+    }
+
+    pub fn transfer(to: Recipient, amount: SuperTokenAmount) -> !bool|InsufficientBalance|SignedBalanceOverflow
+    modifies shared_settled_balances[msg.sender], shared_settled_balances[to]
+    {
+        let sender: NonZeroAddress = std.msg.sender();
+        let delta: i256 = amountDelta(amount);
+        let sender_before: i256 = shared_settled_balances[sender];
+        let sender_settled: Settled = .{
+            .value = sender_before
+        };
+        let sender_available: u256 = sender_settled.available();
+
+        if (sender_available<amount) {
+            return InsufficientBalance(amount, sender_available);
+        }
+
+        let to_before: i256 = shared_settled_balances[to];
+        if (to_before>std.constants.I256_MAX - delta) {
+            return SignedBalanceOverflow;
+        }
+
+        shared_settled_balances[sender] = sender_before - delta;
+        shared_settled_balances[to] = to_before + delta;
+
+        log Transfer(sender, to, amount);
+        return true;
+    }
+
+    pub fn approve(spender: Spender, amount: u256) -> bool
+    modifies allowances[msg.sender][spender]
+    {
+        let owner: NonZeroAddress = std.msg.sender();
+        allowances[owner][spender] = amount;
+        log Approval(owner, spender, amount);
+        return true;
+    }
+
+    pub fn transferFrom(from: Account, to: Recipient, amount: SuperTokenAmount) -> !bool|InsufficientAllowance|InsufficientBalance|SignedBalanceOverflow
+    modifies allowances[from][msg.sender], shared_settled_balances[from], shared_settled_balances[to]
+    {
+        let spender: NonZeroAddress = std.msg.sender();
+        let current_allowance: u256 = allowances[from][spender];
+        if (current_allowance<amount) {
+            return InsufficientAllowance(amount, current_allowance);
+        }
+
+        let delta: i256 = amountDelta(amount);
+        let from_before: i256 = shared_settled_balances[from];
+        let from_settled: Settled = .{
+            .value = from_before
+        };
+        let from_available: u256 = from_settled.available();
+        if (from_available<amount) {
+            return InsufficientBalance(amount, from_available);
+        }
+
+        let to_before: i256 = shared_settled_balances[to];
+        if (to_before>std.constants.I256_MAX - delta) {
+            return SignedBalanceOverflow;
+        }
+
+        allowances[from][spender] = current_allowance - amount;
+        shared_settled_balances[from] = from_before - delta;
+        shared_settled_balances[to] = to_before + delta;
+
+        log Transfer(from, to, amount);
+        return true;
+    }
+
+    pub fn createAgreement(id: bytes32, data_hash: bytes32, data_length: u256) -> !bool|AgreementAlreadyExists
+    modifies agreement_exists[msg.sender][id], agreement_data_hash[msg.sender][id], agreement_data_length[msg.sender][id]
+    {
+        let agreement_class: NonZeroAddress = std.msg.sender();
+        if (agreement_exists[agreement_class][id]) {
+            return AgreementAlreadyExists;
+        }
+
+        agreement_exists[agreement_class][id] = true;
+        agreement_data_hash[agreement_class][id] = data_hash;
+        agreement_data_length[agreement_class][id] = data_length;
+
+        log AgreementCreated(agreement_class, id, data_length);
+        return true;
+    }
+
+    pub fn getAgreementDataLength(agreement_class: AgreementClass, id: bytes32) -> !u256|AgreementDoesNotExist
+    {
+        if (!agreement_exists[agreement_class][id]) {
+            return AgreementDoesNotExist;
+        }
+
+        return agreement_data_length[agreement_class][id];
+    }
+
+    pub fn getAgreementDataHash(agreement_class: AgreementClass, id: bytes32) -> !bytes32|AgreementDoesNotExist
+    {
+        if (!agreement_exists[agreement_class][id]) {
+            return AgreementDoesNotExist;
+        }
+
+        return agreement_data_hash[agreement_class][id];
+    }
+
+    pub fn updateAgreementData(id: bytes32, data_hash: bytes32, data_length: u256) -> !bool|AgreementDoesNotExist
+    modifies agreement_data_hash[msg.sender][id], agreement_data_length[msg.sender][id]
+    {
+        let agreement_class: NonZeroAddress = std.msg.sender();
+        if (!agreement_exists[agreement_class][id]) {
+            return AgreementDoesNotExist;
+        }
+
+        agreement_data_hash[agreement_class][id] = data_hash;
+        agreement_data_length[agreement_class][id] = data_length;
+
+        log AgreementUpdated(agreement_class, id, data_length);
+        return true;
+    }
+
+    pub fn terminateAgreement(id: bytes32, data_length: u256) -> !bool|AgreementDoesNotExist|AgreementDataLengthMismatch
+    modifies agreement_exists[msg.sender][id], agreement_data_length[msg.sender][id]
+    {
+        let agreement_class: NonZeroAddress = std.msg.sender();
+        if (!agreement_exists[agreement_class][id]) {
+            return AgreementDoesNotExist;
+        }
+        if (agreement_data_length[agreement_class][id] != data_length) {
+            return AgreementDataLengthMismatch;
+        }
+
+        agreement_exists[agreement_class][id] = false;
+        agreement_data_length[agreement_class][id] = 0;
+
+        log AgreementTerminated(agreement_class, id);
+        return true;
+    }
+
+    pub fn updateAgreementStateSlot(account: Account, slot_id: u256, state_hash: bytes32, data_length: u256) -> bool
+    modifies agreement_state_exists[msg.sender][account][slot_id], agreement_state_hash[msg.sender][account][slot_id], agreement_state_length[msg.sender][account][slot_id]
+    {
+        let agreement_class: NonZeroAddress = std.msg.sender();
+
+        agreement_state_exists[agreement_class][account][slot_id] = true;
+        agreement_state_hash[agreement_class][account][slot_id] = state_hash;
+        agreement_state_length[agreement_class][account][slot_id] = data_length;
+
+        log AgreementStateUpdated(agreement_class, account, slot_id, data_length);
+        return true;
+    }
+
+    pub fn getAgreementStateSlotLength(agreement_class: AgreementClass, account: Account, slot_id: u256) -> !u256|AgreementStateDoesNotExist
+    {
+        if (!agreement_state_exists[agreement_class][account][slot_id]) {
+            return AgreementStateDoesNotExist;
+        }
+
+        return agreement_state_length[agreement_class][account][slot_id];
+    }
+
+    pub fn getAgreementStateSlotHash(agreement_class: AgreementClass, account: Account, slot_id: u256) -> !bytes32|AgreementStateDoesNotExist
+    {
+        if (!agreement_state_exists[agreement_class][account][slot_id]) {
+            return AgreementStateDoesNotExist;
+        }
+
+        return agreement_state_hash[agreement_class][account][slot_id];
+    }
+
+    pub fn settleBalance(account: Account, delta: i256) -> !bool|SignedBalanceOverflow
+    modifies shared_settled_balances[account]
+    {
+        let agreement_class: NonZeroAddress = std.msg.sender();
+        let current: i256 = shared_settled_balances[account];
+        let checked: struct { value: i256, overflow: bool } = @addWithOverflow(current, delta);
+        if (checked.overflow) {
+            return SignedBalanceOverflow;
+        }
+
+        let next: i256 = checked.value;
+        shared_settled_balances[account] = next;
+
+        log AgreementSettled(agreement_class, account, delta, next);
+        return true;
+    }
+
+}
+    */

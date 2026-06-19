@@ -396,6 +396,97 @@ def Ora_SStoreOp : Ora_Op<"sstore",
   }];
 }
 
+def Ora_StorageDeriveOp : Ora_PureOp<"storage.derive"> {
+  let summary = "Derive an opaque computed-storage slot";
+  let description = [{
+    Derives a compiler-owned computed-storage slot from a compile-time namespace
+    hash and zero or more scalar runtime keys. The namespace string is retained
+    for diagnostics, source maps, and layout manifests; lowering hashes a
+    domain-separated preimage containing a fixed Ora computed-storage tag, the
+    key count, the namespace_hash attribute, and the keys.
+
+    Example:
+    ```mlir
+    %slot = ora.storage.derive "vault.position"(%owner : !ora.address)
+      {namespace_hash = 123 : i256} : (!ora.address) -> !ora.int<256, false>
+    ```
+  }];
+
+  let arguments = (ins StrAttr:$namespace_name, AnyAttr:$namespace_hash, Variadic<AnyType>:$keys);
+  let results = (outs AnyType:$slot);
+
+  let assemblyFormat = "$namespace_name `(` $keys `)` attr-dict `:` functional-type($keys, results)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageWordLoadOp : Ora_Op<"storage.word_load",
+    [MemoryEffects<[MemRead]>]> {
+  let summary = "Load one word from a computed-storage capability";
+  let description = [{
+    Loads a single word from an opaque computed-storage slot plus a word offset.
+    The source language can construct the slot only through compiler-owned
+    derivation primitives, not integer casts.
+
+    Example:
+    ```mlir
+    %word = ora.storage.word_load %slot, %offset : i256, i256 -> i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, AnyType:$offset);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "$slot `,` $offset attr-dict `:` type($slot) `,` type($offset) `->` type($result)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageWordStoreOp : Ora_Op<"storage.word_store",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Store one word through a computed-storage capability";
+  let description = [{
+    Stores a single word to an opaque computed-storage slot plus a word offset.
+    Source programs can construct the slot only through compiler-owned
+    derivation primitives, and this op lowers through the normal SIR storage
+    path rather than exposing raw EVM assembly.
+
+    Example:
+    ```mlir
+    ora.storage.word_store %slot, %offset, %value : i256, i256, i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, AnyType:$offset, AnyType:$value);
+
+  let assemblyFormat = "$slot `,` $offset `,` $value attr-dict `:` type($slot) `,` type($offset) `,` type($value)";
+  let hasVerifier = 1;
+}
+
+def Ora_StorageRangeEraseOp : Ora_Op<"storage.range_erase",
+    [MemoryEffects<[MemWrite]>]> {
+  let summary = "Erase a bounded computed-storage word range";
+  let description = [{
+    Erases a bounded computed-storage word range by zeroing every physical word
+    in `[slot, slot + word_count)`. The range is represented in source as an
+    opaque StorageRange capability, so user code cannot forge it with integer
+    casts. The lowering contract is intentionally stricter than the value
+    operands: `word_count` must be present as a compile-time attribute, and the
+    converter must reject the operation if only a runtime length is available.
+    Physical slots are computed as `slot + offset`; source and HIR require
+    computed-storage ranges to be statically bounded, and OraToSIR rejects any
+    malformed unbounded range before bytecode emission.
+
+    Example:
+    ```mlir
+    ora.storage.range_erase %slot {word_count = 4 : i64} : i256
+    ```
+  }];
+
+  let arguments = (ins AnyType:$slot, I64Attr:$word_count);
+
+  let assemblyFormat = "$slot attr-dict `:` type($slot)";
+  let hasVerifier = 1;
+}
+
 def Ora_MemoryGlobalOp : Ora_TypedSymbolDeclOp<"memory.global",
     "Memory global variable declaration"> {
   let summary = "Memory global variable declaration";

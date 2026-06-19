@@ -1,0 +1,17 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedOffsetWrapGuard {
+    fn payloadSlot(account: address) -> StorageSlot {
+        return std_storage.derive("ora.example.storage.offset.wrap", account);
+    }
+
+    pub fn writeZero(account: address, value: u256)
+        modifies std_storage.range(std_storage.derive("ora.example.storage.offset.wrap", account), 1)
+    {
+        std_storage.words.store(payloadSlot(account), 0, value);
+    }
+
+    pub fn readAt(account: address, offset: u256) -> u256 {
+        return std_storage.words.load(payloadSlot(account), offset);
+    }
+}

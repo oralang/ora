@@ -110,6 +110,46 @@ test "compiler removes simple source inline helper calls before SIR call convers
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "compiler binds source inline arguments once before SIR call conversion" {
+    const source_text =
+        \\contract InlineLowering {
+        \\    storage var saved: u256;
+        \\
+        \\    inline fn observeTwice(value: u256) -> u256 {
+        \\        if (value == value) {
+        \\            return 14;
+        \\        }
+        \\        return 0;
+        \\    }
+        \\
+        \\    fn sideEffectArg() -> u256 {
+        \\        saved = 1;
+        \\        return 7;
+        \\    }
+        \\
+        \\    pub fn run() -> u256 {
+        \\        return observeTwice(sideEffectArg());
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const run_fn = try functionSlice(rendered, "run");
+    try testing.expect(!std.mem.containsAtLeast(u8, run_fn, 1, "icall @observeTwice"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, run_fn, "icall @sideEffectArg"));
+    try expectNoResidualOraRuntimeOps(rendered);
+}
+
 test "compiler expands early-return source inline helper calls before SIR call conversion" {
     const source_text =
         \\contract InlineLowering {
@@ -997,6 +1037,62 @@ test "compiler lowers runtime keccak256 through OraToSIR" {
 
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "keccak256"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.keccak256"));
+}
+
+test "compiler lowers computed storage derive and word operations through OraToSIR" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn write(owner: address, offset: u256, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        @storageWordStore(slot, offset, value);
+        \\    }
+        \\
+        \\    pub fn read(owner: address, offset: u256) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        return @storageWordLoad(slot, offset);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        let range: StorageRange = @storageRange(slot, 2);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\
+        \\    pub fn zero_key(value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.root");
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const write_fn = try functionSlice(rendered, "write");
+    const read_fn = try functionSlice(rendered, "read");
+    const clear_fn = try functionSlice(rendered, "clear");
+    const zero_key_fn = try functionSlice(rendered, "zero_key");
+
+    try testing.expect(std.mem.containsAtLeast(u8, write_fn, 1, "keccak256"));
+    try testing.expect(std.mem.containsAtLeast(u8, write_fn, 1, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, read_fn, 1, "keccak256"));
+    try testing.expect(std.mem.containsAtLeast(u8, read_fn, 1, "sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, clear_fn, 1, "keccak256"));
+    try testing.expect(std.mem.containsAtLeast(u8, clear_fn, 1, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, clear_fn, 1, "lt "));
+    try testing.expect(std.mem.containsAtLeast(u8, clear_fn, 1, "=>"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_key_fn, 1, "keccak256"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_key_fn, 1, "malloc"));
+    try testing.expect(std.mem.containsAtLeast(u8, zero_key_fn, 3, "mstore256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.storage.derive"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.storage.word_load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.storage.word_store"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.storage.range_erase"));
 }
 
 test "compiler lowers signed integer operations through signed SIR ops" {

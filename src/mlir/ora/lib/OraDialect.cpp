@@ -96,6 +96,30 @@ namespace mlir
                 return {};
             }
 
+            static bool isIntegerWidth(::mlir::Type type, unsigned width)
+            {
+                if (auto base = getRefinementBaseType(type))
+                    type = base;
+                if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+                    return oraInt.getWidth() == width;
+                if (auto builtinInt = llvm::dyn_cast<::mlir::IntegerType>(type))
+                    return builtinInt.getWidth() == width;
+                return false;
+            }
+
+            static bool isComputedStorageWordType(::mlir::Type type)
+            {
+                return isIntegerWidth(type, 256);
+            }
+
+            static bool isComputedStorageKeyType(::mlir::Type type)
+            {
+                if (auto base = getRefinementBaseType(type))
+                    type = base;
+                return isComputedStorageWordType(type) ||
+                       llvm::isa<AddressType, NonZeroAddressType>(type);
+            }
+
             static ::mlir::OpFoldResult foldAddressCarrierRoundTrip(::mlir::Value value, ::mlir::Type resultType)
             {
                 if (value.getType() == resultType)
@@ -1057,6 +1081,68 @@ namespace mlir
                                      << " for '" << getGlobalName() << "'";
             }
 
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageDeriveOp::verify()
+        {
+            auto hashAttr = (*this)->getAttrOfType<IntegerAttr>("namespace_hash");
+            if (!hashAttr)
+                return emitOpError("requires 256-bit integer 'namespace_hash' attribute");
+            if (hashAttr.getValue().getBitWidth() != 256)
+                return emitOpError("'namespace_hash' must be a 256-bit integer attribute");
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "result type must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            for (auto key : getKeys())
+            {
+                if (!isComputedStorageKeyType(key.getType()))
+                    return emitOpError() << "key operand type must be address or 256-bit integer, got "
+                                         << key.getType();
+            }
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageWordLoadOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            if (!isComputedStorageWordType(getOffset().getType()))
+                return emitOpError() << "offset operand must be a 256-bit integer word offset, got "
+                                     << getOffset().getType();
+            if (!isComputedStorageWordType(getResult().getType()))
+                return emitOpError() << "result type must be a 256-bit integer word, got "
+                                     << getResult().getType();
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageWordStoreOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            if (!isComputedStorageWordType(getOffset().getType()))
+                return emitOpError() << "offset operand must be a 256-bit integer word offset, got "
+                                     << getOffset().getType();
+            if (!isComputedStorageWordType(getValue().getType()))
+                return emitOpError() << "stored value must be a 256-bit integer word, got "
+                                     << getValue().getType();
+            return success();
+        }
+
+        ::mlir::LogicalResult StorageRangeEraseOp::verify()
+        {
+            if (!isComputedStorageWordType(getSlot().getType()))
+                return emitOpError() << "slot operand must be a 256-bit integer storage slot, got "
+                                     << getSlot().getType();
+            auto wordCountAttr = (*this)->getAttrOfType<IntegerAttr>("word_count");
+            if (!wordCountAttr)
+                return emitOpError("requires 'word_count' attribute");
+            if (wordCountAttr.getValue().getBitWidth() != 64)
+                return emitOpError("'word_count' must be a 64-bit integer attribute");
+            if (wordCountAttr.getValue().isNegative())
+                return emitOpError("'word_count' must be non-negative");
             return success();
         }
 

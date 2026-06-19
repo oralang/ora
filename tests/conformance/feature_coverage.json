@@ -113,6 +113,48 @@
       ]
     },
     {
+      "id": "storage.computed_words",
+      "area": "storage",
+      "behavior": "Opaque computed-storage slots support word load/store/range erase, offset isolation, key isolation, namespace isolation, and overwrite-to-zero",
+      "specs": [
+        "tests/conformance/computed_storage_words.spec.toml",
+        "tests/conformance/computed_storage_domain_separation.spec.toml",
+        "tests/conformance/computed_storage_range_boundaries.spec.toml",
+        "tests/conformance/computed_storage_offset_wrap.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.computed_capability_fail_closed",
+      "area": "storage",
+      "behavior": "Opaque computed-storage capabilities cannot be forged, exposed through ABI/log boundaries, dynamically namespaced, or erased with unbounded ranges",
+      "negative_specs": [
+        "tests/negative/computed_storage_dynamic_namespace.ora",
+        "tests/negative/computed_storage_event_leak.ora",
+        "tests/negative/computed_storage_public_param.ora",
+        "tests/negative/computed_storage_unbounded_range.ora"
+      ]
+    },
+    {
+      "id": "storage.computed_fixed_size_data",
+      "area": "storage",
+      "behavior": "std/storage/fixed_size_data stores, loads, detects, and erases fixed u256 word arrays over compiler-owned computed-storage primitives",
+      "specs": [
+        "tests/conformance/computed_storage_fixed_size_data.spec.toml"
+      ]
+    },
+    {
+      "id": "storage.computed_cost_compare",
+      "area": "storage",
+      "behavior": "Computed fixed-size word storage is measured against map-of-array, map-of-struct, and many-map typed storage alternatives for matching N=4 payload operations",
+      "specs": [
+        "tests/conformance/computed_storage_cost_compare.spec.toml",
+        "tests/conformance/computed_storage_cost_computed.spec.toml",
+        "tests/conformance/computed_storage_cost_array.spec.toml",
+        "tests/conformance/computed_storage_cost_struct.spec.toml",
+        "tests/conformance/computed_storage_cost_many.spec.toml"
+      ]
+    },
+    {
       "id": "storage.mapping_address_key",
       "area": "storage",
       "behavior": "map<address,V> store/load with keccak slot parity",
@@ -424,7 +466,7 @@
     {
       "id": "functions.source_inline",
       "area": "functions",
-      "behavior": "Private source inline functions expand at call sites, including nested simple calls, nested early returns, explicit comptime parameters, structured region bodies, and value/void one-arm early-return helpers",
+      "behavior": "Private source inline functions expand at call sites, including nested simple calls, nested early returns, explicit comptime parameters, structured region bodies, single-evaluation of side-effecting arguments, error-union try propagation, and value/void one-arm early-return helpers",
       "specs": [
         "tests/conformance/source_inline.spec.toml"
       ]

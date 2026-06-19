@@ -2600,11 +2600,11 @@ test "compiler carries payload-bearing narrow error unions across function calls
     const source_text =
         \\error Failure(code: u256);
         \\
-        \\fn helper(flag: bool) -> !bool | Failure {
-        \\    return flag;
-        \\}
-        \\
         \\contract Probe {
+        \\    pub fn helper(flag: bool) -> !bool | Failure {
+        \\        return flag;
+        \\    }
+        \\
         \\    pub fn run(flag: bool) -> !bool | Failure {
         \\        return helper(flag);
         \\    }

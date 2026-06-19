@@ -1,0 +1,244 @@
+# Ora-native SuperToken flow over ora-example/protocols/superfluid/ora_pure_super_token.ora.
+# Covers refinement-typed constructor/entry args, signed settled balances,
+# nested-map allowances, indexed ERC20-style logs, and payloaded custom errors.
+[deploy]
+source = "ora-example/protocols/superfluid/ora_pure_super_token.ora"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["Ora Pure SuperToken", "OPST", 1000000]
+
+[[call]]
+fn = "name()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { string = "Ora Pure SuperToken" }
+
+[[call]]
+fn = "symbol()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { string = "OPST" }
+
+[[call]]
+fn = "decimals()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { uint8 = 18 }
+
+[[call]]
+fn = "totalSupply()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { uint256 = 1000000 }
+
+[[call]]
+fn = "createAgreement(bytes32,bytes32,uint256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0x1111111111111111111111111111111111111111111111111111111111111111", 2]
+returns = { bool = true }
+
+[[call]]
+fn = "getAgreementDataLength(address,bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+returns = { uint256 = 2 }
+
+[[call]]
+fn = "getAgreementDataHash(address,bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+returns = { bytes32 = "0x1111111111111111111111111111111111111111111111111111111111111111" }
+
+[[call]]
+fn = "createAgreement(bytes32,bytes32,uint256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0x3333333333333333333333333333333333333333333333333333333333333333", 1]
+reverts = { any = true }
+
+[[call]]
+fn = "updateAgreementData(bytes32,bytes32,uint256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0x3333333333333333333333333333333333333333333333333333333333333333", 1]
+returns = { bool = true }
+
+[[call]]
+fn = "getAgreementDataLength(address,bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+returns = { uint256 = 1 }
+
+[[call]]
+fn = "getAgreementDataHash(address,bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+returns = { bytes32 = "0x3333333333333333333333333333333333333333333333333333333333333333" }
+
+[[call]]
+fn = "updateAgreementStateSlot(address,uint256,bytes32,uint256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 7, "0x4444444444444444444444444444444444444444444444444444444444444444", 2]
+returns = { bool = true }
+
+[[call]]
+fn = "getAgreementStateSlotLength(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0x1000000000000000000000000000000000000001", 7]
+returns = { uint256 = 2 }
+
+[[call]]
+fn = "getAgreementStateSlotHash(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0x1000000000000000000000000000000000000001", 7]
+returns = { bytes32 = "0x4444444444444444444444444444444444444444444444444444444444444444" }
+
+[[call]]
+fn = "settleBalance(address,int256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0x5000000000000000000000000000000000000005", 77]
+returns = { bool = true }
+
+[[call]]
+fn = "settleBalance(address,int256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0x5000000000000000000000000000000000000005", -12]
+returns = { bool = true }
+
+[[call]]
+fn = "settledBalanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x5000000000000000000000000000000000000005"]
+returns = { int256 = 65 }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x5000000000000000000000000000000000000005"]
+returns = { uint256 = 65 }
+
+[[call]]
+fn = "realtimeBalanceOf(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x5000000000000000000000000000000000000005", 1234]
+returns = { (int256,uint256,uint256) = (65,0,0) }
+
+[[call]]
+fn = "terminateAgreement(bytes32,uint256)"
+caller = "0x4000000000000000000000000000000000000004"
+value = 0
+args = ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1]
+returns = { bool = true }
+
+[[call]]
+fn = "getAgreementDataLength(address,bytes32)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000004", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+reverts = { any = true }
+
+[[call]]
+fn = "settledBalanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { int256 = 1000000 }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { uint256 = 1000000 }
+
+[[call]]
+fn = "transfer(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1000]
+returns = { bool = true }
+
+[[call.log]]
+topics = ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x0000000000000000000000001000000000000000000000000000000000000001"]
+data = "0x00000000000000000000000000000000000000000000000000000000000003e8"
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x1000000000000000000000000000000000000001"]
+returns = { uint256 = 1000 }
+
+[[call]]
+fn = "settledBalanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"]
+returns = { int256 = 999000 }
+
+[[call]]
+fn = "approve(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000002", 500]
+returns = { bool = true }
+
+[[call.log]]
+topics = ["0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925", "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x0000000000000000000000002000000000000000000000000000000000000002"]
+data = "0x00000000000000000000000000000000000000000000000000000000000001f4"
+
+[[call]]
+fn = "allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x2000000000000000000000000000000000000002"]
+returns = { uint256 = 500 }
+
+[[call]]
+fn = "transferFrom(address,address,uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x1000000000000000000000000000000000000001", 250]
+returns = { bool = true }
+
+[[call.log]]
+topics = ["0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef", "0x000000000000000000000000f39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x0000000000000000000000001000000000000000000000000000000000000001"]
+data = "0x00000000000000000000000000000000000000000000000000000000000000fa"
+
+[[call]]
+fn = "allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x2000000000000000000000000000000000000002"]
+returns = { uint256 = 250 }
+
+[[call]]
+fn = "transferFrom(address,address,uint256)"
+caller = "0x2000000000000000000000000000000000000002"
+value = 0
+args = ["0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", "0x1000000000000000000000000000000000000001", 300]
+reverts = { selector = "0x2a1b2dd8" }
+
+[[call]]
+fn = "transfer(address,uint256)"
+caller = "0x3000000000000000000000000000000000000003"
+value = 0
+args = ["0x1000000000000000000000000000000000000001", 1]
+reverts = { selector = "0xcf479181" }

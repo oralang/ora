@@ -1246,6 +1246,10 @@ public:
         patterns.add<NormalizeAdtSStoreOp>(ctx);
         patterns.add<ConvertSLoadOp>(typeConverter, ctx);
         patterns.add<ConvertSStoreOp>(typeConverter, ctx);
+        patterns.add<ConvertStorageDeriveOp>(typeConverter, ctx);
+        patterns.add<ConvertStorageWordLoadOp>(typeConverter, ctx);
+        patterns.add<ConvertStorageWordStoreOp>(typeConverter, ctx);
+        patterns.add<ConvertStorageRangeEraseOp>(typeConverter, ctx);
         patterns.add<ConvertTLoadOp>(typeConverter, ctx);
         patterns.add<ConvertTStoreOp>(typeConverter, ctx);
         patterns.add<ConvertMapGetOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
@@ -1391,7 +1395,7 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp>();
+        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp, ora::StorageDeriveOp, ora::StorageWordLoadOp, ora::StorageWordStoreOp, ora::StorageRangeEraseOp>();
         target.addIllegalOp<ora::GlobalOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
 

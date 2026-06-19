@@ -2557,3 +2557,61 @@ test "abi manifest Result input carrier projection follows layout context plan" 
         try expectManifestResultInputMatchesPlan(&fixture.contract_abi, &ctx, param_ty, input.type_id);
     }
 }
+
+test "abi exposes computed storage effect paths with namespace key and offset" {
+    const allocator = testing.allocator;
+    const source =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    fn metaSlot(owner: address) -> StorageSlot {
+        \\        let slot: StorageSlot = @storageDerive("ora.test.computed.meta", owner);
+        \\        return slot;
+        \\    }
+        \\
+        \\    pub fn read(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("ora.test.computed.meta", owner);
+        \\        return @storageWordLoad(slot, 0);
+        \\    }
+        \\
+        \\    pub fn write(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("ora.test.computed.meta", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("ora.test.computed.meta", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn helper_write(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("ora.test.computed.meta", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = metaSlot(owner);
+        \\        std_storage.words.store(slot, 1, value);
+        \\    }
+        \\
+        \\    pub fn helper_erase(owner: address)
+        \\        modifies @storageRange(@storageDerive("ora.test.computed.meta", owner), 2)
+        \\    {
+        \\        let slot: StorageSlot = metaSlot(owner);
+        \\        let range: StorageRange = std_storage.range(slot, 2);
+        \\        std_storage.words.erase(range);
+        \\    }
+        \\}
+    ;
+
+    var fixture = try generateAbiForSource(allocator, source);
+    defer fixture.deinit();
+
+    const manifest_json = try fixture.contract_abi.toJson(allocator);
+    defer allocator.free(manifest_json);
+
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"reads\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"writes\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"writes\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][1]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"kind\":\"writes\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0..2]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "$computed_storage[?]") == null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"path\":\"$computed_storage\"") == null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"storageLayout\":{\"computedAccesses\":[") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"callable\":\"c:Vault.read(address)\",\"kind\":\"reads\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"callable\":\"c:Vault.write(address,uint256)\",\"kind\":\"writes\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0]\"") != null);
+    try testing.expect(std.mem.indexOf(u8, manifest_json, "\"callable\":\"c:Vault.helper_erase(address)\",\"kind\":\"writes\",\"path\":\"$computed_storage[ora.test.computed.meta][param#0][0..2]\"") != null);
+}

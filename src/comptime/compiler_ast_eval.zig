@@ -1275,7 +1275,7 @@ const ConstEvaluator = struct {
             .Generic => |generic| blk: {
                 if (!refinements.isKnownName(generic.name) or generic.args.len == 0 or generic.args[0] != .Type) break :blk null;
                 const base_type = (try self.modelTypeFromTypeExpr(generic.args[0].Type)) orelse break :blk null;
-                const args = try type_descriptors.refinementArgsFromAst(self.allocator, generic.args);
+                const args = try type_descriptors.refinementArgsFromAst(self.allocator, self.file, generic.args);
                 break :blk try refinements.refinementType(self.allocator, generic.name, base_type, args);
             },
             else => null,

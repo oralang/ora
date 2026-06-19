@@ -33,10 +33,14 @@ class Options:
 
 def parse_args(argv: list[str]) -> Options:
     options = Options()
+    mode_seen = False
     index = 0
     while index < len(argv):
         arg = argv[index]
         if arg in {"--diff", "--update", "--check"}:
+            if mode_seen:
+                raise SystemExit("compile-metrics-check: choose only one of --diff, --update, or --check")
+            mode_seen = True
             options.mode = arg
         elif arg == "--time-output":
             index += 1

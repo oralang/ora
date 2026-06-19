@@ -1,0 +1,33 @@
+comptime const constants = @import("std/constants");
+
+contract InlineRefinementStorage {
+    storage var total: u256;
+    storage var balances: map<address, u256>;
+
+    inline fn checkedAdd(current: u256, amount: u256) -> u256
+        requires(current <= constants.U256_MAX - amount)
+    {
+        return current + amount;
+    }
+
+    inline fn amountValue(amount: MinValue<u256, 1>) -> u256 {
+        return amount;
+    }
+
+    pub fn deposit(account: address, amount: MinValue<u256, 1>)
+        requires(total <= constants.U256_MAX - amount)
+        requires(balances[account] <= constants.U256_MAX - amount)
+    {
+        let delta: u256 = amountValue(amount);
+        balances[account] = checkedAdd(balances[account], delta);
+        total = checkedAdd(total, delta);
+    }
+
+    pub fn balanceOf(account: address) -> u256 {
+        return balances[account];
+    }
+
+    pub fn totalDeposited() -> u256 {
+        return total;
+    }
+}

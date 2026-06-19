@@ -1,0 +1,84 @@
+comptime const std_storage = @import("std/storage");
+
+contract ComputedStorageWords {
+    storage var marker: u256;
+    storage var balances: map<address, u256>;
+    storage var allowances: map<address, map<address, u256>>;
+
+    fn dataSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.words", owner);
+    }
+
+    fn otherSlot(owner: address) -> StorageSlot {
+        return std_storage.derive("ora.test.computed.other", owner);
+    }
+
+    pub fn write_pair(owner: address, first: u256, second: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.words", owner), 2)
+    {
+        let slot: StorageSlot = dataSlot(owner);
+        std_storage.words.store(slot, 0, first);
+        std_storage.words.store(slot, 1, second);
+    }
+
+    pub fn write_marker(value: u256) {
+        marker = value;
+    }
+
+    pub fn read_marker() -> u256 {
+        return marker;
+    }
+
+    pub fn write_balance(owner: address, value: u256) {
+        balances[owner] = value;
+    }
+
+    pub fn read_balance(owner: address) -> u256 {
+        return balances[owner];
+    }
+
+    pub fn write_allowance(owner: address, spender: address, value: u256) {
+        allowances[owner][spender] = value;
+    }
+
+    pub fn read_allowance(owner: address, spender: address) -> u256 {
+        return allowances[owner][spender];
+    }
+
+    pub fn write_other(owner: address, value: u256)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.other", owner), 1)
+    {
+        let slot: StorageSlot = otherSlot(owner);
+        std_storage.words.store(slot, 0, value);
+    }
+
+    pub fn clear_first(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.words", owner), 1)
+    {
+        let slot: StorageSlot = dataSlot(owner);
+        std_storage.words.store(slot, 0, 0);
+    }
+
+    pub fn clear_pair(owner: address)
+        modifies std_storage.range(std_storage.derive("ora.test.computed.words", owner), 2)
+    {
+        let slot: StorageSlot = dataSlot(owner);
+        let range: StorageRange = std_storage.range(slot, 2);
+        std_storage.words.erase(range);
+    }
+
+    pub fn read_first(owner: address) -> u256 {
+        let slot: StorageSlot = dataSlot(owner);
+        return std_storage.words.load(slot, 0);
+    }
+
+    pub fn read_second(owner: address) -> u256 {
+        let slot: StorageSlot = dataSlot(owner);
+        return std_storage.words.load(slot, 1);
+    }
+
+    pub fn read_other(owner: address) -> u256 {
+        let slot: StorageSlot = otherSlot(owner);
+        return std_storage.words.load(slot, 0);
+    }
+}

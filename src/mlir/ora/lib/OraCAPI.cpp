@@ -50,6 +50,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/ArrayRef.h"
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -57,6 +58,32 @@
 
 namespace
 {
+    static bool isOraDialectRegistered(MlirContext ctx)
+    {
+        mlir::MLIRContext *context = unwrap(ctx);
+        return context->getLoadedDialect("ora") != nullptr;
+    }
+
+    static MlirOperation createSimpleOraOperation(
+        MlirContext ctx,
+        MlirLocation loc,
+        llvm::StringRef name,
+        llvm::ArrayRef<mlir::Value> operands,
+        llvm::ArrayRef<mlir::Type> resultTypes = {},
+        llvm::ArrayRef<mlir::NamedAttribute> attributes = {})
+    {
+        if (!isOraDialectRegistered(ctx))
+            return {nullptr};
+
+        mlir::MLIRContext *context = unwrap(ctx);
+        mlir::OperationState state(unwrap(loc), name);
+        state.addOperands(operands);
+        state.addTypes(resultTypes);
+        state.addAttributes(attributes);
+        mlir::OpBuilder builder(context);
+        return wrap(builder.create(state));
+    }
+
     static mlir::Operation *findStructDeclInScope(mlir::Operation *anchor, llvm::StringRef structName)
     {
         if (!anchor)
@@ -1374,6 +1401,119 @@ MlirOperation oraSStoreOpCreate(MlirContext ctx, MlirLocation loc, MlirValue val
 
 
         return wrap(sstoreOp.getOperation());
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageDeriveOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirStringRef namespaceName,
+    MlirStringRef namespaceHashDecimal,
+    const MlirValue *keys,
+    size_t numKeys,
+    MlirType resultType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+        StringRef namespaceRef = unwrap(namespaceName);
+        StringRef hashRef = unwrap(namespaceHashDecimal);
+        Type resultTypeRef = unwrap(resultType);
+
+        if (!oraDialectIsRegistered(ctx))
+        {
+            return {nullptr};
+        }
+
+        llvm::APInt hashValue(256, 0);
+        if (hashRef.getAsInteger(10, hashValue))
+        {
+            return {nullptr};
+        }
+        hashValue = hashValue.zextOrTrunc(256);
+        auto hashType = ::mlir::IntegerType::get(context, 256, ::mlir::IntegerType::Unsigned);
+        auto hashAttr = IntegerAttr::get(hashType, hashValue);
+
+        SmallVector<Value, 4> operands;
+        operands.reserve(numKeys);
+        for (size_t i = 0; i < numKeys; ++i)
+        {
+            operands.push_back(unwrap(keys[i]));
+        }
+
+        OpBuilder builder(context);
+        OperationState state(location, "ora.storage.derive");
+        state.addOperands(operands);
+        state.addTypes(resultTypeRef);
+        state.addAttribute("namespace_name", StringAttr::get(context, namespaceRef));
+        state.addAttribute("namespace_hash", hashAttr);
+        Operation *op = builder.create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageWordLoadOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    MlirValue offset,
+    MlirType resultType)
+{
+    try
+    {
+        Type resultTypeRef = unwrap(resultType);
+        SmallVector<Value, 2> operands{unwrap(slot), unwrap(offset)};
+        SmallVector<Type, 1> results{resultTypeRef};
+        return createSimpleOraOperation(ctx, loc, "ora.storage.word_load", operands, results);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageWordStoreOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    MlirValue offset,
+    MlirValue value)
+{
+    try
+    {
+        SmallVector<Value, 3> operands{unwrap(slot), unwrap(offset), unwrap(value)};
+        return createSimpleOraOperation(ctx, loc, "ora.storage.word_store", operands);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraStorageRangeEraseOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    MlirValue slot,
+    uint64_t wordCount)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        auto wordCountType = mlir::IntegerType::get(context, 64);
+        SmallVector<Value, 1> operands{unwrap(slot)};
+        SmallVector<NamedAttribute, 1> attributes{
+            NamedAttribute(StringAttr::get(context, "word_count"), IntegerAttr::get(wordCountType, wordCount)),
+        };
+        return createSimpleOraOperation(ctx, loc, "ora.storage.range_erase", operands, {}, attributes);
     }
     catch (...)
     {

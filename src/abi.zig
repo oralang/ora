@@ -523,8 +523,48 @@ pub const ContractAbi = struct {
         }
         try writer.writeByte(']');
 
+        if (self.hasComputedStorageLayout()) {
+            try writeObjectKey(writer, &first, "storageLayout");
+            try self.writeStorageLayout(writer);
+        }
+
         try writer.writeByte('}');
         return buffer.toOwnedSlice(allocator);
+    }
+
+    fn hasComputedStorageLayout(self: *const ContractAbi) bool {
+        for (self.callables) |callable| {
+            for (callable.effects) |effect| {
+                if (effect.path) |path| {
+                    if (computedStorageEffectPath(path)) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn writeStorageLayout(self: *const ContractAbi, writer: anytype) !void {
+        try writer.writeByte('{');
+        var first = true;
+        try writeObjectKey(writer, &first, "computedAccesses");
+        try writer.writeByte('[');
+        var wrote_any = false;
+        for (self.callables) |callable| {
+            for (callable.effects) |effect| {
+                const path = effect.path orelse continue;
+                if (!computedStorageEffectPath(path)) continue;
+                if (wrote_any) try writer.writeByte(',');
+                wrote_any = true;
+                try writer.writeByte('{');
+                var access_first = true;
+                try writeObjectStringField(writer, &access_first, "callable", callable.id);
+                try writeObjectStringField(writer, &access_first, "kind", effectKindString(effect.kind));
+                try writeObjectStringField(writer, &access_first, "path", path);
+                try writer.writeByte('}');
+            }
+        }
+        try writer.writeByte(']');
+        try writer.writeByte('}');
     }
 
     fn writeCallableExtras(self: *const ContractAbi, writer: anytype, callable: AbiCallable) !void {
@@ -1304,7 +1344,7 @@ const CompilerAbiGenerator = struct {
             paths.deinit(self.allocator);
         }
         for (slots) |slot| {
-            try paths.append(self.allocator, try self.allocator.dupe(u8, slot.name));
+            try paths.append(self.allocator, try self.effectSlotPath(slot));
         }
         sortStringArrayList(&paths);
         for (paths.items) |path| {
@@ -1314,6 +1354,13 @@ const CompilerAbiGenerator = struct {
                 .event_id = null,
             });
         }
+    }
+
+    fn effectSlotPath(self: *CompilerAbiGenerator, slot: compiler.sema.EffectSlot) ![]const u8 {
+        if (std.mem.eql(u8, slot.name, "$computed_storage")) {
+            return try compiler.sema.formatEffectSlotPath(self.allocator, slot);
+        }
+        return try self.allocator.dupe(u8, slot.name);
     }
 
     fn resolveSemaType(
@@ -1920,6 +1967,10 @@ fn effectKindString(kind: AbiEffectKind) []const u8 {
         .calls => "calls",
         .value => "value",
     };
+}
+
+fn computedStorageEffectPath(path: []const u8) bool {
+    return std.mem.startsWith(u8, path, "$computed_storage[");
 }
 
 fn projectStateMutability(callable: AbiCallable) []const u8 {

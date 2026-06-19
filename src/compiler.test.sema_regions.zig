@@ -144,6 +144,92 @@ test "compiler allows writes around extern staticcall" {
     try testing.expectEqual(@as(usize, 0), typecheck.diagnostics.items.items.len);
 }
 
+test "compiler treats computed storage writes as storage around extern call" {
+    const source_text =
+        \\extern trait Hook {
+        \\    call fn notify(self) -> bool;
+        \\}
+        \\
+        \\error ExternalCallFailed;
+        \\
+        \\contract Vault {
+        \\    storage var hook: address;
+        \\
+        \\    pub fn bad(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("computed.external.same", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("computed.external.same", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\        let ok = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok;
+        \\        @storageWordStore(slot, 0, value + 1);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies @storageRange(@storageDerive("computed.external.before", owner), 1)
+        \\        modifies @storageRange(@storageDerive("computed.external.after", owner), 1)
+        \\    {
+        \\        let before: StorageSlot = @storageDerive("computed.external.before", owner);
+        \\        let after: StorageSlot = @storageDerive("computed.external.after", owner);
+        \\        @storageWordStore(before, 0, value);
+        \\        let ok_result = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok_result;
+        \\        @storageWordStore(after, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+}
+
+test "compiler treats imported computed storage helpers as storage around extern call" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\extern trait Hook {
+        \\    call fn notify(self) -> bool;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var hook: address;
+        \\
+        \\    pub fn bad(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("computed.external.imported", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\        let ok = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok;
+        \\        std_storage.words.store(slot, 0, value + 1);
+        \\    }
+        \\
+        \\    pub fn ok(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported.before", owner), 1)
+        \\        modifies std_storage.range(std_storage.derive("computed.external.imported.after", owner), 1)
+        \\    {
+        \\        let before: StorageSlot = std_storage.derive("computed.external.imported.before", owner);
+        \\        let after: StorageSlot = std_storage.derive("computed.external.imported.after", owner);
+        \\        std_storage.words.store(before, 0, value);
+        \\        let ok_result = external<Hook>(hook, gas: 50000).notify();
+        \\        _ = ok_result;
+        \\        std_storage.words.store(after, 0, value);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+    try testing.expectEqual(@as(usize, 1), countDiagnosticMessages(&typecheck.diagnostics, "cannot write storage slot '$computed_storage' after external call because it was written before the call"));
+}
+
 test "compiler allows post-call writes when pre-call storage write is branch-local" {
     const source_text =
         \\extern trait ERC20 {

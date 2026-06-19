@@ -1,0 +1,1 @@
+expect_error = "public function parameter 'slot' cannot expose opaque storage capability type 'StorageSlot'"

@@ -3,6 +3,7 @@ const mlir = @import("mlir_c_api").c;
 const ast = @import("../ast/mod.zig");
 const sema = @import("../sema/mod.zig");
 const ora_types = @import("ora_types");
+const integer_constants = ora_types.integer_constants;
 const refinements = ora_types.refinement_semantics;
 const type_descriptors = @import("../sema/type_descriptors.zig");
 const source = @import("../source/mod.zig");
@@ -739,6 +740,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn parseU256Literal(text: []const u8) ?u256 {
+            if (integer_constants.lookup(text)) |constant| {
+                return parseU256Literal(constant);
+            }
             if (std.mem.startsWith(u8, text, "-")) {
                 const magnitude = parseU256Literal(text[1..]) orelse return null;
                 return @as(u256, 0) -% magnitude;
@@ -1281,7 +1285,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         if (pattern_type.kind() == .unknown) {
                             break :blk try self.lowerExpr(expr_id, locals);
                         }
-                        const target_type = self.parent.lowerSemaType(pattern_type, decl.range);
+                        const target_type = try @This().lowerPatternType(self, decl.pattern) orelse
+                            self.parent.lowerSemaType(pattern_type, decl.range);
                         break :blk try self.lowerExprForFlowTarget(expr_id, target_type, locals);
                     } else if (decl.type_expr) |type_expr| blk: {
                         const lowered_type = self.parent.lowerTypeExpr(type_expr);
@@ -2294,7 +2299,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 },
                 else => {
                     const range = patternRange(self.parent.file, pattern_id);
-                    const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
+                    const target_type = try @This().lowerPatternType(self, pattern_id) orelse
+                        self.parent.lowerSemaType(self.parent.typecheck.pattern_types[pattern_id.index()].type, range);
                     const converted = try @This().convertValueForFlow(self, value, target_type, range);
                     @This().annotatePatternValue(self, pattern_id, converted);
                     try locals.bindPattern(self.parent.file, pattern_id, converted);
@@ -3936,9 +3942,8 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             _ = locals;
             var result_types: std.ArrayList(mlir.MlirType) = .{};
             for (carried_locals) |local_id| {
-                const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
-                if (sema_type.kind() == .unknown) return null;
-                try result_types.append(self.parent.allocator, self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, local_id)));
+                const result_type = try @This().lowerPatternType(self, local_id) orelse return null;
+                try result_types.append(self.parent.allocator, result_type);
             }
             return result_types;
         }
@@ -3964,8 +3969,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             if (locals.getValue(local_id)) |value| return value;
 
-            const sema_type = self.parent.typecheck.pattern_types[local_id.index()].type;
-            if (sema_type.kind() == .unknown) return error.MlirOperationCreationFailed;
+            const result_type = try @This().lowerPatternType(self, local_id) orelse return error.MlirOperationCreationFailed;
             try self.parent.emitLoweringError(
                 patternRange(self.parent.file, local_id),
                 "loop-carried local has no materialized value",
@@ -3976,9 +3980,39 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 "ora.loop_carried_local",
                 range,
                 &.{},
-                self.parent.lowerSemaType(sema_type, range),
+                result_type,
             );
             return appendValueOp(self.block, op);
+        }
+
+        fn lowerPatternType(self: *FunctionLowerer, pattern_id: ast.PatternId) anyerror!?mlir.MlirType {
+            const sema_type = self.parent.typecheck.pattern_types[pattern_id.index()].type;
+            if (sema_type.kind() == .unknown) return null;
+            if (sema_type.kind() != .anonymous_struct) {
+                if (@This().declaredTypeExprForPattern(self, pattern_id)) |type_expr| {
+                    return self.parent.lowerTypeExpr(type_expr);
+                }
+            }
+            return self.parent.lowerSemaType(sema_type, patternRange(self.parent.file, pattern_id));
+        }
+
+        fn declaredTypeExprForPattern(self: *FunctionLowerer, pattern_id: ast.PatternId) ?ast.TypeExprId {
+            if (self.function) |function| {
+                for (function.parameters) |parameter| {
+                    if (parameter.pattern == pattern_id) return parameter.type_expr;
+                }
+            }
+            for (self.parent.file.bodies) |body| {
+                for (body.statements) |statement_id| {
+                    switch (self.parent.file.statement(statement_id).*) {
+                        .VariableDecl => |decl| {
+                            if (decl.pattern == pattern_id) return decl.type_expr;
+                        },
+                        else => {},
+                    }
+                }
+            }
+            return null;
         }
 
         pub fn appendOraYieldFromLocals(

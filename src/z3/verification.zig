@@ -2091,7 +2091,9 @@ pub const VerificationPass = struct {
             std.mem.eql(u8, op_name, "call") or
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.tstore") or
-            std.mem.eql(u8, op_name, "ora.map_store");
+            std.mem.eql(u8, op_name, "ora.map_store") or
+            std.mem.eql(u8, op_name, "ora.storage.word_store") or
+            std.mem.eql(u8, op_name, "ora.storage.range_erase");
         if (!should_observe) return;
 
         const function_name = self.current_function_name orelse "unknown";

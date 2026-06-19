@@ -163,6 +163,50 @@ namespace mlir
                 ConversionPatternRewriter &rewriter) const override;
         };
 
+        class ConvertStorageDeriveOp : public OpConversionPattern<ora::StorageDeriveOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageDeriveOp op,
+                typename ora::StorageDeriveOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageWordLoadOp : public OpConversionPattern<ora::StorageWordLoadOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageWordLoadOp op,
+                typename ora::StorageWordLoadOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageWordStoreOp : public OpConversionPattern<ora::StorageWordStoreOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageWordStoreOp op,
+                typename ora::StorageWordStoreOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertStorageRangeEraseOp : public OpConversionPattern<ora::StorageRangeEraseOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::StorageRangeEraseOp op,
+                typename ora::StorageRangeEraseOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertTLoadOp : public OpConversionPattern<ora::TLoadOp>
         {
         public:

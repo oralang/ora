@@ -426,6 +426,8 @@ pub const EffectSlot = struct {
 
 pub const KeySegment = union(enum) {
     parameter: u32,
+    comptime_parameter: u32,
+    comptime_range_parameter: u32,
     constant: []const u8,
     msg_sender,
     tx_origin,
@@ -449,6 +451,8 @@ pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u
             try writer.writeByte('[');
             switch (segment) {
                 .parameter => |index| try writer.print("param#{d}", .{index}),
+                .comptime_parameter => |index| try writer.print("comptime_param#{d}", .{index}),
+                .comptime_range_parameter => |index| try writer.print("comptime_range_param#{d}", .{index}),
                 .constant => |value| try writer.writeAll(value),
                 .msg_sender => try writer.writeAll("msg.sender"),
                 .tx_origin => try writer.writeAll("tx.origin"),

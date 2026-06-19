@@ -328,6 +328,38 @@ test "compiler lowers embedded std constants through imported module access" {
     try testing.expect(std.mem.indexOf(u8, hir_text, "ora.field_access") == null);
 }
 
+test "compiler lowers refinement bounds from embedded std integer constants" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\type SignedDeltaAmount = InRange<u256, 1, std.constants.I256_MAX>;
+        \\
+        \\contract RefinementConstBounds {
+        \\    pub fn keep(amount: SignedDeltaAmount) -> u256 {
+        \\        return amount;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(hir_result.diagnostics.isEmpty());
+    try testing.expectEqual(@as(u32, 0), hir_result.type_fallback_count);
+    try testing.expect(hir_result.isEmittable());
+
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "57896044618658097711785492504343953926634992332820282019728792003956564819967"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.refinement_guard"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
 test "compiler lowers structured type expressions" {
     const source_text =
         \\struct Types {
@@ -2212,6 +2244,66 @@ test "compiler lowers runtime keccak256 builtin" {
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.keccak256"));
     try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c0_i256 : i256"));
+}
+
+test "compiler lowers computed storage derive and word operations to Ora MLIR ops" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn write(owner: address, offset: u256, value: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        @storageWordStore(slot, offset, value);
+        \\    }
+        \\
+        \\    pub fn read(owner: address, offset: u256) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        return @storageWordLoad(slot, offset);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address) {
+        \\        let slot: StorageSlot = @storageDerive("vault.position", owner);
+        \\        let range: StorageRange = @storageRange(slot, 2);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "ora.storage.derive"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "\"vault.position\""));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "namespace_hash"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_store"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.range_erase"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "word_count = 2"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "$computed_storage[vault.position][param#0][param#1]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "$computed_storage[vault.position][param#0][0..2]"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 2, "memref.store"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "memref.load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
+}
+
+test "compiler lowers imported fixed size data wrapper with concrete array lengths" {
+    const source_text =
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\
+        \\contract Vault {
+        \\    pub fn read(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.fixed", owner);
+        \\        let data: [u256; 3] = fixed.load(slot, 3);
+        \\        return data[2];
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "@std.storage.fixed_size_data.load__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "memref<3xi256>"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.storage.word_load"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.lowering_error"));
 }
 
 test "compiler lowers builtin cast through real conversion ops" {

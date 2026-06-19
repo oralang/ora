@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "zig-out" / "bin" / "metrics-snapshot"
 BASELINE = ROOT / "tests" / "conformance" / "metrics_snapshot.txt"
+VALID_MODES = {"--diff", "--update", "--check"}
 
 
 def category(key: str) -> str:
@@ -69,7 +70,17 @@ def write_baseline(current: dict[str, int]) -> None:
 
 
 def main() -> int:
-    mode = sys.argv[1] if len(sys.argv) > 1 else "--diff"
+    mode = "--diff"
+    mode_seen = False
+    for arg in sys.argv[1:]:
+        if arg not in VALID_MODES:
+            print("usage: metrics-check.py [--diff|--update|--check]", file=sys.stderr)
+            return 2
+        if mode_seen:
+            print("metrics-check: choose only one of --diff, --update, or --check", file=sys.stderr)
+            return 2
+        mode_seen = True
+        mode = arg
     current = run_harness()
 
     if mode == "--update":

@@ -329,6 +329,359 @@ test "verification accepts runtime keccak256 without degradation" {
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+test "verification models computed storage word store then load" {
+    const source_text =
+        \\contract C {
+        \\    pub fn roundtrip(owner: address, value: u256) -> u256
+        \\        modifies @storageRange(@storageDerive("verify.computed.roundtrip", owner), 1)
+        \\        ensures result == value
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("verify.computed.roundtrip", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\        return @storageWordLoad(slot, 0);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "roundtrip");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(result.success);
+}
+
+test "verification rejects false postcondition over computed storage" {
+    const source_text =
+        \\contract C {
+        \\    pub fn false_roundtrip(owner: address, value: u256) -> u256
+        \\        modifies @storageRange(@storageDerive("verify.computed.false.roundtrip", owner), 1)
+        \\        ensures result != value
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("verify.computed.false.roundtrip", owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\        return @storageWordLoad(slot, 0);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "false_roundtrip");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves computed storage slots returned by private helpers" {
+    const source_text =
+        \\contract C {
+        \\    fn dataSlot(owner: address) -> StorageSlot {
+        \\        return @storageDerive("verify.computed.private.slot", owner);
+        \\    }
+        \\
+        \\    pub fn roundtrip(owner: address, value: u256) -> u256
+        \\        modifies @storageRange(@storageDerive("verify.computed.private.slot", owner), 1)
+        \\        ensures result == value
+        \\    {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        @storageWordStore(slot, 0, value);
+        \\        return @storageWordLoad(slot, 0);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "roundtrip");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(result.success);
+}
+
+test "verification preserves computed storage slots through std storage helpers" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract C {
+        \\    fn dataSlot(owner: address) -> StorageSlot {
+        \\        return @storageDerive("verify.computed.std.slot", owner);
+        \\    }
+        \\
+        \\    pub fn roundtrip(owner: address, value: u256) -> u256
+        \\        modifies @storageRange(@storageDerive("verify.computed.std.slot", owner), 1)
+        \\        ensures result == value
+        \\    {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\        return std_storage.words.load(slot, 0);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "roundtrip");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves computed storage std helper effects with modifies clauses" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract C {
+        \\    fn dataSlot(owner: address) -> StorageSlot {
+        \\        return @storageDerive("verify.computed.std.no_modifies", owner);
+        \\    }
+        \\
+        \\    pub fn write(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("verify.computed.std.no_modifies", owner), 1)
+        \\    {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\
+        \\    pub fn read(owner: address) -> u256 {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        return std_storage.words.load(slot, 0);
+        \\    }
+        \\}
+    ;
+
+    var write = try verifyTextWithoutDegradation(source_text, "write");
+    defer write.deinit(testing.allocator);
+    try testing.expect(write.success);
+    try testing.expectEqual(@as(usize, 0), write.errors_len);
+    try testing.expectEqual(@as(usize, 0), write.diagnostics_len);
+    try testing.expect(!write.degraded);
+    try testing.expectEqualStrings("", write.soundness_losses);
+
+    var read = try verifyTextWithoutDegradation(source_text, "read");
+    defer read.deinit(testing.allocator);
+    try testing.expect(read.success);
+    try testing.expectEqual(@as(usize, 0), read.errors_len);
+    try testing.expectEqual(@as(usize, 0), read.diagnostics_len);
+    try testing.expect(!read.degraded);
+    try testing.expectEqualStrings("", read.soundness_losses);
+}
+
+test "verification preserves imported computed storage helpers through std storage calls" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\pub fn dataSlot(owner: address) -> StorageSlot {
+        \\    return std_storage.derive("verify.computed.imported.std.slot", owner);
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract C {
+        \\    pub fn write(owner: address, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("verify.computed.imported.std.slot", owner), 1)
+        \\    {
+        \\        std_storage.words.store(dep.dataSlot(owner), 0, value);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var result = try verifyPackageWithoutDegradation(root_path, "write");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification preserves computed storage slots through std range erase helper" {
+    const source_text =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract C {
+        \\    fn dataSlot(owner: address) -> StorageSlot {
+        \\        return @storageDerive("verify.computed.std.erase", owner);
+        \\    }
+        \\
+        \\    pub fn clear(owner: address) -> bool
+        \\        modifies std_storage.range(std_storage.derive("verify.computed.std.erase", owner), 2)
+        \\        ensures result
+        \\    {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        std_storage.words.store(slot, 0, 1);
+        \\        std_storage.words.store(slot, 1, 2);
+        \\        let range: StorageRange = std_storage.range(slot, 2);
+        \\        std_storage.words.erase(range);
+        \\        return std_storage.words.load(slot, 0) == 0 && std_storage.words.load(slot, 1) == 0;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "clear");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expect(!result.degraded);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(result.success);
+}
+
+test "verification preserves computed storage slots through fixed size data helpers" {
+    const source_text =
+        \\comptime const fixed = @import("std/storage/fixed_size_data");
+        \\
+        \\contract C {
+        \\    fn dataSlot(owner: address) -> StorageSlot {
+        \\        return @storageDerive("verify.computed.fixed", owner);
+        \\    }
+        \\
+        \\    pub fn roundtrip(owner: address, first: u256, second: u256) -> bool
+        \\        modifies @storageRange(@storageDerive("verify.computed.fixed", owner), 2)
+        \\        requires first != 0
+        \\        ensures result
+        \\    {
+        \\        let slot: StorageSlot = dataSlot(owner);
+        \\        let data: [u256; 2] = [first, second];
+        \\        fixed.store(slot, data);
+        \\        let loaded: [u256; 2] = fixed.load(slot, 2);
+        \\        return loaded[0] == first && loaded[1] == second && fixed.hasData(slot, 2);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "roundtrip");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(result.success);
+}
+
+test "verification frames computed storage unrelated word offsets" {
+    const source_text =
+        \\contract C {
+        \\    pub fn offset_frame(owner: address, value: u256) -> bool
+        \\        modifies @storageRange(@storageDerive("verify.computed.frame.offset", owner), 2)
+        \\        ensures result
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("verify.computed.frame.offset", owner);
+        \\        let before: u256 = @storageWordLoad(slot, 1);
+        \\        @storageWordStore(slot, 0, value);
+        \\        let after: u256 = @storageWordLoad(slot, 1);
+        \\        return after == before;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "offset_frame");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification frames computed storage unrelated namespaces" {
+    const source_text =
+        \\contract C {
+        \\    pub fn namespace_frame(owner: address, value: u256) -> bool
+        \\        modifies @storageRange(@storageDerive("verify.computed.frame.a", owner), 1)
+        \\        ensures result
+        \\    {
+        \\        let a: StorageSlot = @storageDerive("verify.computed.frame.a", owner);
+        \\        let b: StorageSlot = @storageDerive("verify.computed.frame.b", owner);
+        \\        let before: u256 = @storageWordLoad(b, 0);
+        \\        @storageWordStore(a, 0, value);
+        \\        let after: u256 = @storageWordLoad(b, 0);
+        \\        return after == before;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "namespace_frame");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification models bounded computed storage range erase" {
+    const source_text =
+        \\contract C {
+        \\    pub fn erase_then_read(owner: address, first: u256, second: u256) -> bool
+        \\        modifies @storageRange(@storageDerive("verify.computed.erase", owner), 2)
+        \\        ensures result
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("verify.computed.erase", owner);
+        \\        @storageWordStore(slot, 0, first);
+        \\        @storageWordStore(slot, 1, second);
+        \\        @storageRangeErase(@storageRange(slot, 2));
+        \\        return @storageWordLoad(slot, 0) == 0 && @storageWordLoad(slot, 1) == 0;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "erase_then_read");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expectEqualStrings("", result.error_kinds);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.success);
+}
+
+test "verification frames computed storage offsets outside erased range" {
+    const source_text =
+        \\contract C {
+        \\    pub fn erase_frame(owner: address) -> bool
+        \\        modifies @storageRange(@storageDerive("verify.computed.erase.frame", owner), 2)
+        \\        ensures result
+        \\    {
+        \\        let slot: StorageSlot = @storageDerive("verify.computed.erase.frame", owner);
+        \\        let before: u256 = @storageWordLoad(slot, 2);
+        \\        @storageRangeErase(@storageRange(slot, 2));
+        \\        let after: u256 = @storageWordLoad(slot, 2);
+        \\        return after == before;
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "erase_frame");
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+    try testing.expect(result.success);
+}
+
 test "verification does not assume runtime keccak256 collision resistance" {
     const source_text =
         \\pub fn hash_collision_claim(a: bytes, b: bytes)
@@ -919,6 +1272,45 @@ test "verification preserves callee requires when summary inlining falls back" {
     try testing.expect(checked.success);
     try testing.expect(!checked.degraded);
     try testing.expectEqual(@as(usize, 0), checked.errors_len);
+}
+
+test "verification propagates inline requires and ensures through callers" {
+    const source_text =
+        \\contract V {
+        \\    inline fn plusOne(value: u256) -> u256
+        \\        requires(value < 10)
+        \\        ensures result == value + 1
+        \\    {
+        \\        return value + 1;
+        \\    }
+        \\
+        \\    pub fn unchecked(value: u256) -> u256 {
+        \\        return plusOne(value);
+        \\    }
+        \\
+        \\    pub fn checked(value: u256) -> u256
+        \\        requires(value < 10)
+        \\        ensures result > value
+        \\    {
+        \\        return plusOne(value);
+        \\    }
+        \\}
+    ;
+
+    var unchecked = try verifyTextWithoutDegradation(source_text, "unchecked");
+    defer unchecked.deinit(testing.allocator);
+    try testing.expect(!unchecked.success);
+    try testing.expect(!unchecked.degraded);
+    try testing.expect(unchecked.errors_len > 0);
+    try testing.expectEqualStrings("PreconditionViolation", unchecked.error_kinds);
+    try testing.expectEqualStrings("", unchecked.soundness_losses);
+
+    var checked = try verifyTextWithoutDegradation(source_text, "checked");
+    defer checked.deinit(testing.allocator);
+    try testing.expect(checked.success);
+    try testing.expect(!checked.degraded);
+    try testing.expectEqual(@as(usize, 0), checked.errors_len);
+    try testing.expectEqualStrings("", checked.soundness_losses);
 }
 
 test "verification uses opaque modifies metadata for struct fields when internal summary inlining is disabled" {

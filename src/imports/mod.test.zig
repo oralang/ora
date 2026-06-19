@@ -236,7 +236,7 @@ test "imports: std import resolves through embedded stdlib graph" {
     var graph = try imports.resolveImportGraph(allocator, entry_path, .{});
     defer graph.deinit(allocator);
 
-    try testing.expectEqual(@as(usize, 1 + imports.embedded_stdlib.all().len), graph.modules.len);
+    try testing.expectEqual(@as(usize, 6), graph.modules.len);
     const entry_module = for (graph.modules) |module| {
         if (std.mem.endsWith(u8, module.resolved_path, "entry.ora")) break module;
     } else return error.TestUnexpectedResult;
@@ -263,6 +263,45 @@ test "imports: std import resolves through embedded stdlib graph" {
     try testing.expect(found_std_constants);
     try testing.expect(found_std_result);
     try testing.expect(found_std_interfaces);
+}
+
+test "imports: std storage import resolves only storage helper graph" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "entry.ora",
+        .data =
+        \\const storage = @import("std/storage");
+        \\contract UsesStorage { }
+        ,
+    });
+
+    const entry_path = try pathFromTmpAlloc(allocator, tmp, "entry.ora");
+    defer allocator.free(entry_path);
+
+    var graph = try imports.resolveImportGraph(allocator, entry_path, .{});
+    defer graph.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 3), graph.modules.len);
+
+    var found_storage = false;
+    var found_words = false;
+    for (graph.modules) |module| {
+        if (module.package_name) |package_name| {
+            if (std.mem.eql(u8, package_name, "std")) {
+                if (std.mem.eql(u8, module.package_module_path.?, "storage.ora")) {
+                    found_storage = true;
+                    try testing.expectEqual(@as(usize, 1), module.imports.len);
+                    try testing.expectEqualStrings("words", module.imports[0].alias);
+                }
+                if (std.mem.eql(u8, module.package_module_path.?, "words.ora")) found_words = true;
+            }
+        }
+    }
+    try testing.expect(found_storage);
+    try testing.expect(found_words);
 }
 
 test "imports: package import must include package and module path" {

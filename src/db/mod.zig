@@ -769,7 +769,9 @@ pub const CompilerDb = struct {
         return .{
             .context = self,
             .ast_file = astFileForComptime,
+            .module_path = modulePathForComptime,
             .item_index = itemIndexForComptime,
+            .resolution = resolveNamesForComptime,
             .module_typecheck = moduleTypeCheckForComptime,
             .lookup_item = lookupItemForComptime,
             .resolve_import_alias = resolveImportAliasForComptime,
@@ -793,6 +795,7 @@ pub const CompilerDb = struct {
         return .{
             .context = self,
             .ast_file = astFileForComptime,
+            .module_path = modulePathForComptime,
             .item_index = itemIndexForComptime,
             .resolution = resolveNamesForComptime,
             .module_typecheck = moduleTypeCheckForComptime,
@@ -853,6 +856,11 @@ fn constEvalForComptime(context: *anyopaque, module_id: source.ModuleId) anyerro
 fn astFileForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile {
     const self: *CompilerDb = @ptrCast(@alignCast(context));
     return self.astFile(self.sources.module(module_id).file_id);
+}
+
+fn modulePathForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror![]const u8 {
+    const self: *CompilerDb = @ptrCast(@alignCast(context));
+    return self.sources.file(self.sources.module(module_id).file_id).path;
 }
 
 fn itemIndexForComptime(context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema.ItemIndexResult {

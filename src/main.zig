@@ -3684,6 +3684,8 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .address => try writer.writeAll("address"),
         .bytes => try writer.writeAll("bytes"),
         .fixed_bytes => |fixed_bytes| try writer.print("bytes{d}", .{fixed_bytes.len}),
+        .storage_slot => try writer.writeAll("StorageSlot"),
+        .storage_range => try writer.writeAll("StorageRange"),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
         .integer => |integer| if (integer.spelling) |spelling|
             try writer.writeAll(spelling)

@@ -580,6 +580,221 @@ test "compiler reports unsupported storage Result payload shapes" {
     );
 }
 
+test "compiler rejects opaque computed-storage capability types at unsafe boundaries" {
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn leak(slot: StorageSlot) {}
+        \\}
+    , .typecheck, "public function parameter 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn leak() -> StorageRange {}
+        \\}
+    , .typecheck, "public function 'leak' cannot expose opaque storage capability return type 'StorageRange'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var slot: StorageSlot;
+        \\}
+    , .typecheck, "storage declarations cannot use opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var indexed: map<StorageSlot, u256>;
+        \\}
+    , .typecheck, "storage declarations cannot use opaque storage capability type 'map<StorageSlot, u256>'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let slot: StorageSlot = @cast(StorageSlot, raw);
+        \\    }
+        \\}
+    , .typecheck, "@cast cannot construct opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let slot: StorageSlot = @bitCast(StorageSlot, raw);
+        \\    }
+        \\}
+    , .typecheck, "@bitCast cannot construct opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return @cast(u256, slot);
+        \\    }
+        \\}
+    , .typecheck, "@cast cannot reinterpret opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return @truncate(u256, slot);
+        \\    }
+        \\}
+    , .typecheck, "@truncate cannot reinterpret opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> u256 {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        let next = slot + 1;
+        \\        return 0;
+        \\    }
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'StorageSlot' and 'integer'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) -> bool {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        return slot == slot;
+        \\    }
+        \\}
+    , .typecheck, "invalid binary operator '==' for types 'StorageSlot' and 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address) {
+        \\        let ns = "vault.dynamic";
+        \\        let slot: StorageSlot = @storageDerive(ns, owner);
+        \\    }
+        \\}
+    , .typecheck, "@storageDerive namespace must be a string literal");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(key: string) {
+        \\        let slot: StorageSlot = @storageDerive("vault.dynamic", key);
+        \\    }
+        \\}
+    , .typecheck, "@storageDerive key type 'string' is not supported");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) -> u256 {
+        \\        return @storageWordLoad(raw, 0);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordLoad expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        @storageWordStore(raw, 0, 1);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordStore expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        let range: StorageRange = @storageRange(raw, 2);
+        \\    }
+        \\}
+    , .typecheck, "@storageRange expects StorageSlot as its first argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(raw: u256) {
+        \\        @storageRangeErase(raw);
+        \\    }
+        \\}
+    , .typecheck, "@storageRangeErase expects StorageRange, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256) {
+        \\        let slot: StorageSlot = @storageDerive("vault.dynamic", owner);
+        \\        let range: StorageRange = @storageRange(slot, len);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    , .typecheck, "@storageRange length must be a compile-time integer literal or comptime integer parameter");
+
+    try expectDiagnosticProbeContains(
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256) {
+        \\        let slot: StorageSlot = std_storage.derive("vault.dynamic", owner);
+        \\        let range: StorageRange = std_storage.range(slot, len);
+        \\        @storageRangeErase(range);
+        \\    }
+        \\}
+    , .typecheck, "std.storage.range length must be a compile-time integer literal or comptime integer parameter");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    struct Payload { value: u256 }
+        \\
+        \\    pub fn bad(owner: address, payload: Payload) {
+        \\        let slot: StorageSlot = @storageDerive("vault.payload", owner);
+        \\        @storageWordStore(slot, 0, payload);
+        \\    }
+        \\}
+    , .typecheck, "@storageWordStore value must be an integer-compatible word");
+}
+
+test "compiler build rejects unbounded computed storage ranges without artifacts" {
+    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const std_storage = @import("std/storage");
+        \\
+        \\contract Vault {
+        \\    pub fn bad(owner: address, len: u256, value: u256)
+        \\        modifies std_storage.range(std_storage.derive("vault.unbounded", owner), len)
+        \\    {
+        \\        let slot: StorageSlot = std_storage.derive("vault.unbounded", owner);
+        \\        std_storage.words.store(slot, 0, value);
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.makeDir("out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try std.process.Child.run(.{
+        .allocator = testing.allocator,
+        .argv = &[_][]const u8{
+            ORA_BINARY_REL,
+            "build",
+            "-o",
+            out_path,
+            root_path,
+        },
+        .max_output_bytes = 1024 * 1024,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .Exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "`modifies` computed storage ranges require a literal bounded word count in v1") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "`modifies` computed storage ranges require a literal bounded word count in v1"));
+    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+}
+
 test "compiler abi emit barrier rejects undefined types without artifacts" {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -1427,6 +1642,20 @@ test "compiler rejects dynamic indexed log fields until topic hashing is support
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(!typecheck.diagnostics.isEmpty());
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "indexed log field 'label' has unsupported type 'string'"));
+}
+
+test "compiler rejects opaque storage capability log fields" {
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    log Bad(slot: StorageSlot);
+        \\}
+    , .typecheck, "log field 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+
+    try expectDiagnosticProbeContains(
+        \\contract C {
+        \\    log Bad(indexed range: StorageRange);
+        \\}
+    , .typecheck, "log field 'range' cannot expose opaque storage capability type 'StorageRange'");
 }
 
 test "compiler reports invalid constant shift amounts" {

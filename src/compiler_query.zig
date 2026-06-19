@@ -11,7 +11,9 @@ const sema_model = @import("sema/model.zig");
 pub const SemaView = struct {
     context: *anyopaque,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
+    module_path: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror![]const u8,
     item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.ItemIndexResult,
+    resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.NameResolutionResult,
     module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.TypeCheckResult,
     lookup_item: *const fn (context: *anyopaque, module_id: source.ModuleId, name: []const u8) anyerror!?ast.ItemId,
     resolve_import_alias: *const fn (context: *anyopaque, module_id: source.ModuleId, alias: []const u8) anyerror!?source.ModuleId,
@@ -20,8 +22,16 @@ pub const SemaView = struct {
         return self.ast_file(self.context, module_id);
     }
 
+    pub fn modulePath(self: *const SemaView, module_id: source.ModuleId) anyerror![]const u8 {
+        return self.module_path(self.context, module_id);
+    }
+
     pub fn itemIndex(self: *const SemaView, module_id: source.ModuleId) anyerror!*const sema_model.ItemIndexResult {
         return self.item_index(self.context, module_id);
+    }
+
+    pub fn nameResolution(self: *const SemaView, module_id: source.ModuleId) anyerror!*const sema_model.NameResolutionResult {
+        return self.resolution(self.context, module_id);
     }
 
     pub fn moduleTypeCheck(self: *const SemaView, module_id: source.ModuleId) anyerror!*const sema_model.TypeCheckResult {
@@ -79,6 +89,7 @@ pub const ComptimeView = struct {
 pub const HirView = struct {
     context: *anyopaque,
     ast_file: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const ast.AstFile,
+    module_path: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror![]const u8,
     item_index: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.ItemIndexResult,
     resolution: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.NameResolutionResult,
     module_typecheck: *const fn (context: *anyopaque, module_id: source.ModuleId) anyerror!*const sema_model.TypeCheckResult,
@@ -89,6 +100,10 @@ pub const HirView = struct {
 
     pub fn astFile(self: *const HirView, module_id: source.ModuleId) anyerror!*const ast.AstFile {
         return self.ast_file(self.context, module_id);
+    }
+
+    pub fn modulePath(self: *const HirView, module_id: source.ModuleId) anyerror![]const u8 {
+        return self.module_path(self.context, module_id);
     }
 
     pub fn itemIndex(self: *const HirView, module_id: source.ModuleId) anyerror!*const sema_model.ItemIndexResult {

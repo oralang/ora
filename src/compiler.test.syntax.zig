@@ -531,6 +531,18 @@ test "compiler rejects invalid source inline function declarations" {
 
     try expectDiagnosticProbeContains(
         \\contract InlineSurface {
+        \\    inline fn recurse(value: u256) -> u256 {
+        \\        return recurse(value);
+        \\    }
+        \\
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return recurse(value);
+        \\    }
+        \\}
+    , .typecheck, "inline functions must not be recursive");
+
+    try expectDiagnosticProbeContains(
+        \\contract InlineSurface {
         \\    inline fn a(value: u256) -> u256 {
         \\        return b(value);
         \\    }

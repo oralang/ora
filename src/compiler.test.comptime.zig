@@ -766,6 +766,65 @@ test "compiler type-checks runtime arguments of generic calls" {
     try testing.expect(diagnosticMessagesContain(diags, "expected argument type 'u256', found 'bool'"));
 }
 
+test "compiler rejects extra explicit generic call arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn first(comptime T: type, a: T, b: T) -> T {
+        \\        return a;
+        \\    }
+        \\
+        \\    pub fn choose(a: u256, b: u256) -> u256 {
+        \\        return first(u256, a, b, 9);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "could not infer generic type arguments"));
+}
+
+test "compiler rejects extra imported explicit generic call arguments" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\fn first(comptime T: type, a: T, b: T) -> T {
+        \\    return a;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Math {
+        \\    pub fn choose(a: u256, b: u256) -> u256 {
+        \\        return dep.first(u256, a, b, 9);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const module_typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    const diags = &module_typecheck.diagnostics;
+    try testing.expect(!diags.isEmpty());
+    try testing.expect(diagnosticMessagesContain(diags, "could not infer generic type arguments"));
+}
+
 test "compiler monomorphizes integer generic contract function calls in HIR" {
     const source_text =
         \\contract Math {
@@ -786,6 +845,93 @@ test "compiler monomorphizes integer generic contract function calls in HIR" {
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @shl_by__8"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @shl_by__8"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+}
+
+test "compiler monomorphizes imported explicit comptime integer calls in HIR" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "dep.ora",
+        .data =
+        \\fn shl_by(comptime N: u256, value: u256) -> u256 {
+        \\    return value << N;
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(.{
+        .sub_path = "main.ora",
+        .data =
+        \\comptime const dep = @import("./dep.ora");
+        \\
+        \\contract Math {
+        \\    pub fn run(value: u256) -> u256 {
+        \\        return dep.shl_by(8, value);
+        \\    }
+        \\}
+        ,
+    });
+
+    const root_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/main.ora", .{tmp.sub_path});
+    defer testing.allocator.free(root_path);
+
+    var compilation = try compilePackage(root_path);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @dep.shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @dep.shl_by__8"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "arith.shli"));
+}
+
+test "compiler infers integer generic arguments from fixed array runtime arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn array_len(comptime N: u256, values: [u256; N]) -> u256 {
+        \\        return N;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256, c: u256) -> u256 {
+        \\        let values: [u256; 3] = [a, b, c];
+        \\        return array_len(values);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c3_i256 : i256"));
+}
+
+test "compiler accepts explicit comptime arguments after runtime arguments" {
+    const source_text =
+        \\contract Math {
+        \\    fn array_len(values: [u256; N], comptime N: u256) -> u256 {
+        \\        return N;
+        \\    }
+        \\
+        \\    pub fn run(a: u256, b: u256, c: u256) -> u256 {
+        \\        let values: [u256; 3] = [a, b, c];
+        \\        return array_len(values, 3);
+        \\    }
+        \\}
+    ;
+
+    const hir_text = try renderHirTextForSource(source_text);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "func.func @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "call @array_len__3"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.return %c3_i256 : i256"));
 }
 
 test "compiler monomorphizes generic struct types on type use" {

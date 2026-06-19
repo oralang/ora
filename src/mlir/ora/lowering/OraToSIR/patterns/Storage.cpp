@@ -102,6 +102,15 @@ namespace {
         MapHashKey k = makeMapHashKey(funcOp, mapSlot, key);
         cache.hashes[k] = hash;
     }
+
+    static void emitEmptyRevert(PatternRewriter &rewriter, Location loc)
+    {
+        auto *ctx = rewriter.getContext();
+        auto ptrType = sir::PtrType::get(ctx, /*addrSpace=*/1);
+        Value zero = constU256(rewriter, loc, 0);
+        Value zeroPtr = rewriter.create<sir::BitcastOp>(loc, ptrType, zero);
+        rewriter.create<sir::RevertOp>(loc, zeroPtr, zero);
+    }
 } // namespace
 
 // Debug logging macro
@@ -1881,6 +1890,195 @@ LogicalResult ConvertSStoreOp::matchAndRewrite(
     }
 
     rewriter.replaceOpWithNewOp<sir::SStoreOp>(op, slot, convertedValue);
+    return success();
+}
+
+LogicalResult ConvertStorageDeriveOp::matchAndRewrite(
+    ora::StorageDeriveOp op,
+    typename ora::StorageDeriveOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    auto namespaceHashAttr = llvm::dyn_cast<IntegerAttr>(op.getNamespaceHash());
+    if (!namespaceHashAttr)
+        return rewriter.notifyMatchFailure(op, "storage.derive missing integer namespace_hash");
+
+    ValueRange keys = adaptor.getKeys();
+
+    // Domain-separate computed storage from all other physical storage layouts.
+    // The preimage is always:
+    //   [ORA_CST_V1, key_count, namespace_hash, key0, key1, ...]
+    // including the zero-key case. Returning namespace_hash directly would put
+    // computed storage in the same flat slot space as ordinary sstore globals.
+    constexpr uint64_t kComputedStorageDomainPrefix = 0x4f72614353545631ULL; // "OraCSTV1"
+    uint64_t wordCount = 3 + static_cast<uint64_t>(keys.size());
+    Value byteLen = constU256(rewriter, loc, wordCount * 32);
+    Value buffer = rewriter.create<sir::MallocOp>(loc, ptrType, byteLen);
+    rewriter.create<sir::StoreOp>(loc, buffer, constU256(rewriter, loc, kComputedStorageDomainPrefix));
+    Value keyCountPtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, constU256(rewriter, loc, 32));
+    rewriter.create<sir::StoreOp>(loc, keyCountPtr, constU256(rewriter, loc, static_cast<uint64_t>(keys.size())));
+    Value namespacePtr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, constU256(rewriter, loc, 64));
+    rewriter.create<sir::StoreOp>(loc, namespacePtr, constU256(rewriter, loc, namespaceHashAttr));
+
+    for (auto indexedKey : llvm::enumerate(keys))
+    {
+        Value keyWord = ensureU256(rewriter, loc, op.getOperation(), indexedKey.value(), "storage.derive key");
+        if (!keyWord)
+            return failure();
+        Value offset = constU256(rewriter, loc, (indexedKey.index() + 3) * 32);
+        Value ptr = rewriter.create<sir::AddPtrOp>(loc, ptrType, buffer, offset);
+        rewriter.create<sir::StoreOp>(loc, ptr, keyWord);
+    }
+
+    Value slot = rewriter.create<sir::KeccakOp>(loc, u256Type, buffer, byteLen);
+    rewriter.replaceOp(op, slot);
+    return success();
+}
+
+LogicalResult ConvertStorageWordLoadOp::matchAndRewrite(
+    ora::StorageWordLoadOp op,
+    typename ora::StorageWordLoadOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.word_load slot");
+    if (!slot)
+        return failure();
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "storage.word_load offset");
+    if (!offset)
+        return failure();
+
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, offset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, physicalSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto okBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto resultArg = afterBlock->addArgument(u256Type, loc);
+    op.getResult().replaceAllUsesWith(resultArg);
+    rewriter.eraseOp(op);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{}, ValueRange{}, okBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(okBlock);
+    Value loaded = rewriter.create<sir::SLoadOp>(loc, u256Type, physicalSlot);
+    rewriter.create<sir::BrOp>(loc, ValueRange{loaded}, afterBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+    return success();
+}
+
+LogicalResult ConvertStorageWordStoreOp::matchAndRewrite(
+    ora::StorageWordStoreOp op,
+    typename ora::StorageWordStoreOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.word_store slot");
+    if (!slot)
+        return failure();
+    Value offset = ensureU256(rewriter, loc, op.getOperation(), adaptor.getOffset(), "storage.word_store offset");
+    if (!offset)
+        return failure();
+    Value value = ensureU256(rewriter, loc, op.getOperation(), adaptor.getValue(), "storage.word_store value");
+    if (!value)
+        return failure();
+
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, offset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, physicalSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto okBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.eraseOp(op);
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{}, ValueRange{}, okBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(okBlock);
+    rewriter.create<sir::SStoreOp>(loc, physicalSlot, value);
+    rewriter.create<sir::BrOp>(loc, ValueRange{}, afterBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+    return success();
+}
+
+LogicalResult ConvertStorageRangeEraseOp::matchAndRewrite(
+    ora::StorageRangeEraseOp op,
+    typename ora::StorageRangeEraseOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    auto loc = op.getLoc();
+    auto *ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value slot = ensureU256(rewriter, loc, op.getOperation(), adaptor.getSlot(), "storage.range_erase slot");
+    if (!slot)
+        return failure();
+    auto wordCountAttr = op->getAttrOfType<IntegerAttr>("word_count");
+    if (!wordCountAttr)
+        return rewriter.notifyMatchFailure(op, "storage.range_erase missing bounded word_count attribute");
+    if (wordCountAttr.getValue().isNegative())
+        return rewriter.notifyMatchFailure(op, "storage.range_erase word_count must be non-negative");
+    if (wordCountAttr.getValue().isZero())
+    {
+        rewriter.eraseOp(op);
+        return success();
+    }
+    Value len = constU256(rewriter, loc, wordCountAttr);
+
+    Block *parentBlock = op->getBlock();
+    Region *parentRegion = parentBlock->getParent();
+    auto afterBlock = rewriter.splitBlock(parentBlock, Block::iterator(op));
+    auto condBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto bodyBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator(), {u256Type}, {loc});
+    auto revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    Value zero = constU256(rewriter, loc, 0);
+    Value maxOffset = constU256(rewriter, loc, wordCountAttr.getValue() - 1);
+    Value lastSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, maxOffset);
+    Value wrapped = rewriter.create<sir::LtOp>(loc, u256Type, lastSlot, slot);
+    Value notWrapped = rewriter.create<sir::IsZeroOp>(loc, u256Type, wrapped);
+    rewriter.create<sir::CondBrOp>(loc, notWrapped, ValueRange{zero}, ValueRange{}, condBlock, revertBlock);
+
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+
+    rewriter.setInsertionPointToStart(condBlock);
+    Value iv = condBlock->getArgument(0);
+    Value hasElement = rewriter.create<sir::LtOp>(loc, u256Type, iv, len);
+    rewriter.create<sir::CondBrOp>(loc, hasElement, ValueRange{iv}, ValueRange{}, bodyBlock, afterBlock);
+
+    rewriter.setInsertionPointToStart(bodyBlock);
+    Value bodyIv = bodyBlock->getArgument(0);
+    Value physicalSlot = rewriter.create<sir::AddOp>(loc, u256Type, slot, bodyIv);
+    Value storeZero = constU256(rewriter, loc, 0);
+    rewriter.create<sir::SStoreOp>(loc, physicalSlot, storeZero);
+    Value one = constU256(rewriter, loc, 1);
+    Value nextIv = rewriter.create<sir::AddOp>(loc, u256Type, bodyIv, one);
+    rewriter.create<sir::BrOp>(loc, ValueRange{nextIv}, condBlock);
+
+    rewriter.eraseOp(op);
     return success();
 }
 

@@ -4,6 +4,8 @@
 //! as a stable, deterministic table so any pipeline change can be judged
 //! better/worse automatically:
 //!   <spec>::__bytecode_bytes      <N>   — compiled bytecode size per contract
+//!   <spec>::__deploy_gas          <gas> — metered gas for primary deployment
+//!   <spec>::__deploy_gas:<name>   <gas> — metered gas for named secondary deploy
 //!   <spec>::c<index>:<fn>         <gas> — metered gas per executed call
 //!
 //! Piped through scripts/metrics-check.py against a committed baseline, this

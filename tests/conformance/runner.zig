@@ -219,9 +219,9 @@ pub fn runConformanceSpecDifferential(
     try runConformanceSpecWithExtraArgs(allocator, source_path, spec_path, &.{"--keep-proved-checks"});
 }
 
-/// Like runConformanceSpec but records numeric metrics (per-call gas + per-contract
-/// bytecode size) into `metrics`. Still asserts all spec outcomes, so it only
-/// measures on a green corpus.
+/// Like runConformanceSpec but records numeric metrics (deploy gas, per-call
+/// gas, and per-contract bytecode size) into `metrics`. Still asserts all spec
+/// outcomes, so it only measures on a green corpus.
 pub fn runConformanceSpecMetrics(allocator: std.mem.Allocator, source_path: []const u8, spec_path: []const u8, metrics: MetricSink) !void {
     return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, &.{"--no-verify"});
 }
@@ -441,6 +441,13 @@ fn executeSpec(allocator: std.mem.Allocator, spec: types.Spec, contracts: []cons
             std.debug.print("contract deployment failed: {s}\n", .{c.name});
         }
         try testing.expect(create_result.success);
+        if (metrics) |sink| {
+            const deploy_key = if (i == 0)
+                "__deploy_gas"
+            else
+                try std.fmt.allocPrint(allocator, "__deploy_gas:{s}", .{c.name});
+            try sink.record(deploy_key, types.DEFAULT_GAS - create_result.gas_left);
+        }
         try testing.expect(host.getCodeForAddress(create_result.address).len > 0);
         try addresses.put(c.name, create_result.address);
     }

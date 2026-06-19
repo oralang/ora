@@ -2,6 +2,7 @@ const std = @import("std");
 const ast = @import("../ast/mod.zig");
 const ora_types = @import("ora_types");
 const builtin = ora_types.builtin;
+const integer_constants = ora_types.integer_constants;
 const model = @import("model.zig");
 const refinements = ora_types.refinement_semantics;
 
@@ -63,6 +64,8 @@ pub fn descriptorFromPathName(file: *const ast.AstFile, item_index: *const ItemI
     const trimmed = std.mem.trim(u8, name, " \t\n\r");
     if (descriptorFromBuiltinName(trimmed)) |ty| return ty;
     if (parseFixedBytesType(trimmed)) |fixed_bytes| return .{ .fixed_bytes = fixed_bytes };
+    if (std.mem.eql(u8, trimmed, "StorageSlot")) return .{ .storage_slot = {} };
+    if (std.mem.eql(u8, trimmed, "StorageRange")) return .{ .storage_range = {} };
     if (invalidIntegerTypeName(trimmed)) return .{ .unknown = {} };
     if (item_index.lookup(trimmed)) |item_id| {
         return switch (file.item(item_id).*) {
@@ -120,7 +123,7 @@ pub fn descriptorFromGenericType(allocator: std.mem.Allocator, file: *const ast.
                 .Type => |type_expr_id| .{ .refinement = .{
                     .name = generic.name,
                     .base_type = try storeType(allocator, try descriptorFromTypeExpr(allocator, file, item_index, type_expr_id)),
-                    .args = try refinementArgsFromAst(allocator, generic.args),
+                    .args = try refinementArgsFromAst(allocator, file, generic.args),
                 } },
                 else => .{ .unknown = {} },
             };
@@ -190,7 +193,7 @@ pub fn mergeExprType(current: Type, next: Type) Type {
 pub fn typeEql(lhs: Type, rhs: Type) bool {
     if (lhs.kind() != rhs.kind()) return false;
     return switch (lhs) {
-        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
+        .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes, .storage_slot, .storage_range => true,
         .fixed_bytes => |left| left.len == rhs.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs.external_proxy.trait_name),
         .integer => |left| blk: {
@@ -406,16 +409,26 @@ fn errorSetContainsAll(expected_errors: []const Type, actual_errors: []const Typ
     return true;
 }
 
-pub fn refinementArgsFromAst(allocator: std.mem.Allocator, args: []const ast.TypeArg) ![]const model.RefinementArg {
+pub fn refinementArgsFromAst(allocator: std.mem.Allocator, file: *const ast.AstFile, args: []const ast.TypeArg) ![]const model.RefinementArg {
     if (args.len == 0) return &.{};
     const semantic_args = try allocator.alloc(model.RefinementArg, args.len);
     for (args, 0..) |arg, index| {
         semantic_args[index] = switch (arg) {
-            .Type => .Type,
+            .Type => |type_expr| if (refinementIntegerConstantArg(file, type_expr)) |text|
+                .{ .Integer = .{ .text = text } }
+            else
+                .Type,
             .Integer => |literal| .{ .Integer = .{ .text = literal.text } },
         };
     }
     return semantic_args;
+}
+
+fn refinementIntegerConstantArg(file: *const ast.AstFile, type_expr: ast.TypeExprId) ?[]const u8 {
+    return switch (file.typeExpr(type_expr).*) {
+        .Path => |path| integer_constants.lookup(path.name),
+        else => null,
+    };
 }
 
 fn refinementArgSliceEql(lhs: []const model.RefinementArg, rhs: []const model.RefinementArg) bool {

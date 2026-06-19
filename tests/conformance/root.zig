@@ -501,6 +501,20 @@ test "conformance slot expressions compute mapping and nested mapping slots" {
     try testing.expectEqual(manual +% 2, try slots.parseSlotExpression("add(map(address,0x3000000000000000000000000000000000000000,map(address,0x2000000000000000000000000000000000000000,0)),2)"));
 }
 
+test "conformance slot expressions compute domain-separated computed-storage slots" {
+    const root = try slots.parseSlotExpression("computed(ora.test.computed.expr)");
+    const same_root = try slots.parseSlotExpression("computed(ora.test.computed.expr)");
+    const one_key = try slots.parseSlotExpression("computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001)");
+    const two_keys_zero = try slots.parseSlotExpression("computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001,uint256,0)");
+    const other_namespace = try slots.parseSlotExpression("computed(ora.test.computed.other,address,0x1000000000000000000000000000000000000001)");
+
+    try testing.expectEqual(root, same_root);
+    try testing.expect(root != one_key);
+    try testing.expect(one_key != two_keys_zero);
+    try testing.expect(one_key != other_namespace);
+    try testing.expectEqual(two_keys_zero +% 1, try slots.parseSlotExpression("add(computed(ora.test.computed.expr,address,0x1000000000000000000000000000000000000001,uint256,0),1)"));
+}
+
 test "conformance static return comparison requires canonical narrow signed words" {
     var zero_extended: [32]u8 = [_]u8{0} ** 32;
     zero_extended[30] = 0xff;

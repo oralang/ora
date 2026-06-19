@@ -6,6 +6,7 @@
 pub const source_span = @import("source_span.zig");
 pub const region = @import("region.zig");
 pub const builtin = @import("builtin.zig");
+pub const integer_constants = @import("integer_constants.zig");
 pub const semantic = @import("semantic.zig");
 pub const value = @import("value.zig");
 pub const refinement_semantics = @import("refinement_semantics.zig");

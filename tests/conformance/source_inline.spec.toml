@@ -154,3 +154,35 @@ caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 value = 0
 args = []
 returns = { u256 = 88 }
+
+[[call]]
+fn = "inlineTryOk()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 23 }
+
+[[call]]
+fn = "inlineTryErr()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 999 }
+
+[[call]]
+fn = "inlinePropagateErr()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+reverts = { any = true }
+
+[[call]]
+fn = "singleEval()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 14 }
+
+[[call.storage]]
+slot = "0x0"
+value = "0x1"

@@ -1,3 +1,7 @@
+comptime const constants = @import("std/constants");
+
+error InlineFailure;
+
 contract SourceInlineConformance {
     storage var saved: u256;
 
@@ -97,6 +101,28 @@ contract SourceInlineConformance {
         saved = normalize(value);
     }
 
+    inline fn observeTwice(value: u256) -> u256 {
+        if (value == value) {
+            return 14;
+        }
+        return 0;
+    }
+
+    inline fn maybeInline(flag: bool) -> !u256 | InlineFailure {
+        if (flag) {
+            return 23;
+        }
+        return InlineFailure;
+    }
+
+    fn sideEffectArg() -> u256
+        requires(saved < constants.U256_MAX)
+        ensures result == 7
+    {
+        saved = saved + 1;
+        return 7;
+    }
+
     pub fn set(value: u256) {
         writeSaved(value);
     }
@@ -151,5 +177,33 @@ contract SourceInlineConformance {
 
     pub fn loopThree() -> u256 {
         return countThree();
+    }
+
+    pub fn singleEval() -> u256 {
+        saved = 0;
+        return observeTwice(sideEffectArg());
+    }
+
+    pub fn inlineTryOk() -> u256 {
+        try {
+            let value: u256 = try maybeInline(true);
+            return value;
+        } catch {
+            return 999;
+        }
+    }
+
+    pub fn inlineTryErr() -> u256 {
+        try {
+            let value: u256 = try maybeInline(false);
+            return value;
+        } catch {
+            return 999;
+        }
+    }
+
+    pub fn inlinePropagateErr() -> !u256 | InlineFailure {
+        let value: u256 = try maybeInline(false);
+        return value;
     }
 }

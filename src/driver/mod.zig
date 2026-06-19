@@ -202,10 +202,10 @@ pub fn compileSourceWithOptions(allocator: std.mem.Allocator, path: []const u8, 
     compiler_db.setCompileOptions(options);
 
     const package_id = try compiler_db.addPackage("main");
-    try addEmbeddedStdModules(&compiler_db, package_id);
     const file_id = try compiler_db.addSourceFile(path, text);
     const module_name = std.fs.path.stem(path);
     const module_id = try compiler_db.addModule(package_id, file_id, module_name);
+    try addEmbeddedStdModulesReferencedByAst(allocator, &compiler_db, package_id, try compiler_db.astFile(file_id));
 
     return .{
         .db = compiler_db,
@@ -254,9 +254,37 @@ fn loadPackageSources(
     };
 }
 
-fn addEmbeddedStdModules(compiler_db: *db.CompilerDb, package_id: source.PackageId) !void {
-    for (embedded_stdlib.all()) |module| {
-        const file_id = try compiler_db.addSourceFile(module.resolved_path, module.source);
-        _ = try compiler_db.addModule(package_id, file_id, module.logical_path);
+fn addEmbeddedStdModulesReferencedByAst(
+    allocator: std.mem.Allocator,
+    compiler_db: *db.CompilerDb,
+    package_id: source.PackageId,
+    ast_file: *const ast.AstFile,
+) anyerror!void {
+    var added = std.StringHashMap(void).init(allocator);
+    defer added.deinit();
+    for (ast_file.root_items) |item_id| {
+        const item = ast_file.item(item_id).*;
+        if (item == .Import) {
+            const module = embedded_stdlib.byLogicalPath(item.Import.path) orelse continue;
+            try addEmbeddedStdModuleWithDependencies(allocator, compiler_db, package_id, module, &added);
+        }
+    }
+}
+
+fn addEmbeddedStdModuleWithDependencies(
+    allocator: std.mem.Allocator,
+    compiler_db: *db.CompilerDb,
+    package_id: source.PackageId,
+    module: embedded_stdlib.EmbeddedModule,
+    added: *std.StringHashMap(void),
+) anyerror!void {
+    if (added.contains(module.logical_path)) return;
+    try added.put(module.logical_path, {});
+    const file_id = try compiler_db.addSourceFile(module.resolved_path, module.source);
+    _ = try compiler_db.addModule(package_id, file_id, module.logical_path);
+    for (module.imports) |import_info| {
+        if (embedded_stdlib.byLogicalPath(import_info.specifier)) |dependency| {
+            try addEmbeddedStdModuleWithDependencies(allocator, compiler_db, package_id, dependency, added);
+        }
     }
 }

@@ -254,6 +254,39 @@ extern "C"
         MlirValue value,
         MlirStringRef globalName);
 
+    /// Create an ora.storage.derive operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageDeriveOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirStringRef namespaceName,
+        MlirStringRef namespaceHashDecimal,
+        const MlirValue *keys,
+        size_t numKeys,
+        MlirType resultType);
+
+    /// Create an ora.storage.word_load operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageWordLoadOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        MlirValue offset,
+        MlirType resultType);
+
+    /// Create an ora.storage.word_store operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageWordStoreOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        MlirValue offset,
+        MlirValue value);
+
+    /// Create an ora.storage.range_erase operation.
+    MLIR_CAPI_EXPORTED MlirOperation oraStorageRangeEraseOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        MlirValue slot,
+        uint64_t wordCount);
+
     /// Create an ora.conditional_return operation using the registered dialect
     /// Returns null operation if the dialect is not registered or creation fails
     MLIR_CAPI_EXPORTED MlirOperation oraConditionalReturnOpCreate(
