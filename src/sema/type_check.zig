@@ -131,6 +131,8 @@ fn typeContainsUnknown(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsUnknown(resource.carrier_type.*),
+        .resource_place => |place| typeContainsUnknown(place.domain_type.*),
         .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
         else => false,
     };
@@ -160,6 +162,8 @@ fn typeContainsMap(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsMap(resource.carrier_type.*),
+        .resource_place => |place| typeContainsMap(place.domain_type.*),
         .function => |function| blk: {
             for (function.param_types) |param_type| {
                 if (typeContainsMap(param_type)) break :blk true;
@@ -200,6 +204,7 @@ fn typeContainsStorageCapability(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsStorageCapability(resource.carrier_type.*),
         .function => |function| blk: {
             for (function.param_types) |param_type| {
                 if (typeContainsStorageCapability(param_type)) break :blk true;
@@ -210,6 +215,46 @@ fn typeContainsStorageCapability(ty: Type) bool {
             break :blk false;
         },
         .refinement => |refinement| typeContainsStorageCapability(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn typeContainsResourcePlace(ty: Type) bool {
+    return switch (ty) {
+        .resource_place => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsResourcePlace(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsResourcePlace(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsResourcePlace(array.element_type.*),
+        .slice => |slice| typeContainsResourcePlace(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsResourcePlace(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsResourcePlace(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsResourcePlace(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsResourcePlace(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .function => |function| blk: {
+            for (function.param_types) |param_type| {
+                if (typeContainsResourcePlace(param_type)) break :blk true;
+            }
+            for (function.return_types) |return_type| {
+                if (typeContainsResourcePlace(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsResourcePlace(refinement.base_type.*),
         else => false,
     };
 }
@@ -712,6 +757,9 @@ pub fn typeCheck(
                 else
                     try typechecker.resolveTypeExpr(type_alias.target_type);
             },
+            .Resource => |resource| {
+                item_types[index] = try typechecker.resolveResourceDomainType(ast.ItemId.fromIndex(index), resource);
+            },
             else => {},
         }
     }
@@ -831,6 +879,7 @@ const TypeChecker = struct {
     opaque_multi_error_patterns: []bool = &.{},
     try_scope_depth: usize = 0,
     active_aliases: InlineItemIdStack = .{},
+    active_resources: InlineItemIdStack = .{},
     current_return_type: ?Type = null,
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
@@ -1217,7 +1266,7 @@ const TypeChecker = struct {
                 var indexed_count: usize = 0;
                 for (log_decl.fields) |field| {
                     const field_type = try self.resolveTypeExpr(field.type_expr);
-                    if (typeContainsStorageCapability(field_type)) {
+                    if (typeContainsStorageCapability(field_type) or typeContainsResourcePlace(field_type)) {
                         try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque storage capability type '{s}'", .{
                             field.name,
                             diagnosticTypeDisplayName(self, field_type),
@@ -1825,7 +1874,7 @@ const TypeChecker = struct {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
-            if (typeContainsStorageCapability(param_type)) {
+            if (typeContainsStorageCapability(param_type) or typeContainsResourcePlace(param_type)) {
                 try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque storage capability type '{s}'", .{
                     name,
                     diagnosticTypeDisplayName(self, param_type),
@@ -1847,7 +1896,7 @@ const TypeChecker = struct {
         }
 
         if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
-            if (typeContainsStorageCapability(self.current_return_type.?)) {
+            if (typeContainsStorageCapability(self.current_return_type.?) or typeContainsResourcePlace(self.current_return_type.?)) {
                 try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque storage capability return type '{s}'", .{
                     function.name,
                     diagnosticTypeDisplayName(self, self.current_return_type.?),
@@ -1867,10 +1916,12 @@ const TypeChecker = struct {
             if (self.parameterIsBareSelf(parameter)) continue;
             const parameter_type = self.pattern_types[parameter.pattern.index()].type;
             try self.checkRuntimeMapParameter(parameter.range, parameter.pattern, parameter_type);
+            try self.checkRuntimeResourcePlaceParameter(parameter.range, parameter.pattern, parameter_type);
         }
 
         if (function.return_type != null) {
             try self.checkRuntimeMapReturn(function.range, function.name, self.current_return_type.?);
+            try self.checkRuntimeResourcePlaceReturn(function.range, function.name, self.current_return_type.?);
         }
     }
 
@@ -1910,6 +1961,47 @@ const TypeChecker = struct {
         if (!typeContainsMap(ty)) return;
         const name = self.patternName(pattern_id) orelse "<local>";
         try self.emitRangeError(range, "local '{s}' cannot have map type '{s}' as a runtime value; index storage maps directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceParameter(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!typeContainsResourcePlace(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<param>";
+        try self.emitRangeError(range, "function parameter '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceReturn(
+        self: *TypeChecker,
+        range: source.TextRange,
+        function_name: []const u8,
+        ty: Type,
+    ) !void {
+        if (!typeContainsResourcePlace(ty)) return;
+        try self.emitRangeError(range, "function '{s}' cannot return resource place type '{s}'; resource places are not first-class runtime values", .{
+            function_name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceLocal(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!typeContainsResourcePlace(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<local>";
+        try self.emitRangeError(range, "local '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
             name,
             diagnosticTypeDisplayName(self, ty),
         });
@@ -2705,6 +2797,7 @@ const TypeChecker = struct {
                 }
                 if (decl.storage_class != .storage) {
                     try self.checkRuntimeMapLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    try self.checkRuntimeResourcePlaceLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
                     try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
@@ -5550,9 +5643,32 @@ const TypeChecker = struct {
             .Bitfield => .{ .bitfield = .{ .name = name } },
             .Enum => .{ .enum_ = .{ .name = name } },
             .ErrorDecl => .{ .named = .{ .name = name } },
+            .Resource => |resource| try self.resolveResourceDomainType(item_id, resource),
             .TypeAlias => |type_alias| try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
             else => null,
         };
+    }
+
+    fn resolveResourceDomainType(self: *TypeChecker, item_id: ast.ItemId, resource: ast.ResourceItem) !Type {
+        if (self.active_resources.contains(item_id)) {
+            try self.emitRangeError(resource.range, "recursive resource declaration '{s}' is not supported", .{resource.name});
+            return .{ .unknown = {} };
+        }
+        try self.active_resources.push(self.arena, item_id);
+        defer _ = self.active_resources.pop();
+
+        const carrier_type = try self.resolveTypeExpr(resource.carrier_type);
+        if (carrier_type.kind() != .unknown and unwrapRefinement(carrier_type).kind() != .integer) {
+            try self.emitRangeError(resource.range, "resource carrier for '{s}' must be an integer type, found '{s}'", .{
+                resource.name,
+                diagnosticTypeDisplayName(self, carrier_type),
+            });
+            return .{ .unknown = {} };
+        }
+        return .{ .resource_domain = .{
+            .name = resource.name,
+            .carrier_type = try self.storeType(carrier_type),
+        } };
     }
 
     fn resolvePathTypeName(
@@ -5690,6 +5806,27 @@ const TypeChecker = struct {
                     try self.storeType(try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings))
                 else
                     null,
+            } };
+        }
+
+        if (std.mem.eql(u8, generic.name, "Resource")) {
+            if (generic.args.len != 1) {
+                try self.emitGenericArityError(generic.range, "type", "Resource", 1, generic.args.len);
+                return .{ .unknown = {} };
+            }
+            if (generic.args[0] != .Type) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument", .{});
+                return .{ .unknown = {} };
+            }
+            const domain_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+            if (domain_type.kind() != .resource_domain) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument, found '{s}'", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                });
+                return .{ .unknown = {} };
+            }
+            return .{ .resource_place = .{
+                .domain_type = try self.storeType(domain_type),
             } };
         }
 
@@ -10632,6 +10769,8 @@ fn typeHasUnresolvedInteger(ty: Type) bool {
             }
             return false;
         },
+        .resource_domain => |resource| typeHasUnresolvedInteger(resource.carrier_type.*),
+        .resource_place => |place| typeHasUnresolvedInteger(place.domain_type.*),
         .refinement => |refinement| typeHasUnresolvedInteger(refinement.base_type.*),
         else => false,
     };
@@ -10720,6 +10859,11 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
         .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
+        .resource_domain => |left| blk: {
+            const right = rhs_type.resource_domain;
+            break :blk std.mem.eql(u8, left.name, right.name) and sameConcreteType(left.carrier_type.*, right.carrier_type.*);
+        },
+        .resource_place => |left| sameConcreteType(left.domain_type.*, rhs_type.resource_place.domain_type.*),
         .integer => |left| blk: {
             const right = rhs_type.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);
@@ -10797,6 +10941,12 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .storage_slot => try buffer.appendSlice(allocator, "StorageSlot"),
         .storage_range => try buffer.appendSlice(allocator, "StorageRange"),
         .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
+        .resource_domain => |resource| try buffer.appendSlice(allocator, resource.name),
+        .resource_place => |place| {
+            try buffer.appendSlice(allocator, "Resource<");
+            try appendDiagnosticTypeDisplayName(allocator, buffer, place.domain_type.*);
+            try buffer.append(allocator, '>');
+        },
         .named => |named| try buffer.appendSlice(allocator, named.name),
         .function => |function| try buffer.appendSlice(allocator, function.name orelse "function"),
         .contract => |named| try buffer.appendSlice(allocator, named.name),
@@ -10883,6 +11033,8 @@ fn typeDisplayName(ty: Type) []const u8 {
         .storage_slot => "StorageSlot",
         .storage_range => "StorageRange",
         .external_proxy => "external proxy",
+        .resource_domain => |resource| resource.name,
+        .resource_place => "resource place",
         .named => |named| named.name,
         .function => |function| function.name orelse "function",
         .contract => |named| named.name,

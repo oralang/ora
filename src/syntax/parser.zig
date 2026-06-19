@@ -249,6 +249,7 @@ const Parser = struct {
             .Struct => self.parseStructItem(),
             .Bitfield => self.parseBitfieldItem(),
             .Enum => self.parseEnumItem(),
+            .Resource => self.parseResourceItem(),
             .Extern => self.parseTraitItem(),
             .Trait => self.parseTraitItem(),
             .Impl => self.parseImplItem(),
@@ -1136,6 +1137,50 @@ const Parser = struct {
         }
 
         return self.finishNode(SyntaxKind.TypeAliasItem, children.items);
+    }
+
+    fn parseResourceItem(self: *Parser) anyerror!green.GreenNodeId {
+        var children = ChildList.init();
+        defer children.deinit(self.scratch_arena.allocator());
+
+        if (self.at(.Resource)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected 'resource' in resource declaration");
+        }
+
+        if (tokenIsIdentifierLike(self.current().kind)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected resource name");
+            return self.finishNode(SyntaxKind.ResourceItem, children.items);
+        }
+
+        if (self.at(.LeftParen)) {
+            try self.reportHere("generic resource declarations are not supported");
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseParameterListNode() });
+        }
+
+        if (self.at(.Equal)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected '=' in resource declaration");
+            return self.finishNode(SyntaxKind.ResourceItem, children.items);
+        }
+
+        if (self.at(.Semicolon)) {
+            try self.reportHere("expected carrier type in resource declaration");
+        } else {
+            try children.append(self.scratch_arena.allocator(), .{ .node = try self.parseTypeExprNode(&.{.Semicolon}) });
+        }
+
+        if (self.at(.Semicolon)) {
+            try children.append(self.scratch_arena.allocator(), .{ .token = self.bump() });
+        } else {
+            try self.reportHere("expected ';' after resource declaration");
+        }
+
+        return self.finishNode(SyntaxKind.ResourceItem, children.items);
     }
 
     fn parseMemberNode(self: *Parser, kind: SyntaxKind, message: []const u8) anyerror!green.GreenNodeId {
@@ -2902,7 +2947,7 @@ const Parser = struct {
         if (self.startsDecodePermissiveFunction()) return true;
         const kind = self.current().kind;
         return switch (kind) {
-            .Contract, .Pub, .Fn, .Inline, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
+            .Contract, .Pub, .Fn, .Inline, .Struct, .Bitfield, .Enum, .Resource, .Extern, .Trait, .Impl, .Log, .Error, .Const, .Ghost, .Storage, .Memory, .Tstore, .Let, .Var, .Immutable => true,
             .Comptime => self.peekKind(1) == .Const or self.peekKind(1) == .Fn or (self.peekKind(1) == .Inline and self.peekKind(2) == .Fn),
             .Identifier => self.startsTypeAliasItem(),
             else => false,

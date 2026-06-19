@@ -206,6 +206,36 @@ test "compiler lowers syntax into immutable AST items" {
     try testing.expect(file.item(file.root_items[0]).Contract.members.len >= 2);
 }
 
+test "compiler lowers resource declarations into AST items and indexes them" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    resource ShareUnit = u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const file = try compilation.db.astFile(module.file_id);
+    const item_index = try compilation.db.itemIndex(compilation.root_module_id);
+
+    const root_resource_id = item_index.lookup("TokenUnit") orelse return error.TestExpectedEqual;
+    const root_resource = file.item(root_resource_id).Resource;
+    try testing.expectEqualStrings("TokenUnit", root_resource.name);
+
+    const contract_id = item_index.lookup("Vault") orelse return error.TestExpectedEqual;
+    const contract = file.item(contract_id).Contract;
+    try testing.expectEqual(@as(usize, 1), contract.members.len);
+    const member_resource = file.item(contract.members[0]).Resource;
+    try testing.expectEqualStrings("ShareUnit", member_resource.name);
+
+    const member_id = item_index.lookup("Vault.ShareUnit") orelse return error.TestExpectedEqual;
+    try testing.expectEqual(contract.members[0], member_id);
+}
+
 test "compiler parses and lowers structured top-level item forms" {
     const source_text =
         \\comptime const math = @import("./math.ora");

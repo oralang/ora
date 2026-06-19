@@ -567,6 +567,7 @@ pub fn itemRange(file: *const ast.AstFile, item_id: ast.ItemId) source.TextRange
         .Struct => |node| node.range,
         .Bitfield => |node| node.range,
         .Enum => |node| node.range,
+        .Resource => |node| node.range,
         .Trait => |node| node.range,
         .Impl => |node| node.range,
         .TypeAlias => |node| node.range,

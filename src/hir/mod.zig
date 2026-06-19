@@ -737,6 +737,14 @@ const Lowerer = struct {
             .storage_slot => support.reprIntegerType(self.context),
             .storage_range => support.arrayMemRefType(self.context, support.reprIntegerType(self.context), 2),
             .external_proxy => support.addressType(self.context),
+            .resource_domain => |resource| self.lowerSemaType(resource.carrier_type.*, range),
+            .resource_place => |place| blk: {
+                const carrier_type = place.domain_type.resourceCarrierType() orelse {
+                    self.emitLoweringError(range, "resource place carrier must be resolved before HIR lowering", .{}) catch {};
+                    break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
+                };
+                break :blk self.lowerSemaType(carrier_type.*, range);
+            },
             .void => mlir.oraNoneTypeCreate(self.context),
             .array => |array| blk: {
                 const len = array.len orelse {

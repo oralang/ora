@@ -495,6 +495,46 @@ test "compiler syntax carries inline function declarations into AST" {
     try testing.expect(!entry.is_inline);
 }
 
+test "compiler syntax parses resource declarations" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    resource ShareUnit = u256;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const module = compilation.db.sources.module(compilation.root_module_id);
+    const syntax_diags = try compilation.db.syntaxDiagnostics(module.file_id);
+    try testing.expectEqual(@as(usize, 0), syntax_diags.items.items.len);
+
+    const tree = try compilation.db.syntaxTree(module.file_id);
+    const root = compiler.syntax.rootNode(tree);
+    try testing.expect(nthChildNodeOfKind(root, .ResourceItem, 0) != null);
+
+    const contract = nthChildNodeOfKind(root, .ContractItem, 0).?;
+    try testing.expect(nthChildNodeOfKind(contract, .ResourceItem, 0) != null);
+}
+
+test "compiler reports malformed resource declarations" {
+    inline for (.{
+        .{ "resource TokenUnit u256;", "expected '=' in resource declaration" },
+        .{ "resource TokenUnit = ;", "expected carrier type in resource declaration" },
+        .{ "resource TokenUnit = u256", "expected ';' after resource declaration" },
+        .{ "resource TokenUnit(T) = u256;", "generic resource declarations are not supported" },
+    }) |case| {
+        var compilation = try compileText(case[0]);
+        defer compilation.deinit();
+
+        const module = compilation.db.sources.module(compilation.root_module_id);
+        const syntax_diags = try compilation.db.syntaxDiagnostics(module.file_id);
+        try testing.expect(diagnosticMessagesContain(syntax_diags, case[1]));
+    }
+}
+
 test "compiler marks source inline functions for Ora MLIR inlining" {
     const source_text =
         \\contract InlineSurface {

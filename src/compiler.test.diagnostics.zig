@@ -741,6 +741,71 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
     , .typecheck, "@storageWordStore value must be an integer-compatible word");
 }
 
+test "compiler accepts resource domains and storage resource places" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    log Transfer(to: address, amount: TokenUnit);
+        \\
+        \\    pub fn identity(amount: TokenUnit) -> TokenUnit {
+        \\        return amount;
+        \\    }
+        \\
+        \\    pub fn announce(to: address, amount: TokenUnit) {
+        \\        log Transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource declarations and first-class resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = bool;
+    , .typecheck, "resource carrier for 'TokenUnit' must be an integer type, found 'bool'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = TokenUnit;
+    , .typecheck, "recursive resource declaration 'TokenUnit' is not supported");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<u256>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn expose(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "public function parameter 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    fn local(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "function parameter 'place' cannot have resource place type 'Resource<TokenUnit>' as a runtime value");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    log Bad(place: Resource<TokenUnit>);
+        \\}
+    , .typecheck, "log field 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
+}
+
 test "compiler build rejects unbounded computed storage ranges without artifacts" {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,

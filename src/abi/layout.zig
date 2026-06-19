@@ -140,6 +140,8 @@ fn fromTypeAtPath(allocator: std.mem.Allocator, ty: Type, path: []const ValuePat
         .bytes => .{ .dynamic_bytes = .{ .path = try clonePath(allocator, path), .kind = .bytes } },
         .fixed_bytes => |fixed_bytes| staticWordNode(allocator, path, .{ .fixed_bytes = try fixedBytesLen(fixed_bytes) }),
         .integer => |integer| staticWordNode(allocator, path, try integerEncoding(integer)),
+        .resource_domain => |resource| fromTypeAtPath(allocator, resource.carrier_type.*, path),
+        .resource_place => error.UnsupportedAbiType,
         // Legacy context-free behavior. Context-aware lowering resolves named bitfields to their base type.
         .bitfield => staticWordNode(allocator, path, .{ .uint = 256 }),
         .enum_ => error.UnsupportedAbiType,
@@ -248,6 +250,8 @@ pub fn staticWordCountForType(ty: Type) ?usize {
         .bool, .address, .enum_, .bitfield => 1,
         .fixed_bytes => |fixed_bytes| if (fixedBytesLen(fixed_bytes)) |_| 1 else |_| null,
         .integer => |integer| if (integerEncoding(integer)) |_| 1 else |_| null,
+        .resource_domain => |resource| staticWordCountForType(resource.carrier_type.*),
+        .resource_place => null,
         .named => |named| if (parseFixedBytesSpelling(named.name) != null) 1 else null,
         .refinement => |refinement| staticWordCountForType(refinement.base_type.*),
         // Keep the legacy API boundary: `hir.abi.staticAbiWordCount` did not

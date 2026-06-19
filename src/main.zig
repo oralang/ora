@@ -1642,6 +1642,7 @@ fn validateInitArgValue(ty: compiler.sema.Type, raw_value: []const u8) !void {
         },
         .string => {},
         .refinement => |refinement| try validateInitArgValue(refinement.base_type.*, value),
+        .resource_domain => |resource| try validateInitArgValue(resource.carrier_type.*, value),
         else => return error.UnsupportedInitArgType,
     }
 }
@@ -3687,6 +3688,12 @@ fn writeCompilerType(writer: anytype, ty: compiler.sema.Type) !void {
         .storage_slot => try writer.writeAll("StorageSlot"),
         .storage_range => try writer.writeAll("StorageRange"),
         .external_proxy => |proxy| try writer.print("external<{s}>", .{proxy.trait_name}),
+        .resource_domain => |resource| try writer.writeAll(resource.name),
+        .resource_place => |place| {
+            try writer.writeAll("Resource<");
+            try writeCompilerType(writer, place.domain_type.*);
+            try writer.writeAll(">");
+        },
         .integer => |integer| if (integer.spelling) |spelling|
             try writer.writeAll(spelling)
         else
@@ -3799,6 +3806,7 @@ fn compilerItemKindName(item: compiler.ast.Item) []const u8 {
         .Struct => "Struct",
         .Bitfield => "Bitfield",
         .Enum => "Enum",
+        .Resource => "Resource",
         .Trait => "Trait",
         .Impl => "Impl",
         .TypeAlias => "TypeAlias",
@@ -3818,6 +3826,7 @@ fn compilerItemName(item: compiler.ast.Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield_item| bitfield_item.name,
         .Enum => |enum_item| enum_item.name,
+        .Resource => |resource_item| resource_item.name,
         .Trait => |trait_item| trait_item.name,
         .Impl => |impl_item| impl_item.target_name,
         .TypeAlias => |type_alias| type_alias.name,

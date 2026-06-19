@@ -388,6 +388,10 @@ fn collectItem(
             const alias_detail = try formatTypeExprAlloc(builder.result_allocator, file, alias_decl.target_type);
             _ = try builder.addSymbol(alias_decl.name, .type_alias, alias_decl.range, parent, alias_detail);
         },
+        .Resource => |resource_decl| {
+            const carrier_detail = try formatTypeExprAlloc(builder.result_allocator, file, resource_decl.carrier_type);
+            _ = try builder.addSymbol(resource_decl.name, .type_alias, resource_decl.range, parent, carrier_detail);
+        },
         .LogDecl => |log_decl| {
             const log_detail = try formatLogDetailAlloc(builder.result_allocator, file, log_decl);
             const log_index = try builder.addSymbol(log_decl.name, .event, log_decl.range, parent, log_detail);
