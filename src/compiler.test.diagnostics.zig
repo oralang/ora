@@ -859,6 +859,150 @@ test "compiler rejects invalid resource declarations and first-class resource pl
     , .typecheck, "declaration expects type 'TokenUnit', found 'u256'");
 }
 
+test "compiler validates resource move create and destroy builtins" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn issue(to: address, amount: TokenUnit) {
+        \\        @create(balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn retire(from: address, amount: TokenUnit) {
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource builtin calls" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address) {
+        \\        @move(balances[from], balances[to]);
+        \\    }
+        \\}
+    , .typecheck, "@move expects 3 arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(amount, balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move expects Resource<T> places as its first two arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @create(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@create expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @destroy(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\contract Vault {
+        \\    storage var usdc: map<address, Resource<USDC>>;
+        \\    storage var dai: map<address, Resource<DAI>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: USDC) {
+        \\        @move(usdc[from], dai[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot move between Resource<USDC> and Resource<DAI>");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: u256) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must have type TokenUnit");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(balances[dynamicKey()], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var nested: map<address, map<address, Resource<TokenUnit>>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @create(nested[dynamicKey()][to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource DebtUnit = i256;
+        \\
+        \\contract Vault {
+        \\    storage var debts: map<address, Resource<DebtUnit>>;
+        \\
+        \\    pub fn bad(to: address) {
+        \\        @create(debts[to], -1);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must be non-negative");
+}
+
 test "compiler build rejects unbounded computed storage ranges without artifacts" {
     std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,

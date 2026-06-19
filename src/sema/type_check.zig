@@ -55,6 +55,12 @@ const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
+const ResourcePlaceInfo = struct {
+    domain_type: Type,
+    carrier_type: Type,
+    region: Region,
+    slot: ?EffectSlot = null,
+};
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const refinementArgsFromAst = descriptors.refinementArgsFromAst;
@@ -4352,7 +4358,152 @@ const TypeChecker = struct {
             .storage_range_erase => try self.checkStorageRangeEraseBuiltinArguments(builtin),
             .storage_word_load => try self.checkStorageWordLoadBuiltinArguments(builtin),
             .storage_word_store => try self.checkStorageWordStoreBuiltinArguments(builtin),
+            .resource_move, .resource_create, .resource_destroy => try self.checkResourceBuiltinArguments(kind, builtin),
             else => {},
+        }
+    }
+
+    fn checkResourceBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const expected_args: usize = switch (kind) {
+            .resource_move => 3,
+            .resource_create, .resource_destroy => 2,
+            else => unreachable,
+        };
+        if (builtin.args.len != expected_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects {d} arguments", .{ builtin.name, expected_args });
+            return;
+        }
+
+        const first_place = (try self.resourcePlaceForExpr(builtin.args[0])) orelse {
+            switch (kind) {
+                .resource_move => try self.emitExprError(builtin.args[0], "@move expects Resource<T> places as its first two arguments", .{}),
+                .resource_create => try self.emitExprError(builtin.args[0], "@create expects a Resource<T> place as its first argument", .{}),
+                .resource_destroy => try self.emitExprError(builtin.args[0], "@destroy expects a Resource<T> place as its first argument", .{}),
+                else => unreachable,
+            }
+            return;
+        };
+
+        const domain_type = first_place.domain_type;
+        if (kind == .resource_move) {
+            const second_place = (try self.resourcePlaceForExpr(builtin.args[1])) orelse {
+                try self.emitExprError(builtin.args[1], "@move expects Resource<T> places as its first two arguments", .{});
+                return;
+            };
+            if (!sameConcreteType(domain_type, second_place.domain_type)) {
+                try self.emitRangeError(builtin.range, "cannot move between Resource<{s}> and Resource<{s}>", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                    diagnosticTypeDisplayName(self, second_place.domain_type),
+                });
+                return;
+            }
+        }
+
+        const amount_expr = builtin.args[expected_args - 1];
+        try self.contextualizeLiteral(amount_expr, domain_type);
+        const actual_type = self.expr_types[amount_expr.index()];
+        if (actual_type.kind() != .unknown and !typesFlowCompatible(domain_type, actual_type)) {
+            try self.emitExprError(amount_expr, "resource amount must have type {s}", .{
+                diagnosticTypeDisplayName(self, domain_type),
+            });
+            return;
+        }
+        try self.checkResourceAmountNonNegative(amount_expr, domain_type);
+    }
+
+    fn resourcePlaceForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?ResourcePlaceInfo {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.resourcePlaceForExpr(group.expr),
+            .Name => self.resourcePlaceFromLocated(expr_id, self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()])),
+            .Field => |field| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(field.base);
+                const place_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            .Index => |index| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(index.base);
+                const base_type = self.expr_types[index.base.index()];
+                const place_type = self.indexAccessType(base_type, index.index);
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            else => null,
+        };
+    }
+
+    fn validateResourcePlacePathKeys(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.validateResourcePlacePathKeys(group.expr),
+            .Field => |field| try self.validateResourcePlacePathKeys(field.base),
+            .Index => |index| (try self.validateResourcePlacePathKeys(index.base)) and
+                (try self.validateResourcePlaceKeyExpr(index.index)),
+            else => true,
+        };
+    }
+
+    fn resourcePlaceFromLocated(self: *TypeChecker, expr_id: ast.ExprId, located: LocatedType) ?ResourcePlaceInfo {
+        if (located.type.kind() != .resource_place) return null;
+        if (located.region != .storage and located.region != .transient) return null;
+        const domain_type = located.type.resource_place.domain_type.*;
+        const carrier_type: Type = if (domain_type.kind() == .resource_domain)
+            domain_type.resource_domain.carrier_type.*
+        else
+            .{ .unknown = {} };
+        return .{
+            .domain_type = domain_type,
+            .carrier_type = carrier_type,
+            .region = located.region,
+            .slot = self.lockSlotForExpr(expr_id),
+        };
+    }
+
+    fn validateResourcePlaceKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| return try self.validateResourcePlaceKeyExpr(group.expr),
+            .IntegerLiteral, .StringLiteral, .AddressLiteral, .BytesLiteral, .BoolLiteral => return true,
+            .Name => {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id) != null) return true,
+                        .item => {},
+                    }
+                }
+            },
+            .Field => |field| {
+                const base = self.file.expression(field.base).*;
+                if (base == .Name and
+                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
+                {
+                    return true;
+                }
+            },
+            else => {},
+        }
+        try self.emitExprError(expr_id, "resource place key expression must be side-effect-free", .{});
+        return false;
+    }
+
+    fn checkResourceAmountNonNegative(self: *TypeChecker, expr_id: ast.ExprId, domain_type: Type) !void {
+        if (domain_type.kind() != .resource_domain) return;
+        const carrier = unwrapRefinement(domain_type.resource_domain.carrier_type.*);
+        if (carrier.kind() != .integer or !carrier.integer.signed) return;
+        const value = (try self.integerValueForResolution(expr_id)) orelse {
+            try self.emitExprError(expr_id, "resource amount must be non-negative", .{});
+            return;
+        };
+        if (value != .integer) return;
+        if (!value.integer.isPositive() and !value.integer.eqlZero()) {
+            try self.emitExprError(expr_id, "resource amount must be non-negative", .{});
         }
     }
 
@@ -6679,7 +6830,7 @@ const TypeChecker = struct {
 
             .size_of, .keccak256, .chain_id, .storage_word_load => descriptorFromPathName(self.file, self.item_index, "u256"),
 
-            .storage_range_erase, .storage_word_store => .{ .void = {} },
+            .storage_range_erase, .storage_word_store, .resource_move, .resource_create, .resource_destroy => .{ .void = {} },
 
             .storage_derive => .{ .storage_slot = {} },
 
