@@ -306,6 +306,27 @@ test "mlir verifier rejects copied values as resource places" {
     try expectModuleVerificationFailure(text);
 }
 
+test "OraToSIR lowers resource create and destroy to checked storage updates" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %owner: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.create"(%balances, %owner, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.destroy"(%balances, %owner, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    ora.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+    try testing.expect(c.oraConvertToSIR(h.ctx, module, false));
+}
+
 test "OraToSIR fails closed for resource move until resource lowering is implemented" {
     const h = createContext();
     defer destroyContext(h);

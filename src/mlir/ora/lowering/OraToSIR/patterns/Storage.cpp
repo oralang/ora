@@ -2193,6 +2193,189 @@ static Value deriveMapElementSlot(
     return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
 }
 
+static llvm::StringRef getGlobalNameFromMapOperand(mlir::Value mapOperand, mlir::Operation *currentOp);
+
+static bool isSupportedResourceCarrier(Type type)
+{
+    if (auto oraInt = llvm::dyn_cast<ora::IntegerType>(type))
+        return oraInt.getWidth() == 256;
+    if (auto builtinInt = llvm::dyn_cast<mlir::IntegerType>(type))
+        return builtinInt.getWidth() == 256;
+    return false;
+}
+
+static Block *emitResourceRevertUnless(Location loc, ConversionPatternRewriter &rewriter, Value condition)
+{
+    Block *guardBlock = rewriter.getInsertionBlock();
+    Region *parentRegion = guardBlock->getParent();
+    Block *afterBlock = rewriter.splitBlock(guardBlock, rewriter.getInsertionPoint());
+
+    Block *revertBlock = rewriter.createBlock(parentRegion, afterBlock->getIterator());
+    rewriter.setInsertionPointToStart(revertBlock);
+    emitEmptyRevert(rewriter, loc);
+
+    rewriter.setInsertionPointToEnd(guardBlock);
+    rewriter.create<sir::CondBrOp>(loc, condition, ValueRange{}, ValueRange{}, afterBlock, revertBlock);
+    rewriter.setInsertionPointToStart(afterBlock);
+    return afterBlock;
+}
+
+static FailureOr<Value> deriveResourceMapPlaceSlot(
+    Operation *op,
+    OperandRange originalPlace,
+    ValueRange convertedPlace,
+    ConversionPatternRewriter &rewriter)
+{
+    if (originalPlace.size() != convertedPlace.size() || originalPlace.size() < 2)
+        return rewriter.notifyMatchFailure(op, "resource place must be a map root plus at least one key");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+    auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
+
+    auto mapType = llvm::dyn_cast<ora::MapType>(originalPlace.front().getType());
+    if (!mapType)
+        return rewriter.notifyMatchFailure(op, "resource place root is not a map");
+
+    Value mapSlot = Value();
+    Value convertedRoot = convertedPlace.front();
+    llvm::StringRef globalName;
+    if (llvm::isa<sir::U256Type>(convertedRoot.getType()))
+    {
+        mapSlot = convertedRoot;
+    }
+    else
+    {
+        globalName = getGlobalNameFromMapOperand(originalPlace.front(), op);
+        if (globalName.empty())
+            return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
+
+        auto slotIndex = computeGlobalSlot(globalName, op);
+        if (!slotIndex)
+            return rewriter.notifyMatchFailure(op, "missing ora.slot_index for resource place root");
+
+        mapSlot = findOrCreateSlotConstant(op, *slotIndex, globalName, rewriter);
+        if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
+            setResultName(slotOp, 0, ("slot_" + globalName).str());
+    }
+
+    Value slot = mapSlot;
+    for (unsigned i = 1; i < originalPlace.size(); ++i)
+    {
+        Type originalKeyType = mapType.getKeyType();
+        Value key = convertedPlace[i];
+        FailureOr<Value> materializedKey = materializeStorageMapKey(op, key, originalKeyType, rewriter, "resource place key");
+        if (failed(materializedKey))
+            return failure();
+
+        slot = deriveMapElementSlot(loc, rewriter, *materializedKey, slot, u256Type, ptrType);
+        if (!globalName.empty() && i == 1)
+        {
+            if (auto hashOp = slot.getDefiningOp())
+                setResultName(hashOp, 0, ("hash_" + globalName).str());
+        }
+
+        Type valueType = mapType.getValueType();
+        if (i + 1 < originalPlace.size())
+        {
+            mapType = llvm::dyn_cast<ora::MapType>(valueType);
+            if (!mapType)
+                return rewriter.notifyMatchFailure(op, "resource place has extra keys after scalar map value");
+        }
+    }
+
+    return slot;
+}
+
+static LogicalResult lowerResourceCreateOrDestroy(
+    Operation *op,
+    OperandRange originalPlace,
+    ValueRange convertedPlace,
+    Value amount,
+    Type carrierType,
+    bool isCreate,
+    ConversionPatternRewriter &rewriter)
+{
+    if (!isSupportedResourceCarrier(carrierType))
+        return rewriter.notifyMatchFailure(op, "resource lowering currently supports only 256-bit integer carriers");
+
+    auto loc = op->getLoc();
+    auto ctx = rewriter.getContext();
+    auto u256Type = sir::U256Type::get(ctx);
+
+    Value amountU256 = ensureU256(rewriter, loc, op, amount, "resource amount");
+    if (!amountU256)
+        return failure();
+
+    FailureOr<Value> slot = deriveResourceMapPlaceSlot(op, originalPlace, convertedPlace, rewriter);
+    if (failed(slot))
+        return failure();
+
+    rewriter.setInsertionPoint(op);
+    Value current = rewriter.create<sir::SLoadOp>(loc, u256Type, *slot);
+    if (isCreate)
+    {
+        Value updated = rewriter.create<sir::AddOp>(loc, u256Type, current, amountU256);
+        Value overflow = rewriter.create<sir::LtOp>(loc, u256Type, updated, current);
+        Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, overflow);
+        emitResourceRevertUnless(loc, rewriter, ok);
+        rewriter.create<sir::SStoreOp>(loc, *slot, updated);
+    }
+    else
+    {
+        Value underflow = rewriter.create<sir::LtOp>(loc, u256Type, current, amountU256);
+        Value ok = rewriter.create<sir::IsZeroOp>(loc, u256Type, underflow);
+        emitResourceRevertUnless(loc, rewriter, ok);
+        Value updated = rewriter.create<sir::SubOp>(loc, u256Type, current, amountU256);
+        rewriter.create<sir::SStoreOp>(loc, *slot, updated);
+    }
+
+    rewriter.eraseOp(op);
+    return success();
+}
+
+LogicalResult ConvertResourceCreateOp::matchAndRewrite(
+    ora::CreateOp op,
+    typename ora::CreateOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    return lowerResourceCreateOrDestroy(
+        op.getOperation(),
+        op.getPlace(),
+        adaptor.getPlace(),
+        adaptor.getAmount(),
+        op.getCarrierType(),
+        /*isCreate=*/true,
+        rewriter);
+}
+
+LogicalResult ConvertResourceDestroyOp::matchAndRewrite(
+    ora::DestroyOp op,
+    typename ora::DestroyOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    return lowerResourceCreateOrDestroy(
+        op.getOperation(),
+        op.getPlace(),
+        adaptor.getPlace(),
+        adaptor.getAmount(),
+        op.getCarrierType(),
+        /*isCreate=*/false,
+        rewriter);
+}
+
+LogicalResult ConvertResourceMoveOp::matchAndRewrite(
+    ora::MoveOp op,
+    typename ora::MoveOp::Adaptor adaptor,
+    ConversionPatternRewriter &rewriter) const
+{
+    (void)adaptor;
+    return rewriter.notifyMatchFailure(
+        op,
+        "resource move lowering requires alias-aware checked storage update implementation");
+}
+
 static Block *emitLockedKeyRevertGuard(
     Operation *op,
     Location loc,

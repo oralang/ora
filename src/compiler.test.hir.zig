@@ -281,6 +281,39 @@ test "compiler fails closed for direct storage resource places until place roots
     try testing.expectError(error.MlirOperationCreationFailed, compilation.db.lowerToHir(compilation.root_module_id));
 }
 
+test "compiler lowers map-backed resource create and destroy through OraToSIR" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn issue(to: address, amount: TokenUnit) {
+        \\        @create(balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn retire(from: address, amount: TokenUnit) {
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.create"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.destroy"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "sstore"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, " ? @"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 2, "revert"));
+}
+
 test "compiler parses and lowers structured top-level item forms" {
     const source_text =
         \\comptime const math = @import("./math.ora");
