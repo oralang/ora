@@ -1303,7 +1303,6 @@ public:
         patterns.add<ora::ConvertLockOp>(typeConverter, ctx);
         patterns.add<ora::ConvertUnlockOp>(typeConverter, ctx);
         patterns.add<ora::ConvertTStoreGuardOp>(typeConverter, ctx);
-        patterns.add<EraseOpByName>("ora.move", ctx);
 
         ConversionTarget target(*ctx);
         // Mark SIR dialect as legal

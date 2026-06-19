@@ -5172,49 +5172,48 @@ MlirOperation oraStructInstantiateOpCreate(MlirContext ctx, MlirLocation loc, Ml
     }
 }
 
-MlirOperation oraMoveOpCreate(MlirContext ctx, MlirLocation loc, MlirValue amount, MlirValue source, MlirValue destination)
+static void addOperandSegmentSizes(OperationState &state, MLIRContext *context, ArrayRef<int32_t> sizes)
+{
+    state.addAttribute("operand_segment_sizes", DenseI32ArrayAttr::get(context, sizes));
+}
+
+static void addResourceBoundaryAttrs(OperationState &state, MLIRContext *context, MlirStringRef domain, MlirType carrierType)
+{
+    state.addAttribute("domain", StringAttr::get(context, unwrap(domain)));
+    state.addAttribute("carrier_type", TypeAttr::get(unwrap(carrierType)));
+}
+
+MlirOperation oraMoveOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *sourcePlace,
+    size_t numSourcePlace,
+    const MlirValue *destinationPlace,
+    size_t numDestinationPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         Location location = unwrap(loc);
-        Value amt = unwrap(amount);
-        Value src = unwrap(source);
-        Value dst = unwrap(destination);
-
-        OpBuilder builder(context);
-
-        // Create the move operation
-        auto op = builder.create<ora::MoveOp>(location, amt, src, dst);
-
-        return wrap(op.getOperation());
-    }
-    catch (...)
-    {
-        return {nullptr};
-    }
-}
-
-MlirOperation oraMoveOpCreateWithMapping(MlirContext ctx, MlirLocation loc, MlirValue mapping, MlirValue source, MlirValue destination, MlirValue amount, MlirType resultType)
-{
-    try
-    {
-        Location location = unwrap(loc);
-
-        Value mappingVal = unwrap(mapping);
-        Value sourceVal = unwrap(source);
-        Value destinationVal = unwrap(destination);
-        Value amountVal = unwrap(amount);
-        Type resultTy = unwrap(resultType);
 
         OperationState state(location, "ora.move");
-        SmallVector<Value, 4> operands;
-        operands.push_back(mappingVal);
-        operands.push_back(sourceVal);
-        operands.push_back(destinationVal);
-        operands.push_back(amountVal);
+        SmallVector<Value, 8> operands;
+        for (size_t i = 0; i < numSourcePlace; ++i)
+            operands.push_back(unwrap(sourcePlace[i]));
+        for (size_t i = 0; i < numDestinationPlace; ++i)
+            operands.push_back(unwrap(destinationPlace[i]));
+        operands.push_back(unwrap(amount));
         state.addOperands(operands);
-        state.addTypes(resultTy);
+        SmallVector<int32_t, 3> segments = {
+            static_cast<int32_t>(numSourcePlace),
+            static_cast<int32_t>(numDestinationPlace),
+            1,
+        };
+        addOperandSegmentSizes(state, context, segments);
+        addResourceBoundaryAttrs(state, context, domain, carrierType);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -5223,6 +5222,63 @@ MlirOperation oraMoveOpCreateWithMapping(MlirContext ctx, MlirLocation loc, Mlir
     {
         return {nullptr};
     }
+}
+
+static MlirOperation createResourceBoundaryOp(
+    MlirContext ctx,
+    MlirLocation loc,
+    StringRef opName,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType)
+{
+    try
+    {
+        MLIRContext *context = unwrap(ctx);
+        Location location = unwrap(loc);
+
+        OperationState state(location, opName);
+        SmallVector<Value, 4> operands;
+        for (size_t i = 0; i < numPlace; ++i)
+            operands.push_back(unwrap(place[i]));
+        Value amountVal = unwrap(amount);
+        operands.push_back(amountVal);
+        state.addOperands(operands);
+        addResourceBoundaryAttrs(state, context, domain, carrierType);
+
+        Operation *op = Operation::create(state);
+        return wrap(op);
+    }
+    catch (...)
+    {
+        return {nullptr};
+    }
+}
+
+MlirOperation oraCreateOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType)
+{
+    return createResourceBoundaryOp(ctx, loc, "ora.create", place, numPlace, amount, domain, carrierType);
+}
+
+MlirOperation oraDestroyOpCreate(
+    MlirContext ctx,
+    MlirLocation loc,
+    const MlirValue *place,
+    size_t numPlace,
+    MlirValue amount,
+    MlirStringRef domain,
+    MlirType carrierType)
+{
+    return createResourceBoundaryOp(ctx, loc, "ora.destroy", place, numPlace, amount, domain, carrierType);
 }
 
 MlirOperation oraCmpOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef predicate, MlirValue lhs, MlirValue rhs, MlirType resultType)

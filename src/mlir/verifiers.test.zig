@@ -272,6 +272,60 @@ test "mlir verifier rejects ora.map_store with wrong key type" {
     try expectModuleVerificationFailure(text);
 }
 
+test "mlir verifier accepts resource boundary ops with map place paths" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.create"(%balances, %to, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    "ora.destroy"(%balances, %from, %amount) <{domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+}
+
+test "mlir verifier rejects copied values as resource places" {
+    const text =
+        \\module {
+        \\  func.func @f(%source: !ora.int<256, false>, %destination: !ora.int<256, false>, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%source, %destination, %amount) <{operand_segment_sizes = array<i32: 1, 1, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.int<256, false>, !ora.int<256, false>, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    try expectModuleVerificationFailure(text);
+}
+
+test "OraToSIR fails closed for resource move until resource lowering is implemented" {
+    const h = createContext();
+    defer destroyContext(h);
+
+    const text =
+        \\module {
+        \\  func.func @f(%balances: !ora.map<!ora.address, !ora.int<256, false>>, %from: !ora.address, %to: !ora.address, %amount: !ora.int<256, false>) {
+        \\    "ora.move"(%balances, %from, %balances, %to, %amount) <{operand_segment_sizes = array<i32: 2, 2, 1>, domain = "TokenUnit", carrier_type = !ora.int<256, false>}> : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.map<!ora.address, !ora.int<256, false>>, !ora.address, !ora.int<256, false>) -> ()
+        \\    func.return
+        \\  }
+        \\}
+    ;
+
+    const module = try parseModuleFromText(h.ctx, text);
+    defer c.oraModuleDestroy(module);
+
+    try testing.expect(c.mlirOperationVerify(c.oraModuleGetOperation(module)));
+    try testing.expect(!c.oraConvertToSIR(h.ctx, module, false));
+}
+
 test "mlir verifier rejects ora.error.unwrap on non-error-union type" {
     const text =
         \\module {

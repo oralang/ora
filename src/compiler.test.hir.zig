@@ -236,6 +236,51 @@ test "compiler lowers resource declarations into AST items and indexes them" {
     try testing.expectEqual(contract.members[0], member_id);
 }
 
+test "compiler lowers map-backed resource builtins to Ora resource ops" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn exercise(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\        @create(balances[to], amount);
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\}
+    ;
+
+    const rendered = try renderOraMlirForSource(source_text);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.move\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.create\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "\"ora.destroy\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "domain = \"TokenUnit\""));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 3, "carrier_type = i256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.map_get"));
+}
+
+test "compiler fails closed for direct storage resource places until place roots are represented" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn issue(amount: TokenUnit) {
+        \\        @create(reserve, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    try testing.expectError(error.MlirOperationCreationFailed, compilation.db.lowerToHir(compilation.root_module_id));
+}
+
 test "compiler parses and lowers structured top-level item forms" {
     const source_text =
         \\comptime const math = @import("./math.ora");

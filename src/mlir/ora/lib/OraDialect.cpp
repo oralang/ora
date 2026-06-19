@@ -1453,6 +1453,105 @@ namespace mlir
             return success();
         }
 
+        static bool isSupportedResourceCarrierType(Type type)
+        {
+            return llvm::isa<ora::IntegerType, mlir::IntegerType>(type);
+        }
+
+        static ::mlir::LogicalResult verifyResourceMetadata(Operation *op, Value amount, Type &carrierType)
+        {
+            auto domainAttr = op->getAttrOfType<StringAttr>("domain");
+            if (!domainAttr || domainAttr.getValue().empty())
+                return op->emitOpError("requires non-empty 'domain' resource attribute");
+
+            auto carrierAttr = op->getAttrOfType<TypeAttr>("carrier_type");
+            if (!carrierAttr)
+                return op->emitOpError("requires 'carrier_type' resource attribute");
+
+            carrierType = carrierAttr.getValue();
+            if (!isSupportedResourceCarrierType(carrierType))
+                return op->emitOpError() << "resource carrier_type must be an integer type, got " << carrierType;
+
+            if (amount.getType() != carrierType)
+                return op->emitOpError() << "amount type " << amount.getType()
+                                         << " does not match resource carrier_type " << carrierType;
+
+            return success();
+        }
+
+        static ::mlir::LogicalResult verifyResourcePlacePath(Operation *op, OperandRange place, Type carrierType, StringRef label)
+        {
+            if (place.size() < 2)
+            {
+                return op->emitOpError() << label
+                                         << " place must be a map root followed by at least one key; copied values are not resource places";
+            }
+
+            auto mapType = llvm::dyn_cast<MapType>(place.front().getType());
+            if (!mapType)
+            {
+                return op->emitOpError() << label << " place root must have !ora.map<key, value> type, got "
+                                         << place.front().getType();
+            }
+
+            for (unsigned i = 1; i < place.size(); ++i)
+            {
+                Value key = place[i];
+                if (key.getType() != mapType.getKeyType())
+                {
+                    return op->emitOpError() << label << " place key #" << (i - 1)
+                                             << " type " << key.getType()
+                                             << " does not match map key type " << mapType.getKeyType();
+                }
+
+                Type valueType = mapType.getValueType();
+                if (i + 1 == place.size())
+                {
+                    if (valueType != carrierType)
+                    {
+                        return op->emitOpError() << label << " place resolves to " << valueType
+                                                 << " but resource carrier_type is " << carrierType;
+                    }
+                    return success();
+                }
+
+                mapType = llvm::dyn_cast<MapType>(valueType);
+                if (!mapType)
+                {
+                    return op->emitOpError() << label
+                                             << " place has extra keys after a non-map value type " << valueType;
+                }
+            }
+
+            return op->emitOpError() << label << " place does not resolve to a resource value";
+        }
+
+        ::mlir::LogicalResult MoveOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            if (failed(verifyResourcePlacePath(getOperation(), getSourcePlace(), carrierType, "source")))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getDestinationPlace(), carrierType, "destination");
+        }
+
+        ::mlir::LogicalResult CreateOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getPlace(), carrierType, "target");
+        }
+
+        ::mlir::LogicalResult DestroyOp::verify()
+        {
+            Type carrierType;
+            if (failed(verifyResourceMetadata(getOperation(), getAmount(), carrierType)))
+                return failure();
+            return verifyResourcePlacePath(getOperation(), getPlace(), carrierType, "target");
+        }
+
         ::mlir::LogicalResult ErrorUnwrapOp::verify()
         {
             auto unionType = llvm::dyn_cast<ErrorUnionType>(getValue().getType());
