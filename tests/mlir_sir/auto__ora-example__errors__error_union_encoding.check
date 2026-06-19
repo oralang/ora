@@ -2,7 +2,7 @@
 // INPUT: ora-example/errors/error_union_encoding.ora
 // CHECK-NOT: builtin.unrealized_conversion_cast
 // CHECK: module attributes {sir.error_ids = {E1 = 1141528511 : i256}, sir.error_selectors = {E1 = "0x440a57bf"}} {
-// CHECK-NEXT:   func.func @mayFail(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_encoding.ora":8:20)) -> (!sir.u256, !sir.u256) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.returns_error_union = true, ora.selector = "0xd78d008b", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @mayFail(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_encoding.ora":8:20)) -> (!sir.u256, !sir.u256) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_error_ids = [1141528511 : i256], ora.returns_error_union = true, ora.selector = "0xd78d008b", ora.visibility = "pub"} {
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/error_union_encoding.ora":12:9)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %2 = sir.const 32 : !sir.u256 loc(unknown)
@@ -38,7 +38,7 @@
 // CHECK-NEXT:     sir.store %20 : !sir.ptr<1>, %18 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/error_union_encoding.ora":12:9)))
 // CHECK-NEXT:     sir.return %19 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.2"("ora.origin_stmt.2"("{{.*}}/ora-example/errors/error_union_encoding.ora":12:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/errors/error_union_encoding.ora":8:5)
-// CHECK-NEXT:   func.func @unwrapWithTry(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_encoding.ora":16:26)) -> (!sir.u256, !sir.u256) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.returns_error_union = true, ora.selector = "0xbb905ae7", ora.visibility = "pub"} {
+// CHECK-NEXT:   func.func @unwrapWithTry(%arg0: !sir.u256 loc("{{.*}}/ora-example/errors/error_union_encoding.ora":16:26)) -> (!sir.u256, !sir.u256) attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["x"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.return_error_ids = [1141528511 : i256], ora.returns_error_union = true, ora.selector = "0xbb905ae7", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)
 // CHECK-NEXT:     %0 = sir.const 0 : !sir.u256 loc("ora.stmt.4"("ora.origin_stmt.4"("{{.*}}/ora-example/errors/error_union_encoding.ora":18:9)))
 // CHECK-NEXT:     %1 = sir.const 64 : !sir.u256 loc(unknown)

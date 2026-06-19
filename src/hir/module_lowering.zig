@@ -1101,7 +1101,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 }
 
-                if (body_type.kind() == .error_union) {
+                if (body_type.kind() == .error_union and @This().publicReturnErrorsUseCustomErrors(body_type.error_union)) {
                     try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
                     const error_union = body_type.error_union;
                     var return_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
@@ -1125,6 +1125,14 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     }
                 }
             }
+        }
+
+        fn publicReturnErrorsUseCustomErrors(error_union: anytype) bool {
+            for (error_union.error_types) |error_type| {
+                const error_name = error_type.name() orelse return false;
+                if (std.mem.eql(u8, error_name, "AbiDecodeError")) return false;
+            }
+            return true;
         }
 
         pub fn lowerField(self: *Lowerer, item_id: ast.ItemId, field: ast.FieldItem, parent_block: mlir.MlirBlock) anyerror!void {
