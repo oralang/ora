@@ -82,6 +82,13 @@ fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
     };
 }
 
+fn isResourceBoundaryBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .resource_move, .resource_create, .resource_destroy => true,
+        else => false,
+    };
+}
+
 fn declarationRegion(storage_class: ast.StorageClass) Region {
     return switch (storage_class) {
         .none => .memory,
@@ -897,6 +904,7 @@ const TypeChecker = struct {
     current_function_item: ?ast.ItemId = null,
     comptime_depth: usize = 0,
     effect_scratch_depth: usize = 0,
+    allow_resource_boundary_builtin_statement: bool = false,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
@@ -2906,6 +2914,10 @@ const TypeChecker = struct {
                 try self.visitExpr(assign.value);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
+                if (expected_type.kind() == .resource_place) {
+                    try self.emitRangeError(assign.range, "resource places can only be mutated with @move, @create, or @destroy", .{});
+                    return;
+                }
                 try self.contextualizeLiteral(assign.value, expected_type);
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
@@ -2920,11 +2932,24 @@ const TypeChecker = struct {
                     }
                 }
             },
-            .Expr => |expr_stmt| try self.visitExpr(expr_stmt.expr),
+            .Expr => |expr_stmt| {
+                const previous = self.allow_resource_boundary_builtin_statement;
+                self.allow_resource_boundary_builtin_statement = self.exprIsResourceBoundaryBuiltinStatement(expr_stmt.expr);
+                defer self.allow_resource_boundary_builtin_statement = previous;
+                try self.visitExpr(expr_stmt.expr);
+            },
             .Block => |block| try self.visitBody(block.body),
             .LabeledBlock => |block| try self.visitBody(block.body),
             else => {},
         }
+    }
+
+    fn exprIsResourceBoundaryBuiltinStatement(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsResourceBoundaryBuiltinStatement(group.expr),
+            .Builtin => |builtin| if (builtinKind(builtin.name)) |kind| isResourceBoundaryBuiltin(kind) else false,
+            else => false,
+        };
     }
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
@@ -3228,6 +3253,25 @@ const TypeChecker = struct {
                 };
 
                 if (isReferenceConstevalBuiltin(kind)) {
+                    self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
+                    try self.checkBuiltinArguments(kind, builtin);
+                    return;
+                }
+
+                if (isResourceBoundaryBuiltin(kind)) {
+                    const allowed_as_statement = self.allow_resource_boundary_builtin_statement;
+                    const previous = self.allow_resource_boundary_builtin_statement;
+                    self.allow_resource_boundary_builtin_statement = false;
+                    defer self.allow_resource_boundary_builtin_statement = previous;
+
+                    for (builtin.args) |arg| try self.visitExpr(arg);
+                    if (!allowed_as_statement) {
+                        try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
+                            builtin.name,
+                        });
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                        return;
+                    }
                     self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
                     try self.checkBuiltinArguments(kind, builtin);
                     return;
@@ -7261,6 +7305,7 @@ const TypeChecker = struct {
                                 try self.checker.appendUniqueEffectSlot(&effects.writes, slot);
                             }
                         },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, &effects),
                         else => {},
                     };
                     try self.recordWrites(builtin.range, effects.writes.items());
@@ -7387,23 +7432,24 @@ const TypeChecker = struct {
     }
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkSwitchPattern(LockExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
 
     const LockExprValidator = struct {
         checker: *TypeChecker,
+        locked_slots: *InlineEffectSlotList,
 
         pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
             switch (file.expression(expr_id).*) {
@@ -7414,6 +7460,13 @@ const TypeChecker = struct {
                             else => {},
                         }
                     }
+                },
+                .Builtin => |builtin| {
+                    const kind = builtinKind(builtin.name) orelse return;
+                    if (!isResourceBoundaryBuiltin(kind)) return;
+                    var state = EffectCollectorState.init();
+                    try self.checker.collectResourceBuiltinEffects(kind, builtin, &state);
+                    try self.checker.emitLockedWriteDiagnostics(builtin.range, state.writes.items(), self.locked_slots.items());
                 },
                 else => {},
             }
@@ -7444,6 +7497,43 @@ const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn placeSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| self.lookupNamedFieldSlot(name.name),
+            .Group => |group| self.placeSlotForExpr(group.expr),
+            .Field => |field| blk: {
+                const base = self.placeSlotForExpr(field.base) orelse break :blk null;
+                break :blk self.slotWithField(base, field.name);
+            },
+            .Index => |index| blk: {
+                const base = self.placeSlotForExpr(index.base) orelse break :blk null;
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
+            else => null,
+        };
+    }
+
+    fn collectResourceBuiltinEffects(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr, state: *EffectCollectorState) !void {
+        switch (kind) {
+            .resource_move => {
+                if (builtin.args.len != 3) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+                try self.collectResourcePlaceReadWrite(builtin.args[1], state);
+            },
+            .resource_create, .resource_destroy => {
+                if (builtin.args.len != 2) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+            },
+            else => return,
+        }
+    }
+
+    fn collectResourcePlaceReadWrite(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) !void {
+        const slot = self.placeSlotForExpr(expr_id) orelse return;
+        try self.appendUniqueEffectSlot(&state.reads, slot);
+        try self.appendUniqueEffectSlot(&state.writes, slot);
     }
 
     fn runtimeLockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId, op_name: []const u8) !?EffectSlot {
@@ -7847,6 +7937,7 @@ const TypeChecker = struct {
                                 try self.checker.appendUniqueEffectSlot(&self.current().writes, slot);
                             }
                         },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, self.current()),
                         else => {},
                     };
                 },

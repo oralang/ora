@@ -877,6 +877,10 @@ test "compiler validates resource move create and destroy builtins" {
         \\    pub fn retire(from: address, amount: TokenUnit) {
         \\        @destroy(balances[from], amount);
         \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
         \\}
     ;
 
@@ -1001,6 +1005,117 @@ test "compiler rejects invalid resource builtin calls" {
         \\    }
         \\}
     , .typecheck, "resource amount must be non-negative");
+}
+
+test "compiler rejects direct mutation of resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] = amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] += amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+}
+
+test "compiler rejects resource boundary builtins in value positions" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: TokenUnit) {
+        \\        let output = @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        let output = @create(balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@create is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, amount: TokenUnit) {
+        \\        let output = @destroy(balances[from], amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy is statement-only and cannot be used in expression position");
+}
+
+test "compiler tracks resource builtin effects for modifies and locks" {
+    const covered_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from], balances[to]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    ;
+    var covered = try compileText(covered_source);
+    defer covered.deinit();
+    const covered_typecheck = try covered.db.moduleTypeCheck(covered.root_module_id);
+    try testing.expect(covered_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(user: address, amount: TokenUnit) {
+        \\        @lock(balances[user]);
+        \\        @create(balances[user], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'balances'");
 }
 
 test "compiler build rejects unbounded computed storage ranges without artifacts" {
