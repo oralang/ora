@@ -462,6 +462,7 @@ pub fn resolvedIntegerSignedness(ty: Type) anyerror!?bool {
     return switch (unwrapRefinementSemaType(ty)) {
         .integer => |integer| integer.signed,
         .comptime_integer => error.MlirOperationCreationFailed,
+        .resource_domain => |resource| resolvedIntegerSignedness(resource.carrier_type.*),
         else => null,
     };
 }

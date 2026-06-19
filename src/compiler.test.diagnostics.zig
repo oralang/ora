@@ -744,13 +744,32 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
 test "compiler accepts resource domains and storage resource places" {
     const source_text =
         \\resource TokenUnit = u256;
+        \\resource ShareUnit = u256;
         \\
         \\contract Vault {
         \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var reserve: Resource<TokenUnit>;
         \\    log Transfer(to: address, amount: TokenUnit);
         \\
         \\    pub fn identity(amount: TokenUnit) -> TokenUnit {
         \\        return amount;
+        \\    }
+        \\
+        \\    pub fn literal() -> TokenUnit {
+        \\        return 10;
+        \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
+        \\
+        \\    pub fn reserveBalance() -> TokenUnit {
+        \\        return reserve;
+        \\    }
+        \\
+        \\    fn addSameDomain(lhs: TokenUnit, rhs: TokenUnit) -> TokenUnit {
+        \\        let one: TokenUnit = 1;
+        \\        return lhs + rhs + one;
         \\    }
         \\
         \\    pub fn announce(to: address, amount: TokenUnit) {
@@ -785,6 +804,14 @@ test "compiler rejects invalid resource declarations and first-class resource pl
         \\resource TokenUnit = u256;
         \\
         \\contract Vault {
+        \\    storage var balances: map<address, Resource<Resource<TokenUnit>>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
         \\    pub fn expose(place: Resource<TokenUnit>) {}
         \\}
     , .typecheck, "public function parameter 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
@@ -804,6 +831,32 @@ test "compiler rejects invalid resource declarations and first-class resource pl
         \\    log Bad(place: Resource<TokenUnit>);
         \\}
     , .typecheck, "log field 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\fn bad(lhs: USDC, rhs: DAI) -> USDC {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'USDC' and 'DAI'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(lhs: TokenUnit, rhs: u256) -> TokenUnit {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'TokenUnit' and 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(raw: u256) -> TokenUnit {
+        \\    let amount: TokenUnit = raw;
+        \\    return amount;
+        \\}
+    , .typecheck, "declaration expects type 'TokenUnit', found 'u256'");
 }
 
 test "compiler build rejects unbounded computed storage ranges without artifacts" {

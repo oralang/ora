@@ -219,6 +219,11 @@ fn typeContainsStorageCapability(ty: Type) bool {
     };
 }
 
+fn resourcePlaceReadType(ty: Type) ?Type {
+    if (ty.kind() != .resource_place) return null;
+    return ty.resource_place.domain_type.*;
+}
+
 fn typeContainsResourcePlace(ty: Type) bool {
     return switch (ty) {
         .resource_place => true,
@@ -1441,11 +1446,13 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(field.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(expr_id, expected_type);
+                        const contextual_actual_type = self.expr_types[expr_id.index()];
                         const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
                         const actual_located = self.exprLocatedType(expr_id);
-                        const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                        if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, actual_type);
+                        const actual = locatedValue(contextual_actual_type, actual_located.region, actual_located.provenance);
+                        if (!typesFlowCompatible(expected_type, contextual_actual_type)) {
+                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, contextual_actual_type);
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                             try self.emitNamedSubjectExpectedRegionFoundRange(field.range, "field", field.name, expected.region, actual.region);
                         }
@@ -1459,6 +1466,7 @@ const TypeChecker = struct {
                     self.item_types[item_id.index()] = self.expr_types[constant.value.index()];
                 } else {
                     const expected_type = self.item_types[item_id.index()];
+                    try self.contextualizeLiteral(constant.value, expected_type);
                     const actual_type = self.expr_types[constant.value.index()];
                     if (try self.emitIntegerOverflowIfNeeded(constant.range, constant.value, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
@@ -3063,7 +3071,7 @@ const TypeChecker = struct {
             },
             .Name => {
                 const binding_type = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
-                self.expr_types[expr_id.index()] = if (binding_type.kind() != .unknown)
+                const resolved_type: Type = if (binding_type.kind() != .unknown)
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
                     .Name => |name| if (std.mem.eql(u8, name.name, "result"))
@@ -3072,6 +3080,7 @@ const TypeChecker = struct {
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
+                self.expr_types[expr_id.index()] = resourcePlaceReadType(resolved_type) orelse resolved_type;
             },
             .Result => {
                 self.expr_types[expr_id.index()] = self.currentResultType();
@@ -3236,10 +3245,11 @@ const TypeChecker = struct {
             .Field => |field| {
                 try self.visitExpr(field.base);
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = self.environmentIntrinsicValueType(expr_id) orelse
+                const place_or_value_type = self.environmentIntrinsicValueType(expr_id) orelse
                     try self.fieldAccessTypeForExpr(field.base, field.name);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
                         try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
                             diagnosticTypeDisplayName(self, base_type),
@@ -3252,9 +3262,10 @@ const TypeChecker = struct {
                 try self.visitExpr(index.base);
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
-                const result_type = self.indexAccessType(base_type, index.index);
+                const place_or_value_type = self.indexAccessType(base_type, index.index);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
                 }
             },
@@ -6097,6 +6108,7 @@ const TypeChecker = struct {
             .not_applicable => {},
             .resolved, .overflow => return,
         }
+        if (try self.resolveResourceDomainLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
         if (try self.resolveAddressLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
 
         const expr = self.file.expression(expr_id).*;
@@ -6183,6 +6195,24 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = expected_type;
             },
             else => {},
+        }
+    }
+
+    fn resolveResourceDomainLiteralExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (expected_type.kind() != .resource_domain) return false;
+        const value = (try self.integerValueForResolution(expr_id)) orelse return false;
+        if (value != .integer) return false;
+        const carrier_type = expected_type.resource_domain.carrier_type.*;
+        switch (try self.resolveIntegerExpression(range, expr_id, carrier_type)) {
+            .not_applicable => return false,
+            .resolved => {
+                self.expr_types[expr_id.index()] = expected_type;
+                return true;
+            },
+            .overflow => {
+                self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                return true;
+            },
         }
     }
 
@@ -10562,6 +10592,9 @@ fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain or rhs.kind() == .resource_domain) {
+        return if (sameConcreteType(lhs, rhs)) lhs else .{ .unknown = {} };
+    }
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
