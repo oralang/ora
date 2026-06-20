@@ -1,0 +1,5 @@
+resource TokenUnit = u256;
+
+contract ResourcePlaceEventLeak {
+    log Bad(place: Resource<TokenUnit>);
+}

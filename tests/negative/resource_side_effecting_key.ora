@@ -1,0 +1,14 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSideEffectingKey {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    fn dynamicKey() -> address {
+        return std.msg.sender();
+    }
+
+    pub fn bad(to: address, amount: TokenUnit) {
+        @move(balances[dynamicKey()], balances[to], amount);
+    }
+}

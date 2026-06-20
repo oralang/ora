@@ -151,6 +151,41 @@
       ]
     },
     {
+      "id": "resource.basic_create_move_destroy",
+      "area": "resources",
+      "behavior": "Resource places execute explicit create, conserved move, and explicit destroy through bytecode-visible storage updates",
+      "specs": [
+        "tests/conformance/resource_basic_transfer.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.builtin_argument_fail_closed",
+      "area": "resources",
+      "behavior": "Resource boundary builtins reject bad arity, non-place operands, cross-domain moves, raw carrier amounts, negative signed literal amounts, and side-effecting place keys",
+      "negative_specs": [
+        "tests/negative/resource_builtin_bad_arity_move.ora",
+        "tests/negative/resource_move_non_place.ora",
+        "tests/negative/resource_create_non_place.ora",
+        "tests/negative/resource_destroy_non_place.ora",
+        "tests/negative/resource_move_cross_domain.ora",
+        "tests/negative/resource_amount_wrong_domain.ora",
+        "tests/negative/resource_signed_negative_literal.ora",
+        "tests/negative/resource_side_effecting_key.ora"
+      ]
+    },
+    {
+      "id": "resource.place_capability_fail_closed",
+      "area": "resources",
+      "behavior": "Resource places remain compiler-owned capabilities: they cannot be nested as Resource<Resource<T>>, exposed through public parameters or logs, or mutated by direct assignment",
+      "negative_specs": [
+        "tests/negative/resource_nested_resource.ora",
+        "tests/negative/resource_public_param_leak.ora",
+        "tests/negative/resource_place_event_leak.ora",
+        "tests/negative/resource_direct_assignment.ora",
+        "tests/negative/resource_compound_assignment.ora"
+      ]
+    },
+    {
       "id": "storage.computed_cost_compare",
       "area": "storage",
       "behavior": "Computed fixed-size word storage is measured against map-of-array, map-of-struct, and many-map typed storage alternatives for matching N=4 payload operations",

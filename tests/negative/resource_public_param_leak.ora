@@ -1,0 +1,5 @@
+resource TokenUnit = u256;
+
+contract ResourcePublicParamLeak {
+    pub fn expose(place: Resource<TokenUnit>) {}
+}
