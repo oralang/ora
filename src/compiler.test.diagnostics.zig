@@ -937,6 +937,22 @@ test "compiler rejects invalid resource builtin calls" {
     , .typecheck, "@destroy expects a Resource<T> place as its first argument");
 
     try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\struct Bucket {
+        \\    balance: Resource<TokenUnit>;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var buckets: map<address, Bucket>;
+        \\
+        \\    pub fn bad(owner: address, amount: TokenUnit) {
+        \\        @create(buckets[owner].balance, amount);
+        \\    }
+        \\}
+    , .typecheck, "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place");
+
+    try expectDiagnosticProbeContains(
         \\resource USDC = u256;
         \\resource DAI = u256;
         \\

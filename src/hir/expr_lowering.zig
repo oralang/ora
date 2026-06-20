@@ -3340,6 +3340,38 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (value_type.kind() != .resource_place) break :blk null;
                     break :blk value_type.*;
                 },
+                .Field => |field| blk: {
+                    const ty = @This().resourceFieldPlaceType(self, field.base, field.name) orelse break :blk null;
+                    if (ty.kind() != .resource_place) break :blk null;
+                    break :blk ty;
+                },
+                else => null,
+            };
+        }
+
+        fn resourceFieldPlaceType(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) ?sema.Type {
+            const base_type = switch (self.parent.file.expression(base_expr).*) {
+                .Group => |group| return @This().resourceFieldPlaceType(self, group.expr, field_name),
+                else => self.parent.typecheck.exprType(base_expr),
+            };
+            if (base_type.kind() == .anonymous_struct) {
+                if (base_type.anonymous_struct.fieldByName(field_name)) |field| return field.ty;
+            }
+            if (base_type.kind() == .struct_) {
+                if (self.parent.typecheck.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
+                    if (instantiated.fieldByName(field_name)) |field| return field.ty;
+                }
+            }
+            const type_name = base_type.name() orelse return null;
+            if (self.parent.typecheck.instantiatedStructByName(type_name)) |instantiated| {
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
+            }
+            const item_id = self.parent.item_index.lookup(type_name) orelse return null;
+            return switch (self.parent.file.item(item_id).*) {
+                .Struct => blk: {
+                    const struct_field = self.parent.item_index.lookupStructField(self.parent.file, item_id, field_name) orelse break :blk null;
+                    break :blk type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, struct_field.type_expr) catch null;
+                },
                 else => null,
             };
         }
@@ -3357,6 +3389,18 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Name => {
                     const root = try self.lowerExpr(expr_id, locals);
                     try operands.append(root);
+                },
+                .Field => |field| {
+                    if (!@This().resourceFieldBaseIsDirectRootPath(self, field.base)) {
+                        try self.parent.emitLoweringError(
+                            exprRange(self.parent.file, expr_id),
+                            "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place",
+                            .{},
+                        );
+                        return error.MlirOperationCreationFailed;
+                    }
+                    const field_place = try self.lowerExpr(expr_id, locals);
+                    try operands.append(field_place);
                 },
                 .Index => |index| {
                     try @This().appendResourcePlacePath(self, index.base, locals, operands);
@@ -3376,6 +3420,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return error.MlirOperationCreationFailed;
                 },
             }
+        }
+
+        fn resourceFieldBaseIsDirectRootPath(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().resourceFieldBaseIsDirectRootPath(self, group.expr),
+                .Field => |field| @This().resourceFieldBaseIsDirectRootPath(self, field.base),
+                .Name => true,
+                else => false,
+            };
         }
 
         fn stringLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const u8 {

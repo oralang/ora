@@ -2226,6 +2226,9 @@ static std::optional<ResourceRootRef> getResourceRootFromPlaceOperand(mlir::Valu
         return ResourceRootRef{keyAttr.getValue(), true};
     }
 
+    if (auto extractOp = llvm::dyn_cast<ora::StructFieldExtractOp>(definingOp))
+        return getResourceRootFromPlaceOperand(extractOp.getStructValue());
+
     if (auto castOp = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
     {
         auto inputs = castOp.getInputs();
@@ -2234,6 +2237,69 @@ static std::optional<ResourceRootRef> getResourceRootFromPlaceOperand(mlir::Valu
     }
 
     return std::nullopt;
+}
+
+static FailureOr<ResourcePlaceSlot> deriveResourceRootSlot(
+    Operation *op,
+    ResourceRootRef root,
+    ConversionPatternRewriter &rewriter)
+{
+    if (root.name.empty())
+        return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
+
+    auto slotIndex = computeGlobalSlot(root.name, op);
+    if (!slotIndex)
+        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for resource place root");
+
+    Value slot = findOrCreateSlotConstant(op, *slotIndex, root.name, rewriter);
+    if (auto slotOp = slot.getDefiningOp<sir::ConstOp>())
+        setResultName(slotOp, 0, ("slot_" + root.name).str());
+
+    return ResourcePlaceSlot{slot, root.transient};
+}
+
+static FailureOr<ResourcePlaceSlot> deriveDirectResourceProjectionSlot(
+    Operation *op,
+    Value originalPlace,
+    ConversionPatternRewriter &rewriter)
+{
+    Operation *definingOp = originalPlace.getDefiningOp();
+    if (!definingOp)
+        return rewriter.notifyMatchFailure(op, "resource direct place has no defining storage operation");
+
+    if (auto root = getResourceRootFromPlaceOperand(originalPlace))
+    {
+        if (llvm::isa<ora::SLoadOp, ora::TLoadOp>(definingOp))
+            return deriveResourceRootSlot(op, *root, rewriter);
+    }
+
+    if (auto extractOp = llvm::dyn_cast<ora::StructFieldExtractOp>(definingOp))
+    {
+        FailureOr<ResourcePlaceSlot> baseSlot = deriveDirectResourceProjectionSlot(op, extractOp.getStructValue(), rewriter);
+        if (failed(baseSlot))
+            return failure();
+
+        auto structType = llvm::dyn_cast<ora::StructType>(extractOp.getStructValue().getType());
+        if (!structType)
+            return rewriter.notifyMatchFailure(op, "resource struct-field place base is not a named storage struct");
+
+        size_t fieldIndex = 0;
+        auto fieldOffset = getStructFieldStorageOffset(op, structType, extractOp.getFieldName(), &fieldIndex);
+        if (!fieldOffset)
+            return rewriter.notifyMatchFailure(op, "unknown resource struct-field place");
+
+        Value fieldSlot = addStorageWordOffset(op->getLoc(), baseSlot->slot, *fieldOffset, rewriter);
+        return ResourcePlaceSlot{fieldSlot, baseSlot->transient};
+    }
+
+    if (auto castOp = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
+    {
+        auto inputs = castOp.getInputs();
+        if (inputs.size() == 1)
+            return deriveDirectResourceProjectionSlot(op, inputs[0], rewriter);
+    }
+
+    return rewriter.notifyMatchFailure(op, "resource direct place is not a storage root or struct-field projection");
 }
 
 static bool isSupportedResourceCarrier(Type type)
@@ -2352,24 +2418,21 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
     auto u256Type = sir::U256Type::get(ctx);
     auto ptrType = sir::PtrType::get(ctx, /*addrSpace*/ 1);
 
-    auto root = getResourceRootFromPlaceOperand(originalPlace.front());
-    if (!root || root->name.empty())
-        return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
-
-    auto slotIndex = computeGlobalSlot(root->name, op);
-    if (!slotIndex)
-        return rewriter.notifyMatchFailure(op, "missing ora.slot_index for resource place root");
-
-    Value mapSlot = findOrCreateSlotConstant(op, *slotIndex, root->name, rewriter);
-    if (auto slotOp = mapSlot.getDefiningOp<sir::ConstOp>())
-        setResultName(slotOp, 0, ("slot_" + root->name).str());
-
     if (originalPlace.size() == 1)
     {
         if (originalPlace.front().getType() != carrierType)
             return rewriter.notifyMatchFailure(op, "direct resource place type does not match carrier type");
-        return ResourcePlaceSlot{mapSlot, root->transient};
+        return deriveDirectResourceProjectionSlot(op, originalPlace.front(), rewriter);
     }
+
+    auto root = getResourceRootFromPlaceOperand(originalPlace.front());
+    if (!root || root->name.empty())
+        return rewriter.notifyMatchFailure(op, "could not extract resource place root name");
+
+    FailureOr<ResourcePlaceSlot> rootSlot = deriveResourceRootSlot(op, *root, rewriter);
+    if (failed(rootSlot))
+        return failure();
+    Value mapSlot = rootSlot->slot;
 
     auto mapType = llvm::dyn_cast<ora::MapType>(originalPlace.front().getType());
     if (!mapType)
@@ -2400,7 +2463,7 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
         }
     }
 
-    return ResourcePlaceSlot{slot, root->transient};
+    return ResourcePlaceSlot{slot, rootSlot->transient};
 }
 
 static bool resourcePlacesHaveDistinctRoots(

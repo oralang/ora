@@ -1485,6 +1485,28 @@ namespace mlir
             return success();
         }
 
+        static bool isResourceDirectPlaceProjection(Value value)
+        {
+            Operation *definingOp = value.getDefiningOp();
+            if (!definingOp)
+                return false;
+
+            if (llvm::isa<SLoadOp, TLoadOp>(definingOp))
+                return true;
+
+            if (auto extract = llvm::dyn_cast<StructFieldExtractOp>(definingOp))
+                return isResourceDirectPlaceProjection(extract.getStructValue());
+
+            if (auto cast = llvm::dyn_cast<mlir::UnrealizedConversionCastOp>(definingOp))
+            {
+                auto inputs = cast.getInputs();
+                if (inputs.size() == 1)
+                    return isResourceDirectPlaceProjection(inputs[0]);
+            }
+
+            return false;
+        }
+
         static ::mlir::LogicalResult verifyResourcePlacePath(Operation *op, OperandRange place, Type carrierType, StringRef label)
         {
             if (place.empty())
@@ -1502,10 +1524,10 @@ namespace mlir
                                              << " does not match resource carrier_type " << carrierType;
                 }
 
-                if (!llvm::isa_and_nonnull<SLoadOp, TLoadOp>(root.getDefiningOp()))
+                if (!isResourceDirectPlaceProjection(root))
                 {
                     return op->emitOpError() << label
-                                             << " direct place must be a storage or transient root loaded by ora.sload/ora.tload; copied values are not resource places";
+                                             << " direct place must be a storage or transient root loaded by ora.sload/ora.tload or a struct-field projection of one; copied values are not resource places";
                 }
 
                 return success();

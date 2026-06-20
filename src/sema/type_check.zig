@@ -4418,7 +4418,10 @@ const TypeChecker = struct {
             return;
         }
 
-        const first_place = (try self.resourcePlaceForExpr(builtin.args[0])) orelse {
+        const first_place = (self.resourcePlaceForExpr(builtin.args[0]) catch |err| switch (err) {
+            error.UnsupportedResourcePlaceShape => return,
+            else => return err,
+        }) orelse {
             switch (kind) {
                 .resource_move => try self.emitExprError(builtin.args[0], "@move expects Resource<T> places as its first two arguments", .{}),
                 .resource_create => try self.emitExprError(builtin.args[0], "@create expects a Resource<T> place as its first argument", .{}),
@@ -4430,7 +4433,10 @@ const TypeChecker = struct {
 
         const domain_type = first_place.domain_type;
         if (kind == .resource_move) {
-            const second_place = (try self.resourcePlaceForExpr(builtin.args[1])) orelse {
+            const second_place = (self.resourcePlaceForExpr(builtin.args[1]) catch |err| switch (err) {
+                error.UnsupportedResourcePlaceShape => return,
+                else => return err,
+            }) orelse {
                 try self.emitExprError(builtin.args[1], "@move expects Resource<T> places as its first two arguments", .{});
                 return;
             };
@@ -4463,6 +4469,16 @@ const TypeChecker = struct {
                 if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
                 const base = self.exprLocatedType(field.base);
                 const place_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                if (place_type.kind() == .resource_place and (base.region == .storage or base.region == .transient)) {
+                    if (!self.resourceFieldBaseIsDirectRootPath(field.base)) {
+                        try self.emitExprError(
+                            expr_id,
+                            "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place",
+                            .{},
+                        );
+                        return error.UnsupportedResourcePlaceShape;
+                    }
+                }
                 break :blk self.resourcePlaceFromLocated(expr_id, .{
                     .type = place_type,
                     .region = base.region,
@@ -4481,6 +4497,18 @@ const TypeChecker = struct {
                 });
             },
             else => null,
+        };
+    }
+
+    fn resourceFieldBaseIsDirectRootPath(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resourceFieldBaseIsDirectRootPath(group.expr),
+            .Field => |field| self.resourceFieldBaseIsDirectRootPath(field.base),
+            .Name => blk: {
+                const located = self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]);
+                break :blk located.region == .storage or located.region == .transient;
+            },
+            else => false,
         };
     }
 

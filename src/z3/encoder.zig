@@ -8663,6 +8663,12 @@ pub const Encoder = struct {
             return .{ .name = try self.transientSlotName(key), .owned = true };
         }
 
+        if (std.mem.eql(u8, op_name, "ora.struct_field_extract")) {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return null;
+            return try self.resolveResourceRootNameFromPlaceOperand(mlir.oraOperationGetOperand(owner, 0));
+        }
+
         if (std.mem.eql(u8, op_name, "ora.map_get")) {
             const num_operands = mlir.oraOperationGetNumOperands(owner);
             if (num_operands < 1) return null;
@@ -14861,6 +14867,7 @@ pub const Encoder = struct {
         root_name: ?[]const u8,
         root_name_owned: bool = false,
         root: z3.Z3_ast,
+        field_path: []ResourceFieldProjection,
         containers: []z3.Z3_ast,
         keys: []z3.Z3_ast,
         current: z3.Z3_ast,
@@ -14869,9 +14876,16 @@ pub const Encoder = struct {
             if (self.root_name_owned) {
                 if (self.root_name) |name| allocator.free(name);
             }
+            allocator.free(self.field_path);
             allocator.free(self.containers);
             allocator.free(self.keys);
         }
+    };
+
+    const ResourceFieldProjection = struct {
+        name: []const u8,
+        source_type: mlir.MlirType,
+        source_value: mlir.MlirValue,
     };
 
     const ResourceRootName = struct {
@@ -14897,6 +14911,95 @@ pub const Encoder = struct {
         return @intCast(raw);
     }
 
+    fn collectResourceFieldPathFromPlaceOperand(
+        self: *Encoder,
+        value: mlir.MlirValue,
+        field_path: *std.ArrayList(ResourceFieldProjection),
+    ) EncodeError!mlir.MlirValue {
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return value;
+            return try self.collectResourceFieldPathFromPlaceOperand(init_operand, field_path);
+        }
+        if (!mlir.oraValueIsAOpResult(value)) return value;
+
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return value;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.struct_field_extract")) {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return error.UnsupportedOperation;
+            const source_value = mlir.oraOperationGetOperand(owner, 0);
+            const root = try self.collectResourceFieldPathFromPlaceOperand(source_value, field_path);
+            const field_name = self.getStringAttr(owner, "field_name") orelse {
+                self.recordSoundnessLoss(.missing_product_metadata, "resource struct-field place missing field_name");
+                return error.UnsupportedOperation;
+            };
+            try field_path.append(self.allocator, .{
+                .name = field_name,
+                .source_type = mlir.oraValueGetType(source_value),
+                .source_value = source_value,
+            });
+            return root;
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.refinement_to_base") or
+            std.mem.eql(u8, op_name, "ora.base_to_refinement") or
+            std.mem.eql(u8, op_name, "arith.bitcast") or
+            std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi") or
+            std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast") or
+            std.mem.eql(u8, op_name, "tensor.cast"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return value;
+            return try self.collectResourceFieldPathFromPlaceOperand(mlir.oraOperationGetOperand(owner, 0), field_path);
+        }
+
+        return value;
+    }
+
+    fn encodeResourceFieldPathProjection(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        base: z3.Z3_ast,
+        field_path: []const ResourceFieldProjection,
+    ) EncodeError!z3.Z3_ast {
+        var current = base;
+        for (field_path) |projection| {
+            var product = self.getProductSort(projection.source_type) catch |err| switch (err) {
+                error.UnsupportedOperation => null,
+                else => return err,
+            };
+            if (product == null) {
+                product = self.recoverProductSortFromStructMetadata(
+                    op,
+                    projection.source_type,
+                    projection.source_value,
+                    "resource struct-field place missing struct field metadata",
+                    "resource struct-field place missing struct field type metadata",
+                ) catch |err| switch (err) {
+                    error.UnsupportedOperation => null,
+                    else => return err,
+                };
+            }
+            const resolved = product orelse return error.UnsupportedOperation;
+            const field = resolved.findField(projection.name) orelse return error.UnsupportedOperation;
+            current = z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{current});
+        }
+        return current;
+    }
+
     fn buildResourcePlaceState(
         self: *Encoder,
         op: mlir.MlirOperation,
@@ -14907,27 +15010,51 @@ pub const Encoder = struct {
         label: []const u8,
         op_id: usize,
     ) EncodeError!ResourcePlaceState {
-        _ = mode;
         if (len == 0 or start + len > operands.len) return error.InvalidOperandCount;
 
-        const root_operand = mlir.oraOperationGetOperand(op, @intCast(start));
-        const root = operands[start];
+        const place_operand = mlir.oraOperationGetOperand(op, @intCast(start));
+        var field_path_list = std.ArrayList(ResourceFieldProjection){};
+        defer field_path_list.deinit(self.allocator);
+        const root_operand = try self.collectResourceFieldPathFromPlaceOperand(place_operand, &field_path_list);
         const root_name = (try self.resolveResourceRootNameFromPlaceOperand(root_operand)) orelse {
             self.recordSoundnessLoss(.unsupported_operation, "resource place does not resolve to a tracked storage root");
             return error.UnsupportedOperation;
         };
         errdefer if (root_name.owned) self.allocator.free(root_name.name);
 
+        const field_path = try self.allocator.dupe(ResourceFieldProjection, field_path_list.items);
+        errdefer self.allocator.free(field_path);
+
+        const root = if (field_path.len == 0)
+            operands[start]
+        else blk: {
+            const root_sort = try self.encodeMLIRType(mlir.oraValueGetType(root_operand));
+            break :blk if (mode == .Old)
+                try self.getOrCreateOldGlobal(root_name.name, root_sort)
+            else
+                try self.getOrCreateGlobal(root_name.name, root_sort);
+        };
+
         if (len == 1) {
+            const current = if (field_path.len == 0)
+                root
+            else
+                try self.encodeResourceFieldPathProjection(op, root, field_path);
             return .{
                 .root_operand = root_operand,
                 .root_name = root_name.name,
                 .root_name_owned = root_name.owned,
                 .root = root,
+                .field_path = field_path,
                 .containers = try self.allocator.alloc(z3.Z3_ast, 0),
                 .keys = try self.allocator.alloc(z3.Z3_ast, 0),
-                .current = root,
+                .current = current,
             };
+        }
+
+        if (field_path.len != 0) {
+            self.recordSoundnessLoss(.unsupported_operation, "resource map-contained struct-field places are not modeled");
+            return error.UnsupportedOperation;
         }
 
         const key_count = len - 1;
@@ -14958,6 +15085,7 @@ pub const Encoder = struct {
             .root_name = root_name.name,
             .root_name_owned = root_name.owned,
             .root = root,
+            .field_path = field_path,
             .containers = containers,
             .keys = keys,
             .current = container,
@@ -14966,11 +15094,17 @@ pub const Encoder = struct {
 
     fn buildResourceUpdatedRootFrom(
         self: *Encoder,
+        op: mlir.MlirOperation,
         place: *const ResourcePlaceState,
         base_root: z3.Z3_ast,
         new_value: z3.Z3_ast,
     ) EncodeError!z3.Z3_ast {
-        if (place.keys.len == 0) return new_value;
+        const updated_value = if (place.field_path.len == 0)
+            new_value
+        else
+            try self.buildResourceFieldPathUpdate(op, base_root, place.field_path, 0, new_value);
+
+        if (place.keys.len == 0) return updated_value;
 
         var containers = try self.allocator.alloc(z3.Z3_ast, place.keys.len);
         defer self.allocator.free(containers);
@@ -14983,7 +15117,7 @@ pub const Encoder = struct {
             }
         }
 
-        var updated = self.encodeStore(containers[place.keys.len - 1], place.keys[place.keys.len - 1], new_value);
+        var updated = self.encodeStore(containers[place.keys.len - 1], place.keys[place.keys.len - 1], updated_value);
         var index = place.keys.len - 1;
         while (index > 0) {
             index -= 1;
@@ -14992,8 +15126,49 @@ pub const Encoder = struct {
         return updated;
     }
 
-    fn buildResourceUpdatedRoot(self: *Encoder, place: *const ResourcePlaceState, new_value: z3.Z3_ast) EncodeError!z3.Z3_ast {
-        return try self.buildResourceUpdatedRootFrom(place, place.root, new_value);
+    fn buildResourceFieldPathUpdate(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        base: z3.Z3_ast,
+        field_path: []const ResourceFieldProjection,
+        index: usize,
+        new_value: z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (index >= field_path.len) return new_value;
+
+        const projection = field_path[index];
+        var product = self.getProductSort(projection.source_type) catch |err| switch (err) {
+            error.UnsupportedOperation => null,
+            else => return err,
+        };
+        if (product == null) {
+            product = self.recoverProductSortFromStructMetadata(
+                op,
+                projection.source_type,
+                projection.source_value,
+                "resource struct-field place missing struct field metadata",
+                "resource struct-field place missing struct field type metadata",
+            ) catch |err| switch (err) {
+                error.UnsupportedOperation => null,
+                else => return err,
+            };
+        }
+        const resolved = product orelse return error.UnsupportedOperation;
+
+        var args = try self.allocator.alloc(z3.Z3_ast, resolved.fields.len);
+        defer self.allocator.free(args);
+        for (resolved.fields, 0..) |field, field_index| {
+            const current_field = z3.Z3_mk_app(self.context.ctx, field.projection, 1, &[_]z3.Z3_ast{base});
+            args[field_index] = if (std.mem.eql(u8, field.name, projection.name))
+                try self.buildResourceFieldPathUpdate(op, current_field, field_path, index + 1, new_value)
+            else
+                current_field;
+        }
+        return z3.Z3_mk_app(self.context.ctx, resolved.ctor, @intCast(args.len), args.ptr);
+    }
+
+    fn buildResourceUpdatedRoot(self: *Encoder, op: mlir.MlirOperation, place: *const ResourcePlaceState, new_value: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        return try self.buildResourceUpdatedRootFrom(op, place, place.root, new_value);
     }
 
     fn applyResourceUpdatedRoot(self: *Encoder, place: *const ResourcePlaceState, updated_root: z3.Z3_ast, mode: EncodeMode) EncodeError!void {
@@ -15086,7 +15261,7 @@ pub const Encoder = struct {
             break :blk z3.Z3_mk_bv_sub(self.context.ctx, place.current, amount);
         };
 
-        const updated_root = try self.buildResourceUpdatedRoot(&place, updated_value);
+        const updated_root = try self.buildResourceUpdatedRoot(op, &place, updated_value);
         try self.applyResourceUpdatedRoot(&place, updated_root, mode);
         return self.encodeBoolConstant(true);
     }
@@ -15095,6 +15270,7 @@ pub const Encoder = struct {
         const source_name = source.root_name orelse return error.UnsupportedOperation;
         const dest_name = dest.root_name orelse return error.UnsupportedOperation;
         if (!std.mem.eql(u8, source_name, dest_name)) return self.encodeBoolConstant(false);
+        if (!resourceFieldPathsEqual(source.field_path, dest.field_path)) return self.encodeBoolConstant(false);
         if (source.keys.len != dest.keys.len) {
             self.recordSoundnessLoss(.unsupported_operation, "resource move place identities are not comparable");
             return error.UnsupportedOperation;
@@ -15107,6 +15283,14 @@ pub const Encoder = struct {
             predicates[index] = z3.Z3_mk_eq(self.context.ctx, source.keys[index], dest.keys[index]);
         }
         return self.encodeAnd(predicates);
+    }
+
+    fn resourceFieldPathsEqual(source: []const ResourceFieldProjection, dest: []const ResourceFieldProjection) bool {
+        if (source.len != dest.len) return false;
+        for (source, dest) |lhs, rhs| {
+            if (!std.mem.eql(u8, lhs.name, rhs.name)) return false;
+        }
+        return true;
     }
 
     fn encodeResourceMoveOp(
@@ -15161,15 +15345,15 @@ pub const Encoder = struct {
         const source_name = source.root_name orelse return error.UnsupportedOperation;
         const dest_name = dest.root_name orelse return error.UnsupportedOperation;
         if (!std.mem.eql(u8, source_name, dest_name)) {
-            const source_root = try self.buildResourceUpdatedRoot(&source, source_after);
-            const dest_root = try self.buildResourceUpdatedRoot(&dest, dest_after);
+            const source_root = try self.buildResourceUpdatedRoot(op, &source, source_after);
+            const dest_root = try self.buildResourceUpdatedRoot(op, &dest, dest_after);
             try self.applyResourceUpdatedRoot(&source, source_root, mode);
             try self.applyResourceUpdatedRoot(&dest, dest_root, mode);
             return self.encodeBoolConstant(true);
         }
 
-        const source_root = try self.buildResourceUpdatedRoot(&source, source_after);
-        const distinct_root = try self.buildResourceUpdatedRootFrom(&dest, source_root, dest_after);
+        const source_root = try self.buildResourceUpdatedRoot(op, &source, source_after);
+        const distinct_root = try self.buildResourceUpdatedRootFrom(op, &dest, source_root, dest_after);
         const final_root = self.encodeIte(same_place, source.root, distinct_root);
         try self.applyResourceUpdatedRoot(&source, final_root, mode);
         return self.encodeBoolConstant(true);
