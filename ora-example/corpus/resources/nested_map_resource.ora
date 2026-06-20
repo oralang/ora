@@ -1,0 +1,17 @@
+resource TokenUnit = u256;
+
+contract ResourceNestedMap {
+    storage var balances: map<address, map<address, Resource<TokenUnit>>>;
+
+    pub fn transfer(owner: address, from_bucket: address, to_bucket: address, amount: TokenUnit) {
+        @move(balances[owner][from_bucket], balances[owner][to_bucket], amount);
+    }
+
+    pub fn issue(owner: address, bucket: address, amount: TokenUnit) {
+        @create(balances[owner][bucket], amount);
+    }
+
+    pub fn balanceOf(owner: address, bucket: address) -> TokenUnit {
+        return balances[owner][bucket];
+    }
+}

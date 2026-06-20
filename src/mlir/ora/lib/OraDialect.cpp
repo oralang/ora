@@ -1481,10 +1481,28 @@ namespace mlir
 
         static ::mlir::LogicalResult verifyResourcePlacePath(Operation *op, OperandRange place, Type carrierType, StringRef label)
         {
-            if (place.size() < 2)
+            if (place.empty())
             {
                 return op->emitOpError() << label
-                                         << " place must be a map root followed by at least one key; copied values are not resource places";
+                                         << " place must be a storage root or a map root followed by at least one key";
+            }
+
+            if (place.size() == 1)
+            {
+                Value root = place.front();
+                if (root.getType() != carrierType)
+                {
+                    return op->emitOpError() << label << " direct place type " << root.getType()
+                                             << " does not match resource carrier_type " << carrierType;
+                }
+
+                if (!llvm::isa_and_nonnull<SLoadOp>(root.getDefiningOp()))
+                {
+                    return op->emitOpError() << label
+                                             << " direct place must be a storage root loaded by ora.sload; copied values are not resource places";
+                }
+
+                return success();
             }
 
             auto mapType = llvm::dyn_cast<MapType>(place.front().getType());

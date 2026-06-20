@@ -1,0 +1,26 @@
+resource TokenUnit = u256;
+
+contract ResourceDirectStorage {
+    storage var reserve: Resource<TokenUnit>;
+    storage var treasury: Resource<TokenUnit>;
+
+    pub fn issue(amount: TokenUnit) {
+        @create(reserve, amount);
+    }
+
+    pub fn retire(amount: TokenUnit) {
+        @destroy(reserve, amount);
+    }
+
+    pub fn sweep(amount: TokenUnit) {
+        @move(reserve, treasury, amount);
+    }
+
+    pub fn reserveBalance() -> TokenUnit {
+        return reserve;
+    }
+
+    pub fn treasuryBalance() -> TokenUnit {
+        return treasury;
+    }
+}

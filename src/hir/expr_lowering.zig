@@ -3192,8 +3192,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             defer destination_place.deinit();
             try @This().appendResourcePlacePath(self, builtin.args[0], locals, &source_place);
             try @This().appendResourcePlacePath(self, builtin.args[1], locals, &destination_place);
-            try @This().requireMapResourcePlacePath(self, builtin.args[0], source_place.items.len);
-            try @This().requireMapResourcePlacePath(self, builtin.args[1], destination_place.items.len);
 
             const amount = try @This().lowerResourceAmount(self, builtin.args[2], metadata.carrier_type, locals);
             const op = mlir.oraMoveOpCreate(
@@ -3222,7 +3220,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var place = std.array_list.Managed(mlir.MlirValue).init(self.parent.allocator);
             defer place.deinit();
             try @This().appendResourcePlacePath(self, builtin.args[0], locals, &place);
-            try @This().requireMapResourcePlacePath(self, builtin.args[0], place.items.len);
 
             const amount = try @This().lowerResourceAmount(self, builtin.args[1], metadata.carrier_type, locals);
             const op = if (std.mem.eql(u8, op_name, "ora.create"))
@@ -3299,16 +3296,6 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             var amount = try @This().unwrapRefinementForCast(self, try self.lowerExpr(amount_expr, locals), range);
             amount = try self.convertValueForFlow(amount, carrier_type, range);
             return amount;
-        }
-
-        fn requireMapResourcePlacePath(self: *FunctionLowerer, expr_id: ast.ExprId, operand_count: usize) anyerror!void {
-            if (operand_count >= 2) return;
-            try self.parent.emitLoweringError(
-                exprRange(self.parent.file, expr_id),
-                "resource builtins currently require map-indexed Resource<T> places; direct storage Resource<T> places need a storage-root place representation",
-                .{},
-            );
-            return error.MlirOperationCreationFailed;
         }
 
         fn appendResourcePlacePath(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *LocalEnv, operands: *std.array_list.Managed(mlir.MlirValue)) anyerror!void {

@@ -1,0 +1,18 @@
+resource TokenUnit = u256;
+
+contract ResourceDistinctRootsTransfer {
+    storage var pending: map<address, Resource<TokenUnit>>;
+    storage var settled: map<address, Resource<TokenUnit>>;
+
+    pub fn settle(from: address, to: address, amount: TokenUnit) {
+        @move(pending[from], settled[to], amount);
+    }
+
+    pub fn pendingOf(owner: address) -> TokenUnit {
+        return pending[owner];
+    }
+
+    pub fn settledOf(owner: address) -> TokenUnit {
+        return settled[owner];
+    }
+}

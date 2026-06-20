@@ -1,0 +1,17 @@
+resource TokenUnit = u256;
+
+contract ResourceCreateDestroy {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn issue(to: address, amount: TokenUnit) {
+        @create(balances[to], amount);
+    }
+
+    pub fn retire(from: address, amount: TokenUnit) {
+        @destroy(balances[from], amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return balances[owner];
+    }
+}

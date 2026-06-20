@@ -1,0 +1,13 @@
+resource TokenUnit = u256;
+
+contract ResourceBasicTransfer {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn transfer(from: address, to: address, amount: TokenUnit) {
+        @move(balances[from], balances[to], amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return balances[owner];
+    }
+}
