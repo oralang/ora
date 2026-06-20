@@ -8620,6 +8620,73 @@ pub const Encoder = struct {
         return try std.fmt.allocPrint(self.allocator, "transient:{s}", .{key});
     }
 
+    fn resolveResourceRootNameFromPlaceOperand(self: *Encoder, value: mlir.MlirValue) EncodeError!?ResourceRootName {
+        if (mlir.mlirValueIsABlockArgument(value)) {
+            const init_operand = self.tryResolveBlockArgInitOperand(value) orelse return null;
+            return try self.resolveResourceRootNameFromPlaceOperand(init_operand);
+        }
+        if (!mlir.oraValueIsAOpResult(value)) return null;
+
+        const owner = mlir.oraOpResultGetOwner(value);
+        if (mlir.oraOperationIsNull(owner)) return null;
+
+        const name_ref = mlir.oraOperationGetName(owner);
+        defer @import("mlir_c_api").freeStringRef(name_ref);
+        const op_name = if (name_ref.data == null or name_ref.length == 0)
+            ""
+        else
+            name_ref.data[0..name_ref.length];
+
+        if (std.mem.eql(u8, op_name, "ora.sload")) {
+            const name = self.getStringAttr(owner, "global") orelse return null;
+            return .{ .name = name };
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.tload")) {
+            const key = self.getStringAttr(owner, "key") orelse return null;
+            return .{ .name = try self.transientSlotName(key), .owned = true };
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.map_get")) {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return null;
+            return try self.resolveResourceRootNameFromPlaceOperand(mlir.oraOperationGetOperand(owner, 0));
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.refinement_to_base") or
+            std.mem.eql(u8, op_name, "ora.base_to_refinement") or
+            std.mem.eql(u8, op_name, "arith.bitcast") or
+            std.mem.eql(u8, op_name, "arith.extui") or
+            std.mem.eql(u8, op_name, "arith.extsi") or
+            std.mem.eql(u8, op_name, "arith.trunci") or
+            std.mem.eql(u8, op_name, "arith.index_cast") or
+            std.mem.eql(u8, op_name, "arith.index_castui") or
+            std.mem.eql(u8, op_name, "arith.index_castsi") or
+            std.mem.eql(u8, op_name, "builtin.unrealized_conversion_cast") or
+            std.mem.eql(u8, op_name, "tensor.cast"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(owner);
+            if (num_operands < 1) return null;
+            return try self.resolveResourceRootNameFromPlaceOperand(mlir.oraOperationGetOperand(owner, 0));
+        }
+
+        return null;
+    }
+
+    fn appendResourceRootWriteSlotUnique(self: *Encoder, slots: *std.ArrayList([]u8), value: mlir.MlirValue) EncodeError!bool {
+        const root = (try self.resolveResourceRootNameFromPlaceOperand(value)) orelse return false;
+        defer if (root.owned) self.allocator.free(root.name);
+        try self.appendWriteSlotUnique(slots, root.name);
+        return true;
+    }
+
+    fn appendResourceRootReadSlotUnique(self: *Encoder, slots: *std.ArrayList([]u8), value: mlir.MlirValue) EncodeError!bool {
+        const root = (try self.resolveResourceRootNameFromPlaceOperand(value)) orelse return false;
+        defer if (root.owned) self.allocator.free(root.name);
+        try self.appendReadSlotUnique(slots, root.name);
+        return true;
+    }
+
     fn functionHasWriteEffect(self: *Encoder, func_op: mlir.MlirOperation) bool {
         _ = self;
         const effect_attr = mlir.oraOperationGetAttributeByName(func_op, mlir.oraStringRefCreate("ora.effect", 10));
@@ -8827,9 +8894,7 @@ pub const Encoder = struct {
                 writes_unknown.* = true;
             } else {
                 const root_operand = mlir.oraOperationGetOperand(op, 0);
-                if (self.resolveGlobalNameFromMapOperand(root_operand)) |global_name| {
-                    try self.appendWriteSlotUnique(write_slots, global_name);
-                } else {
+                if (!try self.appendResourceRootWriteSlotUnique(write_slots, root_operand)) {
                     writes_unknown.* = true;
                 }
                 if (std.mem.eql(u8, op_name, "ora.move")) {
@@ -8846,9 +8911,7 @@ pub const Encoder = struct {
                         return;
                     }
                     const dest_root_operand = mlir.oraOperationGetOperand(op, @intCast(source_len));
-                    if (self.resolveGlobalNameFromMapOperand(dest_root_operand)) |global_name| {
-                        try self.appendWriteSlotUnique(write_slots, global_name);
-                    } else {
+                    if (!try self.appendResourceRootWriteSlotUnique(write_slots, dest_root_operand)) {
                         writes_unknown.* = true;
                     }
                 }
@@ -9015,9 +9078,7 @@ pub const Encoder = struct {
                 reads_unknown.* = true;
             } else {
                 const root_operand = mlir.oraOperationGetOperand(op, 0);
-                if (self.resolveGlobalNameFromMapOperand(root_operand)) |global_name| {
-                    try self.appendReadSlotUnique(read_slots, global_name);
-                } else {
+                if (!try self.appendResourceRootReadSlotUnique(read_slots, root_operand)) {
                     reads_unknown.* = true;
                 }
                 if (std.mem.eql(u8, op_name, "ora.move")) {
@@ -9034,9 +9095,7 @@ pub const Encoder = struct {
                         return;
                     }
                     const dest_root_operand = mlir.oraOperationGetOperand(op, @intCast(source_len));
-                    if (self.resolveGlobalNameFromMapOperand(dest_root_operand)) |global_name| {
-                        try self.appendReadSlotUnique(read_slots, global_name);
-                    } else {
+                    if (!try self.appendResourceRootReadSlotUnique(read_slots, dest_root_operand)) {
                         reads_unknown.* = true;
                     }
                 }
@@ -14784,15 +14843,24 @@ pub const Encoder = struct {
     const ResourcePlaceState = struct {
         root_operand: mlir.MlirValue,
         root_name: ?[]const u8,
+        root_name_owned: bool = false,
         root: z3.Z3_ast,
         containers: []z3.Z3_ast,
         keys: []z3.Z3_ast,
         current: z3.Z3_ast,
 
         fn deinit(self: *ResourcePlaceState, allocator: std.mem.Allocator) void {
+            if (self.root_name_owned) {
+                if (self.root_name) |name| allocator.free(name);
+            }
             allocator.free(self.containers);
             allocator.free(self.keys);
         }
+    };
+
+    const ResourceRootName = struct {
+        name: []const u8,
+        owned: bool = false,
     };
 
     fn getDenseI32ArrayAttr(self: *Encoder, op: mlir.MlirOperation, name: []const u8) ?mlir.MlirAttribute {
@@ -14828,15 +14896,17 @@ pub const Encoder = struct {
 
         const root_operand = mlir.oraOperationGetOperand(op, @intCast(start));
         const root = operands[start];
-        const root_name = self.resolveGlobalNameFromMapOperand(root_operand) orelse {
+        const root_name = (try self.resolveResourceRootNameFromPlaceOperand(root_operand)) orelse {
             self.recordSoundnessLoss(.unsupported_operation, "resource place does not resolve to a tracked storage root");
             return error.UnsupportedOperation;
         };
+        errdefer if (root_name.owned) self.allocator.free(root_name.name);
 
         if (len == 1) {
             return .{
                 .root_operand = root_operand,
-                .root_name = root_name,
+                .root_name = root_name.name,
+                .root_name_owned = root_name.owned,
                 .root = root,
                 .containers = try self.allocator.alloc(z3.Z3_ast, 0),
                 .keys = try self.allocator.alloc(z3.Z3_ast, 0),
@@ -14869,7 +14939,8 @@ pub const Encoder = struct {
 
         return .{
             .root_operand = root_operand,
-            .root_name = root_name,
+            .root_name = root_name.name,
+            .root_name_owned = root_name.owned,
             .root = root,
             .containers = containers,
             .keys = keys,

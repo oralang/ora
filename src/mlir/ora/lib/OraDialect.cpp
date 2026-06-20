@@ -1496,10 +1496,10 @@ namespace mlir
                                              << " does not match resource carrier_type " << carrierType;
                 }
 
-                if (!llvm::isa_and_nonnull<SLoadOp>(root.getDefiningOp()))
+                if (!llvm::isa_and_nonnull<SLoadOp, TLoadOp>(root.getDefiningOp()))
                 {
                     return op->emitOpError() << label
-                                             << " direct place must be a storage root loaded by ora.sload; copied values are not resource places";
+                                             << " direct place must be a storage or transient root loaded by ora.sload/ora.tload; copied values are not resource places";
                 }
 
                 return success();
