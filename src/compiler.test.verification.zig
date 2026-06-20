@@ -376,6 +376,153 @@ test "verification rejects false postcondition over computed storage" {
     try testing.expectEqualStrings("", result.soundness_losses);
 }
 
+test "verification models resource create as a map storage update" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\contract C {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn mint(owner: address, amount: TokenUnit)
+        \\        modifies balances[owner]
+        \\        requires balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures balances[owner] == old(balances[owner]) + amount
+        \\    {
+        \\        @create(balances[owner], amount);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "mint");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects false frame claim after resource create" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\contract C {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn mint(owner: address, amount: TokenUnit)
+        \\        modifies balances[owner]
+        \\        requires amount > 0
+        \\        requires balances[owner] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures balances[owner] == old(balances[owner])
+        \\    {
+        \\        @create(balances[owner], amount);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "mint");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification models resource create as a direct storage update" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\contract C {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn mint(amount: TokenUnit)
+        \\        modifies reserve
+        \\        requires reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures reserve == old(reserve) + amount
+        \\    {
+        \\        @create(reserve, amount);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "mint");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification models resource move across distinct roots" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\contract C {
+        \\    storage var pending: map<address, Resource<TokenUnit>>;
+        \\    storage var settled: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn settle(from: address, to: address, amount: TokenUnit)
+        \\        modifies pending[from], settled[to]
+        \\        requires pending[from] >= amount
+        \\        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures pending[from] == old(pending[from]) - amount
+        \\        ensures settled[to] == old(settled[to]) + amount
+        \\    {
+        \\        @move(pending[from], settled[to], amount);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "settle");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.success);
+    try testing.expectEqual(@as(usize, 0), result.errors_len);
+    try testing.expectEqual(@as(usize, 0), result.diagnostics_len);
+    try testing.expect(!result.degraded);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
+test "verification rejects false frame claim after resource move" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\contract C {
+        \\    storage var pending: map<address, Resource<TokenUnit>>;
+        \\    storage var settled: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn settle(from: address, to: address, amount: TokenUnit)
+        \\        modifies pending[from], settled[to]
+        \\        requires amount > 0
+        \\        requires pending[from] >= amount
+        \\        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\        ensures pending[from] == old(pending[from])
+        \\    {
+        \\        @move(pending[from], settled[to], amount);
+        \\    }
+        \\}
+    ;
+
+    var result = try verifyTextWithoutDegradation(source_text, "settle");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.success);
+    try testing.expect(!result.degraded);
+    try testing.expect(result.errors_len > 0);
+    try testing.expectEqualStrings("PostconditionViolation", result.error_kinds);
+    try testing.expectEqualStrings("", result.soundness_losses);
+}
+
 test "verification preserves computed storage slots returned by private helpers" {
     const source_text =
         \\contract C {

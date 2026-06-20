@@ -1116,6 +1116,53 @@ test "compiler tracks resource builtin effects for modifies and locks" {
         \\    }
         \\}
     , .typecheck, "cannot write locked storage slot 'balances'");
+
+    const direct_storage_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve, treasury
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    ;
+    var direct_storage = try compileText(direct_storage_source);
+    defer direct_storage.deinit();
+    const direct_storage_typecheck = try direct_storage.db.moduleTypeCheck(direct_storage.root_module_id);
+    try testing.expect(direct_storage_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @lock(reserve);
+        \\        @destroy(reserve, amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'reserve'");
 }
 
 test "compiler build rejects unbounded computed storage ranges without artifacts" {

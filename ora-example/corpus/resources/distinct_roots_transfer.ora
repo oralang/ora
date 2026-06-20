@@ -1,10 +1,14 @@
 resource TokenUnit = u256;
+comptime const std = @import("std");
 
 contract ResourceDistinctRootsTransfer {
     storage var pending: map<address, Resource<TokenUnit>>;
     storage var settled: map<address, Resource<TokenUnit>>;
 
-    pub fn settle(from: address, to: address, amount: TokenUnit) {
+    pub fn settle(from: address, to: address, amount: TokenUnit)
+        requires pending[from] >= amount
+        requires settled[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
         @move(pending[from], settled[to], amount);
     }
 

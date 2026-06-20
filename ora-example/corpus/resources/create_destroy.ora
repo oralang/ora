@@ -1,13 +1,18 @@
 resource TokenUnit = u256;
+comptime const std = @import("std");
 
 contract ResourceCreateDestroy {
     storage var balances: map<address, Resource<TokenUnit>>;
 
-    pub fn issue(to: address, amount: TokenUnit) {
+    pub fn issue(to: address, amount: TokenUnit)
+        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
         @create(balances[to], amount);
     }
 
-    pub fn retire(from: address, amount: TokenUnit) {
+    pub fn retire(from: address, amount: TokenUnit)
+        requires balances[from] >= amount
+    {
         @destroy(balances[from], amount);
     }
 

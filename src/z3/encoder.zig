@@ -6509,6 +6509,18 @@ pub const Encoder = struct {
             }
         }
 
+        if (std.mem.eql(u8, op_name, "ora.create")) {
+            return try self.encodeResourceBoundaryOp(mlir_op, operands, mode, true);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.destroy")) {
+            return try self.encodeResourceBoundaryOp(mlir_op, operands, mode, false);
+        }
+
+        if (std.mem.eql(u8, op_name, "ora.move")) {
+            return try self.encodeResourceMoveOp(mlir_op, operands, mode);
+        }
+
         if (std.mem.eql(u8, op_name, "ora.tuple_create")) {
             const num_results = mlir.oraOperationGetNumResults(mlir_op);
             if (num_results < 1) return error.UnsupportedOperation;
@@ -8806,6 +8818,41 @@ pub const Encoder = struct {
                     writes_unknown.* = true;
                 }
             }
+        } else if (std.mem.eql(u8, op_name, "ora.create") or
+            std.mem.eql(u8, op_name, "ora.destroy") or
+            std.mem.eql(u8, op_name, "ora.move"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands < 1) {
+                writes_unknown.* = true;
+            } else {
+                const root_operand = mlir.oraOperationGetOperand(op, 0);
+                if (self.resolveGlobalNameFromMapOperand(root_operand)) |global_name| {
+                    try self.appendWriteSlotUnique(write_slots, global_name);
+                } else {
+                    writes_unknown.* = true;
+                }
+                if (std.mem.eql(u8, op_name, "ora.move")) {
+                    const source_len = self.getOperandSegmentSize(op, 0) orelse {
+                        writes_unknown.* = true;
+                        return;
+                    };
+                    const dest_len = self.getOperandSegmentSize(op, 1) orelse {
+                        writes_unknown.* = true;
+                        return;
+                    };
+                    if (source_len + dest_len >= num_operands) {
+                        writes_unknown.* = true;
+                        return;
+                    }
+                    const dest_root_operand = mlir.oraOperationGetOperand(op, @intCast(source_len));
+                    if (self.resolveGlobalNameFromMapOperand(dest_root_operand)) |global_name| {
+                        try self.appendWriteSlotUnique(write_slots, global_name);
+                    } else {
+                        writes_unknown.* = true;
+                    }
+                }
+            }
         } else if (std.mem.eql(u8, op_name, "ora.storage.word_store") or
             std.mem.eql(u8, op_name, "ora.storage.range_erase"))
         {
@@ -8957,6 +9004,41 @@ pub const Encoder = struct {
                     try self.appendReadSlotUnique(read_slots, global_name);
                 } else {
                     reads_unknown.* = true;
+                }
+            }
+        } else if (std.mem.eql(u8, op_name, "ora.create") or
+            std.mem.eql(u8, op_name, "ora.destroy") or
+            std.mem.eql(u8, op_name, "ora.move"))
+        {
+            const num_operands = mlir.oraOperationGetNumOperands(op);
+            if (num_operands < 1) {
+                reads_unknown.* = true;
+            } else {
+                const root_operand = mlir.oraOperationGetOperand(op, 0);
+                if (self.resolveGlobalNameFromMapOperand(root_operand)) |global_name| {
+                    try self.appendReadSlotUnique(read_slots, global_name);
+                } else {
+                    reads_unknown.* = true;
+                }
+                if (std.mem.eql(u8, op_name, "ora.move")) {
+                    const source_len = self.getOperandSegmentSize(op, 0) orelse {
+                        reads_unknown.* = true;
+                        return;
+                    };
+                    const dest_len = self.getOperandSegmentSize(op, 1) orelse {
+                        reads_unknown.* = true;
+                        return;
+                    };
+                    if (source_len + dest_len >= num_operands) {
+                        reads_unknown.* = true;
+                        return;
+                    }
+                    const dest_root_operand = mlir.oraOperationGetOperand(op, @intCast(source_len));
+                    if (self.resolveGlobalNameFromMapOperand(dest_root_operand)) |global_name| {
+                        try self.appendReadSlotUnique(read_slots, global_name);
+                    } else {
+                        reads_unknown.* = true;
+                    }
                 }
             }
         } else if (std.mem.eql(u8, op_name, "ora.storage.word_load")) {
@@ -9874,6 +9956,9 @@ pub const Encoder = struct {
             std.mem.eql(u8, op_name, "ora.sstore") or
             std.mem.eql(u8, op_name, "ora.map_store") or
             std.mem.eql(u8, op_name, "ora.tstore") or
+            std.mem.eql(u8, op_name, "ora.create") or
+            std.mem.eql(u8, op_name, "ora.destroy") or
+            std.mem.eql(u8, op_name, "ora.move") or
             std.mem.eql(u8, op_name, "ora.storage.word_store") or
             std.mem.eql(u8, op_name, "ora.storage.range_erase"))
         {
@@ -12490,6 +12575,9 @@ pub const Encoder = struct {
         if (std.mem.eql(u8, name, "ora.sstore") or
             std.mem.eql(u8, name, "ora.map_store") or
             std.mem.eql(u8, name, "ora.tstore") or
+            std.mem.eql(u8, name, "ora.create") or
+            std.mem.eql(u8, name, "ora.destroy") or
+            std.mem.eql(u8, name, "ora.move") or
             std.mem.eql(u8, name, "memref.store"))
         {
             return try self.tryExtractCatchPredicateFromSequence(next, mode, continuation);
@@ -14221,6 +14309,9 @@ pub const Encoder = struct {
             if (std.mem.eql(u8, op_name, "ora.sstore") or
                 std.mem.eql(u8, op_name, "ora.tstore") or
                 std.mem.eql(u8, op_name, "ora.map_store") or
+                std.mem.eql(u8, op_name, "ora.create") or
+                std.mem.eql(u8, op_name, "ora.destroy") or
+                std.mem.eql(u8, op_name, "ora.move") or
                 std.mem.eql(u8, op_name, "ora.storage.word_store") or
                 std.mem.eql(u8, op_name, "ora.storage.range_erase") or
                 std.mem.eql(u8, op_name, "memref.store") or
@@ -14689,6 +14780,276 @@ pub const Encoder = struct {
         parent_map: mlir.MlirValue,
         key: mlir.MlirValue,
     };
+
+    const ResourcePlaceState = struct {
+        root_operand: mlir.MlirValue,
+        root_name: ?[]const u8,
+        root: z3.Z3_ast,
+        containers: []z3.Z3_ast,
+        keys: []z3.Z3_ast,
+        current: z3.Z3_ast,
+
+        fn deinit(self: *ResourcePlaceState, allocator: std.mem.Allocator) void {
+            allocator.free(self.containers);
+            allocator.free(self.keys);
+        }
+    };
+
+    fn getDenseI32ArrayAttr(self: *Encoder, op: mlir.MlirOperation, name: []const u8) ?mlir.MlirAttribute {
+        _ = self;
+        const attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate(name.ptr, name.len));
+        if (mlir.oraAttributeIsNull(attr)) return null;
+        if (mlir.oraDenseI32ArrayAttrGetNumElements(attr) == 0) return null;
+        return attr;
+    }
+
+    fn getOperandSegmentSize(self: *Encoder, op: mlir.MlirOperation, index: usize) ?usize {
+        const attr = self.getDenseI32ArrayAttr(op, "operand_segment_sizes") orelse
+            self.getDenseI32ArrayAttr(op, "operandSegmentSizes") orelse
+            return null;
+        if (index >= mlir.oraDenseI32ArrayAttrGetNumElements(attr)) return null;
+        const raw = mlir.oraDenseI32ArrayAttrGetElement(attr, index);
+        if (raw < 0) return null;
+        return @intCast(raw);
+    }
+
+    fn buildResourcePlaceState(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        mode: EncodeMode,
+        start: usize,
+        len: usize,
+        label: []const u8,
+        op_id: usize,
+    ) EncodeError!ResourcePlaceState {
+        _ = mode;
+        if (len == 0 or start + len > operands.len) return error.InvalidOperandCount;
+
+        const root_operand = mlir.oraOperationGetOperand(op, @intCast(start));
+        const root = operands[start];
+        const root_name = self.resolveGlobalNameFromMapOperand(root_operand) orelse {
+            self.recordSoundnessLoss(.unsupported_operation, "resource place does not resolve to a tracked storage root");
+            return error.UnsupportedOperation;
+        };
+
+        if (len == 1) {
+            return .{
+                .root_operand = root_operand,
+                .root_name = root_name,
+                .root = root,
+                .containers = try self.allocator.alloc(z3.Z3_ast, 0),
+                .keys = try self.allocator.alloc(z3.Z3_ast, 0),
+                .current = root,
+            };
+        }
+
+        const key_count = len - 1;
+        var containers = try self.allocator.alloc(z3.Z3_ast, key_count);
+        errdefer self.allocator.free(containers);
+        var keys = try self.allocator.alloc(z3.Z3_ast, key_count);
+        errdefer self.allocator.free(keys);
+
+        var container = root;
+        for (0..key_count) |key_index| {
+            const container_sort = z3.Z3_get_sort(self.context.ctx, container);
+            if (!self.isArraySort(container_sort)) {
+                self.recordSoundnessLoss(.unsupported_operation, "resource map place root is not an SMT array");
+                return error.UnsupportedOperation;
+            }
+            const key_sort = z3.Z3_get_array_sort_domain(self.context.ctx, container_sort);
+            const raw_key = operands[start + 1 + key_index];
+            const key_operand = mlir.oraOperationGetOperand(op, @intCast(start + 1 + key_index));
+            const key_type = mlir.oraValueGetType(key_operand);
+            const key = try self.coerceTypedAstToSortOrUndef(raw_key, key_type, key_sort, label, op_id);
+            containers[key_index] = container;
+            keys[key_index] = key;
+            container = self.encodeSelect(container, key);
+        }
+
+        return .{
+            .root_operand = root_operand,
+            .root_name = root_name,
+            .root = root,
+            .containers = containers,
+            .keys = keys,
+            .current = container,
+        };
+    }
+
+    fn buildResourceUpdatedRootFrom(
+        self: *Encoder,
+        place: *const ResourcePlaceState,
+        base_root: z3.Z3_ast,
+        new_value: z3.Z3_ast,
+    ) EncodeError!z3.Z3_ast {
+        if (place.keys.len == 0) return new_value;
+
+        var containers = try self.allocator.alloc(z3.Z3_ast, place.keys.len);
+        defer self.allocator.free(containers);
+
+        var container = base_root;
+        for (0..place.keys.len) |index| {
+            containers[index] = container;
+            if (index + 1 < place.keys.len) {
+                container = self.encodeSelect(container, place.keys[index]);
+            }
+        }
+
+        var updated = self.encodeStore(containers[place.keys.len - 1], place.keys[place.keys.len - 1], new_value);
+        var index = place.keys.len - 1;
+        while (index > 0) {
+            index -= 1;
+            updated = self.encodeStore(containers[index], place.keys[index], updated);
+        }
+        return updated;
+    }
+
+    fn buildResourceUpdatedRoot(self: *Encoder, place: *const ResourcePlaceState, new_value: z3.Z3_ast) EncodeError!z3.Z3_ast {
+        return try self.buildResourceUpdatedRootFrom(place, place.root, new_value);
+    }
+
+    fn applyResourceUpdatedRoot(self: *Encoder, place: *const ResourcePlaceState, updated_root: z3.Z3_ast, mode: EncodeMode) EncodeError!void {
+        if (mode != .Current) return;
+
+        const root_operand_id = @intFromPtr(place.root_operand.ptr);
+        try self.value_bindings.put(root_operand_id, updated_root);
+        try self.value_map.put(root_operand_id, updated_root);
+
+        const root_name = place.root_name orelse {
+            self.recordSoundnessLoss(.unsupported_operation, "resource place update has no tracked storage root");
+            return error.UnsupportedOperation;
+        };
+        _ = try self.getOrCreateGlobal(root_name, z3.Z3_get_sort(self.context.ctx, updated_root));
+        if (self.global_map.getPtr(root_name)) |existing| {
+            existing.* = updated_root;
+        } else {
+            const global_key = try self.allocator.dupe(u8, root_name);
+            try self.global_map.put(global_key, updated_root);
+        }
+        try self.markGlobalSlotWritten(root_name);
+    }
+
+    fn coerceResourceAmount(self: *Encoder, op: mlir.MlirOperation, operands: []const z3.Z3_ast, amount_index: usize, value_sort: z3.Z3_sort, label: []const u8, op_id: usize) EncodeError!z3.Z3_ast {
+        if (amount_index >= operands.len) return error.InvalidOperandCount;
+        const amount_operand = mlir.oraOperationGetOperand(op, @intCast(amount_index));
+        return try self.coerceTypedAstToSortOrUndef(
+            operands[amount_index],
+            mlir.oraValueGetType(amount_operand),
+            value_sort,
+            label,
+            op_id,
+        );
+    }
+
+    fn encodeResourceBoundaryOp(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        mode: EncodeMode,
+        is_create: bool,
+    ) EncodeError!z3.Z3_ast {
+        if (operands.len < 2) return error.InvalidOperandCount;
+        if (!self.verify_state) {
+            self.recordSoundnessLoss(.user_disabled_state_verification, "state verification is disabled; resource operations are not modeled");
+            return self.encodeBoolConstant(true);
+        }
+
+        const op_id = @intFromPtr(op.ptr);
+        var place = try self.buildResourcePlaceState(op, operands, mode, 0, operands.len - 1, "resource_place_key", op_id);
+        defer place.deinit(self.allocator);
+
+        const value_sort = z3.Z3_get_sort(self.context.ctx, place.current);
+        const amount = try self.coerceResourceAmount(op, operands, operands.len - 1, value_sort, "resource_amount", op_id);
+        const updated_value = if (is_create) blk: {
+            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(place.current, amount)));
+            break :blk z3.Z3_mk_bv_add(self.context.ctx, place.current, amount);
+        } else blk: {
+            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(place.current, amount)));
+            break :blk z3.Z3_mk_bv_sub(self.context.ctx, place.current, amount);
+        };
+
+        const updated_root = try self.buildResourceUpdatedRoot(&place, updated_value);
+        try self.applyResourceUpdatedRoot(&place, updated_root, mode);
+        return self.encodeBoolConstant(true);
+    }
+
+    fn resourcePlaceIdentityCondition(self: *Encoder, source: *const ResourcePlaceState, dest: *const ResourcePlaceState) EncodeError!z3.Z3_ast {
+        const source_name = source.root_name orelse return error.UnsupportedOperation;
+        const dest_name = dest.root_name orelse return error.UnsupportedOperation;
+        if (!std.mem.eql(u8, source_name, dest_name)) return self.encodeBoolConstant(false);
+        if (source.keys.len != dest.keys.len) {
+            self.recordSoundnessLoss(.unsupported_operation, "resource move place identities are not comparable");
+            return error.UnsupportedOperation;
+        }
+        if (source.keys.len == 0) return self.encodeBoolConstant(true);
+
+        var predicates = try self.allocator.alloc(z3.Z3_ast, source.keys.len);
+        defer self.allocator.free(predicates);
+        for (0..source.keys.len) |index| {
+            predicates[index] = z3.Z3_mk_eq(self.context.ctx, source.keys[index], dest.keys[index]);
+        }
+        return self.encodeAnd(predicates);
+    }
+
+    fn encodeResourceMoveOp(
+        self: *Encoder,
+        op: mlir.MlirOperation,
+        operands: []const z3.Z3_ast,
+        mode: EncodeMode,
+    ) EncodeError!z3.Z3_ast {
+        if (operands.len < 3) return error.InvalidOperandCount;
+        if (!self.verify_state) {
+            self.recordSoundnessLoss(.user_disabled_state_verification, "state verification is disabled; resource operations are not modeled");
+            return self.encodeBoolConstant(true);
+        }
+
+        const source_len = self.getOperandSegmentSize(op, 0) orelse return error.UnsupportedOperation;
+        const dest_len = self.getOperandSegmentSize(op, 1) orelse return error.UnsupportedOperation;
+        const amount_len = self.getOperandSegmentSize(op, 2) orelse return error.UnsupportedOperation;
+        if (source_len == 0 or dest_len == 0 or amount_len != 1 or source_len + dest_len + amount_len != operands.len) {
+            return error.InvalidOperandCount;
+        }
+
+        const op_id = @intFromPtr(op.ptr);
+        var source = try self.buildResourcePlaceState(op, operands, mode, 0, source_len, "resource_source_key", op_id);
+        defer source.deinit(self.allocator);
+        var dest = try self.buildResourcePlaceState(op, operands, mode, source_len, dest_len, "resource_destination_key", op_id);
+        defer dest.deinit(self.allocator);
+
+        const value_sort = z3.Z3_get_sort(self.context.ctx, source.current);
+        const amount_index = source_len + dest_len;
+        const amount = try self.coerceResourceAmount(op, operands, amount_index, value_sort, "resource_amount", op_id);
+        const dest_amount = try self.coerceTypedAstToSortOrUndef(
+            amount,
+            mlir.oraValueGetType(mlir.oraOperationGetOperand(op, @intCast(amount_index))),
+            z3.Z3_get_sort(self.context.ctx, dest.current),
+            "resource_destination_amount",
+            op_id,
+        );
+
+        const same_place = try self.resourcePlaceIdentityCondition(&source, &dest);
+        const source_after = z3.Z3_mk_bv_sub(self.context.ctx, source.current, amount);
+        const dest_after = z3.Z3_mk_bv_add(self.context.ctx, dest.current, dest_amount);
+        self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(source.current, amount)));
+        self.addObligation(self.encodeImplies(self.encodeNot(same_place), z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(dest.current, dest_amount))));
+
+        const source_name = source.root_name orelse return error.UnsupportedOperation;
+        const dest_name = dest.root_name orelse return error.UnsupportedOperation;
+        if (!std.mem.eql(u8, source_name, dest_name)) {
+            const source_root = try self.buildResourceUpdatedRoot(&source, source_after);
+            const dest_root = try self.buildResourceUpdatedRoot(&dest, dest_after);
+            try self.applyResourceUpdatedRoot(&source, source_root, mode);
+            try self.applyResourceUpdatedRoot(&dest, dest_root, mode);
+            return self.encodeBoolConstant(true);
+        }
+
+        const source_root = try self.buildResourceUpdatedRoot(&source, source_after);
+        const distinct_root = try self.buildResourceUpdatedRootFrom(&dest, source_root, dest_after);
+        const final_root = self.encodeIte(same_place, source.root, distinct_root);
+        try self.applyResourceUpdatedRoot(&source, final_root, mode);
+        return self.encodeBoolConstant(true);
+    }
 
     fn isTransparentMapSourceOp(op_name: []const u8) bool {
         return std.mem.eql(u8, op_name, "ora.refinement_to_base") or

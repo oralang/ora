@@ -584,11 +584,31 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
     MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index)
     {
         auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
-        if (!array_attr || index >= array_attr.size())
+        if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
         {
             return MlirAttribute{nullptr};
         }
         return wrap(array_attr[index]);
+    }
+
+    size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(unwrap(attr));
+        if (!array_attr)
+        {
+            return 0;
+        }
+        return array_attr.size();
+    }
+
+    int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index)
+    {
+        auto array_attr = llvm::dyn_cast<mlir::DenseI32ArrayAttr>(unwrap(attr));
+        if (!array_attr || index >= static_cast<size_t>(array_attr.size()))
+        {
+            return 0;
+        }
+        return array_attr.asArrayRef()[index];
     }
 
     MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr)

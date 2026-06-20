@@ -111,6 +111,8 @@ extern "C"
     MLIR_CAPI_EXPORTED int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr);
     MLIR_CAPI_EXPORTED size_t oraArrayAttrGetNumElements(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index);
+    MLIR_CAPI_EXPORTED size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index);
     /// Returns the integer value as an unsigned decimal string preserving full APInt width.
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
