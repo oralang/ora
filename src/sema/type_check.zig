@@ -4542,7 +4542,6 @@ const TypeChecker = struct {
         const carrier = unwrapRefinement(domain_type.resource_domain.carrier_type.*);
         if (carrier.kind() != .integer or !carrier.integer.signed) return;
         const value = (try self.integerValueForResolution(expr_id)) orelse {
-            try self.emitExprError(expr_id, "resource amount must be non-negative", .{});
             return;
         };
         if (value != .integer) return;
@@ -10835,6 +10834,8 @@ fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
     if (lhs.kind() == .resource_domain or rhs.kind() == .resource_domain) {
+        if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+        if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
         return if (sameConcreteType(lhs, rhs)) lhs else .{ .unknown = {} };
     }
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
@@ -10995,12 +10996,16 @@ fn binaryComptimeIntegerOperandResolutionType(op: ast.BinaryOp, lhs_type: Type, 
 
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
     if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
     if (rhs.kind() == .comptime_integer and lhs.kind() == .integer) return lhs;
     return null;
 }
 
 fn integerOperandsHaveResolutionTarget(lhs: Type, rhs: Type) bool {
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return true;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return true;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return false;
     if (lhs.kind() == .comptime_integer or rhs.kind() == .comptime_integer) return true;
     return sameIntegerShape(lhs.integer, rhs.integer);

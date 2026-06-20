@@ -83,6 +83,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
         }
 
+        fn resourceDomainCarrierTarget(self: *FunctionLowerer, ty: sema.Type, range: source.TextRange) ?mlir.MlirType {
+            const unwrapped = support.unwrapRefinementSemaType(ty);
+            if (unwrapped.kind() != .resource_domain) return null;
+            return self.parent.lowerSemaType(unwrapped.resource_domain.carrier_type.*, range);
+        }
+
+        fn binaryComptimeIntegerTarget(
+            self: *FunctionLowerer,
+            expr_type: sema.Type,
+            other_type: sema.Type,
+            range: source.TextRange,
+        ) ?mlir.MlirType {
+            if (support.unwrapRefinementSemaType(expr_type).kind() != .comptime_integer) return null;
+            return @This().resourceDomainCarrierTarget(self, other_type, range);
+        }
+
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.parent.allocator,
@@ -570,6 +586,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk try self.lowerExpr(expr_id, locals);
                 },
+                .Unary => |unary| blk: {
+                    if (unary.op == .neg and mlir.oraTypeIsAInteger(target_type)) {
+                        switch (self.parent.file.expression(unary.operand).*) {
+                            .IntegerLiteral => |literal| {
+                                const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                                    break :blk try @This().loweringValueError(self, literal.range, target_type, "invalid integer literal '{s}'", .{literal.text});
+                                break :blk try @This().createWideIntegerConstant(self, target_type, parsed, true, unary.range);
+                            },
+                            else => {},
+                        }
+                    }
+                    const raw_value = try self.lowerExpr(expr_id, locals);
+                    break :blk try self.convertValueForFlow(raw_value, target_type, exprRange(self.parent.file, expr_id));
+                },
                 else => blk: {
                     const raw_value = try self.lowerExpr(expr_id, locals);
                     const value_type = mlir.oraValueGetType(raw_value);
@@ -925,16 +955,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return try @This().lowerShortCircuitLogical(self, expr_id, binary, locals);
             }
 
-            var lhs = try self.lowerExpr(binary.lhs, locals);
+            const lhs_sema_type = self.parent.typecheck.exprType(binary.lhs);
+            const rhs_sema_type = self.parent.typecheck.exprType(binary.rhs);
+            const lhs_target = @This().binaryComptimeIntegerTarget(self, lhs_sema_type, rhs_sema_type, binary.range);
+            const rhs_target = @This().binaryComptimeIntegerTarget(self, rhs_sema_type, lhs_sema_type, binary.range);
+
+            var lhs = if (lhs_target) |target|
+                try self.lowerExprForFlowTarget(binary.lhs, target, locals)
+            else
+                try self.lowerExpr(binary.lhs, locals);
             var rhs = switch (binary.op) {
                 .shl, .shr, .wrapping_shl, .wrapping_shr => blk: {
+                    if (rhs_target) |target| {
+                        break :blk try self.lowerExprForFlowTarget(binary.rhs, target, locals);
+                    }
                     const lhs_type = mlir.oraValueGetType(lhs);
                     if (mlir.oraTypeIsAInteger(lhs_type)) {
                         break :blk try self.lowerExprForFlowTarget(binary.rhs, lhs_type, locals);
                     }
                     break :blk try self.lowerExpr(binary.rhs, locals);
                 },
-                else => try self.lowerExpr(binary.rhs, locals),
+                else => if (rhs_target) |target|
+                    try self.lowerExprForFlowTarget(binary.rhs, target, locals)
+                else
+                    try self.lowerExpr(binary.rhs, locals),
             };
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
@@ -3204,6 +3248,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 amount,
                 strRef(metadata.domain_name),
                 metadata.carrier_type,
+                metadata.carrier_signed,
             );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
@@ -3231,6 +3276,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     amount,
                     strRef(metadata.domain_name),
                     metadata.carrier_type,
+                    metadata.carrier_signed,
                 )
             else
                 mlir.oraDestroyOpCreate(
@@ -3241,6 +3287,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     amount,
                     strRef(metadata.domain_name),
                     metadata.carrier_type,
+                    metadata.carrier_signed,
                 );
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
@@ -3250,6 +3297,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         const ResourceDomainMetadata = struct {
             domain_name: []const u8,
             carrier_type: mlir.MlirType,
+            carrier_signed: bool,
         };
 
         fn resourceDomainMetadata(self: *FunctionLowerer, place_expr: ast.ExprId, range: source.TextRange) anyerror!ResourceDomainMetadata {
@@ -3263,9 +3311,14 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return error.MlirOperationCreationFailed;
             }
             const carrier_type = domain_type.resource_domain.carrier_type;
+            const carrier_signed = (try support.resolvedIntegerSignedness(carrier_type.*)) orelse {
+                try self.parent.emitLoweringError(range, "resource carrier signedness must be resolved before HIR lowering", .{});
+                return error.MlirOperationCreationFailed;
+            };
             return .{
                 .domain_name = domain_type.resource_domain.name,
                 .carrier_type = self.parent.lowerSemaType(carrier_type.*, range),
+                .carrier_signed = carrier_signed,
             };
         }
 

@@ -571,6 +571,16 @@ void oraBlockAppendOwnedOperation(MlirBlock block, MlirOperation op)
         return int_attr.getValue().getSExtValue();
     }
 
+    MlirType oraTypeAttrGetValue(MlirAttribute attr)
+    {
+        auto type_attr = llvm::dyn_cast<mlir::TypeAttr>(unwrap(attr));
+        if (!type_attr)
+        {
+            return {nullptr};
+        }
+        return wrap(type_attr.getValue());
+    }
+
     size_t oraArrayAttrGetNumElements(MlirAttribute attr)
     {
         auto array_attr = llvm::dyn_cast<mlir::ArrayAttr>(unwrap(attr));
@@ -4663,6 +4673,17 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
             return {nullptr};
         }
 
+        bool isNegative = false;
+        if (cleanValue.front() == '-' || cleanValue.front() == '+')
+        {
+            isNegative = cleanValue.front() == '-';
+            cleanValue.erase(cleanValue.begin());
+            if (cleanValue.empty())
+            {
+                return {nullptr};
+            }
+        }
+
         // Parse the string digit by digit to build the APInt
         // This handles values of any size up to the bit width
         llvm::APInt apValue(bitWidth, 0);
@@ -4679,9 +4700,10 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
             }
         }
 
-        // If the type is signed and the value would be negative in two's complement,
-        // we need to handle sign extension. For now, we'll assume unsigned parsing.
-        // The isSigned flag in the type will handle the interpretation.
+        if (isNegative)
+        {
+            apValue = -apValue;
+        }
 
         // Verify the value fits in the bit width
         // APInt will automatically truncate, but we want to ensure it's valid
@@ -5197,10 +5219,11 @@ static void addOperandSegmentSizes(OperationState &state, MLIRContext *context, 
     state.addAttribute("operand_segment_sizes", DenseI32ArrayAttr::get(context, sizes));
 }
 
-static void addResourceBoundaryAttrs(OperationState &state, MLIRContext *context, MlirStringRef domain, MlirType carrierType)
+static void addResourceBoundaryAttrs(OperationState &state, MLIRContext *context, MlirStringRef domain, MlirType carrierType, bool carrierSigned)
 {
     state.addAttribute("domain", StringAttr::get(context, unwrap(domain)));
     state.addAttribute("carrier_type", TypeAttr::get(unwrap(carrierType)));
+    state.addAttribute("carrier_signed", BoolAttr::get(context, carrierSigned));
 }
 
 MlirOperation oraMoveOpCreate(
@@ -5212,7 +5235,8 @@ MlirOperation oraMoveOpCreate(
     size_t numDestinationPlace,
     MlirValue amount,
     MlirStringRef domain,
-    MlirType carrierType)
+    MlirType carrierType,
+    bool carrierSigned)
 {
     try
     {
@@ -5233,7 +5257,7 @@ MlirOperation oraMoveOpCreate(
             1,
         };
         addOperandSegmentSizes(state, context, segments);
-        addResourceBoundaryAttrs(state, context, domain, carrierType);
+        addResourceBoundaryAttrs(state, context, domain, carrierType, carrierSigned);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -5252,7 +5276,8 @@ static MlirOperation createResourceBoundaryOp(
     size_t numPlace,
     MlirValue amount,
     MlirStringRef domain,
-    MlirType carrierType)
+    MlirType carrierType,
+    bool carrierSigned)
 {
     try
     {
@@ -5266,7 +5291,7 @@ static MlirOperation createResourceBoundaryOp(
         Value amountVal = unwrap(amount);
         operands.push_back(amountVal);
         state.addOperands(operands);
-        addResourceBoundaryAttrs(state, context, domain, carrierType);
+        addResourceBoundaryAttrs(state, context, domain, carrierType, carrierSigned);
 
         Operation *op = Operation::create(state);
         return wrap(op);
@@ -5284,9 +5309,10 @@ MlirOperation oraCreateOpCreate(
     size_t numPlace,
     MlirValue amount,
     MlirStringRef domain,
-    MlirType carrierType)
+    MlirType carrierType,
+    bool carrierSigned)
 {
-    return createResourceBoundaryOp(ctx, loc, "ora.create", place, numPlace, amount, domain, carrierType);
+    return createResourceBoundaryOp(ctx, loc, "ora.create", place, numPlace, amount, domain, carrierType, carrierSigned);
 }
 
 MlirOperation oraDestroyOpCreate(
@@ -5296,9 +5322,10 @@ MlirOperation oraDestroyOpCreate(
     size_t numPlace,
     MlirValue amount,
     MlirStringRef domain,
-    MlirType carrierType)
+    MlirType carrierType,
+    bool carrierSigned)
 {
-    return createResourceBoundaryOp(ctx, loc, "ora.destroy", place, numPlace, amount, domain, carrierType);
+    return createResourceBoundaryOp(ctx, loc, "ora.destroy", place, numPlace, amount, domain, carrierType, carrierSigned);
 }
 
 MlirOperation oraCmpOpCreate(MlirContext ctx, MlirLocation loc, MlirStringRef predicate, MlirValue lhs, MlirValue rhs, MlirType resultType)
@@ -5840,6 +5867,14 @@ MlirAttribute oraBoolAttrCreate(MlirContext ctx, bool value)
     {
         return {nullptr};
     }
+}
+
+bool oraBoolAttrGetValue(MlirAttribute attr)
+{
+    Attribute attribute = unwrap(attr);
+    if (auto boolAttr = llvm::dyn_cast_or_null<BoolAttr>(attribute))
+        return boolAttr.getValue();
+    return false;
 }
 
 MlirAttribute oraIntegerAttrCreateI64(MlirContext ctx, MlirType type, int64_t value)

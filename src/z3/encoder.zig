@@ -4327,6 +4327,22 @@ pub const Encoder = struct {
         return z3.Z3_mk_bvult(self.context.ctx, lhs, rhs);
     }
 
+    pub fn checkSignedNonNegative(self: *Encoder, value: z3.Z3_ast) z3.Z3_ast {
+        const sort = z3.Z3_get_sort(self.context.ctx, value);
+        const zero = z3.Z3_mk_unsigned_int64(self.context.ctx, 0, sort);
+        return z3.Z3_mk_bvsge(self.context.ctx, value, zero);
+    }
+
+    pub fn checkSignedAddOverflowFromNonNegativeAmount(self: *Encoder, previous: z3.Z3_ast, amount: z3.Z3_ast) z3.Z3_ast {
+        const updated = z3.Z3_mk_bv_add(self.context.ctx, previous, amount);
+        return z3.Z3_mk_bvslt(self.context.ctx, updated, previous);
+    }
+
+    pub fn checkSignedSubUnderflowFromNonNegativeAmount(self: *Encoder, previous: z3.Z3_ast, amount: z3.Z3_ast) z3.Z3_ast {
+        const updated = z3.Z3_mk_bv_sub(self.context.ctx, previous, amount);
+        return z3.Z3_mk_bvsgt(self.context.ctx, updated, previous);
+    }
+
     /// Check for overflow in multiplication
     pub fn checkMulOverflow(self: *Encoder, lhs: z3.Z3_ast, rhs: z3.Z3_ast) z3.Z3_ast {
         // Unsigned overflow check:
@@ -15013,6 +15029,24 @@ pub const Encoder = struct {
         );
     }
 
+    fn resourceCarrierIsSigned(self: *Encoder, op: mlir.MlirOperation, amount_index: usize) bool {
+        const signed_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("carrier_signed".ptr, "carrier_signed".len));
+        if (!mlir.oraAttributeIsNull(signed_attr)) {
+            return mlir.oraBoolAttrGetValue(signed_attr);
+        }
+
+        const carrier_attr = mlir.oraOperationGetAttributeByName(op, mlir.oraStringRefCreate("carrier_type".ptr, "carrier_type".len));
+        if (!mlir.oraAttributeIsNull(carrier_attr)) {
+            const carrier_type = mlir.oraTypeAttrGetValue(carrier_attr);
+            if (!mlir.oraTypeIsNull(carrier_type)) {
+                return self.isSignedMlirIntegerType(carrier_type);
+            }
+        }
+        const amount_operand = mlir.oraOperationGetOperand(op, @intCast(amount_index));
+        const amount_type = mlir.oraValueGetType(amount_operand);
+        return self.isSignedMlirIntegerType(amount_type);
+    }
+
     fn encodeResourceBoundaryOp(
         self: *Encoder,
         op: mlir.MlirOperation,
@@ -15032,11 +15066,23 @@ pub const Encoder = struct {
 
         const value_sort = z3.Z3_get_sort(self.context.ctx, place.current);
         const amount = try self.coerceResourceAmount(op, operands, operands.len - 1, value_sort, "resource_amount", op_id);
+        const is_signed = self.resourceCarrierIsSigned(op, operands.len - 1);
+        if (is_signed) {
+            self.addObligation(self.checkSignedNonNegative(amount));
+        }
         const updated_value = if (is_create) blk: {
-            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(place.current, amount)));
+            if (is_signed) {
+                self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSignedAddOverflowFromNonNegativeAmount(place.current, amount)));
+            } else {
+                self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(place.current, amount)));
+            }
             break :blk z3.Z3_mk_bv_add(self.context.ctx, place.current, amount);
         } else blk: {
-            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(place.current, amount)));
+            if (is_signed) {
+                self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSignedSubUnderflowFromNonNegativeAmount(place.current, amount)));
+            } else {
+                self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(place.current, amount)));
+            }
             break :blk z3.Z3_mk_bv_sub(self.context.ctx, place.current, amount);
         };
 
@@ -15091,6 +15137,7 @@ pub const Encoder = struct {
         const value_sort = z3.Z3_get_sort(self.context.ctx, source.current);
         const amount_index = source_len + dest_len;
         const amount = try self.coerceResourceAmount(op, operands, amount_index, value_sort, "resource_amount", op_id);
+        const is_signed = self.resourceCarrierIsSigned(op, amount_index);
         const dest_amount = try self.coerceTypedAstToSortOrUndef(
             amount,
             mlir.oraValueGetType(mlir.oraOperationGetOperand(op, @intCast(amount_index))),
@@ -15102,8 +15149,14 @@ pub const Encoder = struct {
         const same_place = try self.resourcePlaceIdentityCondition(&source, &dest);
         const source_after = z3.Z3_mk_bv_sub(self.context.ctx, source.current, amount);
         const dest_after = z3.Z3_mk_bv_add(self.context.ctx, dest.current, dest_amount);
-        self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(source.current, amount)));
-        self.addObligation(self.encodeImplies(self.encodeNot(same_place), z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(dest.current, dest_amount))));
+        if (is_signed) {
+            self.addObligation(self.checkSignedNonNegative(amount));
+            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSignedSubUnderflowFromNonNegativeAmount(source.current, amount)));
+            self.addObligation(self.encodeImplies(self.encodeNot(same_place), z3.Z3_mk_not(self.context.ctx, self.checkSignedAddOverflowFromNonNegativeAmount(dest.current, dest_amount))));
+        } else {
+            self.addObligation(z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(source.current, amount)));
+            self.addObligation(self.encodeImplies(self.encodeNot(same_place), z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(dest.current, dest_amount))));
+        }
 
         const source_name = source.root_name orelse return error.UnsupportedOperation;
         const dest_name = dest.root_name orelse return error.UnsupportedOperation;
