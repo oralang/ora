@@ -27,6 +27,7 @@ const Fixture = struct {
 const FIXTURES = [_]Fixture{
     .{ .name = "simple_counter", .source_relpath = "tests/debug_artifacts/simple_counter/simple_counter.ora" },
     .{ .name = "liveness_dead_after_use", .source_relpath = "tests/debug_artifacts/liveness_dead_after_use/liveness_dead_after_use.ora" },
+    .{ .name = "resource_builtins", .source_relpath = "tests/debug_artifacts/resource_builtins/resource_builtins.ora" },
 };
 
 fn binaryAvailable() bool {
@@ -330,6 +331,17 @@ test "debug-artifacts regression corpus matches goldens" {
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "debug.json", actual_debug, golden_debug);
         try expectDebugCfgArtifacts(allocator, out_dir, stem);
     }
+}
+
+test "debug-artifacts resource builtins carry source locations" {
+    const allocator = testing.allocator;
+    const debug_info = try readFile(allocator, "tests/debug_artifacts/resource_builtins/debug.golden.json");
+    defer allocator.free(debug_info);
+
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"op\":\"sir.sstore\""));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":10,\"col\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":18,\"col\":9"));
+    try testing.expect(std.mem.containsAtLeast(u8, debug_info, 1, "\"line\":25,\"col\":9"));
 }
 
 test "debug-probe malformed public calldata reverts before body effects" {

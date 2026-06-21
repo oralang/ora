@@ -17,4 +17,12 @@ contract StaticAssetDomains {
     {
         @create(dai[to], amount);
     }
+
+    pub fn usdcOf(owner: address) -> USDC {
+        return usdc[owner];
+    }
+
+    pub fn daiOf(owner: address) -> DAI {
+        return dai[owner];
+    }
 }

@@ -4,6 +4,7 @@
   "ci_commands": [
     "zig build check-feature-execution-coverage",
     "zig build check-negative-corpus",
+    "zig build check-smt-resource-corpus",
     "zig build test-conformance",
     "zig build gate"
   ],
@@ -147,30 +148,175 @@
       "area": "resources",
       "behavior": "Resource operations reject map-contained struct-field places until field-path identity with map keys is represented end to end",
       "negative_specs": [
-        "tests/negative/resource_struct_field_place.ora"
+        "tests/negative/resource_struct_field_place.ora",
+        "tests/negative/resource_uncomparable_place_identity.ora"
       ]
     },
     {
-      "id": "resource.basic_create_move_destroy",
+      "id": "resource.declaration_fail_closed",
       "area": "resources",
-      "behavior": "Resource places execute explicit create, conserved move, and explicit destroy through bytecode-visible storage updates",
+      "behavior": "Malformed resource declarations and unresolved carrier types fail closed with source-spanned diagnostics",
+      "negative_specs": [
+        "tests/negative/resource_decl_missing_equal.ora",
+        "tests/negative/resource_decl_missing_carrier.ora",
+        "tests/negative/resource_decl_missing_semicolon.ora",
+        "tests/negative/resource_unknown_carrier.ora",
+        "tests/negative/resource_runtime_asset_address_domain.ora"
+      ]
+    },
+    {
+      "id": "resource.domain_declaration",
+      "area": "resources",
+      "behavior": "Resource domain declarations compile as nominal quantity domains, not carrier aliases",
       "specs": [
-        "tests/conformance/resource_basic_transfer.spec.toml"
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/resource_static_asset_domains.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.place_storage",
+      "area": "resources",
+      "behavior": "Resource places are accepted in storage and map storage positions and execute through carrier storage layout",
+      "specs": [
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/resource_layout_equivalence.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.move_distinct",
+      "area": "resources",
+      "behavior": "Resource moves between distinct places conserve the moved domain and update both storage places",
+      "specs": [
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/properties.zig#checkResourceProperty",
+        "tests/conformance/properties.zig#checkResourceMoveSequences",
+        "tests/conformance/fuzz.zig#checkResourceAbiFuzz"
+      ]
+    },
+    {
+      "id": "resource.create",
+      "area": "resources",
+      "behavior": "Resource create is an explicit bytecode-visible domain-boundary delta with checked carrier addition",
+      "specs": [
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/resource_create_destroy.spec.toml",
+        "tests/conformance/properties.zig#checkResourceDeltaSequences",
+        "tests/conformance/fuzz.zig#checkResourceAbiFuzz"
+      ]
+    },
+    {
+      "id": "resource.destroy",
+      "area": "resources",
+      "behavior": "Resource destroy is an explicit bytecode-visible domain-boundary delta with checked carrier subtraction",
+      "specs": [
+        "tests/conformance/resource_basic_transfer.spec.toml",
+        "tests/conformance/resource_create_destroy.spec.toml",
+        "tests/conformance/properties.zig#checkResourceDeltaSequences",
+        "tests/conformance/fuzz.zig#checkResourceAbiFuzz"
+      ]
+    },
+    {
+      "id": "resource.move_self",
+      "area": "resources",
+      "behavior": "Resource self-transfer is checked and leaves the place unchanged on success or revert",
+      "specs": [
+        "tests/conformance/resource_self_transfer.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.failure_atomicity",
+      "area": "resources",
+      "behavior": "Failed resource moves revert without persisting source underflow or destination overflow partial writes",
+      "specs": [
+        "tests/conformance/resource_failure_atomicity.spec.toml",
+        "tests/conformance/fuzz.zig#checkResourceAbiFuzz"
+      ]
+    },
+    {
+      "id": "resource.move_dynamic_alias",
+      "area": "resources",
+      "behavior": "Comparable dynamic resource places branch at runtime so same-address moves are checked but preserve balance",
+      "specs": [
+        "tests/conformance/resource_dynamic_alias.spec.toml",
+        "tests/conformance/properties.zig#checkResourceMoveSequences",
+        "tests/conformance/fuzz.zig#checkResourceAbiFuzz"
+      ]
+    },
+    {
+      "id": "resource.static_asset_domains",
+      "area": "resources",
+      "behavior": "Distinct static resource domains with the same carrier maintain independent typed storage places",
+      "specs": [
+        "tests/conformance/resource_static_asset_domains.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.many_places_same_domain",
+      "area": "resources",
+      "behavior": "One resource domain can have several independent map and scalar places in the same contract",
+      "specs": [
+        "tests/conformance/resource_many_places_same_domain.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.signed_amount_guard",
+      "area": "resources",
+      "behavior": "Signed resource amounts are checked non-negative at runtime and failed signed creates preserve prior state",
+      "specs": [
+        "tests/conformance/resource_signed_amount.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.signed_negative_balance",
+      "area": "resources",
+      "behavior": "Signed resource moves may leave the source balance negative when amount polarity and carrier bounds hold",
+      "specs": [
+        "tests/conformance/resource_signed_negative_balance.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.transient_immediate",
+      "area": "resources",
+      "behavior": "Transient resource places use immediate tstore effects within one call and support create/destroy checks",
+      "specs": [
+        "tests/conformance/resource_transient_immediate.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.layout_equivalence",
+      "area": "resources",
+      "behavior": "Resource map values execute independently from raw carrier maps while sharing the same carrier ABI shape",
+      "specs": [
+        "tests/conformance/resource_layout_equivalence.spec.toml"
+      ]
+    },
+    {
+      "id": "resource.initial_create_in_init",
+      "area": "resources",
+      "behavior": "Resource creation in init initializes storage and is observable after deployment",
+      "specs": [
+        "tests/conformance/resource_initial_create_in_init.spec.toml"
       ]
     },
     {
       "id": "resource.builtin_argument_fail_closed",
       "area": "resources",
-      "behavior": "Resource boundary builtins reject bad arity, non-place operands, cross-domain moves, raw carrier amounts, negative signed literal amounts, and side-effecting place keys",
+      "behavior": "Resource boundary builtins reject bad arity, non-place operands, cross-domain moves, raw carrier amounts, negative signed literal amounts, side-effecting place keys, static carrier overflow, and unverifiable underflow",
       "negative_specs": [
         "tests/negative/resource_builtin_bad_arity_move.ora",
+        "tests/negative/resource_builtin_bad_arity_create.ora",
+        "tests/negative/resource_builtin_bad_arity_destroy.ora",
         "tests/negative/resource_move_non_place.ora",
         "tests/negative/resource_create_non_place.ora",
         "tests/negative/resource_destroy_non_place.ora",
         "tests/negative/resource_move_cross_domain.ora",
+        "tests/negative/resource_move_static_asset_cross_domain.ora",
         "tests/negative/resource_amount_wrong_domain.ora",
+        "tests/negative/resource_amount_raw_carrier_expr.ora",
         "tests/negative/resource_signed_negative_literal.ora",
-        "tests/negative/resource_side_effecting_key.ora"
+        "tests/negative/resource_side_effecting_key.ora",
+        "tests/negative/resource_unsigned_underflow.ora",
+        "tests/negative/resource_signed_carrier_overflow.ora"
       ]
     },
     {
@@ -180,9 +326,71 @@
       "negative_specs": [
         "tests/negative/resource_nested_resource.ora",
         "tests/negative/resource_public_param_leak.ora",
+        "tests/negative/resource_public_return_leak.ora",
         "tests/negative/resource_place_event_leak.ora",
+        "tests/negative/resource_local_place_value.ora",
+        "tests/negative/resource_return_place_value.ora",
+        "tests/negative/resource_array_of_resource_in_memory.ora",
+        "tests/negative/resource_cast_to_carrier.ora",
+        "tests/negative/resource_cast_from_carrier.ora",
         "tests/negative/resource_direct_assignment.ora",
         "tests/negative/resource_compound_assignment.ora"
+      ]
+    },
+    {
+      "id": "resource.fail_closed_boundaries",
+      "area": "resources",
+      "behavior": "Resource declarations, builtins, place capabilities, ABI/log/local escapes, direct mutation, missing modifies, and unsafe external-call boundaries fail closed",
+      "negative_specs": [
+        "tests/negative/resource_decl_missing_equal.ora",
+        "tests/negative/resource_decl_missing_carrier.ora",
+        "tests/negative/resource_decl_missing_semicolon.ora",
+        "tests/negative/resource_unknown_carrier.ora",
+        "tests/negative/resource_runtime_asset_address_domain.ora",
+        "tests/negative/resource_builtin_bad_arity_move.ora",
+        "tests/negative/resource_builtin_bad_arity_create.ora",
+        "tests/negative/resource_builtin_bad_arity_destroy.ora",
+        "tests/negative/resource_move_non_place.ora",
+        "tests/negative/resource_create_non_place.ora",
+        "tests/negative/resource_destroy_non_place.ora",
+        "tests/negative/resource_move_cross_domain.ora",
+        "tests/negative/resource_move_static_asset_cross_domain.ora",
+        "tests/negative/resource_amount_wrong_domain.ora",
+        "tests/negative/resource_amount_raw_carrier_expr.ora",
+        "tests/negative/resource_signed_negative_literal.ora",
+        "tests/negative/resource_side_effecting_key.ora",
+        "tests/negative/resource_unsigned_underflow.ora",
+        "tests/negative/resource_signed_carrier_overflow.ora",
+        "tests/negative/resource_nested_resource.ora",
+        "tests/negative/resource_public_param_leak.ora",
+        "tests/negative/resource_public_return_leak.ora",
+        "tests/negative/resource_place_event_leak.ora",
+        "tests/negative/resource_local_place_value.ora",
+        "tests/negative/resource_return_place_value.ora",
+        "tests/negative/resource_array_of_resource_in_memory.ora",
+        "tests/negative/resource_cast_to_carrier.ora",
+        "tests/negative/resource_cast_from_carrier.ora",
+        "tests/negative/resource_direct_assignment.ora",
+        "tests/negative/resource_compound_assignment.ora",
+        "tests/negative/resource_missing_modifies.ora",
+        "tests/negative/resource_external_call_without_lock.ora"
+      ]
+    },
+    {
+      "id": "resource.effects_fail_closed",
+      "area": "resources",
+      "behavior": "Resource writes participate in modifies and external-call write validation",
+      "negative_specs": [
+        "tests/negative/resource_missing_modifies.ora",
+        "tests/negative/resource_external_call_without_lock.ora"
+      ]
+    },
+    {
+      "id": "resource.modifies_lock_interaction",
+      "area": "resources",
+      "behavior": "Resource writes can be covered by modifies while explicit lock/unlock operations target the same resource place",
+      "specs": [
+        "tests/conformance/resource_modifies_lock.spec.toml"
       ]
     },
     {
@@ -616,6 +824,30 @@
       "behavior": "ERC-20 (full_token) realistic flow: init supply, transfer, approve, transferFrom, balance/allowance reads \u2014 gas benchmark + execution coverage",
       "specs": [
         "tests/conformance/app_full_token.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.resource_points",
+      "area": "full_app",
+      "behavior": "Resource-backed non-token points app: award, conserved transfer, spend/destroy, per-account reads, and supply/spend accounting execute through bytecode",
+      "specs": [
+        "tests/conformance/app_resource_points.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.resource_token",
+      "area": "full_app",
+      "behavior": "ERC20-like resource token: issue, conserved transferFrom, allowance accounting, retire/destroy, balances, and total supply execute through bytecode",
+      "specs": [
+        "tests/conformance/resource_app_token.spec.toml"
+      ]
+    },
+    {
+      "id": "full_app.resource_vault_shares",
+      "area": "full_app",
+      "behavior": "Vault shares as a resource domain: deposit/create, share transfer, redeem/destroy, total shares, and managed asset accounting execute through bytecode",
+      "specs": [
+        "tests/conformance/resource_app_vault_shares.spec.toml"
       ]
     },
     {

@@ -277,6 +277,10 @@ fn typeContainsResourcePlace(ty: Type) bool {
     };
 }
 
+fn typeContainsOpaqueRuntimeCapability(ty: Type) bool {
+    return typeContainsStorageCapability(ty) or typeContainsResourcePlace(ty);
+}
+
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .refinement) {
         switch (refinements.kindForName(expected_type.refinement.name) orelse return false) {
@@ -1285,7 +1289,7 @@ const TypeChecker = struct {
                 var indexed_count: usize = 0;
                 for (log_decl.fields) |field| {
                     const field_type = try self.resolveTypeExpr(field.type_expr);
-                    if (typeContainsStorageCapability(field_type) or typeContainsResourcePlace(field_type)) {
+                    if (typeContainsOpaqueRuntimeCapability(field_type)) {
                         try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque storage capability type '{s}'", .{
                             field.name,
                             diagnosticTypeDisplayName(self, field_type),
@@ -1896,7 +1900,7 @@ const TypeChecker = struct {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
-            if (typeContainsStorageCapability(param_type) or typeContainsResourcePlace(param_type)) {
+            if (typeContainsOpaqueRuntimeCapability(param_type)) {
                 try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque storage capability type '{s}'", .{
                     name,
                     diagnosticTypeDisplayName(self, param_type),
@@ -1918,7 +1922,7 @@ const TypeChecker = struct {
         }
 
         if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
-            if (typeContainsStorageCapability(self.current_return_type.?) or typeContainsResourcePlace(self.current_return_type.?)) {
+            if (typeContainsOpaqueRuntimeCapability(self.current_return_type.?)) {
                 try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque storage capability return type '{s}'", .{
                     function.name,
                     diagnosticTypeDisplayName(self, self.current_return_type.?),
@@ -4586,7 +4590,7 @@ const TypeChecker = struct {
         }
 
         const target_type = try self.resolveTypeExprInCurrentContext(builtin.type_arg.?);
-        if (typeContainsStorageCapability(target_type)) {
+        if (typeContainsOpaqueRuntimeCapability(target_type)) {
             try self.emitRangeError(builtin.range, "@{s} cannot construct opaque storage capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, target_type),
@@ -4595,7 +4599,7 @@ const TypeChecker = struct {
         }
 
         const source_type = self.expr_types[builtin.args[0].index()];
-        if (typeContainsStorageCapability(source_type)) {
+        if (typeContainsOpaqueRuntimeCapability(source_type)) {
             try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque storage capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, source_type),
@@ -4910,7 +4914,7 @@ const TypeChecker = struct {
 
     fn storageDeriveKeyTypeSupported(self: *const TypeChecker, ty: Type) bool {
         _ = self;
-        if (typeContainsStorageCapability(ty)) return false;
+        if (typeContainsOpaqueRuntimeCapability(ty)) return false;
         return switch (unwrapRefinement(ty)) {
             .integer, .comptime_integer, .bool, .address, .fixed_bytes => true,
             else => false,

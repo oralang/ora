@@ -1343,7 +1343,7 @@ test "compiler source loader injects embedded std result module" {
     defer compilation.deinit();
 
     const package = compilation.db.sources.package(compilation.package_id);
-    try testing.expectEqual(@as(usize, 6), package.modules.items.len);
+    try testing.expectEqual(@as(usize, 5), package.modules.items.len);
 
     const graph = try compilation.db.moduleGraph(compilation.package_id);
     const root_summary = for (graph.modules) |summary| {
@@ -1355,7 +1355,7 @@ test "compiler source loader injects embedded std result module" {
     const std_summary = for (graph.modules) |summary| {
         if (summary.module_id == std_module_id) break summary;
     } else return error.TestUnexpectedResult;
-    try testing.expectEqual(@as(usize, 4), std_summary.imports.len);
+    try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
 }
 
 test "compiler lowers try expressions through real error helper ops" {

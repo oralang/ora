@@ -1,0 +1,18 @@
+resource DebtUnit = i256;
+
+contract ResourceSmtSignedNegativeBalance {
+    storage var pending: Resource<DebtUnit>;
+    storage var settled: Resource<DebtUnit>;
+
+    pub fn settle(amount: DebtUnit)
+        modifies pending, settled
+        requires amount >= 0
+        requires amount <= 100
+        requires pending >= -100
+        requires settled <= 100
+        ensures pending == old(pending) - amount
+        ensures settled == old(settled) + amount
+    {
+        @move(pending, settled, amount);
+    }
+}

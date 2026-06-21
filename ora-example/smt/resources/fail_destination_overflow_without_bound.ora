@@ -1,0 +1,11 @@
+resource TokenUnit = u256;
+
+contract ResourceSmtFailDestinationOverflowWithoutBound {
+    storage var balance: Resource<TokenUnit>;
+
+    pub fn issue(amount: TokenUnit)
+        modifies balance
+    {
+        @create(balance, amount);
+    }
+}

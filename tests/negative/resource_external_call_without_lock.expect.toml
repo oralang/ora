@@ -1,0 +1,1 @@
+expect_error = "cannot write storage slot 'balances' after external call because it was written before the call"

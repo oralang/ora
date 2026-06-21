@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests/oratosir_debloat_coverage.json"
 REQUIRED_CI_COMMANDS = {
     "zig build check-oratosir-coverage",
+    "zig build check-mlir-ora",
     "zig build check-mlir-sir",
     "zig build check-sir-text",
     "zig build test-conformance",
@@ -52,15 +53,15 @@ def validate_zig_fragment(path: Path, text: str, fragment: str, context: str) ->
     fail(f"{context} references missing Zig symbol {fragment!r} in {path.relative_to(ROOT)}")
 
 
-def validate_reference(ref: str, context: str, *, is_sir_golden: bool = False) -> None:
+def validate_reference(ref: str, context: str, *, requires_fragment: bool = False) -> None:
     path, fragment = split_ref(ref)
     if not path.exists():
         fail(f"{context} references missing file: {path.relative_to(ROOT)}")
 
     if path.suffix == ".zig" and fragment is None:
         fail(f"{context} references Zig file without #test-or-symbol: {ref}")
-    if is_sir_golden and fragment is None:
-        fail(f"{context} references SIR golden without #CHECK-fragment: {ref}")
+    if requires_fragment and fragment is None:
+        fail(f"{context} references golden without #CHECK-fragment: {ref}")
     if fragment is None:
         return
 
@@ -128,6 +129,7 @@ def main() -> None:
             require_string(pattern.get(key), f"{pattern_id}.{key}")
 
         executing_tests = require_string_list(pattern.get("executing_tests"), f"{pattern_id}.executing_tests")
+        ora_goldens = require_string_list(pattern.get("ora_goldens", []), f"{pattern_id}.ora_goldens", allow_empty=True)
         sir_goldens = require_string_list(pattern.get("sir_goldens", []), f"{pattern_id}.sir_goldens", allow_empty=True)
 
         high_churn = bool(pattern.get("high_churn", False))
@@ -138,8 +140,10 @@ def main() -> None:
 
         for ref in executing_tests:
             validate_reference(ref, pattern_id)
+        for ref in ora_goldens:
+            validate_reference(ref, pattern_id, requires_fragment=True)
         for ref in sir_goldens:
-            validate_reference(ref, pattern_id, is_sir_golden=True)
+            validate_reference(ref, pattern_id, requires_fragment=True)
 
     if high_churn_count == 0:
         fail("no high-churn patterns listed")

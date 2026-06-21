@@ -1,0 +1,26 @@
+// INPUT: ora-example/corpus/resources/transient_resource_immediate.ora
+// CHECK-LABEL: ora.contract @ResourceTransientImmediate
+// CHECK: "ora.tstore.global"()
+// CHECK-SAME: sym_name = "scratch"
+
+// CHECK-LABEL: func.func @issue
+// CHECK-SAME: ora.read_slots = ["transient:scratch"]
+// CHECK-SAME: ora.write_slots = ["transient:scratch"]
+// CHECK: ora.tload "scratch"
+// CHECK: "ora.create"
+// CHECK-SAME: domain = "TokenUnit"
+// CHECK-SAME: carrier_signed = false
+
+// CHECK-LABEL: func.func @retire
+// CHECK-SAME: ora.read_slots = ["transient:scratch"]
+// CHECK-SAME: ora.write_slots = ["transient:scratch"]
+// CHECK: ora.tload "scratch"
+// CHECK: "ora.destroy"
+// CHECK-SAME: domain = "TokenUnit"
+// CHECK-SAME: carrier_signed = false
+
+// CHECK-LABEL: func.func @move_to_self
+// CHECK-SAME: ora.read_slots = ["transient:scratch"]
+// CHECK-SAME: ora.write_slots = ["transient:scratch"]
+// CHECK: "ora.move"
+// CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1>

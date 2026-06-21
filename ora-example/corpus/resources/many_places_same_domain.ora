@@ -6,6 +6,12 @@ contract ManyPlacesSameDomain {
     storage var reserve: Resource<TokenUnit>;
     storage var fees: Resource<TokenUnit>;
 
+    pub fn issue_user(to: address, amount: TokenUnit)
+        requires user_balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(user_balances[to], amount);
+    }
+
     pub fn collect_fee(from: address, amount: TokenUnit)
         requires user_balances[from] >= amount
         requires fees <= @cast(TokenUnit, std.constants.U256_MAX) - amount
@@ -18,5 +24,17 @@ contract ManyPlacesSameDomain {
         requires reserve <= @cast(TokenUnit, std.constants.U256_MAX) - amount
     {
         @move(user_balances[from], reserve, amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return user_balances[owner];
+    }
+
+    pub fn reserveBalance() -> TokenUnit {
+        return reserve;
+    }
+
+    pub fn feesBalance() -> TokenUnit {
+        return fees;
     }
 }

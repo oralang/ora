@@ -1,0 +1,11 @@
+resource TokenUnit = u256;
+
+contract MissingModifies {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        modifies balances[from]
+    {
+        @move(balances[from], balances[to], amount);
+    }
+}

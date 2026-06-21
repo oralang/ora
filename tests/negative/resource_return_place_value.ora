@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract ReturnPlaceValue {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    fn bad(owner: address) -> Resource<TokenUnit> {
+        return balances[owner];
+    }
+}

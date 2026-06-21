@@ -1,0 +1,1 @@
+expect_error = "failed to prove contract invariant"

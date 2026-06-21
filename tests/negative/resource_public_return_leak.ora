@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract PublicReturnLeak {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn expose(owner: address) -> Resource<TokenUnit> {
+        return balances[owner];
+    }
+}

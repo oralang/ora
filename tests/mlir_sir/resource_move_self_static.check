@@ -1,0 +1,19 @@
+// INPUT: tests/conformance/resource_self_transfer.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+// CHECK-NOT: ora.move
+//
+// CHECK-LABEL: func.func @selfTransfer
+// CHECK-SAME: ora.read_slots = ["balances"]
+// CHECK-SAME: ora.write_slots = ["balances"]
+// CHECK: %hash_balances = sir.keccak256
+// CHECK: %hash_balances_{{[0-9]+}} = sir.keccak256
+// CHECK: [[SAME:%[0-9]+]] = sir.eq %hash_balances
+// CHECK: sir.cond_br [[SAME]]
+// CHECK: [[SAME_VALUE:%[0-9]+]] = sir.sload %hash_balances
+// CHECK: [[SAME_UNDERFLOW:%[0-9]+]] = sir.lt [[SAME_VALUE]]
+// CHECK: [[SAME_OK:%[0-9]+]] = sir.iszero [[SAME_UNDERFLOW]]
+// CHECK: sir.cond_br [[SAME_OK]]
+// CHECK: [[SRC:%[0-9]+]] = sir.sload %hash_balances
+// CHECK: [[DST:%[0-9]+]] = sir.sload %hash_balances_{{[0-9]+}}
+// CHECK: sir.sstore %hash_balances
+// CHECK: sir.sstore %hash_balances_{{[0-9]+}}

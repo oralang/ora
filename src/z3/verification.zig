@@ -185,6 +185,8 @@ pub const VerificationPass = struct {
     guard_id_storage: ManagedArrayList([]const u8),
     /// Storage for duplicated annotation labels/messages
     label_storage: ManagedArrayList([]const u8),
+    /// Resource operation events surfaced in SMT reports.
+    report_resource_events: ManagedArrayList(ResourceEffectEvent),
     /// Semantic constraint provenance recorded while extracting prepared queries.
     semantic_constraint_tags: std.AutoHashMap(usize, AssumptionTag),
 
@@ -275,6 +277,7 @@ pub const VerificationPass = struct {
             .location_storage = ManagedArrayList([]const u8).init(allocator),
             .guard_id_storage = ManagedArrayList([]const u8).init(allocator),
             .label_storage = ManagedArrayList([]const u8).init(allocator),
+            .report_resource_events = ManagedArrayList(ResourceEffectEvent).init(allocator),
             .semantic_constraint_tags = std.AutoHashMap(usize, AssumptionTag).init(allocator),
         };
         return pass;
@@ -335,6 +338,7 @@ pub const VerificationPass = struct {
             self.allocator.free(label);
         }
         self.label_storage.deinit();
+        self.report_resource_events.deinit();
         self.semantic_constraint_tags.deinit();
         self.runtime_reachable_function_names.deinit();
         for (self.encoded_annotations.items) |ann| {
@@ -3626,12 +3630,70 @@ pub const VerificationPass = struct {
         return combined;
     }
 
+    fn collectResourceEffectEvents(self: *VerificationPass, mlir_module: mlir.MlirModule) !void {
+        const module_op = mlir.oraModuleGetOperation(mlir_module);
+        const num_regions = mlir.oraOperationGetNumRegions(module_op);
+        for (0..@intCast(num_regions)) |region_idx| {
+            const region = mlir.oraOperationGetRegion(module_op, @intCast(region_idx));
+            try self.collectResourceEffectEventsInRegion(region, null);
+        }
+    }
+
+    fn collectResourceEffectEventsInRegion(
+        self: *VerificationPass,
+        region: mlir.MlirRegion,
+        current_function: ?[]const u8,
+    ) !void {
+        var current_block = mlir.oraRegionGetFirstBlock(region);
+        while (!mlir.oraBlockIsNull(current_block)) {
+            var current_op = mlir.oraBlockGetFirstOperation(current_block);
+            while (!mlir.oraOperationIsNull(current_op)) {
+                const op_name_ref = mlir.oraOperationGetName(current_op);
+                defer @import("mlir_c_api").freeStringRef(op_name_ref);
+                const op_name = if (op_name_ref.data == null or op_name_ref.length == 0)
+                    ""
+                else
+                    op_name_ref.data[0..op_name_ref.length];
+
+                const nested_function = if (std.mem.eql(u8, op_name, "func.func"))
+                    (try self.getFunctionNameFromOp(current_op)) orelse current_function
+                else
+                    current_function;
+
+                if (resourceEffectKindFromOpName(op_name)) |kind| {
+                    const loc = try self.getLocationInfo(current_op);
+                    const domain = (try self.getStringAttr(current_op, "domain", &self.label_storage)) orelse "unknown";
+                    try self.report_resource_events.append(.{
+                        .kind = kind,
+                        .function_name = nested_function orelse "unknown",
+                        .domain = domain,
+                        .file = loc.file,
+                        .line = loc.line,
+                        .column = loc.column,
+                    });
+                }
+
+                const num_regions = mlir.oraOperationGetNumRegions(current_op);
+                for (0..@intCast(num_regions)) |region_idx| {
+                    const nested_region = mlir.oraOperationGetRegion(current_op, @intCast(region_idx));
+                    try self.collectResourceEffectEventsInRegion(nested_region, nested_function);
+                }
+
+                current_op = mlir.oraOperationGetNextInBlock(current_op);
+            }
+            current_block = mlir.oraBlockGetNextInRegion(current_block);
+        }
+    }
+
     pub fn buildSmtReport(
         self: *VerificationPass,
         mlir_module: mlir.MlirModule,
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
+        self.report_resource_events.clearRetainingCapacity();
+        try self.collectResourceEffectEvents(mlir_module);
+
         if (self.encoded_annotations.items.len == 0) {
             self.phaseLog("report extract-annotations begin", .{});
             self.extractAnnotationsFromMLIR(mlir_module) catch |err| {
@@ -4127,6 +4189,34 @@ pub const VerificationPass = struct {
         try writer.print("- other: `{d}`\n", .{summary.fragment_counts.other});
         try writer.writeAll("\n");
 
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("## Resource Effects\n");
+        try writer.print("- Conserved moves: `{d}`\n", .{resource_summary.conserved_moves});
+        try writer.print("- Explicit creates: `{d}`\n", .{resource_summary.explicit_creates});
+        try writer.print("- Explicit destroys: `{d}`\n", .{resource_summary.explicit_destroys});
+        try writer.print("- Runtime guards: `{d}`\n", .{summary.violatable_guards});
+        try writer.print("- Proof-elided guards: `{d}`\n", .{summary.proven_guards});
+        if (self.report_resource_events.items.len == 0) {
+            try writer.writeAll("- No resource operations observed.\n");
+        } else {
+            try writer.writeAll("- Resource operation events:\n");
+            for (self.report_resource_events.items) |event| {
+                try writer.print(
+                    "  - `{s}` in `{s}` domain `{s}` at `{s}:{d}:{d}` ({s})\n",
+                    .{
+                        resourceEffectKindMarkdownLabel(event.kind),
+                        event.function_name,
+                        event.domain,
+                        event.file,
+                        event.line,
+                        event.column,
+                        resourceEffectDescription(event.kind),
+                    },
+                );
+            }
+        }
+        try writer.writeAll("\n");
+
         try writer.writeAll("## 5. Findings\n");
         if (verification_result) |vr| {
             if (vr.errors.items.len == 0 and vr.diagnostics.items.len == 0) {
@@ -4350,6 +4440,24 @@ pub const VerificationPass = struct {
         try writer.print(",\"other\":{d}", .{summary.fragment_counts.other});
         try writer.print(",\"unknown\":{d}", .{summary.fragment_counts.unknown});
         try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        const resource_summary = resourceEffectSummary(self.report_resource_events.items);
+        try writer.writeAll("\"resource_effect_summary\":{");
+        try writer.print("\"conserved_moves\":{d}", .{resource_summary.conserved_moves});
+        try writer.print(",\"explicit_creates\":{d}", .{resource_summary.explicit_creates});
+        try writer.print(",\"explicit_destroys\":{d}", .{resource_summary.explicit_destroys});
+        try writer.print(",\"runtime_guards\":{d}", .{summary.violatable_guards});
+        try writer.print(",\"proof_elided_guards\":{d}", .{summary.proven_guards});
+        try writer.writeByte('}');
+        try writer.writeByte(',');
+
+        try writer.writeAll("\"resource_effects\":[");
+        for (self.report_resource_events.items, 0..) |event, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeResourceEffectEventJson(writer, event);
+        }
+        try writer.writeByte(']');
         try writer.writeByte(',');
 
         try writer.writeAll("\"verification\":{");
@@ -6494,6 +6602,35 @@ const QueryKind = enum {
     GuardViolate,
 };
 
+const ResourceEffectKind = enum {
+    conserved_move,
+    explicit_create,
+    explicit_destroy,
+};
+
+const ResourceEffectEvent = struct {
+    kind: ResourceEffectKind,
+    function_name: []const u8,
+    domain: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
+const ResourceEffectSummary = struct {
+    conserved_moves: u64 = 0,
+    explicit_creates: u64 = 0,
+    explicit_destroys: u64 = 0,
+
+    fn add(self: *ResourceEffectSummary, kind: ResourceEffectKind) void {
+        switch (kind) {
+            .conserved_move => self.conserved_moves += 1,
+            .explicit_create => self.explicit_creates += 1,
+            .explicit_destroy => self.explicit_destroys += 1,
+        }
+    }
+};
+
 const ReportQueryRun = struct {
     status: z3.Z3_lbool = z3.Z3_L_UNDEF,
     elapsed_ms: u64 = 0,
@@ -6916,6 +7053,29 @@ fn writePrecisionNoteEventJson(writer: anytype, event: Encoder.PrecisionNoteEven
     try writer.writeByte('}');
 }
 
+fn resourceEffectSummary(events: []const ResourceEffectEvent) ResourceEffectSummary {
+    var summary = ResourceEffectSummary{};
+    for (events) |event| summary.add(event.kind);
+    return summary;
+}
+
+fn writeResourceEffectEventJson(writer: anytype, event: ResourceEffectEvent) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"kind\":");
+    try writeJsonStringEscaped(writer, resourceEffectKindLabel(event.kind));
+    try writer.writeAll(",\"description\":");
+    try writeJsonStringEscaped(writer, resourceEffectDescription(event.kind));
+    try writer.writeAll(",\"function_name\":");
+    try writeJsonStringEscaped(writer, event.function_name);
+    try writer.writeAll(",\"domain\":");
+    try writeJsonStringEscaped(writer, event.domain);
+    try writer.writeAll(",\"file\":");
+    try writeJsonStringEscaped(writer, event.file);
+    try writer.print(",\"line\":{d}", .{event.line});
+    try writer.print(",\"column\":{d}", .{event.column});
+    try writer.writeByte('}');
+}
+
 fn writeJsonStringEscaped(writer: anytype, value: []const u8) !void {
     try writer.writeByte('"');
     for (value) |ch| {
@@ -7327,6 +7487,37 @@ fn collectFunctionNamesInRegion(
         }
         current_block = mlir.oraBlockGetNextInRegion(current_block);
     }
+}
+
+fn resourceEffectKindFromOpName(op_name: []const u8) ?ResourceEffectKind {
+    if (std.mem.eql(u8, op_name, "ora.move")) return .conserved_move;
+    if (std.mem.eql(u8, op_name, "ora.create")) return .explicit_create;
+    if (std.mem.eql(u8, op_name, "ora.destroy")) return .explicit_destroy;
+    return null;
+}
+
+fn resourceEffectKindLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved_move",
+        .explicit_create => "explicit_create",
+        .explicit_destroy => "explicit_destroy",
+    };
+}
+
+fn resourceEffectKindMarkdownLabel(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "conserved move",
+        .explicit_create => "explicit create",
+        .explicit_destroy => "explicit destroy",
+    };
+}
+
+fn resourceEffectDescription(kind: ResourceEffectKind) []const u8 {
+    return switch (kind) {
+        .conserved_move => "net domain delta is zero",
+        .explicit_create => "domain boundary delta is positive",
+        .explicit_destroy => "domain boundary delta is negative",
+    };
 }
 
 fn addConstraintSlice(list: *ManagedArrayList(z3.Z3_ast), constraints: []const z3.Z3_ast) !void {
@@ -12657,6 +12848,80 @@ test "rendered SMT report omits markdown precision context when there are no pre
     defer testing.allocator.free(markdown);
 
     try testing.expect(std.mem.indexOf(u8, markdown, "- Precision context:") == null);
+}
+
+test "rendered SMT report includes resource effect summary and events" {
+    var pass = try VerificationPass.init(testing.allocator);
+    defer pass.deinit();
+
+    try pass.report_resource_events.append(.{
+        .kind = .conserved_move,
+        .function_name = "transfer",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 12,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_create,
+        .function_name = "issue",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 18,
+        .column = 9,
+    });
+    try pass.report_resource_events.append(.{
+        .kind = .explicit_destroy,
+        .function_name = "retire",
+        .domain = "TokenUnit",
+        .file = "/tmp/resource.ora",
+        .line = 24,
+        .column = 9,
+    });
+
+    const summary = ReportSummary{
+        .proven_guards = 2,
+        .violatable_guards = 1,
+    };
+    const kind_counts = ReportKindCounts{};
+
+    const markdown = try pass.renderSmtReportMarkdown(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(markdown);
+
+    try testing.expect(std.mem.indexOf(u8, markdown, "## Resource Effects") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Conserved moves: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit creates: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Explicit destroys: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Runtime guards: `1`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "- Proof-elided guards: `2`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "`conserved move` in `transfer` domain `TokenUnit`") != null);
+    try testing.expect(std.mem.indexOf(u8, markdown, "net domain delta is zero") != null);
+
+    const json = try pass.renderSmtReportJson(
+        "/tmp/resource.ora",
+        0,
+        &.{},
+        &.{},
+        summary,
+        kind_counts,
+        null,
+    );
+    defer testing.allocator.free(json);
+
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effect_summary\":{\"conserved_moves\":1,\"explicit_creates\":1,\"explicit_destroys\":1,\"runtime_guards\":1,\"proof_elided_guards\":2}") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"resource_effects\":[") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"kind\":\"conserved_move\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"description\":\"net domain delta is zero\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"function_name\":\"transfer\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"domain\":\"TokenUnit\"") != null);
 }
 
 test "rendered SMT report attributes precision events to matching proof errors" {

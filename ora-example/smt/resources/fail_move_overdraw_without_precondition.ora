@@ -1,0 +1,12 @@
+resource TokenUnit = u256;
+
+contract ResourceSmtFailMoveOverdrawWithoutPrecondition {
+    storage var left: Resource<TokenUnit>;
+    storage var right: Resource<TokenUnit>;
+
+    pub fn transfer(amount: TokenUnit)
+        modifies left, right
+    {
+        @move(left, right, amount);
+    }
+}

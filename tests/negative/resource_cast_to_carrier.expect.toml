@@ -1,0 +1,1 @@
+expect_error = "function parameter 'place' cannot have resource place type 'Resource<TokenUnit>'"

@@ -1,0 +1,22 @@
+// INPUT: ora-example/corpus/resources/resource_layout_equivalence.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// Raw u256 map path.
+// CHECK-LABEL: fn rawBalance:
+// CHECK: slot_raw_balances = const 0x0
+// CHECK: ptr = malloc
+// CHECK: mstore256 ptr v0
+// CHECK: ptr_off = add ptr
+// CHECK: mstore256 ptr_off slot_raw_balances
+// CHECK: [[RAW_SLOT:v[0-9]+]] = keccak256 ptr
+// CHECK: value = sload [[RAW_SLOT]]
+
+// Resource map path uses the same key/root/hash/load shape as the carrier map.
+// CHECK-LABEL: fn resourceBalance:
+// CHECK: slot_resource_balances = const 0x1
+// CHECK: ptr = malloc
+// CHECK: mstore256 ptr v0
+// CHECK: ptr_off = add ptr
+// CHECK: mstore256 ptr_off slot_resource_balances
+// CHECK: [[RESOURCE_SLOT:v[0-9]+]] = keccak256 ptr
+// CHECK: value = sload [[RESOURCE_SLOT]]

@@ -1,0 +1,13 @@
+resource TokenUnit = u256;
+
+struct Bucket {
+    balance: Resource<TokenUnit>;
+}
+
+contract ResourceUncomparablePlaceIdentity {
+    storage var buckets: map<address, Bucket>;
+
+    pub fn bad(from: address, to: address, amount: TokenUnit) {
+        @move(buckets[from].balance, buckets[to].balance, amount);
+    }
+}

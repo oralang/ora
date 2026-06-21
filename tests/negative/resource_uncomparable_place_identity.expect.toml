@@ -1,0 +1,1 @@
+expect_error = "resource struct-field places inside maps are not supported yet"

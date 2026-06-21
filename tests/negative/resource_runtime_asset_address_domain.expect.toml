@@ -1,0 +1,1 @@
+expect_error = "Resource<T> expects a resource-domain type argument"
