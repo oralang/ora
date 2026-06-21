@@ -2023,9 +2023,38 @@ const TypeChecker = struct {
         }
 
         return switch (ty) {
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (try self.typeContainsCapabilityResolved(element, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |array| try self.typeContainsCapabilityResolved(array.element_type.*, kind, depth + 1),
+            .slice => |slice| try self.typeContainsCapabilityResolved(slice.element_type.*, kind, depth + 1),
+            .map => |map| (map.key_type != null and try self.typeContainsCapabilityResolved(map.key_type.?.*, kind, depth + 1)) or
+                (map.value_type != null and try self.typeContainsCapabilityResolved(map.value_type.?.*, kind, depth + 1)),
+            .error_union => |error_union| try self.typeContainsCapabilityResolved(error_union.payload_type.*, kind, depth + 1),
+            .resource_domain => |resource| try self.typeContainsCapabilityResolved(resource.carrier_type.*, kind, depth + 1),
+            .function => |function| blk: {
+                for (function.param_types) |param_type| {
+                    if (try self.typeContainsCapabilityResolved(param_type, kind, depth + 1)) break :blk true;
+                }
+                for (function.return_types) |return_type| {
+                    if (try self.typeContainsCapabilityResolved(return_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .refinement => |refinement| try self.typeContainsCapabilityResolved(refinement.base_type.*, kind, depth + 1),
             .struct_ => |named| try self.namedStructContainsCapability(named.name, kind, depth + 1),
             .named => |named| blk: {
-                const item_id = self.lookupTypeItemInScope(named.name) orelse break :blk false;
+                if (self.isActiveGenericTypeParameterName(named.name)) break :blk false;
+                const item_id = self.lookupTypeItemInScope(named.name) orelse break :blk true;
                 break :blk try self.itemContainsCapability(item_id, kind, depth + 1);
             },
             .bitfield => |named| blk: {
@@ -2054,6 +2083,18 @@ const TypeChecker = struct {
         }
         const item_id = self.lookupTypeItemInScope(name) orelse return false;
         return self.itemContainsCapability(item_id, kind, depth + 1);
+    }
+
+    fn isActiveGenericTypeParameterName(self: *const TypeChecker, name: []const u8) bool {
+        const function_item_id = self.current_function_item orelse return false;
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function or !item.Function.is_generic) return false;
+        for (item.Function.parameters) |parameter| {
+            if (!self.isGenericTypeParameter(parameter)) continue;
+            const parameter_name = self.patternName(parameter.pattern) orelse continue;
+            if (std.mem.eql(u8, parameter_name, name)) return true;
+        }
+        return false;
     }
 
     fn itemContainsCapability(
