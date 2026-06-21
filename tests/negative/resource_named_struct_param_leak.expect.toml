@@ -1,0 +1,1 @@
+expect_error = "function parameter 'holder' cannot have resource place type 'Holder' as a runtime value"

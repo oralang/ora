@@ -1,1 +1,1 @@
-expect_error = "public function parameter 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'"
+expect_error = "public function parameter 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'"

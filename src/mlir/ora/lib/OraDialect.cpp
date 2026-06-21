@@ -1472,11 +1472,9 @@ namespace mlir
             if (!isSupportedResourceCarrierType(carrierType))
                 return op->emitOpError() << "resource carrier_type must be an integer type, got " << carrierType;
 
-            if (Attribute signedAttr = op->getAttr("carrier_signed"))
-            {
-                if (!llvm::isa<BoolAttr>(signedAttr))
-                    return op->emitOpError("resource carrier_signed must be a bool attribute");
-            }
+            auto signedAttr = op->getAttrOfType<BoolAttr>("carrier_signed");
+            if (!signedAttr)
+                return op->emitOpError("requires 'carrier_signed' resource attribute");
 
             if (amount.getType() != carrierType)
                 return op->emitOpError() << "amount type " << amount.getType()

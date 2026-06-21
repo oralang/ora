@@ -12,10 +12,10 @@
 // CHECK: %settled
 // CHECK-SAME: ora.sload "settled"
 // CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "TokenUnit"
 // CHECK-SAME: operandSegmentSizes = array<i32: 2, 2, 1>
-// CHECK-SAME: carrier_signed = false
 
 // CHECK-LABEL: func.func @pendingOf
 // CHECK-SAME: ora.read_slots = ["pending"]

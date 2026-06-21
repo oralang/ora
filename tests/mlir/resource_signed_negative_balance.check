@@ -7,9 +7,9 @@
 // CHECK-SAME: ora.modifies_slots = ["pending"]
 // CHECK: arith.cmpi sge
 // CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = true
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "DebtUnit"
-// CHECK-SAME: carrier_signed = true
 
 // CHECK-LABEL: func.func @settle
 // CHECK-SAME: ora.modifies_slots = ["pending", "settled"]
@@ -17,7 +17,7 @@
 // CHECK-SAME: ora.write_slots = ["pending", "settled"]
 // CHECK: arith.cmpi sge
 // CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = true
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "DebtUnit"
 // CHECK-SAME: operandSegmentSizes = array<i32: 1, 1, 1>
-// CHECK-SAME: carrier_signed = true

@@ -1596,7 +1596,8 @@ class Ora_ResourceBoundaryOp<string mnemonic, string summaryText> :
     Variadic<AnyType>:$place,
     AnyType:$amount,
     StrAttr:$domain,
-    TypeAttr:$carrier_type
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
   );
   let hasVerifier = 1;
 }
@@ -1626,7 +1627,8 @@ def Ora_MoveOp : Ora_Op<"move", [AttrSizedOperandSegments, MemoryEffects<[MemRea
     Variadic<AnyType>:$destination_place,
     AnyType:$amount,
     StrAttr:$domain,
-    TypeAttr:$carrier_type
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
   );
   let hasVerifier = 1;
 }

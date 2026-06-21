@@ -6,23 +6,23 @@
 // CHECK-SAME: ora.read_slots = ["balances"]
 // CHECK-SAME: ora.write_slots = ["balances"]
 // CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "TokenUnit"
-// CHECK-SAME: carrier_signed = false
 //
 // CHECK-LABEL: func.func @transfer
 // CHECK-SAME: ora.read_slots = ["balances", "balances"]
 // CHECK-SAME: ora.write_slots = ["balances", "balances"]
 // CHECK: "ora.move"
+// CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "TokenUnit"
 // CHECK-SAME: operandSegmentSizes = array<i32: 2, 2, 1>
-// CHECK-SAME: carrier_signed = false
 //
 // CHECK-LABEL: func.func @retire
 // CHECK-SAME: ora.read_slots = ["balances"]
 // CHECK-SAME: ora.write_slots = ["balances"]
 // CHECK: "ora.destroy"
+// CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "TokenUnit"
-// CHECK-SAME: carrier_signed = false

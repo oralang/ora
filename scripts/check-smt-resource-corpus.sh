@@ -127,6 +127,14 @@ assert_resource_report_events() {
   expected_counts="$(resource_effect_counts "$source")" || return 1
   read -r expected_moves expected_creates expected_destroys <<<"$expected_counts"
 
+  if ! grep -Eq -- "\"encoding_degraded\"[[:space:]]*:[[:space:]]*false" "$report_json" ||
+     ! grep -Eq -- "\"soundness_losses\"[[:space:]]*:[[:space:]]*\\[[[:space:]]*\\]" "$report_json" ||
+     ! grep -Eq -- "\"success\"[[:space:]]*:[[:space:]]*true" "$report_json"; then
+    echo "error: SMT pass report is degraded, has soundness losses, or is not verified for $source" >&2
+    echo "report: $report_json" >&2
+    return 1
+  fi
+
   if ! grep -Eq -- "\"conserved_moves\"[[:space:]]*:[[:space:]]*$expected_moves" "$report_json" ||
      ! grep -Eq -- "\"explicit_creates\"[[:space:]]*:[[:space:]]*$expected_creates" "$report_json" ||
      ! grep -Eq -- "\"explicit_destroys\"[[:space:]]*:[[:space:]]*$expected_destroys" "$report_json"; then

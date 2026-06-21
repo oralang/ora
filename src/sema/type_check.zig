@@ -281,6 +281,11 @@ fn typeContainsOpaqueRuntimeCapability(ty: Type) bool {
     return typeContainsStorageCapability(ty) or typeContainsResourcePlace(ty);
 }
 
+const OpaqueRuntimeCapabilityKind = enum {
+    storage,
+    resource,
+};
+
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .refinement) {
         switch (refinements.kindForName(expected_type.refinement.name) orelse return false) {
@@ -1289,8 +1294,8 @@ const TypeChecker = struct {
                 var indexed_count: usize = 0;
                 for (log_decl.fields) |field| {
                     const field_type = try self.resolveTypeExpr(field.type_expr);
-                    if (typeContainsOpaqueRuntimeCapability(field_type)) {
-                        try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque storage capability type '{s}'", .{
+                    if (try self.typeContainsOpaqueRuntimeCapabilityResolved(field_type)) {
+                        try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque runtime capability type '{s}'", .{
                             field.name,
                             diagnosticTypeDisplayName(self, field_type),
                         });
@@ -1900,8 +1905,8 @@ const TypeChecker = struct {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
-            if (typeContainsOpaqueRuntimeCapability(param_type)) {
-                try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque storage capability type '{s}'", .{
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(param_type)) {
+                try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque runtime capability type '{s}'", .{
                     name,
                     diagnosticTypeDisplayName(self, param_type),
                 });
@@ -1922,8 +1927,8 @@ const TypeChecker = struct {
         }
 
         if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
-            if (typeContainsOpaqueRuntimeCapability(self.current_return_type.?)) {
-                try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque storage capability return type '{s}'", .{
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(self.current_return_type.?)) {
+                try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque runtime capability return type '{s}'", .{
                     function.name,
                     diagnosticTypeDisplayName(self, self.current_return_type.?),
                 });
@@ -1992,13 +1997,102 @@ const TypeChecker = struct {
         });
     }
 
+    fn typeContainsOpaqueRuntimeCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        if (try self.typeContainsCapabilityResolved(ty, .storage, 0)) return true;
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsStorageCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .storage, 0);
+    }
+
+    fn typeContainsResourcePlaceResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsCapabilityResolved(
+        self: *TypeChecker,
+        ty: Type,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        switch (kind) {
+            .storage => if (typeContainsStorageCapability(ty)) return true,
+            .resource => if (typeContainsResourcePlace(ty)) return true,
+        }
+
+        return switch (ty) {
+            .struct_ => |named| try self.namedStructContainsCapability(named.name, kind, depth + 1),
+            .named => |named| blk: {
+                const item_id = self.lookupTypeItemInScope(named.name) orelse break :blk false;
+                break :blk try self.itemContainsCapability(item_id, kind, depth + 1);
+            },
+            .bitfield => |named| blk: {
+                if (self.instantiatedBitfieldByName(named.name)) |instantiated| {
+                    for (instantiated.fields) |field| {
+                        if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn namedStructContainsCapability(
+        self: *TypeChecker,
+        name: []const u8,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (self.instantiatedStructByName(name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) return true;
+            }
+            return false;
+        }
+        const item_id = self.lookupTypeItemInScope(name) orelse return false;
+        return self.itemContainsCapability(item_id, kind, depth + 1);
+    }
+
+    fn itemContainsCapability(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        return switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| blk: {
+                for (struct_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .TypeAlias => |type_alias| blk: {
+                const target_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk true;
+                break :blk try self.typeContainsCapabilityResolved(target_type, kind, depth + 1);
+            },
+            .Bitfield => |bitfield_item| blk: {
+                for (bitfield_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
     fn checkRuntimeResourcePlaceParameter(
         self: *TypeChecker,
         range: source.TextRange,
         pattern_id: ast.PatternId,
         ty: Type,
     ) !void {
-        if (!typeContainsResourcePlace(ty)) return;
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
         const name = self.patternName(pattern_id) orelse "<param>";
         try self.emitRangeError(range, "function parameter '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
             name,
@@ -2012,7 +2106,7 @@ const TypeChecker = struct {
         function_name: []const u8,
         ty: Type,
     ) !void {
-        if (!typeContainsResourcePlace(ty)) return;
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
         try self.emitRangeError(range, "function '{s}' cannot return resource place type '{s}'; resource places are not first-class runtime values", .{
             function_name,
             diagnosticTypeDisplayName(self, ty),
@@ -2025,7 +2119,7 @@ const TypeChecker = struct {
         pattern_id: ast.PatternId,
         ty: Type,
     ) !void {
-        if (!typeContainsResourcePlace(ty)) return;
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
         const name = self.patternName(pattern_id) orelse "<local>";
         try self.emitRangeError(range, "local '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
             name,
@@ -2034,7 +2128,7 @@ const TypeChecker = struct {
     }
 
     fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
-        if (typeContainsStorageCapability(ty)) {
+        if (try self.typeContainsStorageCapabilityResolved(ty)) {
             try self.emitRangeError(range, "storage declarations cannot use opaque storage capability type '{s}'", .{
                 diagnosticTypeDisplayName(self, ty),
             });
@@ -4590,8 +4684,8 @@ const TypeChecker = struct {
         }
 
         const target_type = try self.resolveTypeExprInCurrentContext(builtin.type_arg.?);
-        if (typeContainsOpaqueRuntimeCapability(target_type)) {
-            try self.emitRangeError(builtin.range, "@{s} cannot construct opaque storage capability type '{s}'", .{
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(target_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot construct opaque runtime capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, target_type),
             });
@@ -4599,8 +4693,8 @@ const TypeChecker = struct {
         }
 
         const source_type = self.expr_types[builtin.args[0].index()];
-        if (typeContainsOpaqueRuntimeCapability(source_type)) {
-            try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque storage capability type '{s}'", .{
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(source_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque runtime capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, source_type),
             });
@@ -7562,7 +7656,10 @@ const TypeChecker = struct {
     }
 
     fn collectResourcePlaceReadWrite(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) !void {
-        const slot = self.placeSlotForExpr(expr_id) orelse return;
+        const slot = self.placeSlotForExpr(expr_id) orelse {
+            try self.emitExprError(expr_id, "resource operation place does not resolve to a storage or transient effect slot", .{});
+            return;
+        };
         try self.appendUniqueEffectSlot(&state.reads, slot);
         try self.appendUniqueEffectSlot(&state.writes, slot);
     }

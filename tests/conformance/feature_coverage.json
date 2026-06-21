@@ -326,6 +326,7 @@
       "negative_specs": [
         "tests/negative/resource_nested_resource.ora",
         "tests/negative/resource_public_param_leak.ora",
+        "tests/negative/resource_named_struct_param_leak.ora",
         "tests/negative/resource_public_return_leak.ora",
         "tests/negative/resource_place_event_leak.ora",
         "tests/negative/resource_local_place_value.ora",
@@ -363,6 +364,7 @@
         "tests/negative/resource_signed_carrier_overflow.ora",
         "tests/negative/resource_nested_resource.ora",
         "tests/negative/resource_public_param_leak.ora",
+        "tests/negative/resource_named_struct_param_leak.ora",
         "tests/negative/resource_public_return_leak.ora",
         "tests/negative/resource_place_event_leak.ora",
         "tests/negative/resource_local_place_value.ora",

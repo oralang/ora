@@ -8,16 +8,16 @@
 // CHECK-SAME: ora.write_slots = ["transient:scratch"]
 // CHECK: ora.tload "scratch"
 // CHECK: "ora.create"
-// CHECK-SAME: domain = "TokenUnit"
 // CHECK-SAME: carrier_signed = false
+// CHECK-SAME: domain = "TokenUnit"
 
 // CHECK-LABEL: func.func @retire
 // CHECK-SAME: ora.read_slots = ["transient:scratch"]
 // CHECK-SAME: ora.write_slots = ["transient:scratch"]
 // CHECK: ora.tload "scratch"
 // CHECK: "ora.destroy"
-// CHECK-SAME: domain = "TokenUnit"
 // CHECK-SAME: carrier_signed = false
+// CHECK-SAME: domain = "TokenUnit"
 
 // CHECK-LABEL: func.func @move_to_self
 // CHECK-SAME: ora.read_slots = ["transient:scratch"]

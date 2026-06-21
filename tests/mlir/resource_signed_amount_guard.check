@@ -9,6 +9,6 @@
 // CHECK-SAME: ora.write_slots = ["debts"]
 // CHECK: arith.cmpi sge
 // CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = true
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "DebtUnit"
-// CHECK-SAME: carrier_signed = true

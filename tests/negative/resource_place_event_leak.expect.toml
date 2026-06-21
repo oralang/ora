@@ -1,1 +1,1 @@
-expect_error = "log field 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'"
+expect_error = "log field 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'"

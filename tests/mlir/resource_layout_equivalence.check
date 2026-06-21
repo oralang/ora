@@ -10,9 +10,9 @@
 // CHECK-LABEL: func.func @issue_resource
 // CHECK-SAME: ora.modifies_slots = ["resource_balances[param#0]"]
 // CHECK: "ora.create"
+// CHECK-SAME: carrier_signed = false
 // CHECK-SAME: carrier_type = i256
 // CHECK-SAME: domain = "TokenUnit"
-// CHECK-SAME: carrier_signed = false
 
 // CHECK-LABEL: func.func @rawBalance
 // CHECK-SAME: ora.read_slots = ["raw_balances"]

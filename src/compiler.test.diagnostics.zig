@@ -585,13 +585,13 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\contract Vault {
         \\    pub fn leak(slot: StorageSlot) {}
         \\}
-    , .typecheck, "public function parameter 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+    , .typecheck, "public function parameter 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
         \\    pub fn leak() -> StorageRange {}
         \\}
-    , .typecheck, "public function 'leak' cannot expose opaque storage capability return type 'StorageRange'");
+    , .typecheck, "public function 'leak' cannot expose opaque runtime capability return type 'StorageRange'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -611,7 +611,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        let slot: StorageSlot = @cast(StorageSlot, raw);
         \\    }
         \\}
-    , .typecheck, "@cast cannot construct opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@cast cannot construct opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -619,7 +619,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        let slot: StorageSlot = @bitCast(StorageSlot, raw);
         \\    }
         \\}
-    , .typecheck, "@bitCast cannot construct opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@bitCast cannot construct opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -628,7 +628,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        return @cast(u256, slot);
         \\    }
         \\}
-    , .typecheck, "@cast cannot reinterpret opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@cast cannot reinterpret opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -637,7 +637,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        return @truncate(u256, slot);
         \\    }
         \\}
-    , .typecheck, "@truncate cannot reinterpret opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@truncate cannot reinterpret opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -814,7 +814,7 @@ test "compiler rejects invalid resource declarations and first-class resource pl
         \\contract Vault {
         \\    pub fn expose(place: Resource<TokenUnit>) {}
         \\}
-    , .typecheck, "public function parameter 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
+    , .typecheck, "public function parameter 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
 
     try expectDiagnosticProbeContains(
         \\resource TokenUnit = u256;
@@ -830,7 +830,7 @@ test "compiler rejects invalid resource declarations and first-class resource pl
         \\contract Vault {
         \\    log Bad(place: Resource<TokenUnit>);
         \\}
-    , .typecheck, "log field 'place' cannot expose opaque storage capability type 'Resource<TokenUnit>'");
+    , .typecheck, "log field 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
 
     try expectDiagnosticProbeContains(
         \\resource USDC = u256;
@@ -2135,13 +2135,13 @@ test "compiler rejects opaque storage capability log fields" {
         \\contract C {
         \\    log Bad(slot: StorageSlot);
         \\}
-    , .typecheck, "log field 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+    , .typecheck, "log field 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract C {
         \\    log Bad(indexed range: StorageRange);
         \\}
-    , .typecheck, "log field 'range' cannot expose opaque storage capability type 'StorageRange'");
+    , .typecheck, "log field 'range' cannot expose opaque runtime capability type 'StorageRange'");
 }
 
 test "compiler reports invalid constant shift amounts" {

@@ -1,1 +1,1 @@
-expect_error = "@cast cannot construct opaque storage capability type 'Resource<TokenUnit>'"
+expect_error = "@cast cannot construct opaque runtime capability type 'Resource<TokenUnit>'"

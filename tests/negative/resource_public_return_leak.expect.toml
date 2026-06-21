@@ -1,1 +1,1 @@
-expect_error = "public function 'expose' cannot expose opaque storage capability return type 'Resource<TokenUnit>'"
+expect_error = "public function 'expose' cannot expose opaque runtime capability return type 'Resource<TokenUnit>'"
