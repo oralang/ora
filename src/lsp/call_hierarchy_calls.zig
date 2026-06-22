@@ -60,7 +60,7 @@ pub fn appendIncomingImportedMatches(
     target_name: []const u8,
     range_converter: anytype,
 ) !void {
-    var matches = std.ArrayList(MatchedIncomingCall){};
+    var matches = std.ArrayList(MatchedIncomingCall).empty;
     defer matches.deinit(arena);
     try matches.ensureTotalCapacity(arena, entry.imported_members.len);
 
@@ -75,7 +75,7 @@ pub fn appendIncomingImportedMatches(
     }
     if (matches.items.len == 0) return;
 
-    var caller_counts = std.ArrayList(IncomingCallerCount){};
+    var caller_counts = std.ArrayList(IncomingCallerCount).empty;
     defer {
         for (caller_counts.items) |count| arena.free(count.ranges);
         caller_counts.deinit(arena);
@@ -163,7 +163,7 @@ pub fn outgoingCallsWithResolver(
     defer arena.free(targets);
     if (targets.len == 0) return null;
 
-    var calls = std.ArrayList(types.CallHierarchyOutgoingCall){};
+    var calls = std.ArrayList(types.CallHierarchyOutgoingCall).empty;
     try calls.ensureTotalCapacity(arena, targets.len);
     for (targets) |target| {
         const resolved = if (entry.callableSymbolNamed(target.callee_name)) |sym|

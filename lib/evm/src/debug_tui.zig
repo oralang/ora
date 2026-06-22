@@ -52,7 +52,7 @@ pub const AppConfig = struct {
     sir_path: ?[]u8 = null,
     debug_info_path: ?[]u8 = null,
     abi_path: ?[]u8 = null,
-    secondary_abi_specs: std.ArrayList(SecondaryAbiSpec) = .{},
+    secondary_abi_specs: std.ArrayList(SecondaryAbiSpec) = .empty,
     init_calldata: []u8 = &.{},
     init_calldata_fallback: []u8 = &.{},
     calldata: []u8 = &.{},
@@ -239,15 +239,15 @@ pub const Ui = struct {
     sir_buffer: vaxis.widgets.TextView.Buffer = .{},
     sir_view: vaxis.widgets.CodeView = .{},
     command_mode: bool = false,
-    command_buffer: std.ArrayList(u8) = .{},
+    command_buffer: std.ArrayList(u8) = .empty,
     command_status: []const u8 = "ready",
-    command_status_storage: std.ArrayList(u8) = .{},
-    command_log: std.ArrayList([]u8) = .{},
-    render_scratch: std.ArrayList(u8) = .{},
-    step_history: std.ArrayList(StepMode) = .{},
-    previous_bindings: std.ArrayList(BindingSnapshotEntry) = .{},
-    breakpoints: std.ArrayList(Breakpoint) = .{},
-    checkpoints: std.ArrayList(Checkpoint) = .{},
+    command_status_storage: std.ArrayList(u8) = .empty,
+    command_log: std.ArrayList([]u8) = .empty,
+    render_scratch: std.ArrayList(u8) = .empty,
+    step_history: std.ArrayList(StepMode) = .empty,
+    previous_bindings: std.ArrayList(BindingSnapshotEntry) = .empty,
+    breakpoints: std.ArrayList(Breakpoint) = .empty,
+    checkpoints: std.ArrayList(Checkpoint) = .empty,
     next_checkpoint_id: u32 = 1,
     selected_frame_index: usize = 0,
     overlay_mode: OverlayMode = .none,
@@ -819,7 +819,7 @@ pub const Ui = struct {
     /// — the minimal subset is `SF:<path>` followed by `DA:<line>,<count>`
     /// rows and an `end_of_record` terminator.
     fn exportLcov(self: *Ui, path: []const u8) !usize {
-        var entries: std.ArrayList(Debugger.LineHit) = .{};
+        var entries: std.ArrayList(Debugger.LineHit) = .empty;
         defer entries.deinit(self.allocator);
 
         // Reuse the existing top-N getter with a large N so we
@@ -831,7 +831,7 @@ pub const Ui = struct {
         const top = try self.session.debugger.getLineHitsTopN(self.allocator, std.math.maxInt(usize));
         defer self.allocator.free(top);
 
-        var out: std.ArrayList(u8) = .{};
+        var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.allocator);
         var w = out.writer(self.allocator);
 
@@ -841,7 +841,7 @@ pub const Ui = struct {
         }
         try w.print("LH:{d}\nLF:{d}\nend_of_record\n", .{ top.len, top.len });
 
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = out.items });
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = path, .data = out.items });
         return top.len;
     }
     fn cmdGasCoverage(self: *Ui, arg: []const u8) anyerror!CommandOutcome {
@@ -2698,7 +2698,7 @@ pub const Ui = struct {
 
         const current_source = if (line != 0) blk: {
             if (self.session.debugger.getSourceLineText(line)) |line_text| {
-                break :blk std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t");
+                break :blk std.mem.trim(u8, std.mem.trimEnd(u8, line_text, "\r"), " \t");
             }
             break :blk "";
         } else "";
@@ -2939,7 +2939,7 @@ pub const Ui = struct {
             const line = self.scroll_line + visible_row;
             if (line > self.session.debugger.totalSourceLines()) break;
             const line_text = self.session.debugger.getSourceLineText(line) orelse continue;
-            const text = std.mem.trimRight(u8, line_text, "\r");
+            const text = std.mem.trimEnd(u8, line_text, "\r");
             const style = if (line == current_line)
                 Style{ .bg = Color.rgbFromUint(0x303A45), .fg = Color.rgbFromUint(0xF5F7FA) }
             else if (self.isFoldedSourceLine(line))
@@ -3289,7 +3289,7 @@ pub const Ui = struct {
 
     fn isMeaningfulRemovedSourceText(self: *Ui, line: u32) bool {
         const raw = self.session.debugger.getSourceLineText(line) orelse return false;
-        const text = std.mem.trim(u8, std.mem.trimRight(u8, raw, "\r"), " \t");
+        const text = std.mem.trim(u8, std.mem.trimEnd(u8, raw, "\r"), " \t");
         if (text.len == 0) return false;
         if (std.mem.eql(u8, text, "{")) return false;
         if (std.mem.eql(u8, text, "}")) return false;
@@ -3305,7 +3305,7 @@ pub const Ui = struct {
 
     fn isStructuralSourceLine(self: *Ui, line: u32) bool {
         const raw = self.session.debugger.getSourceLineText(line) orelse return false;
-        const text = std.mem.trim(u8, std.mem.trimRight(u8, raw, "\r"), " \t");
+        const text = std.mem.trim(u8, std.mem.trimEnd(u8, raw, "\r"), " \t");
         if (text.len == 0) return false;
         if (std.mem.eql(u8, text, "{")) return true;
         if (std.mem.eql(u8, text, "}")) return true;
@@ -3319,7 +3319,7 @@ pub const Ui = struct {
         const current_line = self.currentDisplayLine() orelse 0;
         const source_text = if (current_line != 0)
             if (self.session.debugger.getSourceLineText(current_line)) |line_text|
-                std.mem.trim(u8, std.mem.trimRight(u8, line_text, "\r"), " \t")
+                std.mem.trim(u8, std.mem.trimEnd(u8, line_text, "\r"), " \t")
             else
                 ""
         else
@@ -4922,10 +4922,10 @@ pub fn parseStepMode(name: []const u8) ?StepMode {
     return null;
 }
 
-pub fn main() !void {
-    runMain() catch |err| {
+pub fn main(init: std.process.Init) !void {
+    runMain(init.minimal.args) catch |err| {
         var stderr_buffer: [1024]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+        var stderr_writer = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer);
         const stderr = &stderr_writer.interface;
         switch (err) {
             error.DeploymentRevertedWithNoRuntime => {
@@ -4938,12 +4938,12 @@ pub fn main() !void {
     };
 }
 
-fn runMain() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
+fn runMain(process_args: std.process.Args) !void {
+    var gpa_state = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_state.deinit();
     const allocator = gpa_state.allocator();
 
-    var config = try parseArgs(allocator);
+    var config = try parseArgs(allocator, process_args);
     var seed = try loadSeedFromConfig(allocator, &config);
     var ui = Ui.init(allocator, config, seed) catch |err| {
         seed.deinit(allocator);
@@ -5098,15 +5098,38 @@ pub fn loadSeedFromConfig(allocator: std.mem.Allocator, config: *const AppConfig
 }
 
 fn canonicalizeSourcePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return std.fs.cwd().realpathAlloc(allocator, path) catch |err| switch (err) {
-        error.FileNotFound, error.NameTooLong, error.AccessDenied, error.NotDir => try allocator.dupe(u8, path),
+    const real_z = std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), path, allocator) catch |err| switch (err) {
+        error.FileNotFound, error.NameTooLong, error.AccessDenied, error.NotDir => return allocator.dupe(u8, path),
         else => return err,
     };
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+fn collectArgs(allocator: std.mem.Allocator, process_args: std.process.Args) ![][]u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(process_args, allocator);
+    defer iterator.deinit();
+
+    var list: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (list.items) |arg| allocator.free(arg);
+        list.deinit(allocator);
+    }
+
+    while (iterator.next()) |arg| {
+        try list.append(allocator, try allocator.dupe(u8, arg));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+fn freeArgs(allocator: std.mem.Allocator, args: [][]u8) void {
+    for (args) |arg| allocator.free(arg);
+    allocator.free(args);
+}
+
+fn parseArgs(allocator: std.mem.Allocator, process_args: std.process.Args) !AppConfig {
+    const args = try collectArgs(allocator, process_args);
+    defer freeArgs(allocator, args);
 
     if (args.len < 4) {
         try printUsage();
@@ -5126,13 +5149,13 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
     var signature: ?[]u8 = null;
     defer if (signature) |sig| allocator.free(sig);
 
-    var init_raw_args: std.ArrayList([]u8) = .{};
+    var init_raw_args: std.ArrayList([]u8) = .empty;
     defer {
         for (init_raw_args.items) |item| allocator.free(item);
         init_raw_args.deinit(allocator);
     }
 
-    var raw_args: std.ArrayList([]u8) = .{};
+    var raw_args: std.ArrayList([]u8) = .empty;
     defer {
         for (raw_args.items) |item| allocator.free(item);
         raw_args.deinit(allocator);
@@ -5249,7 +5272,7 @@ fn parseArgs(allocator: std.mem.Allocator) !AppConfig {
 
 fn printUsage() !void {
     var stderr_buffer: [2048]u8 = undefined;
-    var stderr_file = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_file = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer);
     const stderr = &stderr_file.interface;
     try stderr.print(
         \\usage:
@@ -5279,7 +5302,7 @@ fn printUsage() !void {
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return false;
     return true;
 }
 
@@ -5470,7 +5493,7 @@ fn normalizeAbiSignature(allocator: std.mem.Allocator, signature: []const u8) ![
     const name = std.mem.trim(u8, signature[0..open], " \t");
     const raw_types = signature[open + 1 .. close];
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.appendSlice(allocator, name);

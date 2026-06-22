@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
     const mod = createLibMod(b, target, optimize, tables_path_opt, build_config_path);
 
     // b.addModule with an existing module
-    _ = b.modules.put(b.dupe("uucode"), mod.lib) catch @panic("OOM");
+    _ = b.modules.put(b.allocator, b.dupe("uucode"), mod.lib) catch @panic("OOM");
     b.addNamedLazyPath("tables.zig", mod.tables_path);
 
     const test_mod = createLibMod(b, target, optimize, null, b.path("src/build/test_build_config.zig"));

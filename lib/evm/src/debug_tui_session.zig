@@ -161,7 +161,7 @@ pub fn writeSession(ui: *Ui, path: []const u8) !void {
         .checkpoints = saved_checkpoints,
     };
 
-    var json_buf: std.ArrayList(u8) = .{};
+    var json_buf: std.ArrayList(u8) = .empty;
     defer json_buf.deinit(ui.allocator);
     var writer = json_buf.writer(ui.allocator);
     var adapter_buf: [256]u8 = undefined;
@@ -172,7 +172,7 @@ pub fn writeSession(ui: *Ui, path: []const u8) !void {
     };
     try jw.write(session);
     if (adapter.err) |err| return err;
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = json_buf.items });
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = path, .data = json_buf.items });
 }
 
 /// Load a session JSON from `path`, replacing the current session

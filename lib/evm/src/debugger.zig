@@ -130,7 +130,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
                 .source_text = source_text,
                 .source_lines = lines,
                 .breakpoints = std.AutoHashMap(u32, void).init(allocator),
-                .watchpoints = .{},
+                .watchpoints = .empty,
                 .next_watchpoint_id = 1,
                 .last_watchpoint_id = null,
                 .ignored_invalid_idx = std.AutoHashMap(u32, void).init(allocator),
@@ -188,7 +188,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             // Bucket entries by statement_id, splitting into invalid-op idx
             // and "has at least one real op" flag.
             const ScratchEntry = struct {
-                invalid_idxs: std.ArrayList(u32) = .{},
+                invalid_idxs: std.ArrayList(u32) = .empty,
                 has_real_op: bool = false,
             };
             var by_stmt = std.AutoHashMap(u32, ScratchEntry).init(self.allocator);
@@ -353,7 +353,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Returns the `n` hottest lines by hit count, sorted descending.
         /// Caller owns the returned slice.
         pub fn getLineHitsTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineHit {
-            var entries: std.ArrayList(LineHit) = .{};
+            var entries: std.ArrayList(LineHit) = .empty;
             errdefer entries.deinit(allocator);
             try entries.ensureTotalCapacity(allocator, self.line_hits.count());
             var it = self.line_hits.iterator();
@@ -394,7 +394,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         /// Returns the `n` lines with the most cumulative gas spent,
         /// sorted descending. Caller owns the returned slice.
         pub fn getLineGasTopN(self: *const Self, allocator: std.mem.Allocator, n: usize) ![]LineGas {
-            var entries: std.ArrayList(LineGas) = .{};
+            var entries: std.ArrayList(LineGas) = .empty;
             errdefer entries.deinit(allocator);
             try entries.ensureTotalCapacity(allocator, self.line_gas.count());
             var it = self.line_gas.iterator();
@@ -632,7 +632,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
             const bindings = try self.getVisibleBindings(allocator);
             errdefer allocator.free(bindings);
 
-            var writable: std.ArrayList(DebugInfo.VisibleBinding) = .{};
+            var writable: std.ArrayList(DebugInfo.VisibleBinding) = .empty;
             defer writable.deinit(allocator);
 
             for (bindings) |binding| {
@@ -1046,7 +1046,7 @@ pub fn Debugger(comptime config: evm_config.EvmConfig) type {
         }
 
         fn buildLineIndex(allocator: std.mem.Allocator, text: []const u8) ![]LineSlice {
-            var lines: std.ArrayList(LineSlice) = .{};
+            var lines: std.ArrayList(LineSlice) = .empty;
             var start: u32 = 0;
 
             for (text, 0..) |c, i| {

@@ -280,11 +280,11 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
     defer values.deinit();
     var pointers = std.StringHashMap(Pointer).init(testing.allocator);
     defer pointers.deinit();
-    var allocation_order = std.ArrayList([]const u8){};
+    var allocation_order = std.ArrayList([]const u8).empty;
     defer allocation_order.deinit(testing.allocator);
-    var stores = std.ArrayList(Store){};
+    var stores = std.ArrayList(Store).empty;
     defer stores.deinit(testing.allocator);
-    var pointer_stores = std.ArrayList(PointerStore){};
+    var pointer_stores = std.ArrayList(PointerStore).empty;
     defer pointer_stores.deinit(testing.allocator);
     var selected_base: ?[]const u8 = null;
 
@@ -601,7 +601,7 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
         }
     };
 
-    var all_lines = std.ArrayList([]const u8){};
+    var all_lines = std.ArrayList([]const u8).empty;
     defer all_lines.deinit(testing.allocator);
     var lines = std.mem.splitScalar(u8, fn_text, '\n');
     while (lines.next()) |raw_line| {
@@ -609,7 +609,7 @@ fn extractAbiBytesFromSir(sir_text: []const u8, function_name: []const u8, paylo
         try all_lines.append(testing.allocator, line);
     }
 
-    var blocks = std.ArrayList(SirBlock){};
+    var blocks = std.ArrayList(SirBlock).empty;
     defer {
         for (blocks.items) |block| {
             testing.allocator.free(block.inputs);
@@ -1166,7 +1166,7 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
         .{ .name = "err_mixed_dynamic_address_array_tuple_invalid_address", .ora_type = "(u256, slice[address])", .target_type = address_tuple_ty, .payload = mixed_invalid_address, .expected = .invalid_address },
     };
 
-    var runtime_source = std.ArrayList(u8){};
+    var runtime_source = std.ArrayList(u8).empty;
     defer runtime_source.deinit(testing.allocator);
     try runtime_source.appendSlice(testing.allocator, "contract Decode {\n");
     for (cases) |case| {
@@ -1184,7 +1184,7 @@ test "compiler abiDecode dynamic error fixtures expose exact error variants" {
     }
     try runtime_source.appendSlice(testing.allocator, "}\n");
 
-    var expected_runtime = std.ArrayList(ExpectedDecodeError){};
+    var expected_runtime = std.ArrayList(ExpectedDecodeError).empty;
     defer expected_runtime.deinit(testing.allocator);
     for (cases) |case| {
         try expected_runtime.append(testing.allocator, .{
@@ -4928,7 +4928,7 @@ test "compiler abiDecode N4b runtime mutation fuzz matches comptime oracle" {
         .{ .ora_type = "NonZeroU256" },
     };
 
-    var cases = std.ArrayList(RuntimeAbiDecodeFuzzCase){};
+    var cases = std.ArrayList(RuntimeAbiDecodeFuzzCase).empty;
     defer {
         for (cases.items) |case| {
             testing.allocator.free(case.name);
@@ -4985,14 +4985,14 @@ test "compiler abiDecode N4b runtime mutation fuzz matches comptime oracle" {
         });
     }
 
-    var comptime_source = std.ArrayList(u8){};
+    var comptime_source = std.ArrayList(u8).empty;
     defer comptime_source.deinit(testing.allocator);
-    var runtime_source = std.ArrayList(u8){};
+    var runtime_source = std.ArrayList(u8).empty;
     defer runtime_source.deinit(testing.allocator);
     try appendRuntimeAbiDecodeFuzzPrelude(&comptime_source, false);
     try appendRuntimeAbiDecodeFuzzPrelude(&runtime_source, true);
 
-    var names = std.ArrayList([]const u8){};
+    var names = std.ArrayList([]const u8).empty;
     defer names.deinit(testing.allocator);
     for (cases.items) |case| {
         try names.append(testing.allocator, case.name);

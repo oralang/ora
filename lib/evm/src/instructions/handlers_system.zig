@@ -164,7 +164,7 @@ pub fn Handlers(FrameType: type) type {
                         break :blk has_balance or has_code or has_nonce;
                     } else {
                         const has_balance = (evm.balances.get(call_address) orelse 0) > 0;
-                        const has_code = (evm.code.get(call_address) orelse &[_]u8{}).len > 0;
+                        const has_code = if (evm.code.get(call_address)) |code| code.len > 0 else false;
                         const has_nonce = (evm.nonces.get(call_address) orelse 0) > 0;
                         break :blk has_balance or has_code or has_nonce;
                     }
@@ -843,7 +843,7 @@ pub fn Handlers(FrameType: type) type {
                         break :blk has_balance or has_code or has_nonce;
                     } else {
                         const has_balance = (evm_ptr.balances.get(beneficiary) orelse 0) > 0;
-                        const has_code = (evm_ptr.code.get(beneficiary) orelse &[_]u8{}).len > 0;
+                        const has_code = if (evm_ptr.code.get(beneficiary)) |code| code.len > 0 else false;
                         const has_nonce = (evm_ptr.nonces.get(beneficiary) orelse 0) > 0;
                         break :blk has_balance or has_code or has_nonce;
                     }

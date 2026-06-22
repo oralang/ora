@@ -37,6 +37,20 @@ fn pathFromTmpAlloc(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, rel_p
     return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, rel_path });
 }
 
+fn runOraProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.process.RunResult {
+    var io_thread = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer io_thread.deinit();
+
+    return std.process.run(allocator, io_thread.io(), .{
+        .argv = argv,
+        .stdout_limit = std.Io.Limit.limited(1024 * 1024),
+        .stderr_limit = std.Io.Limit.limited(1024 * 1024),
+    });
+}
+
 fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -1226,7 +1240,7 @@ test "compiler tracks resource builtin effects for modifies and locks" {
 }
 
 test "compiler build rejects unbounded computed storage ranges without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1234,7 +1248,7 @@ test "compiler build rejects unbounded computed storage ranges without artifacts
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const std_storage = @import("std/storage");
@@ -1249,38 +1263,34 @@ test "compiler build rejects unbounded computed storage ranges without artifacts
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "`modifies` computed storage ranges require a literal bounded word count in v1") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "`modifies` computed storage ranges require a literal bounded word count in v1"));
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
 }
 
 test "compiler abi emit barrier rejects undefined types without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1288,7 +1298,7 @@ test "compiler abi emit barrier rejects undefined types without artifacts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -1300,43 +1310,39 @@ test "compiler abi emit barrier rejects undefined types without artifacts" {
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi:extras",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi:extras",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined type 'Bogus'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "undefined type 'Bogus'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
 test "compiler abi emit barrier rejects undefined error-union errors without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1344,7 +1350,7 @@ test "compiler abi emit barrier rejects undefined error-union errors without art
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -1354,43 +1360,39 @@ test "compiler abi emit barrier rejects undefined error-union errors without art
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "undefined error 'BadErr'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "undefined error 'BadErr'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
 test "compiler abi emit barrier rejects error-union pipes without bang without artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1398,7 +1400,7 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Vault {
@@ -1408,43 +1410,39 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "emit",
-            "--emit=abi",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "error-union types must start with '!'") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "error-union types must start with '!'"));
 
-    var out_dir = try tmp.dir.openDir("out", .{ .iterate = true });
-    defer out_dir.close();
+    var out_dir = try tmp.dir.openDir(std.testing.io, "out", .{ .iterate = true });
+    defer out_dir.close(std.testing.io);
     var iter = out_dir.iterate();
-    try testing.expect((try iter.next()) == null);
+    try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
 test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1452,7 +1450,7 @@ test "compiler build rejects unsupported local Result aggregate carriers before 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\error Failure;
@@ -1466,39 +1464,35 @@ test "compiler build rejects unsupported local Result aggregate carriers before 
         \\}
         ,
     });
-    try tmp.dir.makeDir("out");
+    try tmp.dir.createDirPath(std.testing.io, "out");
 
     const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
     defer testing.allocator.free(root_path);
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "local Result aggregate values currently require a scalar success payload") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "local Result aggregate values currently require a scalar success payload"));
 
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
 }
 
 test "compiler build removes partial artifacts when native SIR lowering fails" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1506,7 +1500,7 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Entry {
@@ -1522,22 +1516,18 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expect(code != 0),
+        .exited => |code| try testing.expect(code != 0),
         else => return error.TestUnexpectedResult,
     }
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "unsupported dynamic ABI type for dispatcher") or
@@ -1545,12 +1535,12 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "SIR dispatcher build failed") or
         std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
 
-    try tmp.dir.access("out", .{});
-    try testing.expectError(error.FileNotFound, tmp.dir.access("out/bin/main.hex", .{}));
+    try tmp.dir.access(std.testing.io, "out", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
 }
 
 test "compiler build accepts public fallible returns with no declared custom errors" {
-    std.fs.cwd().access(ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -1558,7 +1548,7 @@ test "compiler build accepts public fallible returns with no declared custom err
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract Entry {
@@ -1574,25 +1564,21 @@ test "compiler build accepts public fallible returns with no declared custom err
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
-    const result = try std.process.Child.run(.{
-        .allocator = testing.allocator,
-        .argv = &[_][]const u8{
-            ORA_BINARY_REL,
-            "build",
-            "-o",
-            out_path,
-            root_path,
-        },
-        .max_output_bytes = 1024 * 1024,
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "build",
+        "-o",
+        out_path,
+        root_path,
     });
     defer testing.allocator.free(result.stdout);
     defer testing.allocator.free(result.stderr);
 
     switch (result.term) {
-        .Exited => |code| try testing.expectEqual(@as(u8, 0), code),
+        .exited => |code| try testing.expectEqual(@as(u8, 0), code),
         else => return error.TestUnexpectedResult,
     }
-    try tmp.dir.access("out/bin/main.hex", .{});
+    try tmp.dir.access(std.testing.io, "out/bin/main.hex", .{});
 }
 
 test "compiler reports undefined type names at value resolution positions once" {
@@ -2463,7 +2449,7 @@ test "compiler package driver surfaces payload enum ABI diagnostics before HIR l
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\enum Event {

@@ -94,7 +94,7 @@ pub const LayoutContext = struct {
     }
 
     pub fn signatureForMethod(self: *const LayoutContext, name: []const u8, has_self: bool, param_types: []const Type) anyerror![]const u8 {
-        var parts: std.ArrayList([]const u8) = .{};
+        var parts: std.ArrayList([]const u8) = .empty;
         defer {
             for (parts.items) |part| self.allocator.free(part);
             parts.deinit(self.allocator);

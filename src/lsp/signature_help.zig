@@ -141,7 +141,7 @@ fn buildSignatureInfo(allocator: Allocator, symbol: *const semantic_index.Symbol
     const detail = symbol.detail orelse return null;
 
     // Parse parameter labels from the detail string, e.g. "(x: u256, y: address) -> bool"
-    var params = std.ArrayList(ParameterInfo){};
+    var params = std.ArrayList(ParameterInfo).empty;
     errdefer {
         for (params.items) |p| allocator.free(p.label);
         params.deinit(allocator);

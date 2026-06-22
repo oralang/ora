@@ -157,7 +157,7 @@ fn fromTypeAtPath(allocator: std.mem.Allocator, ty: Type, path: []const ValuePat
         // Callers that need error-union layout must use abi/layout_context.zig.
         .error_union => error.UnsupportedAbiType,
         .tuple => |elements| blk: {
-            var nodes: std.ArrayList(LayoutNode) = .{};
+            var nodes: std.ArrayList(LayoutNode) = .empty;
             errdefer {
                 for (nodes.items) |node| node.deinit(allocator);
                 nodes.deinit(allocator);
@@ -170,7 +170,7 @@ fn fromTypeAtPath(allocator: std.mem.Allocator, ty: Type, path: []const ValuePat
             break :blk .{ .tuple = .{ .path = try clonePath(allocator, path), .elements = try nodes.toOwnedSlice(allocator) } };
         },
         .anonymous_struct => |struct_type| blk: {
-            var nodes: std.ArrayList(LayoutNode) = .{};
+            var nodes: std.ArrayList(LayoutNode) = .empty;
             errdefer {
                 for (nodes.items) |node| node.deinit(allocator);
                 nodes.deinit(allocator);
@@ -220,7 +220,7 @@ pub fn canonicalAbiType(allocator: std.mem.Allocator, node: LayoutNode) ![]const
             break :blk std.fmt.allocPrint(allocator, "{s}[{d}]", .{ element_text, array.len });
         },
         .tuple => |tuple| blk: {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| allocator.free(part);
                 parts.deinit(allocator);
@@ -293,7 +293,7 @@ pub fn serializeForMlirAttr(allocator: std.mem.Allocator, node: LayoutNode) ![]c
             break :blk std.fmt.allocPrint(allocator, "array({d},{s})", .{ array.len, element });
         },
         .tuple => |tuple| blk: {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| allocator.free(part);
                 parts.deinit(allocator);

@@ -19,7 +19,7 @@ pub const Writer = struct {
 
     pub fn init(allocator: std.mem.Allocator, indent_size: u32, line_width: u32) Writer {
         return Writer{
-            .output = std.ArrayList(u8){},
+            .output = std.ArrayList(u8).empty,
             .indent_level = 0,
             .indent_size = indent_size,
             .line_width = line_width,

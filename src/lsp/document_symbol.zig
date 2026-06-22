@@ -29,9 +29,9 @@ pub fn build(
         for (child_lists) |*list| list.deinit(arena);
         arena.free(child_lists);
     }
-    for (child_lists) |*list| list.* = .{};
+    for (child_lists) |*list| list.* = .empty;
 
-    var roots = std.ArrayList(usize){};
+    var roots = std.ArrayList(usize).empty;
     defer roots.deinit(arena);
 
     for (symbols, 0..) |symbol, symbol_index| {

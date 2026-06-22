@@ -768,7 +768,7 @@ const BuiltRangeIndex = struct {
 };
 
 fn buildRootSymbolIndexes(allocator: Allocator, symbols: []const Symbol) !BuiltIndexSlice {
-    var indexes = std.ArrayList(u32){};
+    var indexes = std.ArrayList(u32).empty;
     errdefer indexes.deinit(allocator);
     try indexes.ensureTotalCapacity(allocator, symbols.len);
 
@@ -785,7 +785,7 @@ fn buildRootSymbolIndexes(allocator: Allocator, symbols: []const Symbol) !BuiltI
 }
 
 fn buildCallableSymbolIndexes(allocator: Allocator, symbols: []const Symbol) !BuiltIndexSlice {
-    var indexes = std.ArrayList(u32){};
+    var indexes = std.ArrayList(u32).empty;
     errdefer indexes.deinit(allocator);
     try indexes.ensureTotalCapacity(allocator, symbols.len);
 
@@ -806,7 +806,7 @@ fn buildSymbolNameIndexes(
     symbols: []const Symbol,
     symbol_indexes: []const u32,
 ) !BuiltSymbolNameIndex {
-    var indexes = std.ArrayList(SymbolNameIndexEntry){};
+    var indexes = std.ArrayList(SymbolNameIndexEntry).empty;
     errdefer indexes.deinit(allocator);
     try indexes.ensureTotalCapacity(allocator, symbol_indexes.len);
 
@@ -830,7 +830,7 @@ fn buildSymbolRangeIndexes(
     symbols: []const Symbol,
     symbol_indexes: []const u32,
 ) !BuiltRangeIndex {
-    var indexes = std.ArrayList(RangeIndexEntry){};
+    var indexes = std.ArrayList(RangeIndexEntry).empty;
     errdefer indexes.deinit(allocator);
     try indexes.ensureTotalCapacity(allocator, symbol_indexes.len);
 
@@ -850,7 +850,7 @@ fn buildSymbolRangeIndexes(
 }
 
 fn buildOccurrenceRangeIndexes(allocator: Allocator, occurrences: []const references.Occurrence) !BuiltRangeIndex {
-    var indexes = std.ArrayList(RangeIndexEntry){};
+    var indexes = std.ArrayList(RangeIndexEntry).empty;
     errdefer indexes.deinit(allocator);
     try indexes.ensureTotalCapacity(allocator, occurrences.len);
 

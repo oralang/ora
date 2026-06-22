@@ -97,7 +97,7 @@ fn tokenizeWithTokenSlice(
     tokens: anytype,
     maybe_index: ?semantic_index.SemanticIndex,
 ) ![]SemanticToken {
-    var tokens_list = std.ArrayList(SemanticToken){};
+    var tokens_list = std.ArrayList(SemanticToken).empty;
     errdefer tokens_list.deinit(allocator);
 
     try extractComments(&tokens_list, allocator, tokens, source);

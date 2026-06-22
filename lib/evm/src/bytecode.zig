@@ -9,11 +9,11 @@ pub const Bytecode = struct {
     code: []const u8,
 
     /// Pre-analyzed valid JUMPDEST positions
-    valid_jumpdests: std.AutoArrayHashMap(u32, void),
+    valid_jumpdests: std.AutoHashMap(u32, void),
 
     /// Initialize bytecode with jump destination analysis
     pub fn init(allocator: std.mem.Allocator, code: []const u8) !Bytecode {
-        var valid_jumpdests = std.AutoArrayHashMap(u32, void).init(allocator);
+        var valid_jumpdests = std.AutoHashMap(u32, void).init(allocator);
         errdefer valid_jumpdests.deinit();
 
         try analyzeJumpDests(code, &valid_jumpdests);
@@ -71,7 +71,7 @@ pub const Bytecode = struct {
 /// Analyze bytecode to identify valid JUMPDEST locations
 /// This must skip over PUSH instruction immediate data to avoid
 /// treating data bytes as instructions
-fn analyzeJumpDests(code: []const u8, valid_jumpdests: *std.AutoArrayHashMap(u32, void)) !void {
+fn analyzeJumpDests(code: []const u8, valid_jumpdests: *std.AutoHashMap(u32, void)) !void {
     var pc: u32 = 0;
 
     while (pc < code.len) {
@@ -100,7 +100,7 @@ fn analyzeJumpDests(code: []const u8, valid_jumpdests: *std.AutoArrayHashMap(u32
 
 test "analyzeJumpDests: simple JUMPDEST" {
     const code = [_]u8{ 0x5b, 0x00, 0x5b }; // JUMPDEST, STOP, JUMPDEST
-    var valid_jumpdests = std.AutoArrayHashMap(u32, void).init(std.testing.allocator);
+    var valid_jumpdests = std.AutoHashMap(u32, void).init(std.testing.allocator);
     defer valid_jumpdests.deinit();
 
     try analyzeJumpDests(&code, &valid_jumpdests);
@@ -115,7 +115,7 @@ test "analyzeJumpDests: PUSH data containing JUMPDEST opcode" {
         0x60, 0x5b, // PUSH1 0x5b (pushes JUMPDEST opcode as data)
         0x5b, // JUMPDEST (actual valid jump destination)
     };
-    var valid_jumpdests = std.AutoArrayHashMap(u32, void).init(std.testing.allocator);
+    var valid_jumpdests = std.AutoHashMap(u32, void).init(std.testing.allocator);
     defer valid_jumpdests.deinit();
 
     try analyzeJumpDests(&code, &valid_jumpdests);
@@ -136,7 +136,7 @@ test "analyzeJumpDests: PUSH32 with embedded JUMPDEST bytes" {
     }
     code[33] = 0x5b; // Actual JUMPDEST after PUSH32
 
-    var valid_jumpdests = std.AutoArrayHashMap(u32, void).init(std.testing.allocator);
+    var valid_jumpdests = std.AutoHashMap(u32, void).init(std.testing.allocator);
     defer valid_jumpdests.deinit();
 
     try analyzeJumpDests(&code, &valid_jumpdests);

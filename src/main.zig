@@ -87,6 +87,11 @@ const ChainIdSelection = struct {
     }
 };
 
+fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (!@import("builtin").link_libc) return null;
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
 const CompileContext = struct {
     include_roots: ?[]const []const u8,
     resolver_options: import_graph.ResolverOptions,
@@ -101,8 +106,8 @@ fn compileOptionsForChainWithMetrics(chain_id: u64, instrumentation: ?*Metrics) 
     return .{ .chain_id = chain_id, .instrumentation = instrumentation };
 }
 
-fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
-    var iterator = try std.process.argsWithAllocator(allocator);
+fn rawArgsRequestMetrics(args: std.process.Args, allocator: std.mem.Allocator) !bool {
+    var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
     defer iterator.deinit();
 
     while (iterator.next()) |arg| {
@@ -111,6 +116,20 @@ fn rawArgsRequestMetrics(allocator: std.mem.Allocator) !bool {
         }
     }
     return false;
+}
+
+fn collectProcessArgs(allocator: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
+    var iterator = try std.process.Args.Iterator.initAllocator(args, allocator);
+    defer iterator.deinit();
+
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer list.deinit(allocator);
+
+    while (iterator.next()) |arg| {
+        try list.append(allocator, arg);
+    }
+
+    return list.toOwnedSlice(allocator);
 }
 
 const OptimizationLevel = enum {
@@ -160,9 +179,9 @@ const DebugCliOptions = struct {
 
     fn init() DebugCliOptions {
         return .{
-            .filtered_args = .{},
-            .init_arg_values = .{},
-            .arg_values = .{},
+            .filtered_args = .empty,
+            .init_arg_values = .empty,
+            .arg_values = .empty,
         };
     }
 
@@ -391,49 +410,50 @@ fn parseDebugCliOptions(allocator: std.mem.Allocator, args: []const []const u8) 
     return opts;
 }
 
-fn initProjectLayout(target_dir: []const u8) !void {
+fn initProjectLayout(io: std.Io, target_dir: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
     var exists = true;
-    std.fs.cwd().access(target_dir, .{}) catch |err| switch (err) {
+    cwd.access(io, target_dir, .{}) catch |err| switch (err) {
         error.FileNotFound => exists = false,
         else => return err,
     };
 
     if (!exists) {
-        try std.fs.cwd().makePath(target_dir);
+        try cwd.createDirPath(io, target_dir);
     }
 
-    var root_dir = std.fs.cwd().openDir(target_dir, .{ .iterate = true }) catch |err| switch (err) {
+    var root_dir = cwd.openDir(io, target_dir, .{ .iterate = true }) catch |err| switch (err) {
         error.NotDir => return error.InitTargetIsFile,
         else => return err,
     };
-    defer root_dir.close();
+    defer root_dir.close(io);
 
     var iter = root_dir.iterate();
-    if ((try iter.next()) != null) {
+    if ((try iter.next(io)) != null) {
         return error.InitTargetNotEmpty;
     }
 
-    try root_dir.makePath("contracts");
-    try root_dir.writeFile(.{
+    try root_dir.createDirPath(io, "contracts");
+    try root_dir.writeFile(io, .{
         .sub_path = "ora.toml",
         .data = InitTemplates.ora_toml,
     });
-    try root_dir.writeFile(.{
+    try root_dir.writeFile(io, .{
         .sub_path = "contracts/main.ora",
         .data = InitTemplates.main_contract,
     });
-    try root_dir.writeFile(.{
+    try root_dir.writeFile(io, .{
         .sub_path = "README.md",
         .data = InitTemplates.readme_md,
     });
 }
 
-fn runInitCommand(target_dir: []const u8) !void {
+fn runInitCommand(io: std.Io, target_dir: []const u8) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
-    try initProjectLayout(target_dir);
+    try initProjectLayout(io, target_dir);
 
     try stdout.print("Initialized Ora project in {s}\n", .{target_dir});
     try stdout.print("Next step: cd {s} && ora build\n", .{target_dir});
@@ -445,39 +465,40 @@ fn runInitCommand(target_dir: []const u8) !void {
 // ============================================================================
 
 /// Ora CLI application
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const backing_allocator = gpa.allocator();
-    const metrics_requested = try rawArgsRequestMetrics(backing_allocator);
+    const metrics_requested = try rawArgsRequestMetrics(init.minimal.args, backing_allocator);
     var counting_allocator = allocation_stats.CountingAllocator.init(backing_allocator);
     const allocator = if (metrics_requested) counting_allocator.allocator() else backing_allocator;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try collectProcessArgs(allocator, init.minimal.args);
+    defer allocator.free(args);
 
     if (args.len < 2) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
     if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
     if (args.len >= 2 and std.mem.eql(u8, args[1], "init")) {
         if (args.len == 3 and (std.mem.eql(u8, args[2], "-h") or std.mem.eql(u8, args[2], "--help"))) {
-            try printUsage();
+            try printUsage(io);
             return;
         }
         if (args.len > 3) {
             std.debug.print("error: init accepts at most one optional <path>\n", .{});
-            try printUsage();
+            try printUsage(io);
             std.process.exit(2);
         }
         const target_dir = if (args.len == 3) args[2] else ".";
-        runInitCommand(target_dir) catch |err| switch (err) {
+        runInitCommand(io, target_dir) catch |err| switch (err) {
             error.InitTargetNotEmpty => {
                 std.debug.print("error: init target '{s}' is not empty\n", .{target_dir});
                 std.process.exit(2);
@@ -510,12 +531,12 @@ pub fn main() !void {
     var debug_cli: ?DebugCliOptions = null;
     defer if (debug_cli) |*opts| opts.deinit(allocator);
 
-    var parse_args: std.ArrayList([]const u8) = .{};
+    var parse_args: std.ArrayList([]const u8) = .empty;
     defer parse_args.deinit(allocator);
     if (subcommand == .Debug) {
         debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch |err| {
             std.debug.print("error: invalid debug arguments: {s}\n", .{@errorName(err)});
-            try printUsage();
+            try printUsage(io);
             std.process.exit(2);
         };
         try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
@@ -525,7 +546,7 @@ pub fn main() !void {
 
     var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
         std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
-        try printUsage();
+        try printUsage(io);
         std.process.exit(2);
     };
 
@@ -533,7 +554,7 @@ pub fn main() !void {
         parsed.fmt = true;
     }
     if (parsed.show_help) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
     if (parsed.show_version) {
@@ -580,8 +601,8 @@ pub fn main() !void {
     var debug_enabled: bool = parsed.debug;
     const debug_info: bool = parsed.debug_info;
     if (!debug_enabled) {
-        if (std.posix.getenv("ORA_DEBUG")) |env_value| {
-            if (env_value[0] != 0 and env_value[0] != '0') {
+        if (init.environ_map.get("ORA_DEBUG")) |env_value| {
+            if (env_value.len != 0 and env_value[0] != '0') {
                 debug_enabled = true;
             }
         }
@@ -611,7 +632,7 @@ pub fn main() !void {
         }
         if (input_file == null) {
             std.debug.print("error: fmt requires an input file or directory\n", .{});
-            try printUsage();
+            try printUsage(io);
             std.process.exit(2);
         }
         try runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width);
@@ -915,7 +936,7 @@ pub fn main() !void {
             runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, chain_ids);
 
         var stderr_buffer_build: [1024]u8 = undefined;
-        var stderr_writer_build = std.fs.File.stderr().writer(&stderr_buffer_build);
+        var stderr_writer_build = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer_build);
         const stderr_build = &stderr_writer_build.interface;
         try metrics.report(stderr_build);
         try stderr_build.flush();
@@ -928,7 +949,7 @@ pub fn main() !void {
     }
 
     if (input_file == null) {
-        try printUsage();
+        try printUsage(io);
         return;
     }
 
@@ -970,7 +991,7 @@ pub fn main() !void {
 
     // print metrics report (no-op when --metrics is not passed)
     var stderr_buffer: [1024]u8 = undefined;
-    var stderr_writer = std.fs.File.stderr().writer(&stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writer(std.Io.Threaded.global_single_threaded.io(), &stderr_buffer);
     const stderr = &stderr_writer.interface;
     try metrics.report(stderr);
     try stderr.flush();
@@ -986,17 +1007,18 @@ fn moveArtifactFile(
     defer allocator.free(src_path);
     const dst_path = try std.fs.path.join(allocator, &[_][]const u8{ target_dir, file_name });
     defer allocator.free(dst_path);
-    try std.fs.cwd().makePath(target_dir);
-    std.fs.cwd().rename(src_path, dst_path) catch |err| switch (err) {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    try std.Io.Dir.cwd().createDirPath(io, target_dir);
+    std.Io.Dir.rename(.cwd(), src_path, .cwd(), dst_path, io) catch |err| switch (err) {
         error.FileNotFound => {
-            std.fs.cwd().access(dst_path, .{}) catch |dst_err| switch (dst_err) {
+            std.Io.Dir.cwd().access(io, dst_path, .{}) catch |dst_err| switch (dst_err) {
                 error.FileNotFound => {
-                    std.fs.cwd().access(src_path, .{}) catch |src_err| switch (src_err) {
+                    std.Io.Dir.cwd().access(io, src_path, .{}) catch |src_err| switch (src_err) {
                         error.FileNotFound => return error.FileNotFound,
                         else => return src_err,
                     };
-                    try std.fs.cwd().copyFile(src_path, std.fs.cwd(), dst_path, .{});
-                    try std.fs.cwd().deleteFile(src_path);
+                    try std.Io.Dir.copyFile(.cwd(), src_path, .cwd(), dst_path, io, .{});
+                    try std.Io.Dir.cwd().deleteFile(io, src_path);
                 },
                 else => return dst_err,
             };
@@ -1013,7 +1035,7 @@ fn moveArtifactFileIfExists(
 ) !void {
     const src_path = try std.fs.path.join(allocator, &[_][]const u8{ root_dir, file_name });
     defer allocator.free(src_path);
-    std.fs.cwd().access(src_path, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), src_path, .{}) catch |err| switch (err) {
         error.FileNotFound => return,
         else => return err,
     };
@@ -1029,7 +1051,7 @@ fn runBuildArtifacts(
     configured_init_args: []const project_config.InitArg,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const stem = std.fs.path.stem(file_path);
@@ -1048,7 +1070,7 @@ fn runBuildArtifacts(
     // Never delete a user-supplied output root. Build writes its known artifact
     // files under stable subdirectories and may overwrite files it owns, but it
     // must not recursively remove unrelated user data.
-    try std.fs.cwd().makePath(artifact_root);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
@@ -1061,11 +1083,11 @@ fn runBuildArtifacts(
     const mlir_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "mlir" });
     defer allocator.free(mlir_dir);
 
-    try std.fs.cwd().makePath(abi_dir);
-    try std.fs.cwd().makePath(bin_dir);
-    try std.fs.cwd().makePath(sir_dir);
-    try std.fs.cwd().makePath(verify_dir);
-    try std.fs.cwd().makePath(mlir_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), abi_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), bin_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), sir_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), verify_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), mlir_dir);
 
     try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
@@ -1181,7 +1203,7 @@ fn runDebugArtifacts(
     resolver_options: import_graph.ResolverOptions,
 ) ![]u8 {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const stem = std.fs.path.stem(file_path);
@@ -1191,11 +1213,11 @@ fn runDebugArtifacts(
 
     // Debug artifact output follows the same safety rule as build output:
     // create directories and overwrite compiler-owned files, never wipe roots.
-    try std.fs.cwd().makePath(artifact_root);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), artifact_root);
 
     const abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, "abi" });
     defer allocator.free(abi_dir);
-    try std.fs.cwd().makePath(abi_dir);
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), abi_dir);
 
     try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
@@ -1210,17 +1232,19 @@ fn runDebugArtifacts(
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch return false;
     return true;
 }
 
 fn absolutePathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) return try allocator.dupe(u8, path);
-    return try std.fs.cwd().realpathAlloc(allocator, path);
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
 }
 
 fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
-    const exe_dir = try std.fs.selfExeDirPathAlloc(allocator);
+    const exe_dir = try std.process.executableDirPathAlloc(std.Io.Threaded.global_single_threaded.io(), allocator);
     defer allocator.free(exe_dir);
 
     const from_exe = try std.fs.path.resolve(allocator, &[_][]const u8{ exe_dir, "..", ".." });
@@ -1230,7 +1254,9 @@ fn findOraRepoRoot(allocator: std.mem.Allocator) ![]u8 {
     if (pathExists(probe)) return from_exe;
 
     allocator.free(from_exe);
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd_z = try std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), ".", allocator);
+    defer allocator.free(cwd_z);
+    const cwd = try allocator.dupe(u8, cwd_z);
     errdefer allocator.free(cwd);
     const cwd_probe = try std.fs.path.join(allocator, &[_][]const u8{ cwd, "lib", "evm", "build.zig" });
     defer allocator.free(cwd_probe);
@@ -1258,30 +1284,34 @@ fn launchDebuggerDap(allocator: std.mem.Allocator) !void {
         // Same auto-build pattern launchDebuggerTui uses — keeps
         // `ora debug --dap` working from a fresh checkout without
         // requiring a separate `zig build install` step.
-        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
-        build_child.cwd = evm_dir;
+        const io = std.Io.Threaded.global_single_threaded.io();
         // stdin/stdout are the DAP JSON-RPC channel. The build step
         // must neither consume client input nor emit unframed output
         // before the first Content-Length frame.
-        build_child.stdin_behavior = .Ignore;
-        build_child.stdout_behavior = .Ignore;
-        build_child.stderr_behavior = .Inherit;
-        try build_child.spawn();
-        const term = try build_child.wait();
+        var build_child = try std.process.spawn(io, .{
+            .argv = &.{ "zig", "build", "install" },
+            .cwd = .{ .path = evm_dir },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .inherit,
+        });
+        const term = try build_child.wait(io);
         switch (term) {
-            .Exited => |code| if (code != 0) return error.DapBuildFailed,
+            .exited => |code| if (code != 0) return error.DapBuildFailed,
             else => return error.DapBuildFailed,
         }
     }
 
-    var child = std.process.Child.init(&.{dap_bin}, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{dap_bin},
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| if (code != 0) return error.DapExited,
+        .exited => |code| if (code != 0) return error.DapExited,
         else => return error.DapExited,
     }
 }
@@ -1311,15 +1341,17 @@ fn launchDebuggerTui(
     defer allocator.free(debugger_bin);
 
     if (!pathExists(debugger_bin)) {
-        var build_child = std.process.Child.init(&.{ "zig", "build", "install" }, allocator);
-        build_child.cwd = evm_dir;
-        build_child.stdin_behavior = .Inherit;
-        build_child.stdout_behavior = .Inherit;
-        build_child.stderr_behavior = .Inherit;
-        try build_child.spawn();
-        const build_term = try build_child.wait();
+        const io = std.Io.Threaded.global_single_threaded.io();
+        var build_child = try std.process.spawn(io, .{
+            .argv = &.{ "zig", "build", "install" },
+            .cwd = .{ .path = evm_dir },
+            .stdin = .inherit,
+            .stdout = .inherit,
+            .stderr = .inherit,
+        });
+        const build_term = try build_child.wait(io);
         switch (build_term) {
-            .Exited => |code| if (code != 0) return error.DebuggerBuildFailed,
+            .exited => |code| if (code != 0) return error.DebuggerBuildFailed,
             else => return error.DebuggerBuildFailed,
         }
     }
@@ -1357,7 +1389,7 @@ fn launchDebuggerTui(
     );
     defer allocator.free(deploy_hex_abs);
 
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{ debugger_bin, deploy_hex_abs, srcmap_abs, source_abs });
     try argv.appendSlice(allocator, &.{ "--debug-info", debug_abs });
@@ -1378,14 +1410,16 @@ fn launchDebuggerTui(
     if (deploy_step_cap) |v| try argv.appendSlice(allocator, &.{ "--deploy-step-cap", v });
     if (artifact_max_bytes) |v| try argv.appendSlice(allocator, &.{ "--artifact-max-bytes", v });
 
-    var child = std.process.Child.init(argv.items, allocator);
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    const term = try child.wait();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var child = try std.process.spawn(io, .{
+        .argv = argv.items,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| if (code != 0) std.process.exit(@intCast(code)),
+        .exited => |code| if (code != 0) std.process.exit(@intCast(code)),
         else => std.process.exit(1),
     }
 }
@@ -1404,14 +1438,24 @@ fn prepareDebuggerDeployHex(
         return try allocator.dupe(u8, base_hex_abs);
     }
 
-    const base_hex_text = try std.fs.cwd().readFileAlloc(allocator, base_hex_abs, 16 * 1024 * 1024);
+    const base_hex_text = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        base_hex_abs,
+        allocator,
+        std.Io.Limit.limited(16 * 1024 * 1024),
+    );
     defer allocator.free(base_hex_text);
     const base_bytes = try decodeHexAllocLocal(allocator, base_hex_text);
     defer allocator.free(base_bytes);
 
     const init_bytes = if (init_signature) |sig| blk: {
         if (abi_abs_opt) |abi_abs| {
-            const abi_json = try std.fs.cwd().readFileAlloc(allocator, abi_abs, 16 * 1024 * 1024);
+            const abi_json = try std.Io.Dir.cwd().readFileAlloc(
+                std.Io.Threaded.global_single_threaded.io(),
+                abi_abs,
+                allocator,
+                std.Io.Limit.limited(16 * 1024 * 1024),
+            );
             defer allocator.free(abi_json);
             break :blk try encodeConstructorArgsAllocLocal(allocator, abi_json, sig, init_arg_values);
         }
@@ -1431,19 +1475,16 @@ fn prepareDebuggerDeployHex(
     const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
     defer allocator.free(deploy_hex_path_rel);
 
-    const deploy_hex_file = if (std.fs.path.isAbsolute(deploy_hex_path_rel))
-        try std.fs.createFileAbsolute(deploy_hex_path_rel, .{})
-    else
-        try std.fs.cwd().createFile(deploy_hex_path_rel, .{});
-    defer deploy_hex_file.close();
-
-    var writer_buffer: [4096]u8 = undefined;
-    var writer = deploy_hex_file.writer(&writer_buffer);
-    const out = &writer.interface;
+    var hex_out = std.Io.Writer.Allocating.init(allocator);
+    defer hex_out.deinit();
+    const out = &hex_out.writer;
     for (combined) |byte| {
         try out.print("{X:0>2}", .{byte});
     }
-    try out.flush();
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = deploy_hex_path_rel,
+        .data = hex_out.written(),
+    });
 
     return try absolutePathAlloc(allocator, deploy_hex_path_rel);
 }
@@ -1559,7 +1600,7 @@ fn combineInitArgSlices(
     compiler_init_args: []const project_config.InitArg,
     target_init_args: []const project_config.InitArg,
 ) ![]project_config.InitArg {
-    var combined = std.ArrayList(project_config.InitArg){};
+    var combined = std.ArrayList(project_config.InitArg).empty;
     defer {
         for (combined.items) |arg| {
             allocator.free(arg.name);
@@ -1767,7 +1808,7 @@ fn runBuildFromDiscoveredConfig(
     chain_ids: ChainIdSelection,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     const loaded_opt = project_config.loadDiscovered(allocator) catch |err| {
@@ -1892,9 +1933,9 @@ fn discoverCompileContextForFile(
 // SECTION 2: Usage & Help Text
 // ============================================================================
 
-fn printUsage() !void {
+fn printUsage(io: std.Io) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     try stdout.print("Ora Compiler v0.2 - Asuka\n", .{});
     try stdout.print("Usage: ora <file.ora>\n", .{});
@@ -2161,11 +2202,11 @@ test "verification diagnostics explain registry-backed NonZero guard violations"
         .allocator = allocator,
     }};
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
 
-    try printVerificationDiagnostics(buffer.writer(allocator), diagnostics[0..]);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "`amount` can be zero") != null);
+    try printVerificationDiagnostics(&buffer.writer, diagnostics[0..]);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "`amount` can be zero") != null);
 }
 
 fn printRuntimeGuardSummary(stdout: anytype, diagnostics: []const z3_errors.Diagnostic) !void {
@@ -2244,9 +2285,12 @@ fn printVerificationErrors(stdout: anytype, errors: []const z3_errors.Verificati
 /// Read a single line from a source file by line number (1-based).
 /// Returns null if the file can't be read or the line doesn't exist.
 fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
-    const file = std.fs.cwd().openFile(file_path, .{}) catch return null;
-    defer file.close();
-    const content = file.readToEndAlloc(std.heap.page_allocator, 1024 * 1024) catch return null;
+    const content = std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        file_path,
+        std.heap.page_allocator,
+        std.Io.Limit.limited(1024 * 1024),
+    ) catch return null;
     // Note: we leak this allocation — it's diagnostic output, called once.
     var current_line: u32 = 1;
     var line_start: usize = 0;
@@ -2255,7 +2299,7 @@ fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
             if (current_line == line_number) {
                 const line = content[line_start..i];
                 // Trim trailing whitespace
-                return std.mem.trimRight(u8, line, " \t\r");
+                return std.mem.trimEnd(u8, line, " \t\r");
             }
             current_line += 1;
             line_start = i + 1;
@@ -2263,7 +2307,7 @@ fn readSourceLineFromFile(file_path: []const u8, line_number: u32) ?[]const u8 {
     }
     // Last line (no trailing newline)
     if (current_line == line_number and line_start < content.len) {
-        return std.mem.trimRight(u8, content[line_start..], " \t\r\n");
+        return std.mem.trimEnd(u8, content[line_start..], " \t\r\n");
     }
     return null;
 }
@@ -2398,8 +2442,8 @@ fn writeDetectOnlyTypeFallbacks(
     debug_enabled: bool,
 ) !void {
     const report_enabled = debug_enabled or blk: {
-        if (std.posix.getenv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
-            break :blk env_value[0] != 0 and env_value[0] != '0';
+        if (libcEnv("ORA_REPORT_TYPE_FALLBACKS")) |env_value| {
+            break :blk env_value.len != 0 and env_value[0] != '0';
         }
         break :blk false;
     };
@@ -2562,12 +2606,16 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstVal
             var out = try std.ArrayList(u8).initCapacity(allocator, 2 + bytes.len * 2);
             errdefer out.deinit(allocator);
             try out.appendSlice(allocator, "0x");
-            for (bytes) |byte| try out.writer(allocator).print("{x:0>2}", .{byte});
+            for (bytes) |byte| {
+                var encoded: [2]u8 = undefined;
+                const piece = try std.fmt.bufPrint(&encoded, "{x:0>2}", .{byte});
+                try out.appendSlice(allocator, piece);
+            }
             break :blk try out.toOwnedSlice(allocator);
         },
         .string => |text| try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
         .tuple => |elements| blk: {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| allocator.free(part);
                 parts.deinit(allocator);
@@ -2575,7 +2623,7 @@ fn formatConstDebugValue(allocator: std.mem.Allocator, value: ora_types.ConstVal
             for (elements) |element| {
                 try parts.append(allocator, try formatConstDebugValue(allocator, element));
             }
-            var out = std.ArrayList(u8){};
+            var out = std.ArrayList(u8).empty;
             errdefer out.deinit(allocator);
             try out.append(allocator, '(');
             for (parts.items, 0..) |part, index| {
@@ -2874,7 +2922,7 @@ fn statementUsesAnyName(
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
-    var names: std.ArrayList([]const u8) = .{};
+    var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(arena_allocator);
 
     const stmt = ast_file.statement(statement_id).*;
@@ -3051,7 +3099,7 @@ fn collectBodyScopeDebugInfo(
                 // walking into nested bodies needs a stmt walker
                 // that doesn't exist yet; staying conservative
                 // there avoids false dead-binding signals.
-                var binding_names: std.ArrayList([]const u8) = .{};
+                var binding_names: std.ArrayList([]const u8) = .empty;
                 defer binding_names.deinit(allocator);
                 try collectPatternBindingNames(allocator, ast_file, decl.pattern, &binding_names);
                 const live_end = computeNarrowedLiveEnd(ast_file, &body, stmt_idx, binding_names.items) orelse body.range.end;
@@ -3148,7 +3196,7 @@ fn collectBodyScopeDebugInfo(
                 try collectBodyScopeDebugInfo(allocator, db, const_eval, global_slots, ast_file, file_id, function_name, contract_name, while_stmt.body, scope_id, "while", while_stmt.label, &.{}, state, scopes, locals);
             },
             .For => |for_stmt| {
-                var bindings = std.ArrayList(ExtraScopeBinding){};
+                var bindings = std.ArrayList(ExtraScopeBinding).empty;
                 defer bindings.deinit(allocator);
                 try bindings.append(allocator, .{
                     .pattern_id = for_stmt.item_pattern,
@@ -3242,7 +3290,7 @@ fn collectItemDebugScopes(
         },
         .Function => |function_item| {
             if (function_item.is_comptime or function_item.is_ghost) return;
-            var param_bindings: std.ArrayList(ExtraScopeBinding) = .{};
+            var param_bindings: std.ArrayList(ExtraScopeBinding) = .empty;
             defer param_bindings.deinit(allocator);
             for (function_item.parameters) |parameter| {
                 if (parameter.is_comptime) continue;
@@ -3317,8 +3365,8 @@ fn buildSourceScopeDebugInfo(
     root_module_id: compiler.ModuleId,
     global_slots: *const DebugGlobalSlots,
 ) !DebugSourceScopeBundle {
-    var scopes: std.ArrayList(DebugScopeInfo) = .{};
-    var locals: std.ArrayList(DebugLocalInfo) = .{};
+    var scopes: std.ArrayList(DebugScopeInfo) = .empty;
+    var locals: std.ArrayList(DebugLocalInfo) = .empty;
     errdefer scopes.deinit(allocator);
     errdefer locals.deinit(allocator);
 
@@ -3451,7 +3499,7 @@ fn putExecutableStatementStart(
     const gop = try line_map.getOrPut(file_path);
     if (!gop.found_existing) {
         gop.key_ptr.* = try allocator.dupe(u8, file_path);
-        gop.value_ptr.* = .{};
+        gop.value_ptr.* = .empty;
     }
 
     for (gop.value_ptr.items) |*entry| {
@@ -3864,10 +3912,10 @@ fn writeCompilerAst(
             }
             if (typecheck) |typed| {
                 try writer.writeAll(", \"type\": ");
-                var type_buffer: std.ArrayList(u8) = .{};
-                defer type_buffer.deinit(allocator);
-                try writeCompilerType(type_buffer.writer(allocator), typed.item_types[item_id.index()]);
-                try writeJsonString(writer, type_buffer.items);
+                var type_buffer = std.Io.Writer.Allocating.init(allocator);
+                defer type_buffer.deinit();
+                try writeCompilerType(&type_buffer.writer, typed.item_types[item_id.index()]);
+                try writeJsonString(writer, type_buffer.written());
             }
             try writer.writeByte('}');
         }
@@ -3912,7 +3960,7 @@ fn runCompilerAstEmit(
     debug_enabled: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
@@ -3952,7 +4000,7 @@ fn runCompilerMlirEmit(
     const c = @import("mlir_c_api").c;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
@@ -4002,7 +4050,12 @@ fn runCompilerTokenEmit(
     allocator: std.mem.Allocator,
     file_path: []const u8,
 ) !void {
-    const source_text = try std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize));
+    const source_text = try std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        file_path,
+        allocator,
+        .unlimited,
+    );
     defer allocator.free(source_text);
 
     var lexer = lib.Lexer.init(allocator, source_text);
@@ -4012,7 +4065,7 @@ fn runCompilerTokenEmit(
     defer allocator.free(tokens);
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     for (tokens) |token| {
@@ -4045,18 +4098,16 @@ fn emitCfgDot(
             .sir => ".sir.dot",
         };
 
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
 
         const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
         defer allocator.free(filename);
         const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
         defer allocator.free(output_file);
-        var dot_file = try std.fs.cwd().createFile(output_file, .{});
-        defer dot_file.close();
-        try dot_file.writeAll(dot);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_file,
+            .data = dot,
+        });
 
         if (mode == .sir) {
             const graphs = try mlir_cfg.generateFunctionCFGs(ctx, module, allocator, .{ .mode = .sir });
@@ -4072,9 +4123,10 @@ fn emitCfgDot(
                 defer allocator.free(per_function_filename);
                 const per_function_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, per_function_filename });
                 defer allocator.free(per_function_output);
-                var per_function_file = try std.fs.cwd().createFile(per_function_output, .{});
-                defer per_function_file.close();
-                try per_function_file.writeAll(graph.dot);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = per_function_output,
+                    .data = graph.dot,
+                });
             }
         }
     } else {
@@ -4105,10 +4157,7 @@ fn emitSirCfgOptimizationDiff(
     defer diff.deinit(allocator);
 
     if (output_dir) |dir| {
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
 
         const basename = std.fs.path.stem(file_path);
         const before_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.pre-opt.dot" });
@@ -4118,15 +4167,17 @@ fn emitSirCfgOptimizationDiff(
 
         const before_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, before_filename });
         defer allocator.free(before_output);
-        var before_file = try std.fs.cwd().createFile(before_output, .{});
-        defer before_file.close();
-        try before_file.writeAll(diff.before);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = before_output,
+            .data = diff.before,
+        });
 
         const after_output = try std.fs.path.join(allocator, &[_][]const u8{ dir, after_filename });
         defer allocator.free(after_output);
-        var after_file = try std.fs.cwd().createFile(after_output, .{});
-        defer after_file.close();
-        try after_file.writeAll(diff.after);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = after_output,
+            .data = diff.after,
+        });
     } else {
         try stdout.print("// SIR CFG before framework canonicalizer\n{s}\n", .{diff.before});
         try stdout.print("// SIR CFG after framework canonicalizer\n{s}", .{diff.after});
@@ -4143,7 +4194,7 @@ fn runMlirEmitAdvanced(
     const c = @import("mlir_c_api").c;
 
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const m = mlir_options.metrics;
 
@@ -4292,18 +4343,16 @@ fn runMlirEmitAdvanced(
             const mlir_content_ora = mlir_str_ora.data[0..mlir_str_ora.length];
             if (mlir_options.persist_ora_mlir) {
                 if (mlir_options.output_dir) |output_dir| {
-                    std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                        error.PathAlreadyExists => {},
-                        else => return err,
-                    };
+                    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                     const basename = std.fs.path.stem(file_path);
                     const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".ora.mlir" });
                     defer allocator.free(filename);
                     const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                     defer allocator.free(output_file);
-                    var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-                    defer mlir_file.close();
-                    try mlir_file.writeAll(mlir_content_ora);
+                    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                        .sub_path = output_file,
+                        .data = mlir_content_ora,
+                    });
                 }
             }
             if (mlir_options.emit_mlir) {
@@ -4383,33 +4432,29 @@ fn runMlirEmitAdvanced(
         const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
         if (mlir_options.persist_sir_mlir and mlir_options.output_dir != null) {
             const output_dir = mlir_options.output_dir.?;
-            std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                error.PathAlreadyExists => {},
-                else => return err,
-            };
+            try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
             const basename = std.fs.path.stem(file_path);
             const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir.mlir" });
             defer allocator.free(filename);
             const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
             defer allocator.free(output_file);
-            var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-            defer mlir_file.close();
-            try mlir_file.writeAll(mlir_content_sir);
+            try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                .sub_path = output_file,
+                .data = mlir_content_sir,
+            });
         }
         if (explicit_sir_mlir_output) {
             if (mlir_options.output_dir) |output_dir| {
-                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
+                try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                 const basename = std.fs.path.stem(file_path);
                 const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".mlir" });
                 defer allocator.free(filename);
                 const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                 defer allocator.free(output_file);
-                var mlir_file = try std.fs.cwd().createFile(output_file, .{});
-                defer mlir_file.close();
-                try mlir_file.writeAll(mlir_content_sir);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = output_file,
+                    .data = mlir_content_sir,
+                });
                 try stdout.print("SIR MLIR saved to {s}\n", .{output_file});
             } else {
                 try stdout.print("{s}", .{mlir_content_sir});
@@ -4514,18 +4559,16 @@ fn runMlirEmitAdvanced(
 
         if (mlir_options.emit_sir_text) {
             if (mlir_options.output_dir) |output_dir| {
-                std.fs.cwd().makeDir(output_dir) catch |err| switch (err) {
-                    error.PathAlreadyExists => {},
-                    else => return err,
-                };
+                try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), output_dir);
                 const basename = std.fs.path.stem(file_path);
                 const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, ".sir" });
                 defer allocator.free(filename);
                 const output_file = try std.fs.path.join(allocator, &[_][]const u8{ output_dir, filename });
                 defer allocator.free(output_file);
-                var sir_file = try std.fs.cwd().createFile(output_file, .{});
-                defer sir_file.close();
-                try sir_file.writeAll(sir_text);
+                try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+                    .sub_path = output_file,
+                    .data = sir_text,
+                });
             } else {
                 try stdout.print("{s}", .{sir_text});
             }
@@ -4548,7 +4591,7 @@ fn runMlirEmitAdvanced(
 
 fn printVersion() !void {
     var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
     const logo =
         \\=================
@@ -4613,7 +4656,7 @@ fn printVersion() !void {
 /// Print unified diff between original and formatted code
 fn printUnifiedDiff(_: std.mem.Allocator, original: []const u8, formatted: []const u8, file_path: []const u8) !void {
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     try stdout.print("--- {s}\n", .{file_path});
@@ -4660,7 +4703,7 @@ fn formatSingleFile(
     const fmt_mod = @import("fmt/mod.zig");
 
     // Read source file
-    const source = std.fs.cwd().readFileAlloc(allocator, file_path, std.math.maxInt(usize)) catch |err| {
+    const source = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), file_path, allocator, .unlimited) catch |err| {
         std.debug.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
         std.process.exit(1);
     };
@@ -4697,13 +4740,15 @@ fn formatSingleFile(
     }
 
     if (stdout) {
-        try std.fs.File.stdout().writeAll(formatted);
+        var stdout_writer = std.Io.File.stdout().writerStreaming(std.Io.Threaded.global_single_threaded.io(), &.{});
+        try stdout_writer.interface.writeAll(formatted);
+        try stdout_writer.interface.flush();
         return false;
     }
 
     // Write formatted output
     if (!already_formatted) {
-        try std.fs.cwd().writeFile(.{ .sub_path = file_path, .data = formatted });
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = file_path, .data = formatted });
     }
     return false;
 }
@@ -4716,11 +4761,13 @@ fn formatDirectoryRecursive(
     options: anytype,
     found_mismatch: *bool,
 ) !void {
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var cwd = std.Io.Dir.cwd();
+    var dir = try cwd.openDir(io, dir_path, .{ .iterate = true });
+    defer dir.close(io);
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const child_path = try std.fs.path.join(allocator, &.{ dir_path, entry.name });
         defer allocator.free(child_path);
 
@@ -4746,7 +4793,9 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
         .indent_size = 4,
     };
 
-    var dir_probe = std.fs.cwd().openDir(file_path, .{}) catch |err| switch (err) {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var cwd = std.Io.Dir.cwd();
+    var dir_probe = cwd.openDir(io, file_path, .{}) catch |err| switch (err) {
         error.NotDir => null,
         else => {
             std.debug.print("error: cannot access '{s}': {s}\n", .{ file_path, @errorName(err) });
@@ -4754,7 +4803,7 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
         },
     };
     if (dir_probe) |*dir| {
-        dir.close();
+        dir.close(io);
         if (stdout) {
             std.debug.print("error: --stdout does not support directory inputs\n", .{});
             std.process.exit(2);
@@ -4792,7 +4841,7 @@ fn runAbiEmit(
     allow_missing_contract: bool,
 ) !void {
     var stdout_buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
     const stdout = &stdout_writer.interface;
 
     var compilation = compiler.driver.compilePackageWithOptions(allocator, file_path, .{
@@ -4823,10 +4872,8 @@ fn runAbiEmit(
     const emit_sidecar = emit_abi_extras or (emit_abi and output_dir != null);
 
     if (output_dir) |out_dir| {
-        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        const io = std.Io.Threaded.global_single_threaded.io();
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), out_dir);
         if (emit_abi) {
             const abi_json = try contract_abi.toJson(allocator);
             defer allocator.free(abi_json);
@@ -4834,9 +4881,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const abi_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.json", .{ out_dir, base_name });
             defer allocator.free(abi_path);
-            var abi_file = try std.fs.cwd().createFile(abi_path, .{});
-            defer abi_file.close();
-            try abi_file.writeAll(pretty_json);
+            var abi_file = try std.Io.Dir.cwd().createFile(io, abi_path, .{});
+            defer abi_file.close(io);
+            try abi_file.writeStreamingAll(io, pretty_json);
         }
         if (emit_abi_solidity) {
             const abi_json = try contract_abi.toSolidityJson(allocator);
@@ -4845,9 +4892,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const abi_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.sol.json", .{ out_dir, base_name });
             defer allocator.free(abi_path);
-            var abi_file = try std.fs.cwd().createFile(abi_path, .{});
-            defer abi_file.close();
-            try abi_file.writeAll(pretty_json);
+            var abi_file = try std.Io.Dir.cwd().createFile(io, abi_path, .{});
+            defer abi_file.close(io);
+            try abi_file.writeStreamingAll(io, pretty_json);
         }
         if (emit_sidecar) {
             const extras_json = try contract_abi.toExtrasJson(allocator);
@@ -4856,9 +4903,9 @@ fn runAbiEmit(
             defer allocator.free(pretty_json);
             const extras_path = try std.fmt.allocPrint(allocator, "{s}/{s}.abi.extras.json", .{ out_dir, base_name });
             defer allocator.free(extras_path);
-            var extras_file = try std.fs.cwd().createFile(extras_path, .{});
-            defer extras_file.close();
-            try extras_file.writeAll(pretty_json);
+            var extras_file = try std.Io.Dir.cwd().createFile(io, extras_path, .{});
+            defer extras_file.close(io);
+            try extras_file.writeStreamingAll(io, pretty_json);
         }
     } else {
         if (emit_abi) {
@@ -4913,10 +4960,7 @@ fn writeSmtReportArtifacts(
     defer if (json_path_buf) |buf| allocator.free(buf);
 
     const md_path = if (output_dir) |dir| blk: {
-        std.fs.cwd().makeDir(dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
         md_path_buf = try std.fs.path.join(allocator, &[_][]const u8{ dir, md_name });
         break :blk md_path_buf.?;
     } else md_name;
@@ -4926,16 +4970,18 @@ fn writeSmtReportArtifacts(
         break :blk json_path_buf.?;
     } else json_name;
 
-    var md_file = try std.fs.cwd().createFile(md_path, .{});
-    defer md_file.close();
-    try md_file.writeAll(report.markdown);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = md_path,
+        .data = report.markdown,
+    });
 
     const pretty_json = try formatJsonPretty(allocator, report.json);
     defer allocator.free(pretty_json);
 
-    var json_file = try std.fs.cwd().createFile(json_path, .{});
-    defer json_file.close();
-    try json_file.writeAll(pretty_json);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = json_path,
+        .data = pretty_json,
+    });
 
     if (!suppress_log) {
         try stdout.print("SMT report saved to {s}\n", .{md_path});
@@ -4948,8 +4994,8 @@ fn writeSmtReportArtifacts(
 // ============================================================================
 
 fn resolvePlankSirPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("ORA_PLANK_SIR")) |path| {
-        if (std.fs.cwd().access(path, .{}) catch null) |_| {
+    if (libcEnv("ORA_PLANK_SIR")) |path| {
+        if (std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch null) |_| {
             return allocator.dupe(u8, path);
         }
         return error.PlankSirNotFound;
@@ -4957,7 +5003,7 @@ fn resolvePlankSirPath(allocator: std.mem.Allocator) ![]const u8 {
 
     // Use the vendored Plank SIR binary built from the `vendor/plank` submodule.
     const default_path = "vendor/plank/plankc/target/release/sir";
-    if (std.fs.cwd().access(default_path, .{}) catch null) |_| {
+    if (std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), default_path, .{}) catch null) |_| {
         return allocator.dupe(u8, default_path);
     }
 
@@ -4970,7 +5016,7 @@ const PlankSirBackend = enum {
 };
 
 fn resolvePlankSirBackend(default_backend: PlankSirBackend) !PlankSirBackend {
-    const value = std.posix.getenv("ORA_PLANK_BACKEND") orelse return default_backend;
+    const value = libcEnv("ORA_PLANK_BACKEND") orelse return default_backend;
     if (std.mem.eql(u8, value, "debug")) return .debug;
     if (std.mem.eql(u8, value, "release")) return .release;
     return error.InvalidPlankBackend;
@@ -5006,22 +5052,18 @@ fn emitBytecodeFromSirText(
     defer allocator.free(sir_filename);
 
     const temp_root = "/tmp/ora_sir";
-    std.fs.makeDirAbsolute(temp_root) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
-    const temp_dir = try std.fmt.allocPrint(allocator, "{s}/{x}", .{ temp_root, std.crypto.random.int(u64) });
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), temp_root);
+    const random_source = std.Random.IoSource{ .io = std.Io.Threaded.global_single_threaded.io() };
+    const temp_dir = try std.fmt.allocPrint(allocator, "{s}/{x}", .{ temp_root, random_source.interface().int(u64) });
     defer allocator.free(temp_dir);
-    std.fs.makeDirAbsolute(temp_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => return err,
-    };
+    try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), temp_dir);
     const sir_file_path = try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, sir_filename });
     defer allocator.free(sir_file_path);
 
-    var sir_file = try std.fs.createFileAbsolute(sir_file_path, .{});
-    defer sir_file.close();
-    try sir_file.writeAll(sir_text);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = sir_file_path,
+        .data = sir_text,
+    });
 
     // Request a Plank source map when Ora debug-info sidecars are requested.
     // Both Plank backends support the same op_index -> pc JSON contract in our
@@ -5059,26 +5101,27 @@ fn emitBytecodeFromSirText(
         argc += 1;
     }
     const argv = argv_buf[0..argc];
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
-
-    try child.spawn();
-
     const max_output = 16 * 1024 * 1024;
-    const stdout_bytes = try child.stdout.?.readToEndAlloc(allocator, max_output);
-    defer allocator.free(stdout_bytes);
-    const stderr_bytes = try child.stderr.?.readToEndAlloc(allocator, max_output);
-    defer allocator.free(stderr_bytes);
+    var process_io = std.Io.Threaded.init(allocator, .{
+        .async_limit = .nothing,
+        .concurrent_limit = .nothing,
+    });
+    defer process_io.deinit();
 
-    const term = try child.wait();
-    switch (term) {
-        .Exited => |code| {
+    const run_result = try std.process.run(allocator, process_io.io(), .{
+        .argv = argv,
+        .stdout_limit = std.Io.Limit.limited(max_output),
+        .stderr_limit = std.Io.Limit.limited(max_output),
+    });
+    defer allocator.free(run_result.stdout);
+    defer allocator.free(run_result.stderr);
+
+    switch (run_result.term) {
+        .exited => |code| {
             if (code != 0) {
                 try stdout.print("\nError: Plank SIR bytecode compilation failed (exit code {d})\n", .{code});
                 // Show Plank's error output (the actual error reason)
-                const trimmed_stderr = std.mem.trim(u8, stderr_bytes, " \n\r\t");
+                const trimmed_stderr = std.mem.trim(u8, run_result.stderr, " \n\r\t");
                 if (trimmed_stderr.len > 0) {
                     // Extract the meaningful error line (skip Rust backtrace noise)
                     var line_iter = std.mem.splitScalar(u8, trimmed_stderr, '\n');
@@ -5092,7 +5135,7 @@ fn emitBytecodeFromSirText(
                         try stdout.print("  {s}\n", .{trimmed});
                     }
                 } else {
-                    const trimmed_stdout_err = std.mem.trim(u8, stdout_bytes, " \n\r\t");
+                    const trimmed_stdout_err = std.mem.trim(u8, run_result.stdout, " \n\r\t");
                     if (trimmed_stdout_err.len > 0) {
                         try stdout.print("  {s}\n", .{trimmed_stdout_err});
                     }
@@ -5110,7 +5153,7 @@ fn emitBytecodeFromSirText(
         },
     }
 
-    const bytecode = std.mem.trim(u8, stdout_bytes, " \n\r\t");
+    const bytecode = std.mem.trim(u8, run_result.stdout, " \n\r\t");
     if (bytecode.len == 0) {
         try stdout.print("\nError: Plank SIR produced empty bytecode\n", .{});
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
@@ -5122,19 +5165,14 @@ fn emitBytecodeFromSirText(
     defer if (bytecode_output_path) |p| allocator.free(p);
 
     if (output_file) |out_path| {
-        var out_file = if (std.fs.path.isAbsolute(out_path))
-            try std.fs.createFileAbsolute(out_path, .{})
-        else
-            try std.fs.cwd().createFile(out_path, .{});
-        defer out_file.close();
-        try out_file.writeAll(bytecode);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = out_path,
+            .data = bytecode,
+        });
         bytecode_output_path = try allocator.dupe(u8, out_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_path});
     } else if (output_dir) |out_dir| {
-        std.fs.cwd().makeDir(out_dir) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => return err,
-        };
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), out_dir);
 
         const extension = ".hex";
         const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, extension });
@@ -5142,12 +5180,10 @@ fn emitBytecodeFromSirText(
         const output_path = try std.fs.path.join(allocator, &[_][]const u8{ out_dir, filename });
         defer allocator.free(output_path);
 
-        var out_file = if (std.fs.path.isAbsolute(output_path))
-            try std.fs.createFileAbsolute(output_path, .{})
-        else
-            try std.fs.cwd().createFile(output_path, .{});
-        defer out_file.close();
-        try out_file.writeAll(bytecode);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_path,
+            .data = bytecode,
+        });
         bytecode_output_path = try allocator.dupe(u8, output_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
@@ -5177,7 +5213,12 @@ fn mergeSourceMaps(
     suppress_log: bool,
 ) !void {
     // Read Plank's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
-    const plank_json = std.fs.cwd().readFileAlloc(allocator, plank_srcmap_path, 16 * 1024 * 1024) catch |err| {
+    const plank_json = std.Io.Dir.cwd().readFileAlloc(
+        std.Io.Threaded.global_single_threaded.io(),
+        plank_srcmap_path,
+        allocator,
+        std.Io.Limit.limited(16 * 1024 * 1024),
+    ) catch |err| {
         try stdout.print("Warning: could not read Plank source map: {}\n", .{err});
         return;
     };
@@ -5300,15 +5341,15 @@ fn mergeSourceMaps(
 
     // Merge: for each SIR location entry, look up its PC from Plank
     // Collect unique source files
-    var sources: std.ArrayList([]const u8) = .{};
+    var sources: std.ArrayList([]const u8) = .empty;
     defer sources.deinit(allocator);
     var source_indices = std.StringHashMap(u32).init(allocator);
     defer source_indices.deinit();
 
     // Build merged entries
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const writer = &out.writer;
 
     try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{plank_parsed.value.runtime_start_pc orelse 0});
 
@@ -5334,7 +5375,7 @@ fn mergeSourceMaps(
         stmt: bool,
         kind: ?ExecutableStatementKind = null,
     };
-    var entries: std.ArrayList(MergedEntry) = .{};
+    var entries: std.ArrayList(MergedEntry) = .empty;
     defer entries.deinit(allocator);
 
     var missing_idx_count: usize = 0;
@@ -5591,9 +5632,10 @@ fn mergeSourceMaps(
         try allocator.dupe(u8, srcmap_name);
     defer allocator.free(srcmap_path);
 
-    var srcmap_file = try std.fs.cwd().createFile(srcmap_path, .{});
-    defer srcmap_file.close();
-    try srcmap_file.writeAll(out.items);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = srcmap_path,
+        .data = out.written(),
+    });
 
     if (!suppress_log) try stdout.print("Source map saved to {s} ({d} entries)\n", .{ srcmap_path, entries.items.len });
 }
@@ -5616,9 +5658,9 @@ fn writeProofSidecar(
     const filename = try std.fmt.allocPrint(allocator, "{s}/{s}.proof.json", .{ output_dir, stem });
     defer allocator.free(filename);
 
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    var w = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const w = &out.writer;
 
     try w.writeAll("[");
     for (positions, 0..) |pos, i| {
@@ -5631,7 +5673,10 @@ fn writeProofSidecar(
     }
     try w.writeAll("]\n");
 
-    try std.fs.cwd().writeFile(.{ .sub_path = filename, .data = out.items });
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = filename,
+        .data = out.written(),
+    });
 }
 
 fn writeDebugInfoSidecar(
@@ -5679,11 +5724,9 @@ fn writeDebugInfoSidecar(
         try allocator.dupe(u8, debug_name);
     defer allocator.free(debug_path);
 
-    var debug_file = try std.fs.cwd().createFile(debug_path, .{});
-    defer debug_file.close();
-    var out: std.ArrayList(u8) = .{};
-    defer out.deinit(allocator);
-    const writer = out.writer(allocator);
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    const writer = &out.writer;
     const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, sir_debug_info_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
@@ -5966,7 +6009,10 @@ fn writeDebugInfoSidecar(
         }
     }
     try writer.writeAll("]}");
-    try debug_file.writeAll(out.items);
+    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+        .sub_path = debug_path,
+        .data = out.written(),
+    });
 
     try stdout.print("Debug info saved to {s}\n", .{debug_path});
 }
@@ -5976,7 +6022,7 @@ test "build config init_args: validates init parameters" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6010,7 +6056,7 @@ test "build config init_args: unknown init arg errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6039,7 +6085,7 @@ test "build config init_args: missing init function errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6065,7 +6111,7 @@ test "build config init_args: invalid constructor shape errors" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Main.ora",
         .data =
         \\contract Main {
@@ -6103,11 +6149,11 @@ test "init command: scaffolds new project layout" {
     const readme_path = try std.fmt.allocPrint(allocator, "{s}/README.md", .{target_path});
     defer allocator.free(readme_path);
 
-    const toml = try std.fs.cwd().readFileAlloc(allocator, toml_path, 64 * 1024);
+    const toml = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, toml_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(toml);
-    const contract = try std.fs.cwd().readFileAlloc(allocator, contract_path, 64 * 1024);
+    const contract = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, contract_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(contract);
-    const readme = try std.fs.cwd().readFileAlloc(allocator, readme_path, 64 * 1024);
+    const readme = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, readme_path, allocator, std.Io.Limit.limited(64 * 1024));
     defer allocator.free(readme);
 
     try std.testing.expect(std.mem.indexOf(u8, toml, "[[targets]]") != null);
@@ -6121,8 +6167,8 @@ test "init command: rejects non-empty target directory" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("occupied");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "occupied");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "occupied/existing.txt",
         .data = "keep",
     });
@@ -6148,12 +6194,12 @@ test "compiler typed AST writer prints root item types" {
     const ast_file = try compilation.db.astFile(module.file_id);
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "tree", false);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try writeCompilerAst(allocator, &buffer.writer, ast_file, typecheck, &typecheck.diagnostics, "tree", false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Compiler typed AST") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "Function id : fn(u256) -> u256") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "Compiler typed AST") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "Function id : fn(u256) -> u256") != null);
 }
 
 test "compiler JSON AST writer includes diagnostics array" {
@@ -6171,12 +6217,12 @@ test "compiler JSON AST writer includes diagnostics array" {
     const ast_file = try compilation.db.astFile(module.file_id);
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
 
-    var buffer: std.ArrayList(u8) = .{};
-    defer buffer.deinit(allocator);
-    try writeCompilerAst(allocator, buffer.writer(allocator), ast_file, typecheck, &typecheck.diagnostics, "json", false);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    defer buffer.deinit();
+    try writeCompilerAst(allocator, &buffer.writer, ast_file, typecheck, &typecheck.diagnostics, "json", false);
 
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"root_items\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, buffer.items, "\"diagnostics\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "\"root_items\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buffer.written(), "\"diagnostics\"") != null);
 }
 
 test "simple test" {

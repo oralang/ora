@@ -38,7 +38,7 @@ fn InlineList(comptime T: type, comptime inline_capacity: usize) type {
     return struct {
         inline_buffer: [inline_capacity]T = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(T) = .{},
+        spill: std.ArrayList(T) = .empty,
         items: []const T = &.{},
 
         fn append(self: *@This(), allocator: std.mem.Allocator, item: T) !void {
@@ -69,7 +69,7 @@ fn InlineList(comptime T: type, comptime inline_capacity: usize) type {
         fn toOwnedSlice(self: *@This(), allocator: std.mem.Allocator) ![]T {
             if (self.spill.capacity != 0) {
                 const owned = try self.spill.toOwnedSlice(allocator);
-                self.spill = .{};
+                self.spill = .empty;
                 self.items = &.{};
                 return owned;
             }

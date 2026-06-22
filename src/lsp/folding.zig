@@ -18,7 +18,7 @@ pub fn foldingRangesInAst(
     file: *const compiler.ast.AstFile,
     line_index: *const line_index_api.LineIndex,
 ) ![]FoldingRange {
-    var ranges = std.ArrayList(FoldingRange){};
+    var ranges = std.ArrayList(FoldingRange).empty;
     errdefer ranges.deinit(allocator);
 
     try collectCommentFolds(&ranges, allocator, source);
@@ -147,7 +147,7 @@ fn collectCommentFolds(
         const line_start = i;
         while (i < source.len and source[i] != '\n') : (i += 1) {}
 
-        const line_text = std.mem.trimLeft(u8, source[line_start..i], " \t");
+        const line_text = std.mem.trimStart(u8, source[line_start..i], " \t");
         if (std.mem.startsWith(u8, line_text, "//")) {
             if (comment_start == null) comment_start = line;
             comment_end = line;

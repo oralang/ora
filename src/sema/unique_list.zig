@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn clone(comptime T: type, allocator: std.mem.Allocator, items: []const T) !std.ArrayList(T) {
-    var result: std.ArrayList(T) = .{};
+    var result: std.ArrayList(T) = .empty;
     errdefer result.deinit(allocator);
     try result.appendSlice(allocator, items);
     return result;
@@ -44,7 +44,7 @@ pub fn intersect(
     comptime eql: fn (T, T) bool,
     comptime include: ?fn (T) bool,
 ) !std.ArrayList(T) {
-    var result: std.ArrayList(T) = .{};
+    var result: std.ArrayList(T) = .empty;
     errdefer result.deinit(allocator);
     for (lhs) |lhs_item| {
         if (include) |predicate| {
@@ -71,7 +71,7 @@ fn even(value: u8) bool {
 }
 
 test "appendUnique keeps first occurrence order" {
-    var items: std.ArrayList(u8) = .{};
+    var items: std.ArrayList(u8) = .empty;
     defer items.deinit(std.testing.allocator);
 
     try appendUnique(u8, std.testing.allocator, &items, 1, u8Eql);
@@ -82,7 +82,7 @@ test "appendUnique keeps first occurrence order" {
 }
 
 test "mergeUnique applies optional filter" {
-    var items: std.ArrayList(u8) = .{};
+    var items: std.ArrayList(u8) = .empty;
     defer items.deinit(std.testing.allocator);
 
     try mergeUnique(u8, std.testing.allocator, &items, &.{ 1, 2, 3, 4, 2 }, u8Eql, even);

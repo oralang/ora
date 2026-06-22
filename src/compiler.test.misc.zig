@@ -333,7 +333,7 @@ test "compiler package loader bridges import graph into source modules" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\pub fn helper() -> u256 {
@@ -341,7 +341,7 @@ test "compiler package loader bridges import graph into source modules" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -2959,7 +2959,7 @@ test "compilePackageWithOptions records frontend metrics by phase" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\contract MetricsSmoke {

@@ -93,7 +93,7 @@ fn verificationStatementFactEntryLessThan(_: void, lhs: VerificationStatementFac
 }
 
 fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationFactEntry {
-    var entries: std.ArrayList(VerificationFactEntry) = .{};
+    var entries: std.ArrayList(VerificationFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -108,7 +108,7 @@ fn buildVerificationFactLookup(allocator: std.mem.Allocator, facts: []const sema
 }
 
 fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationTraitMethodFactEntry {
-    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .{};
+    var entries: std.ArrayList(VerificationTraitMethodFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -124,7 +124,7 @@ fn buildVerificationTraitMethodFactLookup(allocator: std.mem.Allocator, facts: [
 }
 
 fn buildVerificationStatementFactLookup(allocator: std.mem.Allocator, facts: []const sema.VerificationFact) ![]const VerificationStatementFactEntry {
-    var entries: std.ArrayList(VerificationStatementFactEntry) = .{};
+    var entries: std.ArrayList(VerificationStatementFactEntry) = .empty;
     errdefer entries.deinit(allocator);
 
     for (facts, 0..) |fact, fact_index| {
@@ -287,8 +287,8 @@ pub fn lowerModule(
         .verification_statement_fact_lookup = verification_statement_fact_lookup,
         .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
-        .items = .{},
-        .type_fallbacks = .{},
+        .items = .empty,
+        .type_fallbacks = .empty,
         .placeholder_count = 0,
         .default_value_count = 0,
         .diagnostics = &result.diagnostics,
@@ -616,7 +616,7 @@ const Lowerer = struct {
             .Path => |path| self.lowerNamedPathType(path.name),
             .Generic => |generic| lowerGenericType(self, generic),
             .Tuple => |tuple| blk: {
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (tuple.elements) |element| {
                     element_types.append(self.allocator, self.lowerTypeExpr(element)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -628,7 +628,7 @@ const Lowerer = struct {
                 );
             },
             .AnonymousStruct => |struct_type| blk: {
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (struct_type.fields) |field| {
                     field_types.append(self.allocator, self.lowerTypeExpr(field.type_expr)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -647,7 +647,7 @@ const Lowerer = struct {
             .Slice => |slice| support.sliceMemRefType(self.context, self.lowerTypeExpr(slice.element)),
             .ErrorUnion => |error_union| blk: {
                 const payload_type = self.lowerTypeExpr(error_union.payload);
-                var error_types: std.ArrayList(mlir.MlirType) = .{};
+                var error_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (error_union.errors) |error_type_expr| {
                     error_types.append(self.allocator, self.lowerTypeExpr(error_type_expr)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, self.typeExprRange(type_expr_id));
@@ -800,13 +800,13 @@ const Lowerer = struct {
             .error_union => |error_union| self.lowerErrorUnionSemaType(error_union, range),
             .unknown => self.recordTypeFallback(.sema_unknown, range),
             .function => |function| blk: {
-                var param_types: std.ArrayList(mlir.MlirType) = .{};
+                var param_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (function.param_types) |param_type| {
                     param_types.append(self.allocator, self.lowerSemaType(param_type, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
                 }
 
-                var result_types: std.ArrayList(mlir.MlirType) = .{};
+                var result_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (function.return_types) |return_type| {
                     result_types.append(self.allocator, self.lowerSemaType(return_type, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_function_sema_type, range);
@@ -821,7 +821,7 @@ const Lowerer = struct {
                 );
             },
             .tuple => |elements| blk: {
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (elements) |element| {
                     element_types.append(self.allocator, self.lowerSemaType(element, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
@@ -833,8 +833,8 @@ const Lowerer = struct {
                 );
             },
             .anonymous_struct => |struct_type| blk: {
-                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (struct_type.fields) |field| {
                     field_names.append(self.allocator, support.strRef(field.name)) catch
                         break :blk self.recordTypeFallback(.unsupported_tuple_sema_type, range);
@@ -887,8 +887,8 @@ const Lowerer = struct {
     }
 
     fn lowerInstantiatedEnumAdtType(self: *Lowerer, instantiated: sema.InstantiatedEnum, range: source.TextRange) mlir.MlirType {
-        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
-        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+        var payload_types: std.ArrayList(mlir.MlirType) = .empty;
         for (instantiated.variants) |variant| {
             variant_names.append(self.allocator, support.strRef(variant.name)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -907,8 +907,8 @@ const Lowerer = struct {
     }
 
     fn lowerEnumAdtType(self: *Lowerer, enum_item: ast.EnumItem, range: source.TextRange) mlir.MlirType {
-        var variant_names: std.ArrayList(mlir.MlirStringRef) = .{};
-        var payload_types: std.ArrayList(mlir.MlirType) = .{};
+        var variant_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+        var payload_types: std.ArrayList(mlir.MlirType) = .empty;
         for (enum_item.variants) |variant| {
             variant_names.append(self.allocator, support.strRef(variant.name)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -930,7 +930,7 @@ const Lowerer = struct {
             .positional => |types| blk: {
                 if (types.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
                 if (types.len == 1) break :blk self.lowerEnumPayloadTypeExpr(types[0], range);
-                var element_types: std.ArrayList(mlir.MlirType) = .{};
+                var element_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (types) |type_expr| {
                     element_types.append(self.allocator, self.lowerEnumPayloadTypeExpr(type_expr, range)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -943,8 +943,8 @@ const Lowerer = struct {
             },
             .named => |fields| blk: {
                 if (fields.len == 0) break :blk mlir.oraNoneTypeCreate(self.context);
-                var field_names: std.ArrayList(mlir.MlirStringRef) = .{};
-                var field_types: std.ArrayList(mlir.MlirType) = .{};
+                var field_names: std.ArrayList(mlir.MlirStringRef) = .empty;
+                var field_types: std.ArrayList(mlir.MlirType) = .empty;
                 for (fields) |field| {
                     field_names.append(self.allocator, support.strRef(field.name)) catch
                         break :blk self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -969,7 +969,7 @@ const Lowerer = struct {
 
     fn lowerErrorUnionSemaType(self: *Lowerer, error_union: sema_model.ErrorUnionType, range: source.TextRange) mlir.MlirType {
         const payload_type = self.lowerSemaType(error_union.payload_type.*, range);
-        var error_types: std.ArrayList(mlir.MlirType) = .{};
+        var error_types: std.ArrayList(mlir.MlirType) = .empty;
         for (error_union.error_types) |error_type| {
             error_types.append(self.allocator, self.lowerSemaType(error_type, range)) catch
                 return self.recordTypeFallback(.unsupported_syntax_type, range);
@@ -1131,7 +1131,7 @@ const Lowerer = struct {
         const start = first_runtime orelse return &.{};
         if (!has_comptime_after_runtime) return function.parameters[start..];
 
-        var parameters: std.ArrayList(ast.Parameter) = .{};
+        var parameters: std.ArrayList(ast.Parameter) = .empty;
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.allocator, parameter);
@@ -1308,7 +1308,7 @@ const Lowerer = struct {
     }
 
     pub fn mangleGenericFunctionName(self: *Lowerer, base_name: []const u8, bindings: []const GenericTypeBinding) ![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         var total_len = base_name.len;
         for (bindings) |binding| {
             total_len += 2 + binding.mangle_name.len;
@@ -1551,7 +1551,7 @@ const Lowerer = struct {
     }
 
     pub fn typeMangleName(self: *Lowerer, ty: sema.Type) ![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         try appendSemaTypeMangleName(self.allocator, &name, ty);
         return name.toOwnedSlice(self.allocator);
     }

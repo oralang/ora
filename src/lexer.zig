@@ -604,8 +604,8 @@ pub const Lexer = struct {
     pub fn init(allocator: Allocator, source: []const u8) Lexer {
         return Lexer{
             .source = source,
-            .tokens = std.ArrayList(Token){},
-            .trivia = std.ArrayList(TriviaPiece){},
+            .tokens = std.ArrayList(Token).empty,
+            .trivia = std.ArrayList(TriviaPiece).empty,
             .start = 0,
             .current = 0,
             .line = 1,
@@ -1376,7 +1376,7 @@ pub const Lexer = struct {
 
         self.arena = std.heap.ArenaAllocator.init(self.allocator);
         self.trivia.deinit(self.allocator);
-        self.trivia = .{};
+        self.trivia = .empty;
         if (self.error_recovery) |*recovery| {
             recovery.deinit();
             self.error_recovery = null;

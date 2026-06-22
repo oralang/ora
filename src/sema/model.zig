@@ -440,10 +440,10 @@ pub const KeySegment = union(enum) {
 };
 
 pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u8 {
-    var buffer: std.ArrayList(u8) = .{};
-    errdefer buffer.deinit(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
 
-    const writer = buffer.writer(allocator);
+    const writer = &buffer.writer;
     try writer.writeAll(slot.name);
     if (slot.field_path) |field_path| {
         for (field_path) |field_name| {
@@ -467,7 +467,7 @@ pub fn formatEffectSlotPath(allocator: std.mem.Allocator, slot: EffectSlot) ![]u
         }
     }
 
-    return try buffer.toOwnedSlice(allocator);
+    return try buffer.toOwnedSlice();
 }
 
 pub fn effectSlotPathRoot(path: []const u8) []const u8 {

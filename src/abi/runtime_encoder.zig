@@ -91,9 +91,9 @@ fn externalCallAbiAttrs(
     method_name: []const u8,
     param_types: []const Type,
 ) !struct { mlir.MlirAttribute, mlir.MlirAttribute } {
-    var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+    var arg_type_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
     defer arg_type_attrs.deinit(allocator);
-    var signature_parts: std.ArrayList([]const u8) = .{};
+    var signature_parts: std.ArrayList([]const u8) = .empty;
     defer {
         for (signature_parts.items) |part| allocator.free(part);
         signature_parts.deinit(allocator);

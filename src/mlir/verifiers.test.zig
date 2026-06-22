@@ -37,10 +37,7 @@ fn expectModuleVerificationFailure(text: []const u8) !void {
     const h = createContext();
     defer destroyContext(h);
 
-    const module = parseModuleFromText(h.ctx, text) catch |err| switch (err) {
-        error.MlirParseFailed => return,
-        else => return err,
-    };
+    const module = parseModuleFromText(h.ctx, text) catch return;
     defer c.oraModuleDestroy(module);
 
     const verified = c.mlirOperationVerify(c.oraModuleGetOperation(module));

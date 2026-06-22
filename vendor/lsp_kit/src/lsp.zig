@@ -1142,18 +1142,20 @@ pub const Transport = struct {
     };
 
     pub const ReadError = std.posix.ReadError || error{EndOfStream} || BaseProtocolHeader.ParseError || std.mem.Allocator.Error;
-    pub const WriteError = std.posix.WriteError;
+    pub const WriteError = std.Io.File.Writer.Error;
 
     pub const Stdio = struct {
         transport: Transport,
+        io: std.Io,
         reader: std.Io.Reader,
-        read_from: std.fs.File,
-        write_to: std.fs.File,
+        read_from: std.Io.File,
+        write_to: std.Io.File,
 
         pub fn init(
             read_buffer: []u8,
-            read_from: std.fs.File,
-            write_to: std.fs.File,
+            io: std.Io,
+            read_from: std.Io.File,
+            write_to: std.Io.File,
         ) Stdio {
             return .{
                 .transport = .{
@@ -1162,7 +1164,8 @@ pub const Transport = struct {
                         .writeJsonMessage = &Stdio.writeJsonMessage,
                     },
                 },
-                .reader = std.fs.File.Reader.initInterface(read_buffer),
+                .io = io,
+                .reader = std.Io.File.Reader.initInterface(read_buffer),
                 .read_from = read_from,
                 .write_to = write_to,
             };
@@ -1170,9 +1173,10 @@ pub const Transport = struct {
 
         fn readJsonMessage(transport: *Transport, allocator: std.mem.Allocator) ReadError![]u8 {
             const stdio: *Stdio = @fieldParentPtr("transport", transport);
-            var file_reader: std.fs.File.Reader = .{
+            var file_reader: std.Io.File.Reader = .{
+                .io = stdio.io,
                 .file = stdio.read_from,
-                .mode = .streaming_reading,
+                .mode = .streaming,
                 .interface = stdio.reader,
             };
             defer stdio.reader = file_reader.interface;
@@ -1184,7 +1188,7 @@ pub const Transport = struct {
 
         fn writeJsonMessage(transport: *Transport, json_message: []const u8) WriteError!void {
             const stdio: *Stdio = @fieldParentPtr("transport", transport);
-            var file_writer: std.fs.File.Writer = .initStreaming(stdio.write_to, &.{});
+            var file_writer: std.Io.File.Writer = .initStreaming(stdio.write_to, stdio.io, &.{});
             return lsp.writeJsonMessage(&file_writer.interface, json_message) catch |err| switch (err) {
                 error.WriteFailed => return file_writer.err.?,
             };
@@ -1274,7 +1278,19 @@ pub const ThreadSafeTransportConfig = struct {
     thread_safe_read: bool,
     /// Makes `writeJsonMessage` thread-safe.
     thread_safe_write: bool,
-    MutexType: type = std.Thread.Mutex,
+    MutexType: type = DefaultMutex,
+};
+
+const DefaultMutex = struct {
+    mutex: std.Io.Mutex = .init,
+
+    fn lock(self: *DefaultMutex) void {
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+    }
+
+    fn unlock(self: *DefaultMutex) void {
+        self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
+    }
 };
 
 /// Wraps a non-thread-safe transport and makes it thread-safe.
@@ -3074,5 +3090,5 @@ test isNotificationMethod {
 
 comptime {
     @setEvalBranchQuota(10_000);
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }

@@ -39,7 +39,7 @@ pub fn buildAtOffset(
     file: *const compiler.ast.AstFile,
     offset: u32,
 ) !types.SelectionRange {
-    var ranges = std.ArrayList(types.Range){};
+    var ranges = std.ArrayList(types.Range).empty;
     defer ranges.deinit(arena);
 
     for (file.root_items) |item_id| {

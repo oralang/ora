@@ -67,7 +67,7 @@ const ChildList = struct {
 
     inline_buffer: [inline_capacity]ChildRef = undefined,
     inline_len: usize = 0,
-    spill: std.ArrayList(ChildRef) = .{},
+    spill: std.ArrayList(ChildRef) = .empty,
     items: []const ChildRef = &.{},
 
     fn init() ChildList {
@@ -125,8 +125,8 @@ const Parser = struct {
             .trivia = trivia,
             .tokens = tokens,
             .diagnostics = diags,
-            .nodes = .{},
-            .children = .{},
+            .nodes = .empty,
+            .children = .empty,
             .index = 0,
             .pending_type_gt = 0,
         };
@@ -177,9 +177,9 @@ const Parser = struct {
             .nodes_capacity = self.nodes.capacity,
             .root = root,
         };
-        self.tokens = .{};
-        self.children = .{};
-        self.nodes = .{};
+        self.tokens = .empty;
+        self.children = .empty;
+        self.nodes = .empty;
         return tree;
     }
 
@@ -3462,7 +3462,7 @@ fn copyTokens(allocator: std.mem.Allocator, token_slice: []const lexer.Token) !s
 
     const synthetic_greater_capacity = try std.math.mul(usize, split_greater_count, 2);
     const token_capacity = try std.math.add(usize, token_slice.len, synthetic_greater_capacity);
-    var tokens: std.ArrayList(green.GreenToken) = .{};
+    var tokens: std.ArrayList(green.GreenToken) = .empty;
     errdefer tokens.deinit(allocator);
     try tokens.ensureTotalCapacityPrecise(allocator, token_capacity);
 

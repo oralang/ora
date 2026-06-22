@@ -11,22 +11,22 @@ test "imports: deterministic order for relative diamond graph" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data =
         \\const left = @import("./left.ora");
         \\const right = @import("./right.ora");
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "left.ora",
         .data = "const shared = @import(\"./shared.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "right.ora",
         .data = "const shared = @import(\"./shared.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "shared.ora",
         .data = "contract Shared { }",
     });
@@ -59,15 +59,15 @@ test "imports: detects recursive cycle" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data = "const a = @import(\"./a.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "a.ora",
         .data = "const b = @import(\"./b.ora\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "b.ora",
         .data = "const a = @import(\"./a.ora\");",
     });
@@ -83,7 +83,7 @@ test "imports: reports missing relative target" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data = "const missing = @import(\"./missing.ora\");",
     });
@@ -99,11 +99,11 @@ test "imports: relative specifier must include .ora extension" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data = "const lib = @import(\"./lib\");",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "lib.ora",
         .data = "contract Lib { }",
     });
@@ -122,14 +122,14 @@ test "imports: relative import cannot escape workspace root" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("project/contracts");
-    try tmp.dir.makePath("outside");
+    try tmp.dir.createDirPath(std.testing.io, "project/contracts");
+    try tmp.dir.createDirPath(std.testing.io, "outside");
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "outside/secret.ora",
         .data = "contract Secret { }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "project/contracts/entry.ora",
         .data = "const secret = @import(\"../../outside/secret.ora\");",
     });
@@ -151,12 +151,12 @@ test "imports: package style resolves from workspace roots" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("workspace/acme");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "workspace/acme");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "workspace/acme/math.ora",
         .data = "pub fn add(x: u256, y: u256) -> u256 { return x + y; }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data = "const math = @import(\"acme/math\");",
     });
@@ -185,17 +185,17 @@ test "imports: package root conflict is rejected" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.makePath("w1/acme");
-    try tmp.dir.makePath("w2/acme");
-    try tmp.dir.writeFile(.{
+    try tmp.dir.createDirPath(std.testing.io, "w1/acme");
+    try tmp.dir.createDirPath(std.testing.io, "w2/acme");
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "w1/acme/math.ora",
         .data = "pub fn math() -> u256 { return 1; }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "w2/acme/util.ora",
         .data = "pub fn util() -> u256 { return 2; }",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data =
         \\const math = @import("acme/math");
@@ -222,7 +222,7 @@ test "imports: std import resolves through embedded stdlib graph" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data =
         \\const std = @import("std");
@@ -267,7 +267,7 @@ test "imports: std storage import resolves only storage helper graph" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data =
         \\const storage = @import("std/storage");
@@ -306,7 +306,7 @@ test "imports: package import must include package and module path" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "entry.ora",
         .data = "const bad = @import(\"acme\");",
     });

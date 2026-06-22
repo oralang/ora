@@ -108,7 +108,7 @@ pub fn buildFromSemanticIndexWithStats(
     const prefix = completion.identifierPrefixAtPosition(source, byte_position);
     const snippet_count: usize = if (protocol_helpers.isAtLineStart(source, byte_position) and trigger_char == null) snippets.len else 0;
 
-    var result = std.ArrayList(types.CompletionItem){};
+    var result = std.ArrayList(types.CompletionItem).empty;
     errdefer result.deinit(arena);
 
     var string_bytes: usize = 0;

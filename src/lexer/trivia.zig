@@ -109,7 +109,7 @@ pub const StringProcessor = struct {
     /// - Only ASCII characters are allowed
     /// - Only supports limited escape sequences: \n, \t, \", \\
     pub fn processString(self: *StringProcessor, raw_string: []const u8) LexerError![]u8 {
-        var result = std.ArrayList(u8){};
+        var result = std.ArrayList(u8).empty;
         defer result.deinit(self.allocator);
 
         var i: usize = 0;

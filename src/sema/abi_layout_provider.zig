@@ -144,7 +144,7 @@ fn contractFieldTypes(provider: *const abi_layout_context.Provider, allocator: s
         .Contract => |contract_item| contract_item,
         else => return null,
     };
-    var fields: std.ArrayList(Type) = .{};
+    var fields: std.ArrayList(Type) = .empty;
     for (contract_item.members) |member_id| {
         switch (provider.file.item(member_id).*) {
             .Field => |field| {

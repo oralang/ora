@@ -1439,7 +1439,7 @@ const ConstEvaluator = struct {
     };
 
     fn signatureForTraitMethod(self: *ConstEvaluator, method: anytype) !?[]const u8 {
-        var abi_types: std.ArrayList([]const u8) = .{};
+        var abi_types: std.ArrayList([]const u8) = .empty;
         defer abi_types.deinit(self.allocator);
 
         for (method.parameters) |parameter| {
@@ -1451,7 +1451,7 @@ const ConstEvaluator = struct {
     }
 
     fn signatureForLogDecl(self: *ConstEvaluator, log_decl: ast.LogDeclItem) !?[]const u8 {
-        var abi_types: std.ArrayList([]const u8) = .{};
+        var abi_types: std.ArrayList([]const u8) = .empty;
         defer abi_types.deinit(self.allocator);
 
         for (log_decl.fields) |field| {
@@ -1652,7 +1652,7 @@ const ConstEvaluator = struct {
                 if (refinements.isKnownName(generic.name)) {
                     if (generic.args.len > 0 and generic.args[0] == .Type) break :blk self.typeExprAbiName(generic.args[0].Type);
                 }
-                var rendered_args: std.ArrayList([]const u8) = .{};
+                var rendered_args: std.ArrayList([]const u8) = .empty;
                 defer rendered_args.deinit(self.allocator);
                 for (generic.args) |arg| switch (arg) {
                     .Type => |nested| {
@@ -1668,7 +1668,7 @@ const ConstEvaluator = struct {
                     try std.fmt.allocPrint(self.allocator, "{s}<{s}>", .{ generic.name, joined });
             },
             .Tuple => |tuple| blk: {
-                var rendered_elements: std.ArrayList([]const u8) = .{};
+                var rendered_elements: std.ArrayList([]const u8) = .empty;
                 defer rendered_elements.deinit(self.allocator);
                 for (tuple.elements) |element| {
                     const name = (try self.typeExprAbiName(element)) orelse break :blk null;
@@ -1678,7 +1678,7 @@ const ConstEvaluator = struct {
                 break :blk try std.fmt.allocPrint(self.allocator, "({s})", .{joined});
             },
             .AnonymousStruct => |struct_type| blk: {
-                var rendered_fields: std.ArrayList([]const u8) = .{};
+                var rendered_fields: std.ArrayList([]const u8) = .empty;
                 defer rendered_fields.deinit(self.allocator);
                 for (struct_type.fields) |field| {
                     const name = (try self.typeExprAbiName(field.type_expr)) orelse break :blk null;

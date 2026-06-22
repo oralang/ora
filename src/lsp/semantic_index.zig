@@ -123,7 +123,7 @@ pub fn indexAstFileWithSourceStoreAlloc(
     errdefer builder.deinit();
 
     for (ast_file.root_items) |item_id| {
-        try collectItem(&builder, ast_file, item_id, null, false);
+        collectItem(&builder, ast_file, item_id, null, false) catch |err| return normalizeAllocatingWriterError(err);
     }
 
     const builder_capacity_requested = builder.symbols.capacity;
@@ -160,9 +160,9 @@ pub fn buildDocumentSymbols(allocator: Allocator, symbols: []const Symbol) ![]Do
         for (child_lists) |*list| list.deinit(allocator);
         allocator.free(child_lists);
     }
-    for (child_lists) |*list| list.* = .{};
+    for (child_lists) |*list| list.* = .empty;
 
-    var roots = std.ArrayList(usize){};
+    var roots = std.ArrayList(usize).empty;
     defer roots.deinit(allocator);
 
     for (symbols, 0..) |symbol, symbol_index| {
@@ -279,6 +279,13 @@ fn buildSymbolNameOrder(allocator: Allocator, symbols: []const Symbol) ![]u32 {
 
 fn symbolIndexU32(index: usize) !u32 {
     return std.math.cast(u32, index) orelse error.SymbolIndexOverflow;
+}
+
+fn normalizeAllocatingWriterError(err: anyerror) anyerror {
+    return switch (err) {
+        error.WriteFailed => error.OutOfMemory,
+        else => err,
+    };
 }
 
 fn lessSymbolStart(symbols: []const Symbol, lhs_index: u32, rhs_index: u32) bool {
@@ -580,9 +587,9 @@ fn rangesEqual(a: frontend.Range, b: frontend.Range) bool {
 }
 
 fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, function_decl: compiler.ast.FunctionItem) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     try writer.writeByte('(');
     for (function_decl.parameters, 0..) |parameter, i| {
@@ -619,7 +626,7 @@ fn formatFunctionDetailAlloc(allocator: Allocator, file: *const compiler.ast.Ast
         try writer.writeByte(')');
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 /// Write a best-effort text representation of an expression (for spec clause display).
@@ -717,9 +724,9 @@ fn mulSat(a: usize, b: usize) usize {
 }
 
 fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, error_decl: compiler.ast.ErrorDeclItem) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     try writer.writeByte('(');
     for (error_decl.parameters, 0..) |parameter, i| {
@@ -732,13 +739,13 @@ fn formatErrorDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFil
     }
     try writer.writeByte(')');
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn formatEnumDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, enum_decl: compiler.ast.EnumItem) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     if (enum_decl.template_parameters.len > 0) {
         try writer.writeByte('(');
@@ -759,13 +766,13 @@ fn formatEnumDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile
         try writer.print(": {s}", .{base_text});
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn formatEnumVariantDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, variant: compiler.ast.EnumVariant) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     switch (variant.payload) {
         .none => {},
@@ -793,13 +800,13 @@ fn formatEnumVariantDetailAlloc(allocator: Allocator, file: *const compiler.ast.
         try writeExprText(writer, file, value_expr);
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, method: anytype) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     try writer.writeByte('(');
     var wrote_parameter = false;
@@ -849,13 +856,13 @@ fn formatTraitMethodDetailAlloc(allocator: Allocator, file: *const compiler.ast.
         try writer.writeByte(')');
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn formatLogDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, log_decl: compiler.ast.LogDeclItem) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     try writer.writeByte('(');
     for (log_decl.fields, 0..) |field, i| {
@@ -867,14 +874,14 @@ fn formatLogDetailAlloc(allocator: Allocator, file: *const compiler.ast.AstFile,
     }
     try writer.writeByte(')');
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }
 
 fn formatTypeExprAlloc(allocator: Allocator, file: *const compiler.ast.AstFile, type_expr_id: compiler.ast.TypeExprId) ![]u8 {
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    try writeTypeExpr(buffer.writer(allocator), file, type_expr_id);
-    return buffer.toOwnedSlice(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    try writeTypeExpr(&buffer.writer, file, type_expr_id);
+    return buffer.toOwnedSlice();
 }
 
 fn writeTypeExpr(writer: anytype, file: *const compiler.ast.AstFile, type_expr_id: compiler.ast.TypeExprId) !void {
@@ -1015,7 +1022,7 @@ const SymbolBuilder = struct {
         return .{
             .result_allocator = result_allocator,
             .scratch_allocator = scratch_allocator,
-            .symbols = .{},
+            .symbols = .empty,
             .sources = sources,
             .file_id = file_id,
             .source_text = source_text,
@@ -1092,7 +1099,7 @@ const SymbolBuilder = struct {
         }
 
         // Now walk backwards through preceding comment lines.
-        var comment_lines = std.ArrayList([]const u8){};
+        var comment_lines = std.ArrayList([]const u8).empty;
         defer comment_lines.deinit(self.scratch_allocator);
 
         var scan_pos = line_start;
@@ -1108,7 +1115,7 @@ const SymbolBuilder = struct {
             }
 
             const line = self.source_text[prev_line_start..prev_line_end];
-            const trimmed = std.mem.trimLeft(u8, line, " \t");
+            const trimmed = std.mem.trimStart(u8, line, " \t");
 
             if (std.mem.startsWith(u8, trimmed, "///")) {
                 // Strip the /// prefix and optional leading space.
