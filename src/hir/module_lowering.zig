@@ -209,7 +209,11 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .IntegerLiteral => |literal| .{ .integer = std.mem.trim(u8, literal.text, " \t\n\r") },
                 .BoolLiteral => |literal| .{ .boolean = literal.value },
                 .Group => |group| @This().inlineKnownArgValueFromExpr(self, group.expr),
-                else => null,
+                else => blk: {
+                    const expr_type = self.typecheck.expr_types[expr_id.index()];
+                    if (expr_type.kind() == .refinement) break :blk .{ .refinement = expr_type };
+                    break :blk null;
+                },
             };
         }
 
@@ -254,9 +258,28 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                         }
                     },
                     .boolean => |value| try name.appendSlice(self.allocator, if (value) "true" else "false"),
+                    .refinement => |ty| try @This().appendInlineRefinementMangle(self, &name, ty.refinement),
                 }
             }
             return name.toOwnedSlice(self.allocator);
+        }
+
+        fn appendInlineRefinementMangle(self: *Lowerer, name: *std.ArrayList(u8), refinement: sema.RefinementType) !void {
+            try name.appendSlice(self.allocator, "refined_");
+            try @This().appendMangleText(self, name, refinement.name);
+            for (refinement.args) |arg| {
+                try name.append(self.allocator, '_');
+                switch (arg) {
+                    .Type => try name.append(self.allocator, 'T'),
+                    .Integer => |integer| try @This().appendMangleText(self, name, integer.text),
+                }
+            }
+        }
+
+        fn appendMangleText(self: *Lowerer, name: *std.ArrayList(u8), text: []const u8) !void {
+            for (text) |ch| {
+                try name.append(self.allocator, if (std.ascii.isAlphanumeric(ch)) ch else '_');
+            }
         }
 
         pub fn ensureMonomorphizedFunction(

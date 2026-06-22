@@ -328,6 +328,7 @@ const Lowerer = struct {
     pub const InlineKnownArgValue = union(enum) {
         integer: []const u8,
         boolean: bool,
+        refinement: sema.Type,
     };
 
     pub const InlineKnownArgBinding = struct {

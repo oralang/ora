@@ -61,7 +61,7 @@ contract ERC20Token {
         return @cast(u256, amount);
     }
 
-    inline fn requireBalance(owner: address, amount: TokenUnit) -> !bool | InsufficientBalance {
+    inline fn requireBalance(owner: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance {
         let available: TokenUnit = balances[owner];
         if (available<amount) {
             return InsufficientBalance(tokenValue(amount), tokenValue(available));
@@ -69,7 +69,7 @@ contract ERC20Token {
         return true;
     }
 
-    inline fn requireAllowance(owner: address, spender: address, amount: TokenUnit) -> !bool | InsufficientAllowance {
+    inline fn requireAllowance(owner: NonZeroAddress, spender: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientAllowance {
         let available: TokenUnit = allowances[owner][spender];
         if (available<amount) {
             return InsufficientAllowance(tokenValue(amount), tokenValue(available));
@@ -126,8 +126,8 @@ contract ERC20Token {
     ensures totalSupply == old(totalSupply)
     {
         let sender: NonZeroAddress = caller();
-        try requireBalance(std.msg.sender(), amount);
-        @move(balances[std.msg.sender()], balances[recipient], amount);
+        try requireBalance(sender, amount);
+        @move(balances[sender], balances[recipient], amount);
 
         log Transfer(sender, recipient, tokenValue(amount));
         return true;
@@ -157,11 +157,11 @@ contract ERC20Token {
     ensures totalSupply == old(totalSupply)
     {
         let spender: NonZeroAddress = caller();
-        try requireAllowance(sender, std.msg.sender(), amount);
+        try requireAllowance(sender, spender, amount);
         try requireBalance(sender, amount);
 
-        let current_allowance: TokenUnit = allowances[sender][std.msg.sender()];
-        allowances[sender][std.msg.sender()] = current_allowance - amount;
+        let current_allowance: TokenUnit = allowances[sender][spender];
+        allowances[sender][spender] = current_allowance - amount;
         @move(balances[sender], balances[recipient], amount);
 
         log Transfer(sender, recipient, tokenValue(amount));
@@ -193,10 +193,11 @@ contract ERC20Token {
     requires totalSupply >= amount
     ensures totalSupply == old(totalSupply) - amount
     {
-        try requireBalance(std.msg.sender(), amount);
+        let sender: NonZeroAddress = caller();
+        try requireBalance(sender, amount);
         totalSupply -= amount;
-        @destroy(balances[std.msg.sender()], amount);
-        log Transfer(caller(), std.constants.ZERO_ADDRESS, tokenValue(amount));
+        @destroy(balances[sender], amount);
+        log Transfer(sender, std.constants.ZERO_ADDRESS, tokenValue(amount));
         return true;
     }
 }

@@ -143,6 +143,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             }
                         },
                         .boolean => |boolean| self.locals.setPatternKnownBool(parent.file, parameter.pattern, boolean) catch {},
+                        .refinement => {},
                     };
                 }
                 runtime_index += 1;
@@ -575,10 +576,21 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             for (function.parameters) |parameter| {
                 const param_type = self.parent.typecheck.pattern_types[parameter.pattern.index()].type;
                 if (param_type.kind() != .refinement) continue;
+                if (@This().inlineArgAlreadyProvidesRefinement(self, parameter, param_type)) continue;
                 const local_id = self.locals.resolvePatternTarget(self.parent.file, parameter.pattern) orelse continue;
                 const param_value = self.locals.getValue(local_id) orelse continue;
                 try @This().insertRefinementGuard(self, param_value, param_type.refinement, parameter.range, patternName(self.parent.file, parameter.pattern), "parameter_refinement");
             }
+        }
+
+        fn inlineArgAlreadyProvidesRefinement(self: *FunctionLowerer, parameter: ast.Parameter, param_type: sema.Type) bool {
+            const name = patternName(self.parent.file, parameter.pattern) orelse return false;
+            const known = self.parent.inlineKnownArg(name) orelse return false;
+            const actual_type = switch (known) {
+                .refinement => |ty| ty,
+                else => return false,
+            };
+            return actual_type.kind() == .refinement and type_descriptors.typesAssignable(param_type, actual_type);
         }
 
         fn insertRefinementGuard(

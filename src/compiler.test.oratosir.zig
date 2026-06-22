@@ -5161,6 +5161,34 @@ test "refinement cleanup deduplicates zero-address requires implied by NonZeroAd
     try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
 }
 
+test "source-inline refined arguments do not duplicate parameter refinement guards" {
+    const source_text =
+        \\contract Check {
+        \\    inline fn requireOwner(owner: NonZeroAddress) {
+        \\    }
+        \\
+        \\    pub fn refined(owner: NonZeroAddress) {
+        \\        requireOwner(owner);
+        \\    }
+        \\
+        \\    pub fn unrefined(owner: address) {
+        \\        requireOwner(owner);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const before_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (before_ref.data != null) mlir.oraStringRefFree(before_ref);
+    const before = before_ref.data[0..before_ref.length];
+
+    try testing.expect(std.mem.containsAtLeast(u8, before, 1, "@requireOwner__inline__owner_refined_NonZeroAddress"));
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, before, "ora.refinement_guard"));
+}
+
 test "refinement cleanup keeps dominated requires checks in keep-proved mode" {
     const source_text =
         \\contract Check {

@@ -8545,7 +8545,10 @@ const TypeChecker = struct {
     fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {
         return switch (self.file.expression(expr_id).*) {
             .Group => |group| self.environmentKeySegmentForExpr(group.expr),
-            .Call => |call| if (call.args.len == 0) self.environmentKeySegmentForExpr(call.callee) else null,
+            .Call => |call| if (call.args.len == 0)
+                self.environmentKeySegmentForExpr(call.callee) orelse self.environmentKeySegmentReturnedByInlineCall(call)
+            else
+                null,
             .Field => blk: {
                 const msg_sender_paths = [_][]const []const u8{
                     &.{ "msg", "sender" },
@@ -8566,6 +8569,17 @@ const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn environmentKeySegmentReturnedByInlineCall(self: *TypeChecker, call: ast.CallExpr) ?KeySegment {
+        const callee_id = self.calleeFunctionItem(call.callee) orelse return null;
+        const function = switch (self.file.item(callee_id).*) {
+            .Function => |function| function,
+            else => return null,
+        };
+        if (!function.is_inline) return null;
+        const returned = self.simpleReturnValueExprInFile(self.file, function) orelse return null;
+        return self.environmentKeySegmentForExpr(returned);
     }
 
     fn environmentIntrinsicValueType(self: *TypeChecker, expr_id: ast.ExprId) ?Type {

@@ -1113,6 +1113,10 @@ test "compiler tracks resource builtin effects for modifies and locks" {
         \\    storage var balances: map<address, Resource<TokenUnit>>;
         \\    storage var allowances: map<address, map<address, TokenUnit>>;
         \\
+        \\    inline fn caller() -> NonZeroAddress {
+        \\        return std.msg.sender();
+        \\    }
+        \\
         \\    pub fn direct(to: address, amount: TokenUnit)
         \\        modifies balances[msg.sender], balances[to]
         \\    {
@@ -1123,6 +1127,13 @@ test "compiler tracks resource builtin effects for modifies and locks" {
         \\        modifies balances[msg.sender], balances[to]
         \\    {
         \\        let sender: address = std.msg.sender();
+        \\        @move(balances[sender], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn inline_aliased(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        let sender: NonZeroAddress = caller();
         \\        @move(balances[sender], balances[to], amount);
         \\    }
         \\
