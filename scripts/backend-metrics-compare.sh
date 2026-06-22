@@ -18,7 +18,7 @@ writes a non-overwriting snapshot under:
 
   tests/conformance/backend_metrics/runs/<run-id>/
 
-Variants are passed through ORA_SENSEI_BACKEND. Defaults: debug release.
+Variants are passed through ORA_PLANK_BACKEND. Defaults: debug release.
 
 Environment:
   ORA_BACKEND_METRICS_DIR      override snapshot root
@@ -111,7 +111,7 @@ for variant in "${VARIANTS[@]}"; do
       ;;
   esac
   echo "backend-metrics-compare: running $variant"
-  ORA_SENSEI_BACKEND="$variant" "$HARNESS" > "$RUN_DIR/$variant.tsv"
+  ORA_PLANK_BACKEND="$variant" "$HARNESS" > "$RUN_DIR/$variant.tsv"
 done
 
 python3 - "$RUN_DIR" "${VARIANTS[@]}" <<'PY'
