@@ -23,6 +23,15 @@ test "lsp builtin docs: formats markdown with example" {
     try std.testing.expect(std.mem.indexOf(u8, markdown, "```ora") != null);
 }
 
+test "lsp builtin docs: covers cast and resource boundary builtins" {
+    inline for (.{ "cast", "move", "create", "destroy" }) |name| {
+        const entry = builtin_docs.entryForName(name) orelse return error.TestExpectedEqual;
+        try std.testing.expect(std.mem.startsWith(u8, entry.signature, "@"));
+        try std.testing.expect(entry.documentation.len > 0);
+        try std.testing.expect(entry.example.len > 0);
+    }
+}
+
 test "lsp builtin docs: every example snippet parses" {
     for (builtin_docs.entries) |entry| {
         try expectExampleParses(entry);

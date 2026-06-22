@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtins = @import("../builtins.zig");
 const lexer_mod = @import("ora_lexer");
 const refinements = @import("ora_refinements");
 const frontend = @import("frontend.zig");
@@ -212,8 +213,15 @@ fn classifyKeywordLexeme(token: anytype) ?Classification {
 }
 
 fn classifyIdentifier(token: anytype, context: TokenContext, maybe_index: ?semantic_index.SemanticIndex) Classification {
+    if (std.mem.eql(u8, token.lexeme, "Resource")) {
+        return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
     if (refinements.entryForName(token.lexeme) != null) {
         return .{ .kind = .type, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
+    }
+
+    if (context.previous_type == .At and builtins.entryForName(token.lexeme) != null) {
+        return .{ .kind = .function, .modifiers = SemanticTokenModifier.mask(.defaultLibrary) };
     }
 
     if (classifyBuiltinPathMember(token.lexeme, context)) |classification| return classification;

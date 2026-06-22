@@ -1,6 +1,7 @@
 const std = @import("std");
 const lsp = @import("lsp");
 const ora_root = @import("ora_root");
+const builtin_docs = ora_root.lsp.builtin_docs;
 
 const completion = ora_root.lsp.completion;
 const frontend = ora_root.lsp.frontend;
@@ -119,6 +120,35 @@ pub fn buildFromSemanticIndexWithStats(
     }
     for (keyword_docs.contextual_keywords) |keyword| {
         try appendBorrowedCompletion(arena, &result, &string_bytes, &markdown_bytes, prefix, keyword, null, keyword_docs.documentation(keyword), .keyword);
+    }
+    try appendBorrowedCompletion(
+        arena,
+        &result,
+        &string_bytes,
+        &markdown_bytes,
+        prefix,
+        "Resource",
+        "Resource<T>",
+        "Opaque storage or transient resource place for a declared `resource` domain. Mutate resource places with `@create`, `@destroy`, and `@move`.",
+        .type_alias,
+    );
+
+    for (builtin_docs.entries) |entry| {
+        if (!matchesPrefix(entry.name, prefix)) continue;
+        if (containsCompletionLabel(result.items, entry.name)) continue;
+
+        const markdown = try builtin_docs.markdownAlloc(arena, entry);
+        try appendBorrowedCompletion(
+            arena,
+            &result,
+            &string_bytes,
+            &markdown_bytes,
+            prefix,
+            entry.name,
+            entry.signature,
+            markdown,
+            .function,
+        );
     }
 
     for (completion.refinement_entries) |entry| {

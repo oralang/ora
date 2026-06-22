@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin_docs = @import("builtin_docs.zig");
 const frontend = @import("frontend.zig");
 const lexer = @import("ora_lexer");
 const refinements = @import("ora_refinements");
@@ -73,6 +74,10 @@ pub fn completionAtIndex(
     for (keyword_docs.contextual_keywords) |keyword| {
         try appendKeywordCompletion(allocator, &items, &seen, prefix, keyword);
     }
+    try appendResourceTypeCompletion(allocator, &items, &seen, prefix);
+    for (builtin_docs.entries) |entry| {
+        try appendBuiltinCompletion(allocator, &items, &seen, prefix, entry);
+    }
 
     for (refinements.entries) |entry| {
         if (!matchesPrefix(entry.name, prefix)) continue;
@@ -104,6 +109,44 @@ pub fn completionAtIndex(
     std.sort.heap(Item, items.items, {}, lessItemByLabel);
 
     return items.toOwnedSlice(allocator);
+}
+
+fn appendBuiltinCompletion(
+    allocator: Allocator,
+    items: *std.ArrayList(Item),
+    seen: *std.StringHashMap(void),
+    prefix: []const u8,
+    entry: builtin_docs.Entry,
+) !void {
+    if (!matchesPrefix(entry.name, prefix)) return;
+    if (seen.contains(entry.name)) return;
+
+    try seen.put(entry.name, {});
+    try items.append(allocator, .{
+        .label = try allocator.dupe(u8, entry.name),
+        .detail = try allocator.dupe(u8, entry.signature),
+        .documentation = try builtin_docs.markdownAlloc(allocator, entry),
+        .kind = .function,
+    });
+}
+
+fn appendResourceTypeCompletion(
+    allocator: Allocator,
+    items: *std.ArrayList(Item),
+    seen: *std.StringHashMap(void),
+    prefix: []const u8,
+) !void {
+    const label = "Resource";
+    if (!matchesPrefix(label, prefix)) return;
+    if (seen.contains(label)) return;
+
+    try seen.put(label, {});
+    try items.append(allocator, .{
+        .label = try allocator.dupe(u8, label),
+        .detail = try allocator.dupe(u8, "Resource<T>"),
+        .documentation = try allocator.dupe(u8, "Opaque storage or transient resource place for a declared `resource` domain. Mutate resource places with `@create`, `@destroy`, and `@move`."),
+        .kind = .type_alias,
+    });
 }
 
 fn appendKeywordCompletion(

@@ -125,6 +125,74 @@ test "lsp hover: keyword docs come from shared guarded table" {
     try testing.expect(std.mem.indexOf(u8, value.contents, "Logical conjunction operator.") != null);
 }
 
+test "lsp hover: builtin docs resolve from at-prefixed calls" {
+    const source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn run(to: address, amount: TokenUnit) {
+        \\        let wide: u256 = @cast(u256, amount);
+        \\        @create(balances[to], amount);
+        \\        @move(balances[to], balances[to], amount);
+        \\        @destroy(balances[to], amount);
+        \\    }
+        \\}
+    ;
+
+    inline for (.{
+        .{ "cast", "@cast(T, value) -> T", "checked conversion rules" },
+        .{ "create", "@create(place, amount) -> void", "resource-domain boundary delta" },
+        .{ "move", "@move(from, to, amount) -> void", "same resource domain" },
+        .{ "destroy", "@destroy(place, amount) -> void", "resource place" },
+    }) |case| {
+        const maybe_hover = try cachedHover(source, positionOf(source, case[0]));
+        try testing.expect(maybe_hover != null);
+
+        var value = maybe_hover.?;
+        defer value.deinit(testing.allocator);
+
+        try testing.expect(std.mem.indexOf(u8, value.contents, case[1]) != null);
+        try testing.expect(std.mem.indexOf(u8, value.contents, case[2]) != null);
+    }
+}
+
+test "lsp hover: builtin docs resolve when cursor is on at sign" {
+    const source =
+        \\pub fn run(value: u64) -> u256 {
+        \\    return @cast(u256, value);
+        \\}
+    ;
+
+    const at_offset = std.mem.indexOf(u8, source, "@cast") orelse return error.TestExpectedEqual;
+    const maybe_hover = try cachedHover(source, byteIndexToPosition(source, at_offset));
+    try testing.expect(maybe_hover != null);
+
+    var value = maybe_hover.?;
+    defer value.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, value.contents, "@cast(T, value) -> T") != null);
+}
+
+test "lsp hover: Resource generic capability type is documented" {
+    const source =
+        \\resource TokenUnit = u256;
+        \\contract Vault {
+        \\    storage var balance: Resource<TokenUnit>;
+        \\}
+    ;
+
+    const maybe_hover = try cachedHover(source, positionOf(source, "Resource"));
+    try testing.expect(maybe_hover != null);
+
+    var value = maybe_hover.?;
+    defer value.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, value.contents, "Resource<T>") != null);
+    try testing.expect(std.mem.indexOf(u8, value.contents, "@create") != null);
+}
+
 test "lsp hover: returns registry-backed refinement docs" {
     const source =
         \\pub fn ready(owner: NonZeroAddress) -> NonZeroAddress {
@@ -154,6 +222,10 @@ test "lsp hover: returns null when no symbol is under cursor" {
 
 fn positionOf(source: []const u8, needle: []const u8) frontend.Position {
     const offset = std.mem.indexOf(u8, source, needle) orelse @panic("needle not found");
+    return byteIndexToPosition(source, offset);
+}
+
+fn byteIndexToPosition(source: []const u8, offset: usize) frontend.Position {
     var line: u32 = 0;
     var character: u32 = 0;
     for (source[0..offset]) |byte| {

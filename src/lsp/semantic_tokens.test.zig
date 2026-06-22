@@ -78,6 +78,24 @@ test "semantic tokens: refinement type names classify as default library types" 
     return error.TestExpectedEqual;
 }
 
+test "semantic tokens: Resource and at-prefixed builtins classify as default library" {
+    const source = "@move Resource @cast";
+    const tokens = try cachedTokens(testing.allocator, source, null);
+    defer testing.allocator.free(tokens);
+
+    const move = try semanticTokenForLexeme(source, tokens, "move");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.function, move.kind);
+    try testing.expect((move.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+
+    const resource = try semanticTokenForLexeme(source, tokens, "Resource");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.type, resource.kind);
+    try testing.expect((resource.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+
+    const cast = try semanticTokenForLexeme(source, tokens, "cast");
+    try testing.expectEqual(semantic_tokens.SemanticTokenKind.function, cast.kind);
+    try testing.expect((cast.modifiers & semantic_tokens.SemanticTokenModifier.mask(.defaultLibrary)) != 0);
+}
+
 test "semantic tokens: builtin environment namespaces and constants classify as default library" {
     const source = "msg.sender i256.MAX std.msg.value std.constants.U256_MAX";
     const tokens = try cachedTokens(testing.allocator, source, null);
