@@ -839,6 +839,14 @@
       ]
     },
     {
+      "id": "full_app.erc20_resource_flow",
+      "area": "full_app",
+      "behavior": "ERC20 app with Resource<TokenUnit> balances: init/create, msg.sender transfer via @move, approve, transferFrom, balances, allowances, and total supply execute through bytecode",
+      "specs": [
+        "tests/conformance/app_erc20_resource.spec.toml"
+      ]
+    },
+    {
       "id": "full_app.resource_token",
       "area": "full_app",
       "behavior": "ERC20-like resource token: issue, conserved transferFrom, allowance accounting, retire/destroy, balances, and total supply execute through bytecode",

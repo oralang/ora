@@ -69,7 +69,9 @@ pub const Formatter = struct {
         for (self.tokens, 0..) |token, index| {
             if (token.type == .Eof) break;
             const next = self.peekNonEof(index + 1);
-            try self.emitLeadingComments(token);
+            if (self.last_token_type != .At) {
+                try self.emitLeadingComments(token);
+            }
             try self.formatToken(token, next);
         }
 
@@ -402,6 +404,7 @@ fn isKeywordThatNeedsSpaceAfter(source: []const u8, token: lib.Token, next: ?lib
         .Staticcall,
         .Errors,
         .Error,
+        .Resource,
         .Try,
         .Catch,
         .Ghost,
@@ -466,6 +469,7 @@ fn isWordBoundaryToken(token: lib.TokenType) bool {
         .True,
         .False,
         .Error,
+        .Resource,
         .Try,
         .Catch,
         .Switch,
@@ -527,6 +531,7 @@ fn isAlwaysSpacedOperator(token: lib.TokenType) bool {
         .GreaterEqual,
         .AmpersandEqual,
         .AmpersandAmpersand,
+        .Pipe,
         .PipeEqual,
         .PipePipe,
         .CaretEqual,
@@ -551,7 +556,7 @@ fn isAlwaysSpacedOperator(token: lib.TokenType) bool {
 
 fn isPrefixOperator(token: lib.TokenType, previous: ?lib.TokenType) bool {
     return switch (token) {
-        .Bang, .Tilde => true,
+        .Bang, .Tilde, .At => true,
         .Ampersand, .Star, .Minus => previous == null or !canEndExpression(previous.?),
         else => false,
     };

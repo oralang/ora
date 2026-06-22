@@ -1358,9 +1358,9 @@ test "compiler source loader injects embedded std result module" {
     try testing.expectEqual(@as(usize, 3), std_summary.imports.len);
 }
 
-test "compiler lowers try expressions through real error helper ops" {
+test "compiler lowers try expressions without rewrapping identical error unions" {
     const source_text =
-        \\error Failure(code: u256);
+        \\error Failure;
         \\
         \\pub fn lift(maybe: !u256 | Failure) -> !u256 | Failure {
         \\    return try maybe;
@@ -1375,8 +1375,32 @@ test "compiler lowers try expressions through real error helper ops" {
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.is_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+}
+
+test "compiler rewraps identical payload error unions that need wide carriers" {
+    const source_text =
+        \\error Failure(code: u256);
+        \\
+        \\pub fn lift(maybe: !bool | Failure) -> !bool | Failure {
+        \\    return try maybe;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.is_error"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "-> !ora.struct<\"Failure\">"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.force_wide_error_union"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.unwrap"));
 }
 
@@ -1399,12 +1423,13 @@ test "compiler carries tuple-payload error unions through HIR" {
 test "compiler marks payload-bearing narrow error unions for wide lowering in HIR" {
     const source_text =
         \\error Failure(code: u256);
+        \\error Other;
         \\
         \\pub fn helper(flag: bool) -> !bool | Failure {
         \\    return flag;
         \\}
         \\
-        \\pub fn use(flag: bool) -> !bool | Failure {
+        \\pub fn use(flag: bool) -> !bool | Failure | Other {
         \\    return try helper(flag);
         \\}
     ;
@@ -1413,6 +1438,8 @@ test "compiler marks payload-bearing narrow error unions for wide lowering in HI
     defer testing.allocator.free(hir_text);
 
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.force_wide_error_union"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.get_error"));
+    try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "-> !ora.struct<\"Failure\">"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.ok"));
     try testing.expect(std.mem.containsAtLeast(u8, hir_text, 1, "ora.error.err"));
 }

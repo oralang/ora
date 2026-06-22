@@ -119,3 +119,52 @@ test "lsp formatting: preserves keyword boundaries for inline impl and modifies"
     try testing.expect(std.mem.indexOf(u8, repaired, "modifies allowances[msg.sender][spender]") != null);
     try testing.expect(std.mem.indexOf(u8, repaired, "modifiesallowances") == null);
 }
+
+test "lsp formatting: preserves resource error-union and builtin syntax" {
+    const source =
+        \\comptime const std = @import("std");
+        \\
+        \\resource TokenUnit = u256;
+        \\
+        \\error InsufficientBalance(required: u256, available: u256);
+        \\
+        \\contract ERC20Token {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    inline fn requireBalance(owner: address, amount: TokenUnit) -> !bool | InsufficientBalance {
+        \\        let available: TokenUnit = balances[owner];
+        \\        if (available < amount) {
+        \\            return InsufficientBalance(amount, available);
+        \\        }
+        \\        return true;
+        \\    }
+        \\
+        \\    pub fn transfer(recipient: NonZeroAddress, amount: TokenUnit) -> !bool | InsufficientBalance {
+        \\        try requireBalance(std.msg.sender(), amount);
+        \\        @move(balances[std.msg.sender()], balances[recipient], amount);
+        \\        return true;
+        \\    }
+        \\}
+    ;
+
+    const formatted_once = try formatting.formatSourceAlloc(testing.allocator, source, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_once);
+
+    const formatted_twice = try formatting.formatSourceAlloc(testing.allocator, formatted_once, .{
+        .line_width = 100,
+        .indent_size = 4,
+    });
+    defer testing.allocator.free(formatted_twice);
+
+    try testing.expectEqualStrings(formatted_once, formatted_twice);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "resource TokenUnit = u256;") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "-> !bool | InsufficientBalance") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@move(balances[std.msg.sender()], balances[recipient], amount);") != null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "resourceTokenUnit") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "!bool|") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@ move") == null);
+    try testing.expect(std.mem.indexOf(u8, formatted_once, "@\n") == null);
+}

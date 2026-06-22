@@ -886,11 +886,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
                     break :blk appendValueOp(self.block, op);
                 },
-                .try_ => try @This().lowerTryUnary(self, operand, unary.range),
+                .try_ => try @This().lowerTryUnary(self, operand, unary.operand, unary.range),
             };
         }
 
-        fn lowerTryUnary(self: *FunctionLowerer, operand: mlir.MlirValue, range: source.TextRange) anyerror!mlir.MlirValue {
+        fn propagatedTryErrorPayloadType(self: *FunctionLowerer, operand_expr: ast.ExprId, range: source.TextRange) mlir.MlirType {
+            const operand_sema_type = self.parent.typecheck.exprType(operand_expr);
+            if (operand_sema_type == .error_union and operand_sema_type.error_union.error_types.len == 1) {
+                const error_type = operand_sema_type.error_union.error_types[0];
+                if (self.parent.errorTypeHasPayload(error_type)) {
+                    return self.parent.lowerSemaType(error_type, range);
+                }
+            }
+            return reprIntegerType(self.parent.context);
+        }
+
+        fn lowerTryUnary(self: *FunctionLowerer, operand: mlir.MlirValue, operand_expr: ast.ExprId, range: source.TextRange) anyerror!mlir.MlirValue {
             const loc = self.parent.location(range);
             const operand_type = mlir.oraValueGetType(operand);
             const result_type = mlir.oraErrorUnionTypeGetSuccessType(operand_type);
@@ -919,19 +930,28 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                             return error.MlirOperationCreationFailed;
                         }
 
-                        const error_type = reprIntegerType(self.parent.context);
-                        const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
-                        if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
-                        appendOp(then_block, get_error);
-                        const error_value = mlir.oraOperationGetResult(get_error, 0);
+                        const return_requires_wide_carrier = self.function != null and
+                            self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()]);
+                        const can_forward_exact_operand =
+                            mlir.oraTypeEqual(operand_type, return_type) and !return_requires_wide_carrier;
 
-                        const error_union = mlir.oraErrorErrOpCreate(self.parent.context, loc, error_value, return_type);
-                        if (mlir.oraOperationIsNull(error_union)) return error.MlirOperationCreationFailed;
-                        if (self.function != null and self.parent.errorUnionRequiresWideCarrier(self.parent.typecheck.body_types[self.function.?.body.index()])) {
-                            mlir.oraOperationSetAttributeByName(error_union, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
-                        }
-                        appendOp(then_block, error_union);
-                        const error_union_value = mlir.oraOperationGetResult(error_union, 0);
+                        const error_union_value = if (can_forward_exact_operand) blk: {
+                            break :blk operand;
+                        } else blk: {
+                            const error_type = @This().propagatedTryErrorPayloadType(self, operand_expr, range);
+                            const get_error = mlir.oraErrorGetErrorOpCreate(self.parent.context, loc, operand, error_type);
+                            if (mlir.oraOperationIsNull(get_error)) return error.MlirOperationCreationFailed;
+                            appendOp(then_block, get_error);
+                            const error_value = mlir.oraOperationGetResult(get_error, 0);
+
+                            const error_union = mlir.oraErrorErrOpCreate(self.parent.context, loc, error_value, return_type);
+                            if (mlir.oraOperationIsNull(error_union)) return error.MlirOperationCreationFailed;
+                            if (return_requires_wide_carrier) {
+                                mlir.oraOperationSetAttributeByName(error_union, strRef("ora.force_wide_error_union"), mlir.oraBoolAttrCreate(self.parent.context, true));
+                            }
+                            appendOp(then_block, error_union);
+                            break :blk mlir.oraOperationGetResult(error_union, 0);
+                        };
 
                         const ret = mlir.oraReturnOpCreate(self.parent.context, loc, &[_]mlir.MlirValue{error_union_value}, 1);
                         if (mlir.oraOperationIsNull(ret)) return error.MlirOperationCreationFailed;
