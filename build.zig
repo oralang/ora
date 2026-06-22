@@ -2433,12 +2433,12 @@ fn buildZ3LibrariesImpl(step: *std.Build.Step, options: std.Build.Step.MakeOptio
 
     const cwd = std.fs.cwd();
     _ = cwd.openDir("vendor/z3", .{ .iterate = false }) catch {
-        std.log.warn("Z3 not found! Please install Z3 or add it as a submodule:", .{});
-        std.log.warn("  System install (recommended): brew install z3  (macOS)", .{});
-        std.log.warn("  System install (recommended): sudo apt install z3  (Linux)", .{});
-        std.log.warn("  Or add as submodule: git submodule add https://github.com/Z3Prover/z3.git vendor/z3", .{});
-        std.log.warn("Z3 is optional for now - continuing without formal verification support", .{});
-        return;
+        std.log.err("Z3 is required for compiler verification tests and no usable Z3 installation was found.", .{});
+        std.log.err("Install Z3 or provide the vendored submodule:", .{});
+        std.log.err("  macOS: brew install z3", .{});
+        std.log.err("  Linux: sudo apt install z3 libz3-dev", .{});
+        std.log.err("  vendor: git submodule update --init --recursive vendor/z3", .{});
+        return error.Z3Unavailable;
     };
 
     // create build and install directories
@@ -2615,8 +2615,10 @@ fn linkZ3Libraries(b: *std.Build, exe: *std.Build.Step.Compile, z3_step: *std.Bu
         // vendored Z3 — paths already set above
     }
 
-    // link Z3 library
-    exe.linkSystemLibrary("z3");
+    // Link Z3 without pkg-config. We add the stable system/vendored include
+    // and library paths above; letting pkg-config inject Homebrew Cellar paths
+    // makes CI sensitive to stale Zig caches and old absolute Z3 versions.
+    exe.root_module.linkSystemLibrary("z3", .{ .use_pkg_config = .no });
 
     // link C++ standard library (Z3 is C++)
     switch (target.result.os.tag) {
