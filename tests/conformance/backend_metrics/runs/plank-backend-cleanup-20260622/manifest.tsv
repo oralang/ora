@@ -1,0 +1,5 @@
+run_id	plank-backend-cleanup-20260622
+utc	2026-06-22T07:49:26Z
+git_head	e11600849c8bc34f2adf638aa7283e497ed6dd17
+git_branch	update_plank
+variants	debug release
