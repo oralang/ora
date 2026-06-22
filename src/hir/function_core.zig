@@ -296,6 +296,16 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn runtimeCheckKeyForBinaryRequires(self: *FunctionLowerer, binary: ast.BinaryExpr) anyerror!?[]const u8 {
+            if (binary.op == .ne) {
+                if (@This().nameExprText(self, binary.lhs)) |name| {
+                    if (@This().exprIsZeroAddress(self, binary.rhs)) return try @This().runtimeCheckNonZeroAddressKey(self, name);
+                }
+                if (@This().nameExprText(self, binary.rhs)) |name| {
+                    if (@This().exprIsZeroAddress(self, binary.lhs)) return try @This().runtimeCheckNonZeroAddressKey(self, name);
+                }
+                return null;
+            }
+
             switch (binary.op) {
                 .ge, .le => {},
                 else => return null,
@@ -314,6 +324,41 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 }
             }
             return null;
+        }
+
+        fn exprIsZeroAddress(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().exprIsZeroAddress(self, group.expr),
+                .IntegerLiteral => |literal| (parseUnsignedIntegerLiteral(u256, literal.text) orelse return false) == 0,
+                .AddressLiteral => |literal| @This().addressLiteralIsZero(literal.text),
+                .Field => |field| std.mem.eql(u8, field.name, "ZERO_ADDRESS") and @This().exprPathEquals(self, field.base, &.{ "std", "constants" }),
+                else => false,
+            };
+        }
+
+        fn addressLiteralIsZero(text: []const u8) bool {
+            const trimmed = std.mem.trim(u8, text, " \t\n\r");
+            const digits = if (std.mem.startsWith(u8, trimmed, "0x")) trimmed[2..] else trimmed;
+            if (digits.len == 0) return false;
+            for (digits) |c| {
+                if (c == '_') continue;
+                if (c != '0') return false;
+            }
+            return true;
+        }
+
+        fn exprPathEquals(self: *FunctionLowerer, expr_id: ast.ExprId, expected: []const []const u8) bool {
+            if (expected.len == 0) return false;
+            const expr = self.parent.file.expression(expr_id).*;
+            return switch (expr) {
+                .Group => |group| @This().exprPathEquals(self, group.expr, expected),
+                .Name => |name| expected.len == 1 and std.mem.eql(u8, name.name, expected[0]),
+                .Field => |field| expected.len > 1 and
+                    std.mem.eql(u8, field.name, expected[expected.len - 1]) and
+                    @This().exprPathEquals(self, field.base, expected[0 .. expected.len - 1]),
+                else => false,
+            };
         }
 
         fn nameExprText(self: *FunctionLowerer, expr_id: ast.ExprId) ?[]const u8 {
@@ -338,6 +383,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             const normalized = try @This().normalizedUnsignedLiteralText(self, literal_text);
             defer self.parent.allocator.free(normalized);
             return std.fmt.allocPrint(self.parent.allocator, "param:{s}:{s}:{s}", .{ name, direction, normalized });
+        }
+
+        fn runtimeCheckNonZeroAddressKey(self: *FunctionLowerer, name: []const u8) ![]const u8 {
+            return std.fmt.allocPrint(self.parent.allocator, "param:{s}:nonzero_address", .{name});
         }
 
         fn normalizedUnsignedLiteralText(self: *FunctionLowerer, literal_text: []const u8) ![]const u8 {
@@ -585,6 +634,9 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn runtimeCheckProvidesForRefinement(self: *FunctionLowerer, name: []const u8, refinement: RefinementType) !?[]const u8 {
+            if (refinements.kindForName(refinement.name) == .non_zero_address) {
+                return try @This().runtimeCheckNonZeroAddressKey(self, name);
+            }
             const bounds = refinements.bounds(refinement) orelse return null;
             if (bounds.min_text) |min_text| {
                 if (bounds.max_text) |max_text| {

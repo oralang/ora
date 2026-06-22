@@ -2,6 +2,7 @@ comptime const constants = @import("std/constants");
 
 error InlineFailure;
 error InlineOverflow;
+error InlinePayload(required: u256, available: u256);
 
 contract SourceInlineConformance {
     storage var saved: u256;
@@ -150,6 +151,10 @@ contract SourceInlineConformance {
         return current + delta;
     }
 
+    inline fn payloadFail(required: u256, available: u256) -> !bool | InlinePayload {
+        return InlinePayload(required, available);
+    }
+
     fn sideEffectArg() -> u256
         requires(saved < constants.U256_MAX)
         ensures result == 7
@@ -260,5 +265,10 @@ contract SourceInlineConformance {
     pub fn checkedSignedAdd(current: i256, delta: i256) -> !i256 | InlineOverflow {
         let out: i256 = try checkedSignedAddInline(current, delta);
         return out;
+    }
+
+    pub fn inlinePayloadPropagate(required: u256, available: u256) -> !bool | InlinePayload | InlineFailure {
+        try payloadFail(required, available);
+        return true;
     }
 }

@@ -1891,6 +1891,7 @@ test "Phase2 address refinement guard lowers without i160 carrier round trip" {
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, ": !sir.u256 : i160"));
     try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, ": i160 : !sir.u256"));
     try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, " and "));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, rendered, "revert"));
 }
 
 test "Phase0 framework canonicalizer converts loop-containing source in release and debug modes" {
@@ -5108,6 +5109,36 @@ test "refinement cleanup deduplicates requires checks implied by parameter refin
         \\    pub fn run(value: InRange<u256, 0, 200>)
         \\        requires value >= 0
         \\        requires value <= 200
+        \\    {
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    var proven_guard_ids = std.StringHashMap(void).init(testing.allocator);
+    defer proven_guard_ids.deinit();
+    compiler.refinement_guards.cleanupRefinementGuardsWithOptions(hir_result.context, hir_result.module.raw_module, &proven_guard_ids, .{});
+
+    const after_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(hir_result.module.raw_module));
+    defer if (after_ref.data != null) mlir.oraStringRefFree(after_ref);
+    const after = after_ref.data[0..after_ref.length];
+
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, after, "cf.assert"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.requires"));
+    try testing.expect(!std.mem.containsAtLeast(u8, after, 1, "ora.assert"));
+}
+
+test "refinement cleanup deduplicates zero-address requires implied by NonZeroAddress" {
+    const source_text =
+        \\comptime const std = @import("std");
+        \\
+        \\contract Check {
+        \\    pub fn approve(spender: NonZeroAddress)
+        \\        requires spender != std.constants.ZERO_ADDRESS
+        \\        requires std.constants.ZERO_ADDRESS != spender
         \\    {
         \\    }
         \\}

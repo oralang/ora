@@ -1106,6 +1106,39 @@ test "compiler tracks resource builtin effects for modifies and locks" {
     const covered_typecheck = try covered.db.moduleTypeCheck(covered.root_module_id);
     try testing.expect(covered_typecheck.diagnostics.isEmpty());
 
+    const environment_key_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var allowances: map<address, map<address, TokenUnit>>;
+        \\
+        \\    pub fn direct(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        @move(balances[std.msg.sender()], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn aliased(to: address, amount: TokenUnit)
+        \\        modifies balances[msg.sender], balances[to]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        @move(balances[sender], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn nested(spender: address, amount: TokenUnit)
+        \\        modifies allowances[msg.sender][spender]
+        \\    {
+        \\        let owner: address = std.msg.sender();
+        \\        allowances[owner][spender] = amount;
+        \\    }
+        \\}
+    ;
+    var environment_key = try compileText(environment_key_source);
+    defer environment_key.deinit();
+    const environment_key_typecheck = try environment_key.db.moduleTypeCheck(environment_key.root_module_id);
+    try testing.expect(environment_key_typecheck.diagnostics.isEmpty());
+
     try expectDiagnosticProbeContains(
         \\resource TokenUnit = u256;
         \\

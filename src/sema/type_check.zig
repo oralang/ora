@@ -4678,28 +4678,7 @@ const TypeChecker = struct {
     }
 
     fn validateResourcePlaceKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !bool {
-        switch (self.file.expression(expr_id).*) {
-            .Group => |group| return try self.validateResourcePlaceKeyExpr(group.expr),
-            .IntegerLiteral, .StringLiteral, .AddressLiteral, .BytesLiteral, .BoolLiteral => return true,
-            .Name => {
-                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
-                    switch (binding) {
-                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id) != null) return true,
-                        .item => {},
-                    }
-                }
-            },
-            .Field => |field| {
-                const base = self.file.expression(field.base).*;
-                if (base == .Name and
-                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
-                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
-                {
-                    return true;
-                }
-            },
-            else => {},
-        }
+        if (self.keySegmentForExpr(expr_id) != .unknown) return true;
         try self.emitExprError(expr_id, "resource place key expression must be side-effect-free", .{});
         return false;
     }
