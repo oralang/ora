@@ -1897,7 +1897,7 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
     // SIR Text Legalizer / Emitter
     //===----------------------------------------------------------------------===//
 
-    /// Validate SIR MLIR for Sensei text emission
+    /// Validate SIR MLIR for Plank text emission
     /// Returns true on success, false on failure
     MLIR_CAPI_EXPORTED bool oraLegalizeSIRText(
         MlirContext ctx,
@@ -1909,7 +1909,7 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module);
 
-    /// Emit Sensei SIR text from a SIR MLIR module
+    /// Emit Plank SIR text from a SIR MLIR module
     /// Returns null string ref on failure
     /// The caller must free the returned string using oraStringRefFree
     MLIR_CAPI_EXPORTED MlirStringRef oraEmitSIRText(

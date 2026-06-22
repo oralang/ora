@@ -1894,21 +1894,44 @@ LogicalResult NormalizeCondBrOperandsOp::matchAndRewrite(
     auto insertIt = Region::iterator(srcBlock);
     ++insertIt;
 
-    Block *trueRelay = rewriter.createBlock(parent, insertIt);
-    Block *falseRelay = rewriter.createBlock(parent, insertIt);
+    SmallVector<Value, 8> carrier;
+    carrier.append(op.getTrueOperands().begin(), op.getTrueOperands().end());
+    carrier.append(op.getFalseOperands().begin(), op.getFalseOperands().end());
+
+    SmallVector<Type, 8> carrierTypes;
+    SmallVector<Location, 8> carrierLocs;
+    carrierTypes.reserve(carrier.size());
+    carrierLocs.reserve(carrier.size());
+    for (Value value : carrier)
+    {
+        carrierTypes.push_back(value.getType());
+        carrierLocs.push_back(op.getLoc());
+    }
+
+    Block *trueRelay = rewriter.createBlock(parent, insertIt, carrierTypes, carrierLocs);
+    Block *falseRelay = rewriter.createBlock(parent, insertIt, carrierTypes, carrierLocs);
+
+    SmallVector<Value, 8> trueForward;
+    SmallVector<Value, 8> falseForward;
+    trueForward.reserve(op.getTrueOperands().size());
+    falseForward.reserve(op.getFalseOperands().size());
+    for (unsigned i = 0; i < op.getTrueOperands().size(); ++i)
+        trueForward.push_back(trueRelay->getArgument(i));
+    for (unsigned i = 0; i < op.getFalseOperands().size(); ++i)
+        falseForward.push_back(falseRelay->getArgument(op.getTrueOperands().size() + i));
 
     rewriter.setInsertionPointToEnd(trueRelay);
-    rewriter.create<sir::BrOp>(op.getLoc(), op.getTrueOperands(), op.getTrueDest());
+    rewriter.create<sir::BrOp>(op.getLoc(), trueForward, op.getTrueDest());
 
     rewriter.setInsertionPointToEnd(falseRelay);
-    rewriter.create<sir::BrOp>(op.getLoc(), op.getFalseOperands(), op.getFalseDest());
+    rewriter.create<sir::BrOp>(op.getLoc(), falseForward, op.getFalseDest());
 
     rewriter.setInsertionPoint(op);
     rewriter.replaceOpWithNewOp<sir::CondBrOp>(
         op,
         op.getCond(),
-        ValueRange{},
-        ValueRange{},
+        carrier,
+        carrier,
         trueRelay,
         falseRelay);
     return success();

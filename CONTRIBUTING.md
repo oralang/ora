@@ -138,6 +138,12 @@ zig build test
 ./zig-out/bin/ora --emit-yul ora-example/basic_storage.ora
 ```
 
+Metrics baselines are reviewed artifacts. `scripts/metrics-check.py --check`
+and `scripts/compile-metrics-check.py --check` must run against the committed
+baseline. Do not use `--update` as part of the same validation command; run it
+only to intentionally regenerate a baseline, then review the diff line by line
+before committing it.
+
 ### Code Quality
 
 ```bash
@@ -478,4 +484,3 @@ By contributing to Ora, you agree that your contributions will be licensed under
 ---
 
 Thank you for contributing to Ora! 🎉
-

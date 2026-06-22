@@ -2240,7 +2240,7 @@ namespace mlir
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 99, constCache, entry, "min_cdsize_3args"));
                     static_cast<void>(getConst(builder, dispatcherMainLoc, u256Type, i64Type, 224, constCache, entry, "selector_shift"));
 
-                    // Sensei initializes memory[0x20] to its static memory high-water mark
+                    // Plank initializes memory[0x20] to its static memory high-water mark.
                     // before entering main. Raise it past compiler-owned named-memory slots
                     // placed after CODESIZE so user allocations cannot collide with them.
                     Value freePtrSlot = builder.create<sir::BitcastOp>(dispatcherMainLoc, ptrType, c32_entry);

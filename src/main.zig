@@ -4454,7 +4454,7 @@ fn runMlirEmitAdvanced(
 
         // Extract source locations from SIR MLIR (sidecar to SIR text).
         // Op indices match the SIR text op ordering for later correlation
-        // with Sensei's bytecode offsets.
+        // with Plank's bytecode offsets.
         const mlir_c_api = @import("mlir_c_api");
         const sir_locations_ref = c.oraExtractSIRLocations(ctx, final_module);
         defer if (sir_locations_ref.data != null) {
@@ -4947,17 +4947,33 @@ fn writeSmtReportArtifacts(
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
 
-fn resolveSenseiSirPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (std.posix.getenv("ORA_SENSEI_SIR")) |path| {
-        return allocator.dupe(u8, path);
+fn resolvePlankSirPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (std.posix.getenv("ORA_PLANK_SIR")) |path| {
+        if (std.fs.cwd().access(path, .{}) catch null) |_| {
+            return allocator.dupe(u8, path);
+        }
+        return error.PlankSirNotFound;
     }
 
-    const default_path = "vendor/sensei/senseic/target/release/sir";
+    // Use the vendored Plank SIR binary built from the `vendor/plank` submodule.
+    const default_path = "vendor/plank/plankc/target/release/sir";
     if (std.fs.cwd().access(default_path, .{}) catch null) |_| {
         return allocator.dupe(u8, default_path);
     }
 
-    return error.SenseiSirNotFound;
+    return error.PlankSirNotFound;
+}
+
+const PlankSirBackend = enum {
+    debug,
+    release,
+};
+
+fn resolvePlankSirBackend(default_backend: PlankSirBackend) !PlankSirBackend {
+    const value = std.posix.getenv("ORA_PLANK_BACKEND") orelse return default_backend;
+    if (std.mem.eql(u8, value, "debug")) return .debug;
+    if (std.mem.eql(u8, value, "release")) return .release;
+    return error.InvalidPlankBackend;
 }
 
 fn emitBytecodeFromSirText(
@@ -4976,7 +4992,12 @@ fn emitBytecodeFromSirText(
     stdout: anytype,
     suppress_log: bool,
 ) !void {
-    const sir_path = try resolveSenseiSirPath(allocator);
+    const sir_path = resolvePlankSirPath(allocator) catch |err| {
+        if (err == error.PlankSirNotFound) {
+            try stdout.print("\nError: Plank SIR compiler not found; run `zig build plank-sir` or set ORA_PLANK_SIR to the `sir` binary\n", .{});
+        }
+        return err;
+    };
     defer allocator.free(sir_path);
 
     const basename = std.fs.path.stem(file_path);
@@ -5002,21 +5023,36 @@ fn emitBytecodeFromSirText(
     defer sir_file.close();
     try sir_file.writeAll(sir_text);
 
-    // If we have source locations, tell Sensei to produce a source map
-    const sensei_srcmap_path = if (sir_locations_json != null)
-        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "sensei_srcmap.json" })
+    // Request a Plank source map when Ora debug-info sidecars are requested.
+    // Both Plank backends support the same op_index -> pc JSON contract in our
+    // vendored debugger layer; release mode maps scheduled bytecode PCs back to
+    // the pre-scheduling SIR operation indices.
+    const plank_srcmap_path = if (sir_debug_info_json != null)
+        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "plank_srcmap.json" })
     else
         null;
-    defer if (sensei_srcmap_path) |p| allocator.free(p);
+    defer if (plank_srcmap_path) |p| allocator.free(p);
 
-    // Build argv: sir <input> [--source-map <path>]
-    var argv_buf: [4][]const u8 = undefined;
+    const default_backend: PlankSirBackend = if (plank_srcmap_path != null) .debug else .release;
+    const backend = resolvePlankSirBackend(default_backend) catch |err| {
+        if (err == error.InvalidPlankBackend) {
+            try stdout.print("\nError: ORA_PLANK_BACKEND must be 'debug' or 'release'\n", .{});
+        }
+        return err;
+    };
+    // Build argv. Without debug info we default to optimized release bytecode. With debug
+    // info, the selected backend still emits bytecode while Plank also writes the source map.
+    var argv_buf: [5][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = sir_path;
     argc += 1;
     argv_buf[argc] = sir_file_path;
     argc += 1;
-    if (sensei_srcmap_path) |srcmap_path| {
+    if (backend == .release) {
+        argv_buf[argc] = "--release";
+        argc += 1;
+    }
+    if (plank_srcmap_path) |srcmap_path| {
         argv_buf[argc] = "--source-map";
         argc += 1;
         argv_buf[argc] = srcmap_path;
@@ -5040,8 +5076,8 @@ fn emitBytecodeFromSirText(
     switch (term) {
         .Exited => |code| {
             if (code != 0) {
-                try stdout.print("\nError: sensei bytecode compilation failed (exit code {d})\n", .{code});
-                // Show sensei's error output (the actual error reason)
+                try stdout.print("\nError: Plank SIR bytecode compilation failed (exit code {d})\n", .{code});
+                // Show Plank's error output (the actual error reason)
                 const trimmed_stderr = std.mem.trim(u8, stderr_bytes, " \n\r\t");
                 if (trimmed_stderr.len > 0) {
                     // Extract the meaningful error line (skip Rust backtrace noise)
@@ -5067,7 +5103,7 @@ fn emitBytecodeFromSirText(
             }
         },
         else => {
-            try stdout.print("\nError: sensei bytecode compiler terminated unexpectedly\n", .{});
+            try stdout.print("\nError: Plank SIR bytecode compiler terminated unexpectedly\n", .{});
             try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
             try stdout.flush();
             std.process.exit(1);
@@ -5076,7 +5112,7 @@ fn emitBytecodeFromSirText(
 
     const bytecode = std.mem.trim(u8, stdout_bytes, " \n\r\t");
     if (bytecode.len == 0) {
-        try stdout.print("\nError: sensei produced empty bytecode\n", .{});
+        try stdout.print("\nError: Plank SIR produced empty bytecode\n", .{});
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
         try stdout.flush();
         std.process.exit(1);
@@ -5118,10 +5154,10 @@ fn emitBytecodeFromSirText(
         try stdout.print("{s}\n", .{bytecode});
     }
 
-    // Merge source maps: sir_locations (op_idx → file:line:col) + sensei (op_idx → pc)
+    // Merge source maps: sir_locations (op_idx → file:line:col) + Plank (op_idx → pc)
     // into final .sourcemap.json
-    if (sir_locations_json != null and sensei_srcmap_path != null and bytecode_output_path != null) {
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sensei_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
+    if (sir_locations_json != null and plank_srcmap_path != null and bytecode_output_path != null) {
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, plank_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
         try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
@@ -5135,37 +5171,37 @@ fn mergeSourceMaps(
     sir_locations_json: []const u8,
     sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
-    sensei_srcmap_path: []const u8,
+    plank_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
     suppress_log: bool,
 ) !void {
-    // Read Sensei's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
-    const sensei_json = std.fs.cwd().readFileAlloc(allocator, sensei_srcmap_path, 16 * 1024 * 1024) catch |err| {
-        try stdout.print("Warning: could not read Sensei source map: {}\n", .{err});
+    // Read Plank's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
+    const plank_json = std.fs.cwd().readFileAlloc(allocator, plank_srcmap_path, 16 * 1024 * 1024) catch |err| {
+        try stdout.print("Warning: could not read Plank source map: {}\n", .{err});
         return;
     };
-    defer allocator.free(sensei_json);
+    defer allocator.free(plank_json);
 
-    // Parse Sensei ops into a map: op_idx → pc
-    const SenseiMap = struct {
+    // Parse Plank ops into a map: op_idx → pc
+    const PlankMap = struct {
         runtime_start_pc: ?u32 = null,
         ops: []const struct { idx: u32, pc: u32 } = &.{},
     };
-    const sensei_parsed = std.json.parseFromSlice(SenseiMap, allocator, sensei_json, .{
+    const plank_parsed = std.json.parseFromSlice(PlankMap, allocator, plank_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse Sensei source map: {}\n", .{err});
+        try stdout.print("Warning: could not parse Plank source map: {}\n", .{err});
         return;
     };
-    defer sensei_parsed.deinit();
+    defer plank_parsed.deinit();
 
     // Build lookup: op_idx → pc
     var idx_to_pc = std.AutoHashMap(u32, u32).init(allocator);
     defer idx_to_pc.deinit();
     var max_mapped_idx: u32 = 0;
     var have_mapped_idx = false;
-    for (sensei_parsed.value.ops) |op| {
+    for (plank_parsed.value.ops) |op| {
         try idx_to_pc.put(op.idx, op.pc);
         if (!have_mapped_idx or op.idx > max_mapped_idx) {
             max_mapped_idx = op.idx;
@@ -5262,7 +5298,7 @@ fn mergeSourceMaps(
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
 
-    // Merge: for each SIR location entry, look up its PC from Sensei
+    // Merge: for each SIR location entry, look up its PC from Plank
     // Collect unique source files
     var sources: std.ArrayList([]const u8) = .{};
     defer sources.deinit(allocator);
@@ -5274,7 +5310,7 @@ fn mergeSourceMaps(
     defer out.deinit(allocator);
     const writer = out.writer(allocator);
 
-    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{sensei_parsed.value.runtime_start_pc orelse 0});
+    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{plank_parsed.value.runtime_start_pc orelse 0});
 
     // First pass: collect sources and build entries
     const MergedEntry = struct {
