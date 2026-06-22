@@ -44,6 +44,22 @@ fn expectBinaryAvailable(path: []const u8, build_hint: []const u8) !void {
 
 /// Run `ora debug --no-tui <fixture> -o <output_dir>`.
 fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []const u8) !void {
+    return runOraDebugWithBackend(allocator, fixture, output_dir, null);
+}
+
+fn runOraDebugWithBackend(
+    allocator: std.mem.Allocator,
+    fixture: Fixture,
+    output_dir: []const u8,
+    plank_backend: ?[]const u8,
+) !void {
+    var env_map: ?std.process.EnvMap = null;
+    defer if (env_map) |*map| map.deinit();
+    if (plank_backend) |backend| {
+        env_map = try std.process.getEnvMap(allocator);
+        try env_map.?.put("ORA_PLANK_BACKEND", backend);
+    }
+
     const result = try std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{
@@ -54,6 +70,7 @@ fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []con
             "-o",
             output_dir,
         },
+        .env_map = if (env_map) |*map| map else null,
         .max_output_bytes = 4 * 1024 * 1024,
     });
     defer allocator.free(result.stdout);
@@ -331,6 +348,49 @@ test "debug-artifacts regression corpus matches goldens" {
         try assertEqualOrDescribeDiff(allocator, fixture, fixture.name, "debug.json", actual_debug, golden_debug);
         try expectDebugCfgArtifacts(allocator, out_dir, stem);
     }
+}
+
+test "debug-artifacts source map can be emitted with Plank release backend" {
+    if (!binaryAvailable()) {
+        std.debug.print(
+            "skip: {s} not found — run `zig build install` first to enable debug-artifact regression tests\n",
+            .{ORA_BINARY_REL},
+        );
+        return error.SkipZigTest;
+    }
+
+    const allocator = testing.allocator;
+    const fixture = FIXTURES[0];
+    const out_dir = "/tmp/ora_dbg_artifacts_release_srcmap";
+
+    std.fs.cwd().deleteTree(out_dir) catch {};
+    try runOraDebugWithBackend(allocator, fixture, out_dir, "release");
+
+    const stem = std.fs.path.stem(fixture.source_relpath);
+    const sourcemap_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}.sourcemap.json",
+        .{ out_dir, stem },
+    );
+    defer allocator.free(sourcemap_path);
+
+    const sourcemap = try readFile(allocator, sourcemap_path);
+    defer allocator.free(sourcemap);
+
+    const SourceMap = struct {
+        runtime_start_pc: u32 = 0,
+        entries: []const struct {
+            idx: u32,
+            pc: u32,
+        } = &.{},
+    };
+    const parsed = try std.json.parseFromSlice(SourceMap, allocator, sourcemap, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    try testing.expect(parsed.value.runtime_start_pc > 0);
+    try testing.expect(parsed.value.entries.len > 0);
 }
 
 test "debug-artifacts resource builtins carry source locations" {

@@ -5023,10 +5023,10 @@ fn emitBytecodeFromSirText(
     defer sir_file.close();
     try sir_file.writeAll(sir_text);
 
-    // The Plank release backend does not emit source maps. Only request
-    // the debug backend source map when Ora debug-info sidecars are requested;
-    // ordinary location metadata is still useful for SIR text, but should not
-    // silently force the debug bytecode backend.
+    // Request a Plank source map when Ora debug-info sidecars are requested.
+    // Both Plank backends support the same op_index -> pc JSON contract in our
+    // vendored debugger layer; release mode maps scheduled bytecode PCs back to
+    // the pre-scheduling SIR operation indices.
     const plank_srcmap_path = if (sir_debug_info_json != null)
         try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "plank_srcmap.json" })
     else
@@ -5040,28 +5040,22 @@ fn emitBytecodeFromSirText(
         }
         return err;
     };
-    if (plank_srcmap_path != null and backend == .release) {
-        try stdout.print("\nError: ORA_PLANK_BACKEND=release is incompatible with source-map emission; use ORA_PLANK_BACKEND=debug or omit the override for debug artifacts\n", .{});
-        return error.InvalidPlankBackend;
-    }
-
-    // Build argv. With debug info we use the debug backend + a source map (the debugger
-    // path); without debug info we use the optimized release backend (stack scheduling,
-    // release codegen). The release backend does not emit source maps, so the two are
-    // mutually exclusive.
-    var argv_buf: [4][]const u8 = undefined;
+    // Build argv. Without debug info we default to optimized release bytecode. With debug
+    // info, the selected backend still emits bytecode while Plank also writes the source map.
+    var argv_buf: [5][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = sir_path;
     argc += 1;
     argv_buf[argc] = sir_file_path;
     argc += 1;
+    if (backend == .release) {
+        argv_buf[argc] = "--release";
+        argc += 1;
+    }
     if (plank_srcmap_path) |srcmap_path| {
         argv_buf[argc] = "--source-map";
         argc += 1;
         argv_buf[argc] = srcmap_path;
-        argc += 1;
-    } else if (backend == .release) {
-        argv_buf[argc] = "--release";
         argc += 1;
     }
     const argv = argv_buf[0..argc];
