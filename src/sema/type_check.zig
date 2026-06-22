@@ -704,14 +704,14 @@ pub fn typeCheck(
         .call_resolutions = call_resolutions,
         .expr_effects = expr_effects,
         .effect_states = effect_states,
-        .instantiated_structs = .{},
+        .instantiated_structs = .empty,
         .instantiated_struct_lookup = std.StringHashMap(usize).init(arena),
-        .instantiated_enums = .{},
+        .instantiated_enums = .empty,
         .instantiated_enum_lookup = std.StringHashMap(usize).init(arena),
-        .instantiated_bitfields = .{},
+        .instantiated_bitfields = .empty,
         .instantiated_bitfield_lookup = std.StringHashMap(usize).init(arena),
-        .trait_interfaces = .{},
-        .impl_interfaces = .{},
+        .trait_interfaces = .empty,
+        .impl_interfaces = .empty,
         .catch_error_tag_patterns = catch_error_tag_patterns,
         .opaque_multi_error_patterns = opaque_multi_error_patterns,
         .diagnostics = &result.diagnostics,
@@ -847,7 +847,7 @@ const ExprEffectList = struct {
 
     inline_buffer: [inline_capacity]ExprEffect = undefined,
     inline_len: usize = 0,
-    spill: std.ArrayList(ExprEffect) = .{},
+    spill: std.ArrayList(ExprEffect) = .empty,
 
     fn append(self: *ExprEffectList, allocator: std.mem.Allocator, entry: ExprEffect) !void {
         if (self.spill.capacity == 0 and self.inline_len < inline_capacity) {
@@ -1560,7 +1560,7 @@ const TypeChecker = struct {
     }
 
     fn validateRuntimeAdtCycleForStruct(self: *TypeChecker, item_id: ast.ItemId, struct_item: ast.StructItem) anyerror!void {
-        var active = std.ArrayList(ast.ItemId){};
+        var active = std.ArrayList(ast.ItemId).empty;
         defer active.deinit(self.arena);
         try active.append(self.arena, item_id);
 
@@ -1701,7 +1701,7 @@ const TypeChecker = struct {
     }
 
     fn validateRuntimeAdtCycleForEnum(self: *TypeChecker, item_id: ast.ItemId, enum_item: ast.EnumItem) anyerror!void {
-        var active = std.ArrayList(ast.ItemId){};
+        var active = std.ArrayList(ast.ItemId).empty;
         defer active.deinit(self.arena);
         try active.append(self.arena, item_id);
 
@@ -1783,7 +1783,7 @@ const TypeChecker = struct {
 
         switch (self.file.item(item_id).*) {
             .Struct => |struct_item| {
-                var next_active = std.ArrayList(ast.ItemId){};
+                var next_active = std.ArrayList(ast.ItemId).empty;
                 defer next_active.deinit(self.arena);
                 try next_active.appendSlice(self.arena, active);
                 try next_active.append(self.arena, item_id);
@@ -1793,7 +1793,7 @@ const TypeChecker = struct {
                 }
             },
             .Enum => |enum_item| {
-                var next_active = std.ArrayList(ast.ItemId){};
+                var next_active = std.ArrayList(ast.ItemId).empty;
                 defer next_active.deinit(self.arena);
                 try next_active.appendSlice(self.arena, active);
                 try next_active.append(self.arena, item_id);
@@ -2324,7 +2324,7 @@ const TypeChecker = struct {
                 .Contract => |contract_item| contract_item,
                 else => return null,
             };
-            var fields: std.ArrayList(Type) = .{};
+            var fields: std.ArrayList(Type) = .empty;
             for (contract_item.members) |member_id| {
                 switch (self.checker.file.item(member_id).*) {
                     .Field => |field| {
@@ -2755,7 +2755,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ImplKey = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ImplKey) = .{},
+        spill: std.ArrayList(ImplKey) = .empty,
 
         fn contains(self: *const InlineImplKeySet, key: ImplKey) bool {
             for (self.inline_items[0..self.inline_len]) |seen| {
@@ -4182,8 +4182,9 @@ const TypeChecker = struct {
     }
 
     fn effectSlotDisplayName(self: *TypeChecker, slot: EffectSlot) ![]const u8 {
-        var buffer: std.ArrayList(u8) = .{};
-        const writer = buffer.writer(self.arena);
+        var buffer = std.Io.Writer.Allocating.init(self.arena);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
         try writer.writeAll(slot.name);
         if (slot.field_path) |field_path| {
             for (field_path) |field_name| {
@@ -4210,7 +4211,7 @@ const TypeChecker = struct {
                 try writer.writeByte(']');
             }
         }
-        return buffer.items;
+        return buffer.toOwnedSlice();
     }
 
     fn switchPatternContainsResult(self: *TypeChecker, pattern: ast.SwitchPattern) bool {
@@ -4344,7 +4345,7 @@ const TypeChecker = struct {
         const start = first_runtime orelse return &.{};
         if (!has_comptime_after_runtime) return function.parameters[start..];
 
-        var parameters: std.ArrayList(ast.Parameter) = .{};
+        var parameters: std.ArrayList(ast.Parameter) = .empty;
         for (function.parameters) |parameter| {
             if (parameter.is_comptime) continue;
             try parameters.append(self.arena, parameter);
@@ -6665,7 +6666,7 @@ const TypeChecker = struct {
     }
 
     fn mangleGenericStructName(self: *TypeChecker, base_name: []const u8, bindings: []const GenericTypeBinding) anyerror![]const u8 {
-        var name = std.ArrayList(u8){};
+        var name = std.ArrayList(u8).empty;
         var total_len = base_name.len;
         for (bindings) |binding| {
             total_len += 2 + switch (binding.value) {
@@ -7776,7 +7777,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]EffectSlot = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(EffectSlot) = .{},
+        spill: std.ArrayList(EffectSlot) = .empty,
 
         fn items(self: *const InlineEffectSlotList) []const EffectSlot {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -7852,7 +7853,7 @@ const TypeChecker = struct {
 
         inline_buffer: [inline_capacity]EffectCollectorState = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(EffectCollectorState) = .{},
+        spill: std.ArrayList(EffectCollectorState) = .empty,
 
         fn current(self: *EffectStateStack) ?*EffectCollectorState {
             if (self.spill.capacity == 0) {
@@ -8973,7 +8974,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ast.ItemId = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ast.ItemId) = .{},
+        spill: std.ArrayList(ast.ItemId) = .empty,
 
         fn items(self: *const InlineItemIdStack) []const ast.ItemId {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -9020,7 +9021,7 @@ const TypeChecker = struct {
 
         inline_items: [inline_capacity]ast.ItemId = undefined,
         inline_len: usize = 0,
-        spill: std.ArrayList(ast.ItemId) = .{},
+        spill: std.ArrayList(ast.ItemId) = .empty,
 
         fn items(self: *const InlineItemIdList) []const ast.ItemId {
             if (self.spill.capacity != 0) return self.spill.items;
@@ -10064,11 +10065,11 @@ const TypeChecker = struct {
     fn validateOrSwitchPatternBindings(self: *TypeChecker, or_pattern: ast.nodes.OrSwitchPattern) !void {
         if (or_pattern.alternatives.len == 0) return;
 
-        var expected: std.ArrayList(OrPatternBinding) = .{};
+        var expected: std.ArrayList(OrPatternBinding) = .empty;
         try self.collectSwitchPatternBindings(or_pattern.alternatives[0], &expected);
 
         for (or_pattern.alternatives[1..]) |alternative| {
-            var actual: std.ArrayList(OrPatternBinding) = .{};
+            var actual: std.ArrayList(OrPatternBinding) = .empty;
             try self.collectSwitchPatternBindings(alternative, &actual);
 
             if (expected.items.len != actual.items.len) {
@@ -11380,10 +11381,18 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .string => try buffer.appendSlice(allocator, "string"),
         .address => try buffer.appendSlice(allocator, "address"),
         .bytes => try buffer.appendSlice(allocator, "bytes"),
-        .fixed_bytes => |fixed_bytes| try buffer.writer(allocator).print("bytes{d}", .{fixed_bytes.len}),
+        .fixed_bytes => |fixed_bytes| {
+            const text = try std.fmt.allocPrint(allocator, "bytes{d}", .{fixed_bytes.len});
+            defer allocator.free(text);
+            try buffer.appendSlice(allocator, text);
+        },
         .storage_slot => try buffer.appendSlice(allocator, "StorageSlot"),
         .storage_range => try buffer.appendSlice(allocator, "StorageRange"),
-        .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
+        .external_proxy => |proxy| {
+            const text = try std.fmt.allocPrint(allocator, "external<{s}>", .{proxy.trait_name});
+            defer allocator.free(text);
+            try buffer.appendSlice(allocator, text);
+        },
         .resource_domain => |resource| try buffer.appendSlice(allocator, resource.name),
         .resource_place => |place| {
             try buffer.appendSlice(allocator, "Resource<");
@@ -11400,7 +11409,9 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
             try buffer.appendSlice(allocator, "struct { ");
             for (struct_type.fields, 0..) |field, index| {
                 if (index != 0) try buffer.appendSlice(allocator, ", ");
-                try buffer.writer(allocator).print("{s}: ", .{field.name});
+                const field_prefix = try std.fmt.allocPrint(allocator, "{s}: ", .{field.name});
+                defer allocator.free(field_prefix);
+                try buffer.appendSlice(allocator, field_prefix);
                 try appendDiagnosticTypeDisplayName(allocator, buffer, field.ty);
             }
             try buffer.appendSlice(allocator, " }");
@@ -11416,8 +11427,11 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .array => |array| {
             try buffer.append(allocator, '[');
             try appendDiagnosticTypeDisplayName(allocator, buffer, array.element_type.*);
-            if (array.len) |len|
-                try buffer.writer(allocator).print("; {d}", .{len});
+            if (array.len) |len| {
+                const text = try std.fmt.allocPrint(allocator, "; {d}", .{len});
+                defer allocator.free(text);
+                try buffer.appendSlice(allocator, text);
+            }
             try buffer.append(allocator, ']');
         },
         .slice => |slice| {
@@ -11456,7 +11470,7 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
 }
 
 fn diagnosticTypeDisplayName(self: *TypeChecker, ty: Type) []const u8 {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     appendDiagnosticTypeDisplayName(self.arena, &buffer, ty) catch return typeDisplayName(ty);
     return buffer.toOwnedSlice(self.arena) catch typeDisplayName(ty);
 }

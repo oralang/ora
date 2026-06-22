@@ -25,8 +25,8 @@ pub const Phase = struct {
 pub const Metrics = struct {
     phases: [max_phases]Phase = undefined,
     count: usize = 0,
-    timer: std.time.Timer = undefined,
-    total_timer: std.time.Timer = undefined,
+    timer: std.Io.Clock.Timestamp = undefined,
+    total_timer: std.Io.Clock.Timestamp = undefined,
     active: bool = false,
     active_name: []const u8 = "",
     alloc_stats: ?*const allocation_stats.Stats = null,
@@ -39,7 +39,7 @@ pub const Metrics = struct {
     pub fn init(enabled: bool) Metrics {
         var m = Metrics{ .enabled = enabled };
         if (enabled) {
-            m.total_timer = std.time.Timer.start() catch unreachable;
+            m.total_timer = nowTimestamp();
         }
         return m;
     }
@@ -58,7 +58,7 @@ pub const Metrics = struct {
             self.begin_alloc_calls = stats.alloc_calls;
             self.begin_bytes_allocated = stats.bytes_allocated;
         }
-        self.timer = std.time.Timer.start() catch unreachable;
+        self.timer = nowTimestamp();
     }
 
     /// End timing the current phase.
@@ -71,7 +71,7 @@ pub const Metrics = struct {
         if (!self.enabled) return;
         std.debug.assert(self.active);
         self.active = false;
-        const elapsed = self.timer.read();
+        const elapsed = elapsedNs(self.timer);
         const index = self.phaseIndex(self.active_name) orelse blk: {
             if (self.count >= max_phases) return;
             const next = self.count;
@@ -111,7 +111,7 @@ pub const Metrics = struct {
     pub fn report(self: *Metrics, writer: anytype) !void {
         if (!self.enabled or self.count == 0) return;
 
-        const total_ns = self.total_timer.read();
+        const total_ns = elapsedNs(self.total_timer);
         const total_ms = floatMs(total_ns);
 
         try writer.print("\n===-------------------------------------------------------------------------===\n", .{});
@@ -168,6 +168,17 @@ pub const Metrics = struct {
         return @as(f64, @floatFromInt(ns)) / 1_000_000.0;
     }
 };
+
+fn nowTimestamp() std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
+}
+
+fn elapsedNs(start: std.Io.Clock.Timestamp) u64 {
+    const end = nowTimestamp();
+    const elapsed = std.Io.Clock.Timestamp.durationTo(start, end);
+    if (elapsed.raw.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, elapsed.raw.nanoseconds) orelse std.math.maxInt(u64);
+}
 
 fn addSat(a: u64, b: u64) u64 {
     return std.math.add(u64, a, b) catch std.math.maxInt(u64);
@@ -242,7 +253,7 @@ test "metrics writes machine-readable JSON report" {
     metrics.begin("ast-lower");
     metrics.endWith(7);
 
-    var json: std.ArrayList(u8) = .{};
+    var json: std.ArrayList(u8) = .empty;
     defer json.deinit(std.testing.allocator);
     try metrics.reportJson(json.writer(std.testing.allocator));
 

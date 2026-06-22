@@ -50,7 +50,7 @@ test "lsp uri ranges: materializes locations and range slices from indexed sourc
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    var locations = std.ArrayList(types.Location){};
+    var locations = std.ArrayList(types.Location).empty;
     try locations.ensureTotalCapacity(arena, ranges.len);
     uri_ranges.appendLocationsAssumeCapacity(&locations, "file:///main.ora", &ranges, indexed, .utf16);
 

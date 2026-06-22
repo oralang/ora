@@ -1,13 +1,11 @@
 const std = @import("std");
 const MetaModel = @import("MetaModel.zig");
 
-pub fn main() !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer _ = debug_allocator.deinit();
+pub fn main(init: std.process.Init) !void {
+    const gpa = init.gpa;
+    const io = init.io;
 
-    const gpa = debug_allocator.allocator();
-
-    var arg_it: std.process.ArgIterator = try .initWithAllocator(gpa);
+    var arg_it = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
     defer arg_it.deinit();
 
     _ = arg_it.skip(); // skip self exe
@@ -30,17 +28,18 @@ pub fn main() !void {
     var zig_tree: std.zig.Ast = try .parse(gpa, source, .zig);
     defer zig_tree.deinit(gpa);
 
-    std.fs.cwd().makePath(std.fs.path.dirname(out_file_path) orelse ".") catch {};
+    const cwd = std.Io.Dir.cwd();
+    cwd.createDirPath(io, std.fs.path.dirname(out_file_path) orelse ".") catch {};
 
-    var out_file = try std.fs.cwd().createFile(out_file_path, .{});
-    defer out_file.close();
+    var out_file = try cwd.createFile(io, out_file_path, .{});
+    defer out_file.close(io);
 
     if (zig_tree.errors.len != 0) {
         std.log.warn("generated file contains syntax errors! (cannot format file)", .{});
-        try out_file.writeAll(source);
+        try out_file.writeStreamingAll(io, source);
     } else {
         var buf: [1024]u8 = undefined;
-        var out = out_file.writer(&buf);
+        var out = out_file.writer(io, &buf);
         const w = &out.interface;
         try zig_tree.render(gpa, w, .{});
         try w.flush();

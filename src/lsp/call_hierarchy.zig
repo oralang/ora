@@ -35,7 +35,7 @@ pub const CallEdgeIndex = struct {
         var callable_ranges = try buildCallableRangeIndex(allocator, symbols);
         defer callable_ranges.deinit(allocator);
 
-        var edges = std.ArrayList(CallEdge){};
+        var edges = std.ArrayList(CallEdge).empty;
         errdefer edges.deinit(allocator);
         const reserved_capacity = tokens.len;
         var builder_growth_events: usize = 0;
@@ -108,7 +108,7 @@ pub const CallEdgeIndex = struct {
         caller_symbol_index: usize,
         callee_name: []const u8,
     ) ![]frontend.Range {
-        var ranges = std.ArrayList(frontend.Range){};
+        var ranges = std.ArrayList(frontend.Range).empty;
         errdefer ranges.deinit(allocator);
         try ranges.ensureTotalCapacity(allocator, self.matchingIncomingCount(caller_symbol_index, callee_name));
 
@@ -126,7 +126,7 @@ pub const CallEdgeIndex = struct {
         allocator: Allocator,
         callee_name: []const u8,
     ) ![]IncomingCallerRanges {
-        var counts = std.ArrayList(IncomingCount){};
+        var counts = std.ArrayList(IncomingCount).empty;
         defer counts.deinit(allocator);
 
         for (self.edges) |edge| {
@@ -184,7 +184,7 @@ pub const CallEdgeIndex = struct {
         allocator: Allocator,
         caller_symbol_index: usize,
     ) ![]CallEdge {
-        var edges = std.ArrayList(CallEdge){};
+        var edges = std.ArrayList(CallEdge).empty;
         errdefer edges.deinit(allocator);
 
         for (self.edges) |edge| {
@@ -227,7 +227,7 @@ fn buildCallableRangeIndex(
     allocator: Allocator,
     symbols: []const semantic_index.Symbol,
 ) !CallableRangeIndex {
-    var indexes = std.ArrayList(CallableRangeIndexEntry){};
+    var indexes = std.ArrayList(CallableRangeIndexEntry).empty;
     errdefer indexes.deinit(allocator);
 
     var callable_count: usize = 0;

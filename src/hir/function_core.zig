@@ -56,7 +56,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 value: mlir.MlirValue,
             };
 
-            entries: std.ArrayList(Entry) = .{},
+            entries: std.ArrayList(Entry) = .empty,
 
             fn deinit(self: *PatternValueCache, allocator: std.mem.Allocator) void {
                 self.entries.deinit(allocator);
@@ -775,7 +775,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         }
 
         fn eventTopic0Hex(self: *FunctionLowerer, event_name: []const u8, log_decl: ast.LogDeclItem) anyerror![]const u8 {
-            var abi_types: std.ArrayList([]const u8) = .{};
+            var abi_types: std.ArrayList([]const u8) = .empty;
             defer {
                 for (abi_types.items) |abi_type| self.parent.allocator.free(abi_type);
                 abi_types.deinit(self.parent.allocator);
@@ -1653,7 +1653,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     return false;
                 },
                 .Log => |log_stmt| {
-                    var args: std.ArrayList(mlir.MlirValue) = .{};
+                    var args: std.ArrayList(mlir.MlirValue) = .empty;
                     for (log_stmt.args) |arg| {
                         try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     }
@@ -2537,7 +2537,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (tuple_count == 0 or field_count == 0 or tuple_count != field_count) return null;
 
             const loc = self.parent.location(range);
-            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            var fields: std.ArrayList(mlir.MlirValue) = .empty;
             defer fields.deinit(self.parent.allocator);
 
             var index: usize = 0;
@@ -2580,7 +2580,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (field_count == 0 or tuple_count == 0 or field_count != tuple_count) return null;
 
             const loc = self.parent.location(range);
-            var elements: std.ArrayList(mlir.MlirValue) = .{};
+            var elements: std.ArrayList(mlir.MlirValue) = .empty;
             defer elements.deinit(self.parent.allocator);
 
             var index: usize = 0;
@@ -3413,7 +3413,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 break :blk flag;
             } else std.mem.zeroes(mlir.MlirValue);
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             const carried_supported = try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, for_stmt.body, locals, &carried_locals, &carried_seen);
             if (!carried_supported) {
@@ -3422,7 +3422,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
-            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            var init_operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
@@ -4004,7 +4004,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             carried_locals: []const LocalId,
         ) anyerror!?std.ArrayList(mlir.MlirType) {
             _ = locals;
-            var result_types: std.ArrayList(mlir.MlirType) = .{};
+            var result_types: std.ArrayList(mlir.MlirType) = .empty;
             for (carried_locals) |local_id| {
                 const result_type = try @This().lowerPatternType(self, local_id) orelse return null;
                 try result_types.append(self.parent.allocator, result_type);
@@ -4017,7 +4017,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *const LocalEnv,
             carried_locals: []const LocalId,
         ) anyerror!LocalIdList {
-            var filtered: LocalIdList = .{};
+            var filtered: LocalIdList = .empty;
             for (carried_locals) |local_id| {
                 if (!locals.hasLocal(local_id)) continue;
                 if (self.parent.typecheck.pattern_types[local_id.index()].type.kind() == .unknown) continue;
@@ -4091,7 +4091,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return;
             }
 
-            var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
+            var yielded_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);
@@ -4111,7 +4111,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return;
             }
 
-            var yielded_values: std.ArrayList(mlir.MlirValue) = .{};
+            var yielded_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try yielded_values.append(self.parent.allocator, value);

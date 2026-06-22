@@ -171,7 +171,7 @@ fn buildCrossFileContext(server: anytype, uri: []const u8) !definition_api.Cross
     const import_resolution = (try server.docs.importResolutionForUri(uri, server.workspaceRootPaths(), &server.phase_counters)) orelse return .{
         .bindings = try server.allocator.alloc(definition_api.ImportBinding, 0),
     };
-    var bindings = std.ArrayList(definition_api.ImportBinding){};
+    var bindings = std.ArrayList(definition_api.ImportBinding).empty;
     errdefer {
         for (bindings.items) |b| {
             server.allocator.free(b.alias);

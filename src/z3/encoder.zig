@@ -374,7 +374,7 @@ pub const Encoder = struct {
             .global_old_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .global_entry_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .written_global_slots = std.StringHashMap(void).init(allocator),
-            .active_lock_frames = std.ArrayList(ActiveLockFrame){},
+            .active_lock_frames = std.ArrayList(ActiveLockFrame).empty,
             .env_map = std.StringHashMap(z3.Z3_ast).init(allocator),
             .memref_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
             .memref_old_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
@@ -387,23 +387,23 @@ pub const Encoder = struct {
             .struct_decl_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .enum_decl_ops = std.StringHashMap(mlir.MlirOperation).init(allocator),
             .materialized_calls = std.AutoHashMap(u64, void).init(allocator),
-            .inline_function_stack = std.ArrayList([]u8){},
-            .string_storage = std.ArrayList([]u8){},
-            .pending_constraints = std.ArrayList(PendingConstraint){},
-            .branch_merge_constraints = std.ArrayList(PendingConstraint){},
-            .pending_obligations = std.ArrayList(PendingObligation){},
+            .inline_function_stack = std.ArrayList([]u8).empty,
+            .string_storage = std.ArrayList([]u8).empty,
+            .pending_constraints = std.ArrayList(PendingConstraint).empty,
+            .branch_merge_constraints = std.ArrayList(PendingConstraint).empty,
+            .pending_obligations = std.ArrayList(PendingObligation).empty,
             .encoding_degraded = false,
             .encoding_degraded_reason = null,
-            .encoding_degraded_reasons = std.ArrayList([]const u8){},
-            .encoding_soundness_losses = std.ArrayList(SoundnessLoss){},
-            .encoding_precision_notes = std.ArrayList(PrecisionNoteKind){},
-            .encoding_precision_note_events = std.ArrayList(PrecisionNoteEvent){},
+            .encoding_degraded_reasons = std.ArrayList([]const u8).empty,
+            .encoding_soundness_losses = std.ArrayList(SoundnessLoss).empty,
+            .encoding_precision_notes = std.ArrayList(PrecisionNoteKind).empty,
+            .encoding_precision_note_events = std.ArrayList(PrecisionNoteEvent).empty,
             .error_union_sorts = std.StringHashMap(ErrorUnionSort).init(allocator),
             .product_sorts = std.StringHashMap(ProductSort).init(allocator),
             .enum_sorts = std.StringHashMap(EnumSort).init(allocator),
             .adt_sorts = std.StringHashMap(AdtSort).init(allocator),
-            .quantified_bindings = std.ArrayList(QuantifiedBinding){},
-            .return_path_assumptions = std.ArrayList(z3.Z3_ast){},
+            .quantified_bindings = std.ArrayList(QuantifiedBinding).empty,
+            .return_path_assumptions = std.ArrayList(z3.Z3_ast).empty,
             .degraded_coercion_fallback_id = 0,
         };
     }
@@ -875,7 +875,7 @@ pub const Encoder = struct {
     }
 
     fn refreshActiveLockFramesFromBlockPrefix(self: *Encoder, target_op: mlir.MlirOperation) EncodeError!void {
-        var ancestors = std.ArrayList(mlir.MlirOperation){};
+        var ancestors = std.ArrayList(mlir.MlirOperation).empty;
         defer ancestors.deinit(self.allocator);
 
         var cursor = target_op;
@@ -904,7 +904,7 @@ pub const Encoder = struct {
     }
 
     fn splitTopLevelTypeList(self: *Encoder, body: []const u8) error{ OutOfMemory, UnsupportedOperation }![][]u8 {
-        var elements = std.ArrayList([]u8){};
+        var elements = std.ArrayList([]u8).empty;
         errdefer {
             for (elements.items) |entry| self.allocator.free(entry);
             elements.deinit(self.allocator);
@@ -965,12 +965,12 @@ pub const Encoder = struct {
             self.allocator.free(entries);
         }
 
-        var field_names = std.ArrayList([]u8){};
+        var field_names = std.ArrayList([]u8).empty;
         errdefer {
             for (field_names.items) |name| self.allocator.free(name);
             field_names.deinit(self.allocator);
         }
-        var field_types = std.ArrayList([]u8){};
+        var field_types = std.ArrayList([]u8).empty;
         errdefer {
             for (field_types.items) |ty| self.allocator.free(ty);
             field_types.deinit(self.allocator);
@@ -1572,9 +1572,9 @@ pub const Encoder = struct {
             return null;
         };
 
-        var names = std.ArrayList([]const u8){};
+        var names = std.ArrayList([]const u8).empty;
         defer names.deinit(self.allocator);
-        var types = std.ArrayList(mlir.MlirType){};
+        var types = std.ArrayList(mlir.MlirType).empty;
         defer types.deinit(self.allocator);
 
         var it = std.mem.splitScalar(u8, csv, ',');
@@ -1775,7 +1775,7 @@ pub const Encoder = struct {
                 .global_map = std.StringHashMap(z3.Z3_ast).init(allocator),
                 .memref_map = std.AutoHashMap(u64, TrackedMemrefState).init(allocator),
                 .written_global_slots = std.StringHashMap(void).init(allocator),
-                .active_lock_frames = std.ArrayList(ActiveLockFrame){},
+                .active_lock_frames = std.ArrayList(ActiveLockFrame).empty,
             };
         }
 
@@ -1949,7 +1949,7 @@ pub const Encoder = struct {
         self: *Encoder,
         map: *const std.AutoHashMap(u64, void),
     ) !std.ArrayList(u64) {
-        var keys = std.ArrayList(u64){};
+        var keys = std.ArrayList(u64).empty;
         errdefer keys.deinit(self.allocator);
 
         var it = map.iterator();
@@ -1970,7 +1970,7 @@ pub const Encoder = struct {
     ) !void {
         self.clearCurrentStateMaps();
 
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -2053,7 +2053,7 @@ pub const Encoder = struct {
             });
         }
 
-        var written_names = std.ArrayList([]const u8){};
+        var written_names = std.ArrayList([]const u8).empty;
         defer written_names.deinit(self.allocator);
         var then_w_it = then_state.written_global_slots.iterator();
         while (then_w_it.next()) |entry| try self.appendUniqueStateName(&written_names, entry.key_ptr.*);
@@ -2075,7 +2075,7 @@ pub const Encoder = struct {
     ) !void {
         self.clearCurrentStateMaps();
 
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -2164,7 +2164,7 @@ pub const Encoder = struct {
             });
         }
 
-        var written_names = std.ArrayList([]const u8){};
+        var written_names = std.ArrayList([]const u8).empty;
         defer written_names.deinit(self.allocator);
         for (branch_states) |*branch_state| {
             var written_it = branch_state.written_global_slots.iterator();
@@ -2193,7 +2193,7 @@ pub const Encoder = struct {
     ) !void {
         self.clearCurrentStateMaps();
 
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -2456,7 +2456,7 @@ pub const Encoder = struct {
         if (self.struct_field_names_csv.contains(name)) return;
 
         const fields_attr = mlir.oraOperationGetAttributeByName(struct_op, mlir.oraStringRefCreate("ora.field_names", 15));
-        var csv_builder = std.ArrayList(u8){};
+        var csv_builder = std.ArrayList(u8).empty;
         defer csv_builder.deinit(self.allocator);
         if (!mlir.oraAttributeIsNull(fields_attr)) {
             const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(fields_attr));
@@ -2483,7 +2483,7 @@ pub const Encoder = struct {
         if (self.struct_field_names_csv.contains(name)) return;
 
         const params_attr = mlir.oraOperationGetAttributeByName(error_op, mlir.oraStringRefCreate("ora.param_names", 15));
-        var csv_builder = std.ArrayList(u8){};
+        var csv_builder = std.ArrayList(u8).empty;
         defer csv_builder.deinit(self.allocator);
         if (!mlir.oraAttributeIsNull(params_attr)) {
             const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(params_attr));
@@ -3704,26 +3704,26 @@ pub const Encoder = struct {
     }
 
     fn computedStorageRootName(self: *Encoder, model: ComputedStorageSlotModel) EncodeError![]const u8 {
-        var buffer = std.ArrayList(u8){};
-        errdefer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        errdefer buffer.deinit();
+        const writer = &buffer.writer;
         const kind_tag: []const u8 = switch (model.kind) {
             .derived => "derived",
             .parameter => "param",
         };
-        try writer.print("$computed_storage:{s}:{d}:keys{d}", .{ kind_tag, model.namespace_hash, model.keys.len });
+        writer.print("$computed_storage:{s}:{d}:keys{d}", .{ kind_tag, model.namespace_hash, model.keys.len }) catch return error.OutOfMemory;
         for (model.keys) |key| {
             const sort = z3.Z3_get_sort(self.context.ctx, key);
             const kind = z3.Z3_get_sort_kind(self.context.ctx, sort);
-            try writer.print(":k{d}", .{@as(u32, @intCast(kind))});
+            writer.print(":k{d}", .{@as(u32, @intCast(kind))}) catch return error.OutOfMemory;
             if (kind == z3.Z3_BV_SORT) {
-                try writer.print("b{d}", .{z3.Z3_get_bv_sort_size(self.context.ctx, sort)});
+                writer.print("b{d}", .{z3.Z3_get_bv_sort_size(self.context.ctx, sort)}) catch return error.OutOfMemory;
             } else {
                 const sort_ast = z3.Z3_sort_to_ast(self.context.ctx, sort);
-                try writer.print("s{x}", .{@intFromPtr(sort_ast)});
+                writer.print("s{x}", .{@intFromPtr(sort_ast)}) catch return error.OutOfMemory;
             }
         }
-        return try buffer.toOwnedSlice(self.allocator);
+        return try buffer.toOwnedSlice();
     }
 
     fn computedStorageRootSort(self: *Encoder, model: ComputedStorageSlotModel) z3.Z3_sort {
@@ -6670,9 +6670,9 @@ pub const Encoder = struct {
                 }
                 if (field_names_str) |csv| {
                     var it = std.mem.splitScalar(u8, csv, ',');
-                    var names = std.ArrayList([]const u8){};
+                    var names = std.ArrayList([]const u8).empty;
                     defer names.deinit(self.allocator);
-                    var types = std.ArrayList(mlir.MlirType){};
+                    var types = std.ArrayList(mlir.MlirType).empty;
                     defer types.deinit(self.allocator);
                     var index: usize = 0;
                     while (it.next()) |part| : (index += 1) {
@@ -6723,9 +6723,9 @@ pub const Encoder = struct {
                 }
                 if (field_names_str) |csv| {
                     var it = std.mem.splitScalar(u8, csv, ',');
-                    var names = std.ArrayList([]const u8){};
+                    var names = std.ArrayList([]const u8).empty;
                     defer names.deinit(self.allocator);
-                    var types = std.ArrayList(mlir.MlirType){};
+                    var types = std.ArrayList(mlir.MlirType).empty;
                     defer types.deinit(self.allocator);
                     var index: usize = 0;
                     while (it.next()) |part| : (index += 1) {
@@ -8275,9 +8275,9 @@ pub const Encoder = struct {
     ) EncodeError!?z3.Z3_ast {
         if (keys.len == 0) return null;
 
-        var containers = std.ArrayList(z3.Z3_ast){};
+        var containers = std.ArrayList(z3.Z3_ast).empty;
         defer containers.deinit(self.allocator);
-        var coerced_keys = std.ArrayList(z3.Z3_ast){};
+        var coerced_keys = std.ArrayList(z3.Z3_ast).empty;
         defer coerced_keys.deinit(self.allocator);
 
         var cursor = base;
@@ -8529,7 +8529,7 @@ pub const Encoder = struct {
         }
         if (root.len >= path.len or path[root.len] != '.') return null;
 
-        var fields = std.ArrayList([]const u8){};
+        var fields = std.ArrayList([]const u8).empty;
         var fields_owned = false;
         defer if (!fields_owned) fields.deinit(self.allocator);
 
@@ -8560,7 +8560,7 @@ pub const Encoder = struct {
         }
         if (root.len >= path.len or path[root.len] != '[') return null;
 
-        var keys = std.ArrayList([]const u8){};
+        var keys = std.ArrayList([]const u8).empty;
         var keys_owned = false;
         defer if (!keys_owned) keys.deinit(self.allocator);
 
@@ -8794,7 +8794,7 @@ pub const Encoder = struct {
                 try self.appendWriteSlotUnique(write_slots, effectSlotPathRoot(slot_path));
             }
 
-            var body_write_slots = std.ArrayList([]u8){};
+            var body_write_slots = std.ArrayList([]u8).empty;
             defer {
                 for (body_write_slots.items) |slot_name| self.allocator.free(slot_name);
                 body_write_slots.deinit(self.allocator);
@@ -8836,7 +8836,7 @@ pub const Encoder = struct {
         // Compiler-emitted slot metadata is the sema summary for tracked state.
         // Cross-check it against an independent body walk before trusting it.
         if (has_slot_metadata_attr) {
-            var body_write_slots = std.ArrayList([]u8){};
+            var body_write_slots = std.ArrayList([]u8).empty;
             defer {
                 for (body_write_slots.items) |slot_name| self.allocator.free(slot_name);
                 body_write_slots.deinit(self.allocator);
@@ -9024,7 +9024,7 @@ pub const Encoder = struct {
         }
 
         if (has_slot_metadata_attr) {
-            var body_read_slots = std.ArrayList([]u8){};
+            var body_read_slots = std.ArrayList([]u8).empty;
             defer {
                 for (body_read_slots.items) |slot_name| self.allocator.free(slot_name);
                 body_read_slots.deinit(self.allocator);
@@ -9157,7 +9157,7 @@ pub const Encoder = struct {
     }
 
     pub fn operationMayWriteTrackedState(self: *Encoder, op: mlir.MlirOperation) EncodeError!bool {
-        var write_slots = std.ArrayList([]u8){};
+        var write_slots = std.ArrayList([]u8).empty;
         defer {
             for (write_slots.items) |slot_name| self.allocator.free(slot_name);
             write_slots.deinit(self.allocator);
@@ -9491,7 +9491,7 @@ pub const Encoder = struct {
             );
         }
 
-        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
         try summary_encoder.collectRequiresForSummary(func_op, &callee_requires);
         self.addCalleePreconditions(callee_requires.items, callee);
@@ -12921,17 +12921,17 @@ pub const Encoder = struct {
         }
 
         const branch_op = if_op orelse return null;
-        var targets = std.ArrayListUnmanaged(mlir.MlirValue){};
+        var targets = std.ArrayListUnmanaged(mlir.MlirValue).empty;
         defer targets.deinit(self.allocator);
-        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer branch_preds.deinit(self.allocator);
         if (!(try self.tryCollectEqCatchTargetsFromIfChain(branch_op, iv, mode, &targets, &branch_preds))) return null;
         if (targets.items.len == 0) return null;
 
         const ub_ast = try self.encodeValueWithMode(mlir.oraOperationGetOperand(for_op, 1), mode);
-        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer catch_cases.deinit(self.allocator);
-        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer miss_cases.deinit(self.allocator);
         for (targets.items, branch_preds.items) |target, pred| {
             const target_ast = try self.encodeValueWithMode(target, mode);
@@ -13144,17 +13144,17 @@ pub const Encoder = struct {
             return null;
         }
 
-        var targets = std.ArrayListUnmanaged(mlir.MlirValue){};
+        var targets = std.ArrayListUnmanaged(mlir.MlirValue).empty;
         defer targets.deinit(self.allocator);
-        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var branch_preds = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer branch_preds.deinit(self.allocator);
         if (!(try self.tryCollectEqCatchTargetsFromIfChain(branch_op, after_iv, mode, &targets, &branch_preds))) return null;
         if (targets.items.len == 0) return null;
 
         const limit_ast = try self.encodeValueWithMode(limit_value, mode);
-        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var catch_cases = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer catch_cases.deinit(self.allocator);
-        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast){};
+        var miss_cases = std.ArrayListUnmanaged(z3.Z3_ast).empty;
         defer miss_cases.deinit(self.allocator);
         for (targets.items, branch_preds.items) |target, pred| {
             const target_ast = try self.encodeValueWithMode(target, mode);
@@ -13618,7 +13618,7 @@ pub const Encoder = struct {
         const entry_block = mlir.oraRegionGetFirstBlock(body_region);
         if (mlir.oraBlockIsNull(entry_block)) return false;
 
-        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
         var any_result = false;
         const will_run_summary_encoder = slots.len > 0 or result_exprs.len == 0;
@@ -13960,7 +13960,7 @@ pub const Encoder = struct {
             );
         }
 
-        var callee_requires = std.ArrayList(z3.Z3_ast){};
+        var callee_requires = std.ArrayList(z3.Z3_ast).empty;
         defer callee_requires.deinit(self.allocator);
         try self.collectRequiresForSummary(func_op, &callee_requires);
         self.addCalleePreconditions(callee_requires.items, callee);
@@ -14019,7 +14019,7 @@ pub const Encoder = struct {
             return;
         }
 
-        var guard_terms = std.ArrayList(z3.Z3_ast){};
+        var guard_terms = std.ArrayList(z3.Z3_ast).empty;
         defer guard_terms.deinit(self.allocator);
         guard_terms.appendSlice(self.allocator, requires) catch {
             self.recordSoundnessLoss(.inexact_call_summary, "failed to allocate summary obligation guards");
@@ -14552,19 +14552,19 @@ pub const Encoder = struct {
             }
         }
 
-        var write_slots = std.ArrayList([]u8){};
+        var write_slots = std.ArrayList([]u8).empty;
         defer {
             for (write_slots.items) |slot_name| self.allocator.free(slot_name);
             write_slots.deinit(self.allocator);
         }
-        var read_slots = std.ArrayList([]u8){};
+        var read_slots = std.ArrayList([]u8).empty;
         defer {
             for (read_slots.items) |slot_name| self.allocator.free(slot_name);
             read_slots.deinit(self.allocator);
         }
         var writes_unknown = false;
         var reads_unknown = false;
-        var declared_modifies_paths = std.ArrayList([]u8){};
+        var declared_modifies_paths = std.ArrayList([]u8).empty;
         defer {
             for (declared_modifies_paths.items) |path| self.allocator.free(path);
             declared_modifies_paths.deinit(self.allocator);
@@ -14614,7 +14614,7 @@ pub const Encoder = struct {
             }
         }
 
-        var slots = std.ArrayList(CallSlotState){};
+        var slots = std.ArrayList(CallSlotState).empty;
         defer {
             self.freeSlotStates(slots.items);
             slots.deinit(self.allocator);
@@ -15013,7 +15013,7 @@ pub const Encoder = struct {
         if (len == 0 or start + len > operands.len) return error.InvalidOperandCount;
 
         const place_operand = mlir.oraOperationGetOperand(op, @intCast(start));
-        var field_path_list = std.ArrayList(ResourceFieldProjection){};
+        var field_path_list = std.ArrayList(ResourceFieldProjection).empty;
         defer field_path_list.deinit(self.allocator);
         const root_operand = try self.collectResourceFieldPathFromPlaceOperand(place_operand, &field_path_list);
         const root_name = (try self.resolveResourceRootNameFromPlaceOperand(root_operand)) orelse {
@@ -15380,7 +15380,7 @@ pub const Encoder = struct {
         mode: EncodeMode,
     ) EncodeError!void {
         // Collect map_get chain from leaf map operand to root map value.
-        var chain = std.ArrayList(MapGetAncestor){};
+        var chain = std.ArrayList(MapGetAncestor).empty;
         defer chain.deinit(self.allocator);
 
         var root_candidate = map_operand;
@@ -15701,7 +15701,7 @@ pub const Encoder = struct {
     fn printMlirTypeOwned(self: *Encoder, ty: mlir.MlirType) ![]u8 {
         var collector = MlirPrintCollector{
             .allocator = self.allocator,
-            .buffer = std.ArrayList(u8){},
+            .buffer = std.ArrayList(u8).empty,
         };
         errdefer collector.buffer.deinit(self.allocator);
         mlir.mlirTypePrint(ty, printMlirChunk, &collector);
@@ -15714,7 +15714,7 @@ pub const Encoder = struct {
     fn printMlirAttributeOwned(self: *Encoder, attr: mlir.MlirAttribute) ![]u8 {
         var collector = MlirPrintCollector{
             .allocator = self.allocator,
-            .buffer = std.ArrayList(u8){},
+            .buffer = std.ArrayList(u8).empty,
         };
         errdefer collector.buffer.deinit(self.allocator);
         mlir.mlirAttributePrint(attr, printMlirChunk, &collector);
@@ -15828,7 +15828,7 @@ pub const Encoder = struct {
         const field_count = mlir.oraStructTypeGetFieldCountInScope(scope_op, ty);
         if (field_count == 0) return null;
 
-        var csv_builder = std.ArrayList(u8){};
+        var csv_builder = std.ArrayList(u8).empty;
         defer csv_builder.deinit(self.allocator);
 
         for (0..field_count) |i| {
@@ -15908,7 +15908,7 @@ pub const Encoder = struct {
             return copy;
         }
 
-        var csv_builder = std.ArrayList(u8){};
+        var csv_builder = std.ArrayList(u8).empty;
         defer csv_builder.deinit(self.allocator);
 
         const count: usize = @intCast(mlir.oraArrayAttrGetNumElements(attr));
@@ -16272,7 +16272,7 @@ pub const Encoder = struct {
     }
 
     pub fn invalidateValueCaches(self: *Encoder) void {
-        var remove_keys = std.ArrayList(u64){};
+        var remove_keys = std.ArrayList(u64).empty;
         defer remove_keys.deinit(self.allocator);
 
         self.collectUncacheableValueKeys(&self.value_map, &remove_keys) catch {

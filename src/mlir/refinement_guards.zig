@@ -29,9 +29,7 @@ pub fn cleanupRefinementGuardsWithOptions(
     options: CleanupOptions,
 ) void {
     const module_op = c.oraModuleGetOperation(module);
-    const debug_env = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_GUARD_DEBUG") catch null;
-    const debug_enabled = debug_env != null;
-    if (debug_env) |val| std.heap.page_allocator.free(val);
+    const debug_enabled = if (@import("builtin").link_libc) std.c.getenv("ORA_GUARD_DEBUG") != null else false;
     walkOperation(ctx, module_op, proven_guard_ids, debug_enabled, options);
 }
 

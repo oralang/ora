@@ -61,7 +61,7 @@ pub fn completionAtIndex(
     var seen = std.StringHashMap(void).init(allocator);
     defer seen.deinit();
 
-    var items = std.ArrayList(Item){};
+    var items = std.ArrayList(Item).empty;
     errdefer {
         for (items.items) |*item| item.deinit(allocator);
         items.deinit(allocator);
@@ -199,7 +199,7 @@ fn memberCompletion(
     position: frontend.Position,
     index: *const semantic_index.SemanticIndex,
 ) ![]Item {
-    var items = std.ArrayList(Item){};
+    var items = std.ArrayList(Item).empty;
     errdefer {
         for (items.items) |*item| item.deinit(allocator);
         items.deinit(allocator);

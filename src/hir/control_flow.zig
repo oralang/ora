@@ -130,7 +130,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (created_deferred_return) {
                 try self.ensureDeferredReturnSlots(if_stmt.range);
             }
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectIfCarriedLocals(self.parent.allocator, self.parent.file, if_stmt.then_body, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.if_placeholder", if_stmt.range);
@@ -145,7 +145,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
             const result_types = if (carried_locals.items.len == 0)
-                std.ArrayList(mlir.MlirType){}
+                std.ArrayList(mlir.MlirType).empty
             else
                 (try self.buildCarriedResultTypes(locals, carried_locals.items)) orelse {
                     try self.appendUnsupportedControlPlaceholder("ora.if_placeholder", if_stmt.range);
@@ -237,7 +237,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (created_deferred_return) {
                 try self.ensureDeferredReturnSlots(try_stmt.range);
             }
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectTryCarriedLocals(self.parent.allocator, self.parent.file, try_stmt, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.try_placeholder", try_stmt.range);
@@ -345,7 +345,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(init_exit)) return error.MlirOperationCreationFailed;
             appendOp(self.block, init_exit);
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, block_stmt.body, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.labeled_block_placeholder", block_stmt.range);
@@ -353,7 +353,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
-            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            var init_operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
@@ -420,7 +420,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(return_enabled)) return error.MlirOperationCreationFailed;
                 continue_value = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, continue_value, appendValueOp(before_block, return_enabled)));
             }
-            var condition_values: std.ArrayList(mlir.MlirValue) = .{};
+            var condition_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try before_lowerer.materializeCarriedLocalValue(&before_locals, local_id);
                 try condition_values.append(self.parent.allocator, value);
@@ -518,7 +518,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 appendOp(self.block, clear_continue);
             }
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             const carried_supported = try collectLoopCarriedLocals(self.parent.allocator, self.parent.file, while_stmt.body, locals, &carried_locals, &carried_seen);
             if (!carried_supported) {
@@ -527,7 +527,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
-            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            var init_operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
@@ -615,7 +615,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 condition = appendValueOp(before_block, mlir.oraArithAndIOpCreate(self.parent.context, loc, appendValueOp(before_block, return_enabled), condition));
             }
 
-            var condition_values: std.ArrayList(mlir.MlirValue) = .{};
+            var condition_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try before_lowerer.materializeCarriedLocalValue(&before_locals, local_id);
                 try condition_values.append(self.parent.allocator, value);
@@ -895,7 +895,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try self.ensureDeferredReturnSlots(switch_stmt.range);
             }
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectSwitchCarriedLocals(self.parent.allocator, self.parent.file, switch_stmt, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
@@ -947,7 +947,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             const branch_condition = (try @This().lowerErrorUnionMatchCondition(self, switch_stmt.condition, condition, arm.pattern, arm.range)) orelse return false;
             const result_types = if (carried_locals.len == 0)
-                std.ArrayList(mlir.MlirType){}
+                std.ArrayList(mlir.MlirType).empty
             else
                 (try self.buildCarriedResultTypes(locals, carried_locals)) orelse return false;
 
@@ -1010,7 +1010,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (created_deferred_return) {
                 try self.ensureDeferredReturnSlots(switch_stmt.range);
             }
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectSwitchCarriedLocals(self.parent.allocator, self.parent.file, switch_stmt, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
@@ -1167,7 +1167,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(init_value)) return error.MlirOperationCreationFailed;
             appendOp(self.block, init_value);
 
-            var carried_locals: LocalIdList = .{};
+            var carried_locals: LocalIdList = .empty;
             var carried_seen = LocalIdSet.init(self.parent.allocator);
             if (!try collectSwitchCarriedLocals(self.parent.allocator, self.parent.file, switch_stmt, locals, &carried_locals, &carried_seen)) {
                 try self.appendUnsupportedControlPlaceholder("ora.switch_placeholder", switch_stmt.range);
@@ -1182,7 +1182,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             }
             carried_locals = try self.filterCarriedLocals(locals, carried_locals.items);
 
-            var init_operands: std.ArrayList(mlir.MlirValue) = .{};
+            var init_operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try self.materializeCarriedLocalValue(locals, local_id);
                 try init_operands.append(self.parent.allocator, value);
@@ -1234,7 +1234,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 if (mlir.oraOperationIsNull(load)) return error.MlirOperationCreationFailed;
                 break :blk load;
             });
-            var condition_values: std.ArrayList(mlir.MlirValue) = .{};
+            var condition_values: std.ArrayList(mlir.MlirValue) = .empty;
             for (carried_locals.items) |local_id| {
                 const value = try before_lowerer.materializeCarriedLocalValue(&before_locals, local_id);
                 try condition_values.append(self.parent.allocator, value);
@@ -1378,10 +1378,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
-                .case_values = .{},
-                .range_starts = .{},
-                .range_ends = .{},
-                .case_kinds = .{},
+                .case_values = .empty,
+                .range_starts = .empty,
+                .range_ends = .empty,
+                .case_kinds = .empty,
                 .total_cases = total_cases,
             };
 
@@ -1405,10 +1405,10 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (total_cases == 0) return null;
 
             var data = SwitchPatternData{
-                .case_values = .{},
-                .range_starts = .{},
-                .range_ends = .{},
-                .case_kinds = .{},
+                .case_values = .empty,
+                .range_starts = .empty,
+                .range_ends = .empty,
+                .case_kinds = .empty,
                 .total_cases = total_cases,
             };
 
@@ -2140,7 +2140,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                         return;
                     }
 
-                    var field_types: std.ArrayList(mlir.MlirType) = .{};
+                    var field_types: std.ArrayList(mlir.MlirType) = .empty;
                     defer field_types.deinit(self.parent.allocator);
                     for (error_decl.parameters) |param| {
                         try field_types.append(self.parent.allocator, self.parent.lowerSemaType(self.parent.typecheck.pattern_types[param.pattern.index()].type, range));

@@ -49,9 +49,9 @@ const ImportRef = struct {
 };
 
 pub fn pathToFileUri(allocator: Allocator, path: []const u8) ![]u8 {
-    var uri = std.ArrayList(u8){};
-    errdefer uri.deinit(allocator);
-    const writer = uri.writer(allocator);
+    var uri = std.Io.Writer.Allocating.init(allocator);
+    errdefer uri.deinit();
+    const writer = &uri.writer;
     try writer.writeAll("file://");
     for (path) |byte| {
         if (std.ascii.isAlphanumeric(byte) or byte == '/' or byte == '.' or byte == '-' or byte == '_') {
@@ -60,7 +60,7 @@ pub fn pathToFileUri(allocator: Allocator, path: []const u8) ![]u8 {
             try writer.print("%{X:0>2}", .{byte});
         }
     }
-    return uri.toOwnedSlice(allocator);
+    return uri.toOwnedSlice();
 }
 
 pub fn fileUriToPathAlloc(allocator: Allocator, uri: []const u8) !?[]u8 {
@@ -77,18 +77,21 @@ pub fn fileUriToPathAlloc(allocator: Allocator, uri: []const u8) !?[]u8 {
 }
 
 pub fn normalizePathAlloc(allocator: Allocator, path: []const u8) ![]u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
     const absolute = if (std.fs.path.isAbsolute(path))
         try std.fs.path.resolve(allocator, &.{path})
     else blk: {
-        const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+        const cwd = try std.process.currentPathAlloc(io, allocator);
         defer allocator.free(cwd);
         break :blk try std.fs.path.resolve(allocator, &.{ cwd, path });
     };
     errdefer allocator.free(absolute);
 
-    const canonical = std.fs.cwd().realpathAlloc(allocator, absolute) catch {
+    const canonical_z = std.Io.Dir.realPathFileAbsoluteAlloc(io, absolute, allocator) catch {
         return absolute;
     };
+    defer allocator.free(canonical_z);
+    const canonical = try allocator.dupe(u8, canonical_z);
     allocator.free(absolute);
     return canonical;
 }
@@ -123,7 +126,7 @@ fn resolveDocumentImportRefs(
     options: ResolveOptions,
     import_refs: []const ImportRef,
 ) !ResolutionResult {
-    var diagnostics = std.ArrayList(ImportResolutionDiagnostic){};
+    var diagnostics = std.ArrayList(ImportResolutionDiagnostic).empty;
     errdefer {
         for (diagnostics.items) |diagnostic| {
             allocator.free(diagnostic.message);
@@ -131,7 +134,7 @@ fn resolveDocumentImportRefs(
         diagnostics.deinit(allocator);
     }
 
-    var imports = std.ArrayList(ResolvedImport){};
+    var imports = std.ArrayList(ResolvedImport).empty;
     errdefer {
         for (imports.items) |item| {
             allocator.free(item.specifier);
@@ -239,7 +242,7 @@ pub fn sourceImportsTargetPath(
 }
 
 fn collectImports(allocator: Allocator, source: []const u8) ![]ImportRef {
-    var collected = std.ArrayList(ImportRef){};
+    var collected = std.ArrayList(ImportRef).empty;
     errdefer {
         for (collected.items) |item| {
             allocator.free(item.specifier);
@@ -315,7 +318,7 @@ fn collectImportsFromCachedTokens(
     source: []const u8,
     tokens: []const token_cache.Token,
 ) ![]ImportRef {
-    var collected = std.ArrayList(ImportRef){};
+    var collected = std.ArrayList(ImportRef).empty;
     errdefer {
         for (collected.items) |item| {
             allocator.free(item.specifier);
@@ -526,10 +529,11 @@ fn resolveRelativeImportPathAlloc(allocator: Allocator, importer_path: []const u
     const joined = try std.fs.path.join(allocator, &.{ importer_dir, specifier });
     defer allocator.free(joined);
 
-    const real = std.fs.cwd().realpathAlloc(allocator, joined) catch {
+    const real_z = std.Io.Dir.cwd().realPathFileAlloc(std.Io.Threaded.global_single_threaded.io(), joined, allocator) catch {
         return null;
     };
-    return real;
+    defer allocator.free(real_z);
+    return try allocator.dupe(u8, real_z);
 }
 
 fn isAllowedInWorkspace(allocator: Allocator, resolved_path: []const u8, workspace_roots: []const []const u8) !bool {

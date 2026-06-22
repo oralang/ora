@@ -370,7 +370,7 @@ test "compiler const eval executes cross-module comptime calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\comptime fn helper() -> u256 {
@@ -378,7 +378,7 @@ test "compiler const eval executes cross-module comptime calls" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -792,7 +792,7 @@ test "compiler rejects extra imported explicit generic call arguments" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\fn first(comptime T: type, a: T, b: T) -> T {
@@ -800,7 +800,7 @@ test "compiler rejects extra imported explicit generic call arguments" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");
@@ -851,7 +851,7 @@ test "compiler monomorphizes imported explicit comptime integer calls in HIR" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\fn shl_by(comptime N: u256, value: u256) -> u256 {
@@ -859,7 +859,7 @@ test "compiler monomorphizes imported explicit comptime integer calls in HIR" {
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");

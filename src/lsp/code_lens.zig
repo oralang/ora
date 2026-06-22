@@ -20,7 +20,7 @@ pub fn findVerificationLensesInAst(
     file: *const compiler.ast.AstFile,
     line_index: *const line_index_api.LineIndex,
 ) ![]VerificationLens {
-    var lenses = std.ArrayList(VerificationLens){};
+    var lenses = std.ArrayList(VerificationLens).empty;
     errdefer {
         for (lenses.items) |*lens| lens.deinit(allocator);
         lenses.deinit(allocator);
@@ -120,9 +120,9 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
         }
     }
 
-    var buffer = std.ArrayList(u8){};
-    errdefer buffer.deinit(allocator);
-    const writer = buffer.writer(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
+    errdefer buffer.deinit();
+    const writer = &buffer.writer;
 
     var first = true;
     if (requires_count > 0) {
@@ -149,5 +149,5 @@ fn formatClausesSummary(allocator: Allocator, clauses: []const compiler.ast.Spec
         try writer.print("{d} modifies", .{modifies_count});
     }
 
-    return buffer.toOwnedSlice(allocator);
+    return buffer.toOwnedSlice();
 }

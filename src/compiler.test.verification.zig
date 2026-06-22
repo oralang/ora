@@ -736,7 +736,7 @@ test "verification preserves imported computed storage helpers through std stora
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "dep.ora",
         .data =
         \\comptime const std_storage = @import("std/storage");
@@ -746,7 +746,7 @@ test "verification preserves imported computed storage helpers through std stora
         \\}
         ,
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "main.ora",
         .data =
         \\comptime const dep = @import("./dep.ora");

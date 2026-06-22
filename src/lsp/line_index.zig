@@ -14,9 +14,9 @@ pub const LineIndex = struct {
     pub fn init(allocator: Allocator, source: []const u8) !LineIndex {
         if (source.len > std.math.maxInt(u32)) return error.SourceTooLarge;
 
-        var starts = std.ArrayList(u32){};
+        var starts = std.ArrayList(u32).empty;
         errdefer starts.deinit(allocator);
-        var ascii = std.ArrayList(bool){};
+        var ascii = std.ArrayList(bool).empty;
         errdefer ascii.deinit(allocator);
 
         try starts.append(allocator, 0);

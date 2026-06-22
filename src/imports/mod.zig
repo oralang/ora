@@ -19,6 +19,20 @@ const std = @import("std");
 const lexer = @import("ora_lexer");
 pub const embedded_stdlib = @import("stdlib_embedded");
 
+fn processIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn cwdRealpathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const real_z = try std.Io.Dir.cwd().realPathFileAlloc(processIo(), path, allocator);
+    defer allocator.free(real_z);
+    return allocator.dupe(u8, real_z);
+}
+
+fn cwdReadFileAlloc(allocator: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(processIo(), path, allocator, std.Io.Limit.limited(limit));
+}
+
 pub const ImportValidationError = error{
     ImportTargetNotFound,
     ImportCycleDetected,
@@ -143,8 +157,8 @@ const ModuleRecord = struct {
             .resolved_path = descriptor.resolved_path,
             .package_name = descriptor.package_name,
             .package_module_path = descriptor.package_module_path,
-            .dependencies = .{},
-            .imports = .{},
+            .dependencies = .empty,
+            .imports = .empty,
         };
     }
 
@@ -228,7 +242,7 @@ const Resolver = struct {
             .states = std.StringHashMap(VisitState).init(allocator),
             .modules = std.StringHashMap(*ModuleRecord).init(allocator),
             .package_bindings = std.StringHashMap([]const u8).init(allocator),
-            .stack = .{},
+            .stack = .empty,
             .entry_canonical_id = null,
         };
     }
@@ -285,7 +299,7 @@ const Resolver = struct {
     }
 
     fn buildEntryDescriptor(self: *Resolver, entry_file_path: []const u8) ImportValidationError!ModuleDescriptor {
-        const resolved_path = std.fs.cwd().realpathAlloc(self.allocator, entry_file_path) catch |err| {
+        const resolved_path = cwdRealpathAlloc(self.allocator, entry_file_path) catch |err| {
             std.log.warn("Entry file not found: '{s}' ({s})", .{ entry_file_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
         };
@@ -362,7 +376,7 @@ const Resolver = struct {
         defer if (owned_source) |source_text| self.allocator.free(source_text);
 
         const source = blk: {
-            owned_source = std.fs.cwd().readFileAlloc(self.allocator, module.resolved_path, 1024 * 1024) catch |err| {
+            owned_source = cwdReadFileAlloc(self.allocator, module.resolved_path, 1024 * 1024) catch |err| {
                 std.log.warn("Failed to read module '{s}': {s}", .{ module.resolved_path, @errorName(err) });
                 return ImportValidationError.ImportTargetNotFound;
             };
@@ -419,7 +433,7 @@ const Resolver = struct {
         };
         defer self.allocator.free(joined);
 
-        const resolved_path = std.fs.cwd().realpathAlloc(self.allocator, joined) catch |err| {
+        const resolved_path = cwdRealpathAlloc(self.allocator, joined) catch |err| {
             std.log.warn("Import target not found: '{s}' in module '{s}' ({s})", .{ specifier, importer.resolved_path, @errorName(err) });
             return ImportValidationError.ImportTargetNotFound;
         };
@@ -456,7 +470,7 @@ const Resolver = struct {
 
     fn isAllowedRelativePath(self: *Resolver, resolved_path: []const u8) ImportValidationError!bool {
         if (self.options.workspace_roots.len == 0 and self.options.include_roots.len == 0) {
-            const cwd_root = std.fs.cwd().realpathAlloc(self.allocator, ".") catch {
+            const cwd_root = cwdRealpathAlloc(self.allocator, ".") catch {
                 return ImportValidationError.OutOfMemory;
             };
             defer self.allocator.free(cwd_root);
@@ -464,7 +478,7 @@ const Resolver = struct {
         }
 
         for (self.options.workspace_roots) |root| {
-            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const real_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(real_root);
@@ -472,7 +486,7 @@ const Resolver = struct {
         }
 
         for (self.options.include_roots) |root| {
-            const real_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const real_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(real_root);
@@ -557,7 +571,7 @@ const Resolver = struct {
         roots: []const []const u8,
     ) ImportValidationError!?ModuleDescriptor {
         for (roots) |root| {
-            const workspace_root = std.fs.cwd().realpathAlloc(self.allocator, root) catch {
+            const workspace_root = cwdRealpathAlloc(self.allocator, root) catch {
                 continue;
             };
             defer self.allocator.free(workspace_root);
@@ -567,7 +581,7 @@ const Resolver = struct {
             };
             defer self.allocator.free(package_root_joined);
 
-            const package_root = std.fs.cwd().realpathAlloc(self.allocator, package_root_joined) catch {
+            const package_root = cwdRealpathAlloc(self.allocator, package_root_joined) catch {
                 continue;
             };
             defer self.allocator.free(package_root);
@@ -577,7 +591,7 @@ const Resolver = struct {
             };
             defer self.allocator.free(module_joined);
 
-            const resolved_module = std.fs.cwd().realpathAlloc(self.allocator, module_joined) catch {
+            const resolved_module = cwdRealpathAlloc(self.allocator, module_joined) catch {
                 continue;
             };
             errdefer self.allocator.free(resolved_module);
@@ -650,7 +664,7 @@ const Resolver = struct {
         var visited = std.StringHashMap(void).init(self.allocator);
         defer visited.deinit();
 
-        var ordered_records = std.ArrayList(*ModuleRecord){};
+        var ordered_records = std.ArrayList(*ModuleRecord).empty;
         defer ordered_records.deinit(self.allocator);
 
         try self.collectOrderedRecords(entry_canonical_id, &visited, &ordered_records);
@@ -719,7 +733,7 @@ pub fn scanSourceImportClauses(allocator: std.mem.Allocator, source: []const u8,
     };
     defer allocator.free(tokens);
 
-    var clauses = std.ArrayList(ImportClause){};
+    var clauses = std.ArrayList(ImportClause).empty;
     errdefer freeImportClauses(allocator, clauses.items);
 
     var index: usize = 0;

@@ -58,7 +58,7 @@ pub fn lower(allocator: std.mem.Allocator, tree: *const syntax.SyntaxTree) !Lowe
 }
 
 pub fn debugDump(allocator: std.mem.Allocator, file: *const AstFile) ![]u8 {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(allocator);
 
     const writer = buffer.writer(allocator);

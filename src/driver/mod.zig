@@ -11,8 +11,9 @@ const compile_options = @import("../compile_options.zig");
 const Metrics = @import("../metrics.zig").Metrics;
 
 fn compilerPhaseDebugEnabled() bool {
-    const value = std.process.getEnvVarOwned(std.heap.page_allocator, "ORA_COMPILER_PHASE_DEBUG") catch return false;
-    defer std.heap.page_allocator.free(value);
+    if (!@import("builtin").link_libc) return false;
+    const value_ptr = std.c.getenv("ORA_COMPILER_PHASE_DEBUG") orelse return false;
+    const value = std.mem.span(value_ptr);
     return value.len != 0 and !std.mem.eql(u8, value, "0");
 }
 
@@ -233,7 +234,7 @@ fn loadPackageSources(
         const source_text = if (embedded_source) |text|
             text
         else
-            try std.fs.cwd().readFileAlloc(allocator, module_info.resolved_path, 1024 * 1024);
+            try std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), module_info.resolved_path, allocator, std.Io.Limit.limited(1024 * 1024));
         defer if (embedded_source == null) allocator.free(source_text);
 
         const file_id = try compiler_db.addSourceFile(module_info.resolved_path, source_text);

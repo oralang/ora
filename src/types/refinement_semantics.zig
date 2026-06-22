@@ -164,7 +164,7 @@ test "refinement semantics expose bounds for bounds-backed refinements" {
 }
 
 test "refinement semantics own runtime guard explanations" {
-    var buffer: std.ArrayList(u8) = .{};
+    var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(std.testing.allocator);
 
     try std.testing.expect(try writeGuardViolationExplanation(buffer.writer(std.testing.allocator), nameForKind(.min_value), "amount"));

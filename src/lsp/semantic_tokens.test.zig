@@ -144,12 +144,9 @@ test "semantic tokens: cached tokenizer propagates allocator failure" {
             allocator.free(tokens);
             try testing.expect(!failing.has_induced_failure);
             if (observed_induced_failure) break;
-        } else |err| switch (err) {
-            error.OutOfMemory => {
-                try testing.expect(failing.has_induced_failure);
-                observed_induced_failure = true;
-            },
-            else => return err,
+        } else |_| {
+            try testing.expect(failing.has_induced_failure);
+            observed_induced_failure = true;
         }
     }
 

@@ -23,6 +23,28 @@ const mlir_helpers = @import("mlir_helpers.zig");
 const refinements = @import("ora_types").refinement_semantics;
 const ManagedArrayList = std.array_list.Managed;
 
+fn libcEnv(comptime name: [:0]const u8) ?[]const u8 {
+    if (!@import("builtin").link_libc) return null;
+    return if (std.c.getenv(name)) |value| std.mem.span(value) else null;
+}
+
+fn nowTimestamp() std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .awake);
+}
+
+fn unixTimestampSeconds() i64 {
+    const timestamp = std.Io.Clock.Timestamp.now(std.Io.Threaded.global_single_threaded.io(), .real);
+    const seconds = @divFloor(timestamp.raw.nanoseconds, std.time.ns_per_s);
+    return std.math.cast(i64, seconds) orelse if (seconds < 0) std.math.minInt(i64) else std.math.maxInt(i64);
+}
+
+fn elapsedNs(start: std.Io.Clock.Timestamp) u64 {
+    const end = nowTimestamp();
+    const elapsed = std.Io.Clock.Timestamp.durationTo(start, end);
+    if (elapsed.raw.nanoseconds <= 0) return 0;
+    return std.math.cast(u64, elapsed.raw.nanoseconds) orelse std.math.maxInt(u64);
+}
+
 pub const AnnotationKind = enum {
     Requires, // Function precondition
     CalleePrecondition, // Call-site proof of a callee precondition
@@ -213,32 +235,28 @@ pub const VerificationPass = struct {
         errdefer qf_solver.deinit();
 
         var encoder = Encoder.init(context, allocator);
-        const debug_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_DEBUG") catch null;
+        const debug_env = libcEnv("ORA_Z3_DEBUG");
         const debug_options = if (debug_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try parseZ3DebugEnv(val);
         } else Z3DebugEnvOptions{};
         encoder.setDebugAssertSimplify(debug_options.assert_simplify);
 
-        const timeout_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_TIMEOUT_MS") catch null;
+        const timeout_env = libcEnv("ORA_Z3_TIMEOUT_MS");
         var timeout_ms: ?u32 = 60_000;
         if (timeout_env) |val| {
             timeout_ms = std.fmt.parseInt(u32, val, 10) catch null;
-            allocator.free(val);
         }
 
-        const seed_env = std.process.getEnvVarOwned(allocator, "ORA_Z3_SEED") catch null;
+        const seed_env = libcEnv("ORA_Z3_SEED");
         var random_seed: u32 = 0;
         if (seed_env) |val| {
             random_seed = std.fmt.parseInt(u32, val, 10) catch random_seed;
-            allocator.free(val);
         }
 
-        const summary_depth_env = std.process.getEnvVarOwned(allocator, "ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH") catch null;
+        const summary_depth_env = libcEnv("ORA_VERIFY_MAX_SUMMARY_INLINE_DEPTH");
         const max_summary_inline_depth = if (options.max_summary_inline_depth) |depth|
             depth
         else if (summary_depth_env) |val| blk: {
-            defer allocator.free(val);
             break :blk try std.fmt.parseInt(u32, val, 10);
         } else encoder.max_summary_inline_depth;
 
@@ -651,7 +669,7 @@ pub const VerificationPass = struct {
                 }
             }
 
-            var block_arg_bindings = std.ArrayList(SavedValueBinding){};
+            var block_arg_bindings = std.ArrayList(SavedValueBinding).empty;
             defer {
                 for (block_arg_bindings.items) |saved| {
                     if (saved.had_binding) {
@@ -664,7 +682,7 @@ pub const VerificationPass = struct {
             }
             try self.bindRegionBlockArguments(current_block, &block_arg_bindings);
 
-            var block_loop_invariant_annotations = std.ArrayList(usize){};
+            var block_loop_invariant_annotations = std.ArrayList(usize).empty;
             defer block_loop_invariant_annotations.deinit(self.allocator);
 
             // walk operations in this block
@@ -1173,7 +1191,7 @@ pub const VerificationPass = struct {
     ) !void {
         // Globals: merge per-slot as ite(condition, then, else), defaulting to base.
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -1277,7 +1295,7 @@ pub const VerificationPass = struct {
         branch_states: []const EncoderBranchState,
     ) !void {
         self.clearEncoderGlobalMap();
-        var global_names = std.ArrayList([]const u8){};
+        var global_names = std.ArrayList([]const u8).empty;
         defer global_names.deinit(self.allocator);
 
         var base_g_it = base.global_map.iterator();
@@ -3182,7 +3200,7 @@ pub const VerificationPass = struct {
             }
 
             std.debug.print("{s} start\n", .{query.log_prefix});
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var vacuity_explain_copy: ?[]u8 = null;
             var vacuity_tags_copy: []const AssumptionTag = &.{};
             errdefer if (vacuity_explain_copy) |core| self.allocator.free(core);
@@ -3232,7 +3250,7 @@ pub const VerificationPass = struct {
             results[idx].explain_tags = vacuity_tags_copy;
             vacuity_explain_copy = null;
             vacuity_tags_copy = &.{};
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
 
             std.debug.print("{s} -> {s} ({d}ms)\n", .{
                 query.log_prefix,
@@ -3772,7 +3790,7 @@ pub const VerificationPass = struct {
             if (self.trace_smt) {
                 self.traceSmt("Q{d} report check-start", .{idx + 1});
             }
-            var timer = try std.time.Timer.start();
+            const timer = nowTimestamp();
             var explain_copy: ?[]u8 = null;
             var explain_tags_copy: []const AssumptionTag = &.{};
             var core_minimized = false;
@@ -3809,7 +3827,7 @@ pub const VerificationPass = struct {
                 try assertPreparedQueryConstraints(&self.solver, query.constraints);
                 break :blk try self.solver.checkChecked();
             };
-            const elapsed_ms = timer.read() / std.time.ns_per_ms;
+            const elapsed_ms = elapsedNs(timer) / std.time.ns_per_ms;
             if (self.trace_smt) {
                 self.traceSmt(
                     "Q{d} report check-done status={s} elapsed_ms={d}",
@@ -3978,7 +3996,7 @@ pub const VerificationPass = struct {
             summary.violatable_guards = @intCast(violatable_guard_ids.count());
         }
 
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const markdown = try self.renderSmtReportMarkdown(
             source_file,
             generated_at_unix,
@@ -4010,7 +4028,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: *const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = @intCast(verification_result.errors.items.len),
@@ -4055,7 +4073,7 @@ pub const VerificationPass = struct {
         source_file: []const u8,
         verification_result: ?*const errors.VerificationResult,
     ) !SmtReportArtifacts {
-        const generated_at_unix = std.time.timestamp();
+        const generated_at_unix = unixTimestampSeconds();
         const summary = ReportSummary{
             .verification_success = false,
             .verification_errors = if (verification_result) |vr| @intCast(vr.errors.items.len) else 0,
@@ -4106,9 +4124,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeAll("# SMT Encoding Report\n\n");
 
@@ -4329,7 +4347,7 @@ pub const VerificationPass = struct {
             try writer.writeAll("\n```\n\n");
         }
 
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn renderSmtReportJson(
@@ -4342,9 +4360,9 @@ pub const VerificationPass = struct {
         kind_counts: ReportKindCounts,
         verification_result: ?*const errors.VerificationResult,
     ) ![]u8 {
-        var buffer = std.ArrayList(u8){};
-        defer buffer.deinit(self.allocator);
-        const writer = buffer.writer(self.allocator);
+        var buffer = std.Io.Writer.Allocating.init(self.allocator);
+        defer buffer.deinit();
+        const writer = &buffer.writer;
 
         try writer.writeByte('{');
         try writer.writeAll("\"schema\":\"ora.smt.report.v1\",");
@@ -4715,7 +4733,7 @@ pub const VerificationPass = struct {
         try writer.writeByte(']');
 
         try writer.writeByte('}');
-        return buffer.toOwnedSlice(self.allocator);
+        return buffer.toOwnedSlice();
     }
 
     fn buildPreparedQueries(self: *VerificationPass) !ManagedArrayList(PreparedQuery) {
@@ -5457,7 +5475,12 @@ pub const VerificationPass = struct {
         if (ann.kind != .ContractInvariant and ann.kind != .LoopInvariant) return null;
         if (std.mem.startsWith(u8, ann.file, "embedded://")) return null;
 
-        const source_text = std.fs.cwd().readFileAlloc(self.allocator, ann.file, 1 << 20) catch return null;
+        const source_text = std.Io.Dir.cwd().readFileAlloc(
+            std.Io.Threaded.global_single_threaded.io(),
+            ann.file,
+            self.allocator,
+            std.Io.Limit.limited(1 << 20),
+        ) catch return null;
         defer self.allocator.free(source_text);
 
         var current_line: u32 = 1;
@@ -5508,7 +5531,7 @@ pub const VerificationPass = struct {
             return try self.allocator.dupe(u8, reasons[0]);
         }
 
-        var list = std.ArrayList(u8){};
+        var list = std.ArrayList(u8).empty;
         defer list.deinit(self.allocator);
         try list.appendSlice(self.allocator, reasons[0]);
         try list.appendSlice(self.allocator, " [all reasons: ");
@@ -6044,7 +6067,7 @@ fn obligationKindLabel(kind: AnnotationKind) []const u8 {
 
 fn inferInvariantLabelFromLine(line: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, line, "invariant ")) return null;
-    const rest = std.mem.trimLeft(u8, line["invariant ".len..], " \t");
+    const rest = std.mem.trimStart(u8, line["invariant ".len..], " \t");
     const open_paren = std.mem.indexOfScalar(u8, rest, '(') orelse return null;
     const candidate = std.mem.trim(u8, rest[0..open_paren], " \t");
     if (candidate.len == 0) return null;
@@ -6155,7 +6178,7 @@ fn collectSortedFunctionNames(
     allocator: std.mem.Allocator,
     by_function: *const std.StringHashMap(ManagedArrayList(EncodedAnnotation)),
 ) !std.ArrayList([]const u8) {
-    var names = std.ArrayList([]const u8){};
+    var names = std.ArrayList([]const u8).empty;
     errdefer names.deinit(allocator);
 
     var it = by_function.iterator();
@@ -7134,7 +7157,7 @@ fn collectSortedStringKeys(
     allocator: std.mem.Allocator,
     map: anytype,
 ) !std.ArrayList([]const u8) {
-    var keys = std.ArrayList([]const u8){};
+    var keys = std.ArrayList([]const u8).empty;
     errdefer keys.deinit(allocator);
 
     var it = map.iterator();
@@ -7873,9 +7896,9 @@ fn formatUnsatCoreSummary(
         return .{ .explain_str = null, .explain_tags = &.{} };
     }
 
-    var buffer = ManagedArrayList(u8).init(allocator);
+    var buffer = std.Io.Writer.Allocating.init(allocator);
     errdefer buffer.deinit();
-    const writer = buffer.writer();
+    const writer = &buffer.writer;
     for (parts.items, 0..) |part, idx| {
         if (idx != 0) try writer.writeAll("; ");
         try writer.writeAll(part);
@@ -8225,7 +8248,7 @@ fn buildSmtlibForConstraints(
 
     const raw = z3.Z3_solver_to_string(solver.context.ctx, temp_solver.solver);
     const text = if (raw == null) "" else std.mem.span(raw);
-    var out: std.ArrayList(u8) = .{};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try out.appendSlice(allocator, text);
     if (!std.mem.endsWith(u8, text, "\n")) {

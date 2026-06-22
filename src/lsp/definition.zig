@@ -564,7 +564,7 @@ const Resolver = struct {
 const DefinitionCollector = struct {
     allocator: Allocator,
     resolver: Resolver,
-    names: std.ArrayList(ResolvedName) = .{},
+    names: std.ArrayList(ResolvedName) = .empty,
 
     fn init(allocator: Allocator, analysis: *const Analysis) DefinitionCollector {
         return .{

@@ -56,7 +56,7 @@ pub fn symbol(
 
     var response_scope = server.responseScope();
     defer response_scope.deinit();
-    var symbols = std.ArrayList(types.SymbolInformation){};
+    var symbols = std.ArrayList(types.SymbolInformation).empty;
     var string_bytes: usize = 0;
 
     var doc_it = server.docs.docs.iterator();

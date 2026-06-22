@@ -440,7 +440,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 .Builtin => |builtin| try self.lowerBuiltin(expr_id, builtin, locals),
                 .Tuple => |tuple| blk: {
                     const sema_tuple_type = self.parent.typecheck.exprType(expr_id);
-                    var operands: std.ArrayList(mlir.MlirValue) = .{};
+                    var operands: std.ArrayList(mlir.MlirValue) = .empty;
                     for (tuple.elements, 0..) |element, index| {
                         const value = if (sema_tuple_type.kind() == .tuple and index < sema_tuple_type.tuple.len)
                             try @This().lowerExprForSemaFlowTarget(self, element, sema_tuple_type.tuple[index], exprRange(self.parent.file, element), locals)
@@ -466,12 +466,12 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     break :blk try @This().lowerStructLiteral(self, expr_id, struct_literal, locals);
                 },
                 .Switch => |switch_expr| try self.lowerSwitchExpr(expr_id, switch_expr, locals),
-                .ExternalProxy => |_| error.UnsupportedExternTraitLowering,
+                .ExternalProxy => error.UnsupportedExternTraitLowering,
                 .Comptime => {
                     return error.ComptimeValueRequiredForRuntimeLowering;
                 },
                 .ErrorReturn => |error_return| blk: {
-                    var args: std.ArrayList(mlir.MlirValue) = .{};
+                    var args: std.ArrayList(mlir.MlirValue) = .empty;
                     for (error_return.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
                     const result_type = self.return_type orelse self.parent.lowerExprType(expr_id);
                     const error_symbol_name = if (self.parent.item_index.lookup(error_return.name)) |item_id|
@@ -718,7 +718,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
         fn quantifiedVariableTypeText(self: *FunctionLowerer, ty: sema.Type) ![]const u8 {
             if (ty.name()) |name| return name;
-            var buffer: std.ArrayList(u8) = .{};
+            var buffer: std.ArrayList(u8) = .empty;
             try sema.appendTypeMangleName(self.parent.allocator, &buffer, ty);
             return try buffer.toOwnedSlice(self.parent.allocator);
         }
@@ -1346,7 +1346,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (try @This().lowerResultConstructorCall(self, expr_id, call, locals)) |value| return value;
             if (try @This().lowerAdtConstructorCall(self, expr_id, call, locals)) |value| return value;
 
-            var args: std.ArrayList(mlir.MlirValue) = .{};
+            var args: std.ArrayList(mlir.MlirValue) = .empty;
             const callee_item_id = @This().calleeFunctionItemId(self, call.callee);
             const imported_resolution = self.parent.typecheck.exprCallResolution(expr_id);
             const imported_target = if (imported_resolution) |resolved|
@@ -1447,7 +1447,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (self.parent.file.item(item_id).* != .ErrorDecl) return null;
             const error_decl = self.parent.file.item(item_id).ErrorDecl;
 
-            var args: std.ArrayList(mlir.MlirValue) = .{};
+            var args: std.ArrayList(mlir.MlirValue) = .empty;
             for (call.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
 
             const result_type = self.parent.lowerExprType(expr_id);
@@ -1502,7 +1502,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     if (self.parent.item_index.lookup(name)) |item_id| {
                         if (self.parent.file.item(item_id).* == .ErrorDecl) {
                             const error_decl = self.parent.file.item(item_id).ErrorDecl;
-                            var args: std.ArrayList(mlir.MlirValue) = .{};
+                            var args: std.ArrayList(mlir.MlirValue) = .empty;
                             for (inner_call.args) |arg| try args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
 
                             const op = mlir.oraErrorReturnOpCreate(
@@ -1550,7 +1550,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const payload_type = @This().adtVariantPayloadType(result_type, field.name) orelse return null;
             const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), field.name);
-            var payload_values: std.ArrayList(mlir.MlirValue) = .{};
+            var payload_values: std.ArrayList(mlir.MlirValue) = .empty;
             if (!mlir.oraTypeIsANone(payload_type)) {
                 try payload_values.append(self.parent.allocator, try @This().lowerAdtPayloadValue(self, call, payload_type, payload_sema_type, locals));
             }
@@ -1576,7 +1576,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
         ) anyerror!mlir.MlirValue {
             const tuple_count = mlir.oraTupleTypeGetNumElements(payload_type);
             if (tuple_count != 0) {
-                var elements: std.ArrayList(mlir.MlirValue) = .{};
+                var elements: std.ArrayList(mlir.MlirValue) = .empty;
                 for (call.args, 0..) |arg, index| {
                     const element_type = mlir.oraTupleTypeGetElementType(payload_type, index);
                     const raw = try self.lowerExpr(arg, locals);
@@ -1599,7 +1599,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
 
             const field_count = mlir.oraAnonymousStructTypeGetFieldCount(payload_type);
             if (field_count != 0) {
-                var fields: std.ArrayList(mlir.MlirValue) = .{};
+                var fields: std.ArrayList(mlir.MlirValue) = .empty;
                 for (call.args, 0..) |arg, index| {
                     const field_type = mlir.oraAnonymousStructTypeGetFieldType(payload_type, index);
                     const raw = try self.lowerExpr(arg, locals);
@@ -1953,7 +1953,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 else => return error.UnsupportedExternTraitLowering,
             };
 
-            var encode_args: std.ArrayList(mlir.MlirValue) = .{};
+            var encode_args: std.ArrayList(mlir.MlirValue) = .empty;
             for (call.args) |arg| {
                 try encode_args.append(self.parent.allocator, try self.lowerExpr(arg, locals));
             }
@@ -2431,7 +2431,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             else
                 call.args;
 
-            var args: std.ArrayList(mlir.MlirValue) = .{};
+            var args: std.ArrayList(mlir.MlirValue) = .empty;
             var receiver_value = try self.lowerExpr(resolved.receiver_expr, locals);
             const receiver_type = self.parent.lowerExprType(resolved.receiver_expr);
             receiver_value = try self.convertValueForFlow(receiver_value, receiver_type, exprRange(self.parent.file, resolved.receiver_expr));
@@ -2571,7 +2571,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 call.args;
             const runtime_parameters = try self.parent.runtimeFunctionParameters(resolved.function);
 
-            var args: std.ArrayList(mlir.MlirValue) = .{};
+            var args: std.ArrayList(mlir.MlirValue) = .empty;
             for (runtime_args, 0..) |arg, index| {
                 const parameter = runtime_parameters[index];
                 const target_type = self.parent.lowerSemaType(self.parent.typecheck.pattern_types[parameter.pattern.index()].type, parameter.range);
@@ -4274,7 +4274,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             };
 
             const result_type = self.parent.lowerExprType(expr_id);
-            var operands: std.ArrayList(mlir.MlirValue) = .{};
+            var operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (struct_item.fields) |decl_field| {
                 const init = structFieldInitByName(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
@@ -4324,7 +4324,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (field_count == 0) return error.MlirOperationCreationFailed;
 
             const payload_sema_type = try @This().adtVariantPayloadSemaType(self, self.parent.typecheck.exprType(expr_id), variant_name);
-            var fields: std.ArrayList(mlir.MlirValue) = .{};
+            var fields: std.ArrayList(mlir.MlirValue) = .empty;
             defer fields.deinit(self.parent.allocator);
             for (0..field_count) |index| {
                 const field_name_ref = mlir.oraAnonymousStructTypeGetFieldName(payload_type, index);
@@ -4377,7 +4377,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
-            var operands: std.ArrayList(mlir.MlirValue) = .{};
+            var operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (fields) |decl_field| {
                 const init = structFieldInitByName(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
@@ -4405,7 +4405,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             locals: *LocalEnv,
         ) anyerror!mlir.MlirValue {
             const result_type = self.parent.lowerExprType(expr_id);
-            var operands: std.ArrayList(mlir.MlirValue) = .{};
+            var operands: std.ArrayList(mlir.MlirValue) = .empty;
             for (fields) |decl_field| {
                 const init = structFieldInitByName(struct_literal.fields, decl_field.name) orelse {
                     return error.MlirOperationCreationFailed;
@@ -5001,7 +5001,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 result_type,
             );
             if (mlir.oraOperationIsNull(alloc)) {
-                var operands: std.ArrayList(mlir.MlirValue) = .{};
+                var operands: std.ArrayList(mlir.MlirValue) = .empty;
                 for (array.elements) |element| try operands.append(self.parent.allocator, try self.lowerExpr(element, locals));
                 const placeholder = try self.createAggregatePlaceholder("ora.array.create", array.range, operands.items, result_type);
                 return appendValueOp(self.block, placeholder);
@@ -5031,7 +5031,7 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     1,
                 );
                 if (mlir.oraOperationIsNull(store)) {
-                    var operands: std.ArrayList(mlir.MlirValue) = .{};
+                    var operands: std.ArrayList(mlir.MlirValue) = .empty;
                     for (array.elements) |fallback_element| try operands.append(self.parent.allocator, try self.lowerExpr(fallback_element, locals));
                     const placeholder = try self.createAggregatePlaceholder("ora.array.create", array.range, operands.items, result_type);
                     return appendValueOp(self.block, placeholder);

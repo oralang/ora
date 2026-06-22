@@ -44,7 +44,7 @@ pub fn references(
 
     var response_scope = server.responseScope();
     defer response_scope.deinit();
-    var all_locations = std.ArrayList(types.Location){};
+    var all_locations = std.ArrayList(types.Location).empty;
     errdefer all_locations.deinit(arena);
 
     const same_file_ref_capacity = references_api.referenceRangeCapacityHintAtOccurrenceIndex(

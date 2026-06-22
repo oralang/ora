@@ -225,7 +225,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         ) anyerror![]const Lowerer.InlineKnownArgBinding {
             if (!function.is_inline) return &.{};
 
-            var bindings: std.ArrayList(Lowerer.InlineKnownArgBinding) = .{};
+            var bindings: std.ArrayList(Lowerer.InlineKnownArgBinding) = .empty;
             for (runtime_parameters, 0..) |parameter, index| {
                 if (index >= runtime_args.len) break;
                 const name = self.patternName(parameter.pattern) orelse continue;
@@ -242,7 +242,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         ) anyerror![]const u8 {
             if (bindings.len == 0) return base_name;
 
-            var name = std.ArrayList(u8){};
+            var name = std.ArrayList(u8).empty;
             try name.appendSlice(self.allocator, base_name);
             try name.appendSlice(self.allocator, "__inline");
             for (bindings) |binding| {
@@ -616,7 +616,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn implMethodSymbolName(self: *Lowerer, trait_name: []const u8, target_name: []const u8, method_name: []const u8) anyerror![]const u8 {
-            var name = std.ArrayList(u8){};
+            var name = std.ArrayList(u8).empty;
             try name.ensureTotalCapacityPrecise(self.allocator, trait_name.len + target_name.len + method_name.len + 2);
             try name.appendSlice(self.allocator, trait_name);
             try name.appendSlice(self.allocator, ".");
@@ -646,7 +646,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             self.active_inline_known_args = inline_known_args;
             defer self.active_inline_known_args = previous_inline_known_args;
 
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             const return_type = if (function.return_type) |_| blk: {
                 if (concrete_return_type) |resolved| break :blk self.lowerSemaType(resolved, function.range);
                 break :blk self.lowerSemaType(self.typecheck.body_types[function.body.index()], function.range);
@@ -692,8 +692,8 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             try @This().attachEffectSummaryAttrs(self, &attrs, item_id);
             try @This().attachModifiesSummaryAttrs(self, &attrs, item_id);
 
-            var param_types: std.ArrayList(mlir.MlirType) = .{};
-            var param_locs: std.ArrayList(mlir.MlirLocation) = .{};
+            var param_types: std.ArrayList(mlir.MlirType) = .empty;
+            var param_locs: std.ArrayList(mlir.MlirLocation) = .empty;
             for (parameters, 0..) |parameter, index| {
                 const impl_self_param_type: ?mlir.MlirType = if (self.active_impl_self_type) |self_type| blk: {
                     if (std.mem.eql(u8, self.patternName(parameter.pattern) orelse "", "self")) {
@@ -833,7 +833,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             if (item_id.index() >= self.typecheck.item_modifies.len) return;
             const slots = self.typecheck.item_modifies[item_id.index()] orelse return;
 
-            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer slot_attrs.deinit(self.allocator);
 
             for (slots) |slot| {
@@ -862,7 +862,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             attr_name: []const u8,
             slots: []const sema.EffectSlot,
         ) anyerror!bool {
-            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var slot_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer slot_attrs.deinit(self.allocator);
 
             for (slots) |slot| {
@@ -907,7 +907,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             const impl_item = @This().enclosingImplForMethod(self, method_item_id) orelse return &.{};
             const trait_item_id = self.item_index.lookup(impl_item.trait_name) orelse return &.{};
 
-            var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .{};
+            var clauses: std.ArrayList(FunctionLowerer.ExtraVerificationClause) = .empty;
             if (@This().matchingTraitMethodForImplMethod(self, trait_item_id, method_item_id)) |matched| {
                 const aliases = try @This().traitMethodPatternAliases(self, matched.method, self.file.item(method_item_id).Function);
                 for (self.traitMethodVerificationFactEntries(matched.owner)) |entry| {
@@ -1005,20 +1005,20 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             function: ast.FunctionItem,
             parameters: []const ast.Parameter,
         ) anyerror!void {
-            var signature_parts: std.ArrayList([]const u8) = .{};
+            var signature_parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (signature_parts.items) |part| self.allocator.free(part);
                 signature_parts.deinit(self.allocator);
             }
-            var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_attrs.deinit(self.allocator);
-            var result_input_mode_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var result_input_mode_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer result_input_mode_attrs.deinit(self.allocator);
-            var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var result_input_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer result_input_error_id_attrs.deinit(self.allocator);
-            var abi_param_enum_count_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_enum_count_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_enum_count_attrs.deinit(self.allocator);
-            var abi_param_refinement_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+            var abi_param_refinement_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
             defer abi_param_refinement_attrs.deinit(self.allocator);
 
             for (parameters) |parameter| {
@@ -1128,7 +1128,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 if (body_type.kind() == .error_union and @This().publicReturnErrorsUseCustomErrors(body_type.error_union)) {
                     try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.returns_error_union", true));
                     const error_union = body_type.error_union;
-                    var return_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .{};
+                    var return_error_id_attrs: std.ArrayList(mlir.MlirAttribute) = .empty;
                     defer return_error_id_attrs.deinit(self.allocator);
                     for (error_union.error_types) |error_type| {
                         return_error_id_attrs.append(
@@ -1615,7 +1615,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerLogDecl(self: *Lowerer, item_id: ast.ItemId, log_decl: ast.LogDeclItem, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(log_decl.range);
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             const event_name = abi_support.eventWireNameFromLogDecl(self.file, log_decl) orelse log_decl.name;
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", log_decl.name));
             try attrs.append(self.allocator, namedStringAttr(self.context, "ora.event_name", event_name));
@@ -1647,7 +1647,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         fn lowerErrorDeclNamed(self: *Lowerer, item_id: ast.ItemId, error_decl: ast.ErrorDeclItem, symbol_name: []const u8, parent_block: mlir.MlirBlock) anyerror!void {
             const loc = self.location(error_decl.range);
-            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             try attrs.append(self.allocator, namedStringAttr(self.context, "sym_name", symbol_name));
             try attrs.append(self.allocator, namedBoolAttr(self.context, "ora.error_decl", true));
             try attrs.append(self.allocator, .{
@@ -1785,22 +1785,26 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         pub fn buildBitfieldLayout(self: *Lowerer, bitfield: ast.BitfieldItem) ![]const u8 {
-            var buffer: std.ArrayList(u8) = .{};
+            var buffer: std.ArrayList(u8) = .empty;
             for (bitfield.fields) |field| {
                 const resolved = (try self.resolveBitfieldField(bitfield.name, field.name)) orelse continue;
-                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
+                const fragment = try std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}:{c};", .{ field.name, resolved.offset, resolved.width, resolved.sign });
+                defer self.allocator.free(fragment);
+                try buffer.appendSlice(self.allocator, fragment);
             }
             return buffer.toOwnedSlice(self.allocator);
         }
 
         pub fn buildInstantiatedBitfieldLayout(self: *Lowerer, bitfield: sema.InstantiatedBitfield) ![]const u8 {
-            var buffer: std.ArrayList(u8) = .{};
+            var buffer: std.ArrayList(u8) = .empty;
             var next_offset: u32 = 0;
             for (bitfield.fields) |field| {
                 const width = field.width orelse self.bitfieldFieldWidthFromType(field.ty) orelse return error.InvalidBitfieldFieldType;
                 const offset = field.offset orelse next_offset;
                 const sign = self.bitfieldFieldSignFromType(field.ty);
-                try buffer.writer(self.allocator).print("{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                const fragment = try std.fmt.allocPrint(self.allocator, "{s}:{d}:{d}:{c};", .{ field.name, offset, width, sign });
+                defer self.allocator.free(fragment);
+                try buffer.appendSlice(self.allocator, fragment);
                 next_offset = offset + width;
             }
             return buffer.toOwnedSlice(self.allocator);
@@ -1893,7 +1897,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
         }
 
         fn abiParamRefinementSpec(self: *Lowerer, ty: sema.Type) ![]const u8 {
-            var parts: std.ArrayList([]const u8) = .{};
+            var parts: std.ArrayList([]const u8) = .empty;
             defer {
                 for (parts.items) |part| self.allocator.free(part);
                 parts.deinit(self.allocator);
@@ -1999,7 +2003,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
             const mark_executable_fallback = std.mem.endsWith(u8, op_name, "_placeholder");
-            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .{};
+            var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             defer marked_attrs.deinit(self.allocator);
             var final_attrs = attrs;
 

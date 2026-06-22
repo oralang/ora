@@ -66,7 +66,7 @@ fn resolvePackageFixturePath(root_path: []const u8) ![]u8 {
 }
 
 fn pathExists(path: []const u8) bool {
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.Io.Dir.cwd().access(std.testing.io, path, .{}) catch return false;
     return true;
 }
 
@@ -161,7 +161,7 @@ pub fn expectVerificationProbeEquivalent(lhs: *const VerificationProbeSummary, r
 }
 
 fn appendSortedLabelsCsv(builder: *std.ArrayList(u8), labels: []const []const u8) !void {
-    var sorted = std.ArrayList([]const u8){};
+    var sorted = std.ArrayList([]const u8).empty;
     defer sorted.deinit(testing.allocator);
     for (labels) |label| {
         try sorted.append(testing.allocator, label);
@@ -179,39 +179,39 @@ fn appendSortedLabelsCsv(builder: *std.ArrayList(u8), labels: []const []const u8
 }
 
 fn collectErrorKindCsv(result: anytype) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (result.errors.items) |err| {
         try labels.append(testing.allocator, @tagName(err.error_type));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);
 }
 
 fn collectSoundnessLossCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (verifier.encoder.soundnessLosses()) |loss| {
         try labels.append(testing.allocator, @tagName(loss));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);
 }
 
 fn collectPrecisionNoteCsv(verifier: *const z3_verification.VerificationPass) ![]u8 {
-    var labels = std.ArrayList([]const u8){};
+    var labels = std.ArrayList([]const u8).empty;
     defer labels.deinit(testing.allocator);
     for (verifier.encoder.precisionNotes()) |note| {
         try labels.append(testing.allocator, @tagName(note));
     }
 
-    var builder = std.ArrayList(u8){};
+    var builder = std.ArrayList(u8).empty;
     errdefer builder.deinit(testing.allocator);
     try appendSortedLabelsCsv(&builder, labels.items);
     return try builder.toOwnedSlice(testing.allocator);

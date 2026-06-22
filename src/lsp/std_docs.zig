@@ -179,7 +179,7 @@ pub const Index = struct {
 };
 
 pub fn collectImportAliases(allocator: Allocator, tokens: []const token_cache.Token) ![]ImportAlias {
-    var aliases = std.ArrayList(ImportAlias){};
+    var aliases = std.ArrayList(ImportAlias).empty;
     errdefer {
         for (aliases.items) |alias| {
             allocator.free(alias.alias);
@@ -268,7 +268,7 @@ pub fn completionCandidatesAt(
     index: *const Index,
     aliases: []const ImportAlias,
 ) ![]semantic_index.Symbol {
-    var symbols = std.ArrayList(semantic_index.Symbol){};
+    var symbols = std.ArrayList(semantic_index.Symbol).empty;
     errdefer symbols.deinit(allocator);
 
     const chain = completionChainForPrefix(source, cursor_offset, prefix) orelse
