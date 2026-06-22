@@ -1,0 +1,60 @@
+[deploy]
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+
+[[call]]
+fn = "issue(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", 100]
+returns = {}
+
+[[call]]
+fn = "approve(address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x3000000000000000000000000000000000000000", 30]
+returns = {}
+
+[[call]]
+fn = "transferFrom(address,address,address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x3000000000000000000000000000000000000000", "0x4000000000000000000000000000000000000000", 25]
+returns = {}
+
+[[call]]
+fn = "retire(address,uint256)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000000", 5]
+returns = {}
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000"]
+returns = { u256 = 75 }
+
+[[call]]
+fn = "balanceOf(address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x4000000000000000000000000000000000000000"]
+returns = { u256 = 20 }
+
+[[call]]
+fn = "allowance(address,address)"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = ["0x2000000000000000000000000000000000000000", "0x3000000000000000000000000000000000000000"]
+returns = { u256 = 5 }
+
+[[call]]
+fn = "totalSupply()"
+caller = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+value = 0
+args = []
+returns = { u256 = 95 }

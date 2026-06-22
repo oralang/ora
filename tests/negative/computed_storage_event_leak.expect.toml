@@ -1,1 +1,1 @@
-expect_error = "log field 'slot' cannot expose opaque storage capability type 'StorageSlot'"
+expect_error = "log field 'slot' cannot expose opaque runtime capability type 'StorageSlot'"

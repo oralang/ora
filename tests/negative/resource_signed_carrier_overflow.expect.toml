@@ -1,0 +1,1 @@
+expect_error = "constant value 128 does not fit in type 'i8'"

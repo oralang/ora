@@ -472,7 +472,7 @@ fn isControlFlowKeyword(tt: TokenType) bool {
 
 fn isDeclarationKeyword(tt: TokenType) bool {
     return switch (tt) {
-        .Contract, .Fn, .Let, .Var, .Const, .Pub, .Import, .Struct, .Bitfield, .Enum, .Extern, .Trait, .Impl, .Log, .Error, .Init, .Errors => true,
+        .Contract, .Fn, .Let, .Var, .Const, .Pub, .Import, .Struct, .Bitfield, .Enum, .Resource, .Extern, .Trait, .Impl, .Log, .Error, .Init, .Errors => true,
         else => false,
     };
 }

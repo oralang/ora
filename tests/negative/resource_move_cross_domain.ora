@@ -1,0 +1,11 @@
+resource USDC = u256;
+resource DAI = u256;
+
+contract ResourceMoveCrossDomain {
+    storage var usdc: map<address, Resource<USDC>>;
+    storage var dai: map<address, Resource<DAI>>;
+
+    pub fn bad(from: address, to: address, amount: USDC) {
+        @move(usdc[from], dai[to], amount);
+    }
+}

@@ -131,6 +131,7 @@ pub fn mixin(Builder: type) type {
                 .StructItem => Lowering.lowerStructItemNode(self, node),
                 .BitfieldItem => Lowering.lowerBitfieldItemNode(self, node),
                 .EnumItem => Lowering.lowerEnumItemNode(self, node),
+                .ResourceItem => Lowering.lowerResourceItemNode(self, node),
                 .TraitItem => Lowering.lowerTraitItemNode(self, node),
                 .ImplItem => Lowering.lowerImplItemNode(self, node),
                 .TypeAliasItem => Lowering.lowerTypeAliasItemNode(self, node),
@@ -165,6 +166,7 @@ pub fn mixin(Builder: type) type {
                         .StructItem,
                         .BitfieldItem,
                         .EnumItem,
+                        .ResourceItem,
                         .TraitItem,
                         .ImplItem,
                         .TypeAliasItem,
@@ -528,6 +530,20 @@ pub fn mixin(Builder: type) type {
                 .is_generic = Lowering.hasGenericTemplateParameters(self, template_parameters),
                 .template_parameters = template_parameters,
                 .target_type = try Lowering.lowerTypeNode(self, target_node),
+            } });
+        }
+
+        fn lowerResourceItemNode(self: *Builder, node: SyntaxNode) !ItemId {
+            const name = tokenText(nthDirectIdentifierLikeToken(node, 0) orelse return Lowering.malformedItem(self, node, "missing resource name"));
+            if (firstDirectChildOfKind(node, .ParameterList) != null) {
+                return Lowering.malformedItem(self, node, "generic resource declarations are not supported");
+            }
+            const carrier_node = firstDirectTypeChild(node) orelse return Lowering.malformedItem(self, node, "missing resource carrier type");
+
+            return Support.pushItem(self, .{ .Resource = .{
+                .range = node.range(),
+                .name = name,
+                .carrier_type = try Lowering.lowerTypeNode(self, carrier_node),
             } });
         }
 

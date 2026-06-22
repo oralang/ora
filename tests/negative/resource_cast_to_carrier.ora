@@ -1,0 +1,7 @@
+resource TokenUnit = u256;
+
+contract ResourceCastToCarrier {
+    fn leak(place: Resource<TokenUnit>) -> u256 {
+        return @cast(u256, place);
+    }
+}

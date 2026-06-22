@@ -1,0 +1,48 @@
+comptime const std = @import("std");
+
+resource ShareUnit = u256;
+
+contract ResourceVaultShares {
+    storage var shares: map<address, Resource<ShareUnit>>;
+    storage var total_shares: ShareUnit;
+    storage var managed_assets: u256;
+
+    pub fn deposit(owner: address, assets: u256, minted_shares: ShareUnit)
+        modifies shares[owner], total_shares, managed_assets
+        requires shares[owner] <= @cast(ShareUnit, std.constants.U256_MAX) - minted_shares
+        requires total_shares <= @cast(ShareUnit, std.constants.U256_MAX) - minted_shares
+        requires managed_assets <= std.constants.U256_MAX - assets
+    {
+        @create(shares[owner], minted_shares);
+        total_shares += minted_shares;
+        managed_assets += assets;
+    }
+
+    pub fn transferShares(from: address, to: address, amount: ShareUnit)
+        modifies shares[from], shares[to]
+    {
+        @move(shares[from], shares[to], amount);
+    }
+
+    pub fn redeem(owner: address, burned_shares: ShareUnit, returned_assets: u256)
+        modifies shares[owner], total_shares, managed_assets
+        requires total_shares >= burned_shares
+        requires managed_assets >= returned_assets
+    {
+        @destroy(shares[owner], burned_shares);
+        total_shares -= burned_shares;
+        managed_assets -= returned_assets;
+    }
+
+    pub fn shareBalance(owner: address) -> ShareUnit {
+        return shares[owner];
+    }
+
+    pub fn totalShares() -> ShareUnit {
+        return total_shares;
+    }
+
+    pub fn assets() -> u256 {
+        return managed_assets;
+    }
+}

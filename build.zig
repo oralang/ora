@@ -1543,6 +1543,15 @@ pub fn build(b: *std.Build) void {
     check_oratosir_coverage_step.dependOn(&oratosir_coverage_cmd.step);
     test_step.dependOn(&oratosir_coverage_cmd.step);
 
+    // zig build check-resource-mutation-tripwires
+    const resource_mutation_tripwires_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/check-resource-mutation-tripwires.py",
+    });
+    const check_resource_mutation_tripwires_step = b.step("check-resource-mutation-tripwires", "Validate resource lowering mutation tripwires");
+    check_resource_mutation_tripwires_step.dependOn(&resource_mutation_tripwires_cmd.step);
+    test_step.dependOn(&resource_mutation_tripwires_cmd.step);
+
     // zig build check-feature-execution-coverage
     const feature_coverage_cmd = b.addSystemCommand(&[_][]const u8{
         "python3",
@@ -1613,6 +1622,7 @@ pub fn build(b: *std.Build) void {
     // zig build gate-oratosir-debloat
     const oratosir_debloat_gate_step = b.step("gate-oratosir-debloat", "Run the OraToSIR regression gate");
     oratosir_debloat_gate_step.dependOn(check_oratosir_coverage_step);
+    oratosir_debloat_gate_step.dependOn(check_mlir_ora_step);
     oratosir_debloat_gate_step.dependOn(check_mlir_sir_step);
     oratosir_debloat_gate_step.dependOn(check_sir_text_step);
     oratosir_debloat_gate_step.dependOn(test_conformance_step);
@@ -1636,15 +1646,26 @@ pub fn build(b: *std.Build) void {
     smt_modifies_corpus_cmd.step.dependOn(b.getInstallStep());
     check_smt_modifies_corpus_step.dependOn(&smt_modifies_corpus_cmd.step);
 
+    // zig build check-smt-resource-corpus
+    const smt_resource_corpus_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-smt-resource-corpus.sh",
+    });
+    const check_smt_resource_corpus_step = b.step("check-smt-resource-corpus", "Run SMT resource corpus checks");
+    smt_resource_corpus_cmd.step.dependOn(b.getInstallStep());
+    check_smt_resource_corpus_step.dependOn(&smt_resource_corpus_cmd.step);
+
     // zig build gate — the full pre-push bar; every commit must pass this on the committed state.
     const gate_step = b.step("gate", "Run the full pre-push bar (test + OraToSIR gate + Ora MLIR checks + SMT corpus + LSP smoke)");
     gate_step.dependOn(test_step);
     gate_step.dependOn(oratosir_debloat_gate_step);
+    gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);
     gate_step.dependOn(check_negative_corpus_step);
     gate_step.dependOn(check_findings_ledger_step);
     gate_step.dependOn(check_verifier_mutations_step);
     gate_step.dependOn(check_smt_modifies_corpus_step);
+    gate_step.dependOn(check_smt_resource_corpus_step);
     gate_step.dependOn(lsp_smoke_step);
 }
 

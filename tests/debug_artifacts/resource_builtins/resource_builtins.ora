@@ -1,0 +1,31 @@
+resource DebugUnit = u256;
+
+contract ResourceBuiltins {
+    storage var balances: map<address, Resource<DebugUnit>>;
+
+    pub fn issue(to: address, amount: DebugUnit)
+        requires amount <= 1000
+        requires balances[to] <= 1000 - amount
+    {
+        @create(balances[to], amount);
+    }
+
+    pub fn transfer(from: address, to: address, amount: DebugUnit)
+        requires amount <= 1000
+        requires balances[from] >= amount
+        requires balances[to] <= 1000 - amount
+    {
+        @move(balances[from], balances[to], amount);
+    }
+
+    pub fn burn(from: address, amount: DebugUnit)
+        requires amount <= 1000
+        requires balances[from] >= amount
+    {
+        @destroy(balances[from], amount);
+    }
+
+    pub fn balance(owner: address) -> DebugUnit {
+        return balances[owner];
+    }
+}

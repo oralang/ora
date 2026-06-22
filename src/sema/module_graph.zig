@@ -234,6 +234,7 @@ fn collectItemEntry(
             }
             break :blk item.Trait.name;
         },
+        .Resource => item.Resource.name,
         .TypeAlias => item.TypeAlias.name,
         .LogDecl => item.LogDecl.name,
         .ErrorDecl => item.ErrorDecl.name,
@@ -294,6 +295,7 @@ fn contractMemberName(item: ast.Item) ?[]const u8 {
         .Struct => |struct_item| struct_item.name,
         .Bitfield => |bitfield| bitfield.name,
         .Enum => |enum_item| enum_item.name,
+        .Resource => |resource| resource.name,
         .Trait => |trait_item| trait_item.name,
         .TypeAlias => |type_alias| type_alias.name,
         .LogDecl => |log_decl| log_decl.name,

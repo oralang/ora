@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+struct Holder {
+    place: Resource<TokenUnit>;
+}
+
+contract ResourceNamedStructArrayLeak {
+    pub fn expose(values: [Holder; 2]) {}
+}

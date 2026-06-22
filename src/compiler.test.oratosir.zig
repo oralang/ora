@@ -6394,6 +6394,96 @@ test "compiler does not store nested map handles back to parent slots" {
     });
 }
 
+test "OraToSIR lowers direct transient resource places to tload and tstore" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\comptime const std = @import("std");
+        \\
+        \\contract TransientResourceProbe {
+        \\    tstore var scratch: Resource<TokenUnit>;
+        \\
+        \\    pub fn issue(amount: TokenUnit)
+        \\        requires scratch <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        \\    {
+        \\        @create(scratch, amount);
+        \\    }
+        \\
+        \\    pub fn retire(amount: TokenUnit)
+        \\        requires scratch >= amount
+        \\    {
+        \\        @destroy(scratch, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const issue = try functionSlice(rendered, "issue");
+    try testing.expect(std.mem.containsAtLeast(u8, issue, 1, "tload"));
+    try testing.expect(std.mem.containsAtLeast(u8, issue, 1, "tstore"));
+    try testing.expect(!std.mem.containsAtLeast(u8, issue, 1, "sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, issue, 1, "sstore"));
+
+    const retire = try functionSlice(rendered, "retire");
+    try testing.expect(std.mem.containsAtLeast(u8, retire, 1, "tload"));
+    try testing.expect(std.mem.containsAtLeast(u8, retire, 1, "tstore"));
+    try testing.expect(!std.mem.containsAtLeast(u8, retire, 1, "sload"));
+    try testing.expect(!std.mem.containsAtLeast(u8, retire, 1, "sstore"));
+}
+
+test "OraToSIR lowers signed resource guards with signed comparisons" {
+    const source_text =
+        \\resource DebtUnit = i256;
+        \\
+        \\contract SignedResourceProbe {
+        \\    storage var debts: map<address, Resource<DebtUnit>>;
+        \\    storage var settled: Resource<DebtUnit>;
+        \\
+        \\    pub fn mint(owner: address, amount: DebtUnit)
+        \\        modifies debts[owner]
+        \\        requires amount >= 0
+        \\        requires amount <= 100
+        \\        requires debts[owner] <= 100
+        \\    {
+        \\        @create(debts[owner], amount);
+        \\    }
+        \\
+        \\    pub fn settle(from: address, amount: DebtUnit)
+        \\        modifies debts[from], settled
+        \\        requires amount >= 0
+        \\        requires amount <= 100
+        \\        requires debts[from] >= -100
+        \\        requires settled <= 100
+        \\    {
+        \\        @move(debts[from], settled, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const mint = try functionSlice(rendered, "mint");
+    try testing.expect(std.mem.containsAtLeast(u8, mint, 1, "slt"));
+
+    const settle = try functionSlice(rendered, "settle");
+    try testing.expect(std.mem.containsAtLeast(u8, settle, 1, "slt"));
+    try testing.expect(std.mem.containsAtLeast(u8, settle, 1, "sgt"));
+}
+
 test "OraToSIR lowers lock and guard to matching transient key shapes" {
     const source_text =
         \\contract GuardedWrites {

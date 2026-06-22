@@ -1,0 +1,21 @@
+// INPUT: ora-example/corpus/resources/distinct_roots_transfer.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn settle:
+// CHECK: slot_pending = const 0x0
+// CHECK: slot_settled = const 0x1
+// CHECK: hash_pending = keccak256
+// CHECK: hash_settled = keccak256
+// CHECK: [[SRC:v[0-9]+]] = sload hash_pending
+// CHECK: [[DST:v[0-9]+]] = sload hash_settled
+// CHECK: [[SRC_AFTER:v[0-9]+]] = sub [[SRC]] v2
+// CHECK: [[SRC_UNDERFLOW:v[0-9]+]] = lt [[SRC]] v2
+// CHECK: [[SRC_OK:v[0-9]+]] = iszero [[SRC_UNDERFLOW]]
+// CHECK: => [[SRC_OK]] ? @bb5 : @bb0
+// CHECK: [[DST_AFTER:v[0-9]+]] = add [[DST]] v2
+// CHECK: [[DST_OVERFLOW:v[0-9]+]] = lt [[DST_AFTER]] [[DST]]
+// CHECK: [[DST_OK:v[0-9]+]] = iszero [[DST_OVERFLOW]]
+// CHECK: => [[DST_OK]] ? @bb6 : @bb0
+// CHECK: sstore hash_pending [[SRC_AFTER]]
+// CHECK: sstore hash_settled [[DST_AFTER]]
+// CHECK: iret

@@ -1,0 +1,7 @@
+resource TokenUnit = u256;
+
+contract ResourceDestroyNonPlace {
+    pub fn bad(amount: TokenUnit) {
+        @destroy(amount, amount);
+    }
+}

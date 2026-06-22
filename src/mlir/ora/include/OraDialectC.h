@@ -109,8 +109,11 @@ extern "C"
     MLIR_CAPI_EXPORTED bool oraAttributeIsNull(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirStringRef oraStringAttrGetValue(MlirAttribute attr);
     MLIR_CAPI_EXPORTED int64_t oraIntegerAttrGetValueSInt(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED MlirType oraTypeAttrGetValue(MlirAttribute attr);
     MLIR_CAPI_EXPORTED size_t oraArrayAttrGetNumElements(MlirAttribute attr);
     MLIR_CAPI_EXPORTED MlirAttribute oraArrayAttrGetElement(MlirAttribute attr, size_t index);
+    MLIR_CAPI_EXPORTED size_t oraDenseI32ArrayAttrGetNumElements(MlirAttribute attr);
+    MLIR_CAPI_EXPORTED int32_t oraDenseI32ArrayAttrGetElement(MlirAttribute attr, size_t index);
     /// Returns the integer value as an unsigned decimal string preserving full APInt width.
     /// Returns a newly allocated string; caller must free with oraStringRefFree.
     MLIR_CAPI_EXPORTED MlirStringRef oraIntegerAttrGetValueString(MlirAttribute attr);
@@ -1230,23 +1233,40 @@ extern "C"
         size_t numFieldValues,
         MlirType resultType);
 
-    /// Create an ora.move operation
+    /// Create an ora.move resource operation
     MLIR_CAPI_EXPORTED MlirOperation oraMoveOpCreate(
         MlirContext ctx,
         MlirLocation loc,
+        const MlirValue *sourcePlace,
+        size_t numSourcePlace,
+        const MlirValue *destinationPlace,
+        size_t numDestinationPlace,
         MlirValue amount,
-        MlirValue source,
-        MlirValue destination);
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
 
-    /// Create an ora.move operation with mapping operand and result type
-    MLIR_CAPI_EXPORTED MlirOperation oraMoveOpCreateWithMapping(
+    /// Create an ora.create resource operation
+    MLIR_CAPI_EXPORTED MlirOperation oraCreateOpCreate(
         MlirContext ctx,
         MlirLocation loc,
-        MlirValue mapping,
-        MlirValue source,
-        MlirValue destination,
+        const MlirValue *place,
+        size_t numPlace,
         MlirValue amount,
-        MlirType resultType);
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
+
+    /// Create an ora.destroy resource operation
+    MLIR_CAPI_EXPORTED MlirOperation oraDestroyOpCreate(
+        MlirContext ctx,
+        MlirLocation loc,
+        const MlirValue *place,
+        size_t numPlace,
+        MlirValue amount,
+        MlirStringRef domain,
+        MlirType carrierType,
+        bool carrierSigned);
 
     /// Create an ora.cmp operation
     MLIR_CAPI_EXPORTED MlirOperation oraCmpOpCreate(
@@ -1437,6 +1457,8 @@ extern "C"
     MLIR_CAPI_EXPORTED MlirAttribute oraBoolAttrCreate(
         MlirContext ctx,
         bool value);
+
+    MLIR_CAPI_EXPORTED bool oraBoolAttrGetValue(MlirAttribute attr);
 
     /// Create an IntegerAttr from a 64-bit value
     MLIR_CAPI_EXPORTED MlirAttribute oraIntegerAttrCreateI64(

@@ -585,13 +585,13 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\contract Vault {
         \\    pub fn leak(slot: StorageSlot) {}
         \\}
-    , .typecheck, "public function parameter 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+    , .typecheck, "public function parameter 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
         \\    pub fn leak() -> StorageRange {}
         \\}
-    , .typecheck, "public function 'leak' cannot expose opaque storage capability return type 'StorageRange'");
+    , .typecheck, "public function 'leak' cannot expose opaque runtime capability return type 'StorageRange'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -611,7 +611,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        let slot: StorageSlot = @cast(StorageSlot, raw);
         \\    }
         \\}
-    , .typecheck, "@cast cannot construct opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@cast cannot construct opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -619,7 +619,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        let slot: StorageSlot = @bitCast(StorageSlot, raw);
         \\    }
         \\}
-    , .typecheck, "@bitCast cannot construct opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@bitCast cannot construct opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -628,7 +628,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        return @cast(u256, slot);
         \\    }
         \\}
-    , .typecheck, "@cast cannot reinterpret opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@cast cannot reinterpret opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -637,7 +637,7 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\        return @truncate(u256, slot);
         \\    }
         \\}
-    , .typecheck, "@truncate cannot reinterpret opaque storage capability type 'StorageSlot'");
+    , .typecheck, "@truncate cannot reinterpret opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract Vault {
@@ -739,6 +739,446 @@ test "compiler rejects opaque computed-storage capability types at unsafe bounda
         \\    }
         \\}
     , .typecheck, "@storageWordStore value must be an integer-compatible word");
+}
+
+test "compiler accepts resource domains and storage resource places" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\resource ShareUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    log Transfer(to: address, amount: TokenUnit);
+        \\
+        \\    pub fn identity(amount: TokenUnit) -> TokenUnit {
+        \\        return amount;
+        \\    }
+        \\
+        \\    pub fn literal() -> TokenUnit {
+        \\        return 10;
+        \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
+        \\
+        \\    pub fn reserveBalance() -> TokenUnit {
+        \\        return reserve;
+        \\    }
+        \\
+        \\    fn addSameDomain(lhs: TokenUnit, rhs: TokenUnit) -> TokenUnit {
+        \\        let one: TokenUnit = 1;
+        \\        return lhs + rhs + one;
+        \\    }
+        \\
+        \\    pub fn announce(to: address, amount: TokenUnit) {
+        \\        log Transfer(to, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource declarations and first-class resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = bool;
+    , .typecheck, "resource carrier for 'TokenUnit' must be an integer type, found 'bool'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = TokenUnit;
+    , .typecheck, "recursive resource declaration 'TokenUnit' is not supported");
+
+    try expectDiagnosticProbeContains(
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<u256>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<Resource<TokenUnit>>>;
+        \\}
+    , .typecheck, "Resource<T> expects a resource-domain type argument, found 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn expose(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "public function parameter 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    fn local(place: Resource<TokenUnit>) {}
+        \\}
+    , .typecheck, "function parameter 'place' cannot have resource place type 'Resource<TokenUnit>' as a runtime value");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    log Bad(place: Resource<TokenUnit>);
+        \\}
+    , .typecheck, "log field 'place' cannot expose opaque runtime capability type 'Resource<TokenUnit>'");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\fn bad(lhs: USDC, rhs: DAI) -> USDC {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'USDC' and 'DAI'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(lhs: TokenUnit, rhs: u256) -> TokenUnit {
+        \\    return lhs + rhs;
+        \\}
+    , .typecheck, "invalid binary operator '+' for types 'TokenUnit' and 'u256'");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\fn bad(raw: u256) -> TokenUnit {
+        \\    let amount: TokenUnit = raw;
+        \\    return amount;
+        \\}
+    , .typecheck, "declaration expects type 'TokenUnit', found 'u256'");
+}
+
+test "compiler validates resource move create and destroy builtins" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn issue(to: address, amount: TokenUnit) {
+        \\        @create(balances[to], amount);
+        \\    }
+        \\
+        \\    pub fn retire(from: address, amount: TokenUnit) {
+        \\        @destroy(balances[from], amount);
+        \\    }
+        \\
+        \\    pub fn balanceOf(owner: address) -> TokenUnit {
+        \\        return balances[owner];
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects invalid resource builtin calls" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address) {
+        \\        @move(balances[from], balances[to]);
+        \\    }
+        \\}
+    , .typecheck, "@move expects 3 arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(amount, balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move expects Resource<T> places as its first two arguments");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @create(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@create expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @destroy(amount, amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy expects a Resource<T> place as its first argument");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\struct Bucket {
+        \\    balance: Resource<TokenUnit>;
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var buckets: map<address, Bucket>;
+        \\
+        \\    pub fn bad(owner: address, amount: TokenUnit) {
+        \\        @create(buckets[owner].balance, amount);
+        \\    }
+        \\}
+    , .typecheck, "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place");
+
+    try expectDiagnosticProbeContains(
+        \\resource USDC = u256;
+        \\resource DAI = u256;
+        \\
+        \\contract Vault {
+        \\    storage var usdc: map<address, Resource<USDC>>;
+        \\    storage var dai: map<address, Resource<DAI>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: USDC) {
+        \\        @move(usdc[from], dai[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot move between Resource<USDC> and Resource<DAI>");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: u256) {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must have type TokenUnit");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @move(balances[dynamicKey()], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var nested: map<address, map<address, Resource<TokenUnit>>>;
+        \\
+        \\    fn dynamicKey() -> address {
+        \\        return msg.sender;
+        \\    }
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        @create(nested[dynamicKey()][to], amount);
+        \\    }
+        \\}
+    , .typecheck, "resource place key expression must be side-effect-free");
+
+    try expectDiagnosticProbeContains(
+        \\resource DebtUnit = i256;
+        \\
+        \\contract Vault {
+        \\    storage var debts: map<address, Resource<DebtUnit>>;
+        \\
+        \\    pub fn bad(to: address) {
+        \\        @create(debts[to], -1);
+        \\    }
+        \\}
+    , .typecheck, "resource amount must be non-negative");
+}
+
+test "compiler rejects direct mutation of resource places" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] = amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        balances[to] += amount;
+        \\    }
+        \\}
+    , .typecheck, "resource places can only be mutated with @move, @create, or @destroy");
+}
+
+test "compiler rejects resource boundary builtins in value positions" {
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, to: address, amount: TokenUnit) {
+        \\        let output = @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@move is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(to: address, amount: TokenUnit) {
+        \\        let output = @create(balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "@create is statement-only and cannot be used in expression position");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(from: address, amount: TokenUnit) {
+        \\        let output = @destroy(balances[from], amount);
+        \\    }
+        \\}
+    , .typecheck, "@destroy is statement-only and cannot be used in expression position");
+}
+
+test "compiler tracks resource builtin effects for modifies and locks" {
+    const covered_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from], balances[to]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    ;
+    var covered = try compileText(covered_source);
+    defer covered.deinit();
+    const covered_typecheck = try covered.db.moduleTypeCheck(covered.root_module_id);
+    try testing.expect(covered_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        \\        modifies balances[from]
+        \\    {
+        \\        @move(balances[from], balances[to], amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn bad(user: address, amount: TokenUnit) {
+        \\        @lock(balances[user]);
+        \\        @create(balances[user], amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'balances'");
+
+    const direct_storage_source =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve, treasury
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    ;
+    var direct_storage = try compileText(direct_storage_source);
+    defer direct_storage.deinit();
+    const direct_storage_typecheck = try direct_storage.db.moduleTypeCheck(direct_storage.root_module_id);
+    try testing.expect(direct_storage_typecheck.diagnostics.isEmpty());
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\    storage var treasury: Resource<TokenUnit>;
+        \\
+        \\    pub fn sweep(amount: TokenUnit)
+        \\        modifies reserve
+        \\    {
+        \\        @move(reserve, treasury, amount);
+        \\    }
+        \\}
+    , .typecheck, "is not covered by this function's `modifies` clause");
+
+    try expectDiagnosticProbeContains(
+        \\resource TokenUnit = u256;
+        \\
+        \\contract Vault {
+        \\    storage var reserve: Resource<TokenUnit>;
+        \\
+        \\    pub fn bad(amount: TokenUnit) {
+        \\        @lock(reserve);
+        \\        @destroy(reserve, amount);
+        \\    }
+        \\}
+    , .typecheck, "cannot write locked storage slot 'reserve'");
 }
 
 test "compiler build rejects unbounded computed storage ranges without artifacts" {
@@ -1695,13 +2135,13 @@ test "compiler rejects opaque storage capability log fields" {
         \\contract C {
         \\    log Bad(slot: StorageSlot);
         \\}
-    , .typecheck, "log field 'slot' cannot expose opaque storage capability type 'StorageSlot'");
+    , .typecheck, "log field 'slot' cannot expose opaque runtime capability type 'StorageSlot'");
 
     try expectDiagnosticProbeContains(
         \\contract C {
         \\    log Bad(indexed range: StorageRange);
         \\}
-    , .typecheck, "log field 'range' cannot expose opaque storage capability type 'StorageRange'");
+    , .typecheck, "log field 'range' cannot expose opaque runtime capability type 'StorageRange'");
 }
 
 test "compiler reports invalid constant shift amounts" {

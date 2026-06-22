@@ -55,6 +55,12 @@ const ConstEvalResult = model.ConstEvalResult;
 const ConstValue = ora_types.ConstValue;
 const BigInt = std.math.big.int.Managed;
 const IntegerResolutionResult = enum { not_applicable, resolved, overflow };
+const ResourcePlaceInfo = struct {
+    domain_type: Type,
+    carrier_type: Type,
+    region: Region,
+    slot: ?EffectSlot = null,
+};
 const descriptorFromTypeExpr = descriptors.descriptorFromTypeExpr;
 const descriptorFromPathName = descriptors.descriptorFromPathName;
 const refinementArgsFromAst = descriptors.refinementArgsFromAst;
@@ -72,6 +78,13 @@ fn builtinKind(name: []const u8) ?BuiltinKind {
 fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
     return switch (kind) {
         .selector, .abi_signature, .event_topic, .struct_fields, .trait_methods => true,
+        else => false,
+    };
+}
+
+fn isResourceBoundaryBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .resource_move, .resource_create, .resource_destroy => true,
         else => false,
     };
 }
@@ -131,6 +144,8 @@ fn typeContainsUnknown(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsUnknown(resource.carrier_type.*),
+        .resource_place => |place| typeContainsUnknown(place.domain_type.*),
         .refinement => |refinement| typeContainsUnknown(refinement.base_type.*),
         else => false,
     };
@@ -160,6 +175,8 @@ fn typeContainsMap(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsMap(resource.carrier_type.*),
+        .resource_place => |place| typeContainsMap(place.domain_type.*),
         .function => |function| blk: {
             for (function.param_types) |param_type| {
                 if (typeContainsMap(param_type)) break :blk true;
@@ -200,6 +217,7 @@ fn typeContainsStorageCapability(ty: Type) bool {
             }
             break :blk false;
         },
+        .resource_domain => |resource| typeContainsStorageCapability(resource.carrier_type.*),
         .function => |function| blk: {
             for (function.param_types) |param_type| {
                 if (typeContainsStorageCapability(param_type)) break :blk true;
@@ -213,6 +231,60 @@ fn typeContainsStorageCapability(ty: Type) bool {
         else => false,
     };
 }
+
+fn resourcePlaceReadType(ty: Type) ?Type {
+    if (ty.kind() != .resource_place) return null;
+    return ty.resource_place.domain_type.*;
+}
+
+fn typeContainsResourcePlace(ty: Type) bool {
+    return switch (ty) {
+        .resource_place => true,
+        .tuple => |elements| blk: {
+            for (elements) |element| {
+                if (typeContainsResourcePlace(element)) break :blk true;
+            }
+            break :blk false;
+        },
+        .anonymous_struct => |struct_type| blk: {
+            for (struct_type.fields) |field| {
+                if (typeContainsResourcePlace(field.ty)) break :blk true;
+            }
+            break :blk false;
+        },
+        .array => |array| typeContainsResourcePlace(array.element_type.*),
+        .slice => |slice| typeContainsResourcePlace(slice.element_type.*),
+        .map => |map| (map.key_type != null and typeContainsResourcePlace(map.key_type.?.*)) or
+            (map.value_type != null and typeContainsResourcePlace(map.value_type.?.*)),
+        .error_union => |error_union| blk: {
+            if (typeContainsResourcePlace(error_union.payload_type.*)) break :blk true;
+            for (error_union.error_types) |error_type| {
+                if (typeContainsResourcePlace(error_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .function => |function| blk: {
+            for (function.param_types) |param_type| {
+                if (typeContainsResourcePlace(param_type)) break :blk true;
+            }
+            for (function.return_types) |return_type| {
+                if (typeContainsResourcePlace(return_type)) break :blk true;
+            }
+            break :blk false;
+        },
+        .refinement => |refinement| typeContainsResourcePlace(refinement.base_type.*),
+        else => false,
+    };
+}
+
+fn typeContainsOpaqueRuntimeCapability(ty: Type) bool {
+    return typeContainsStorageCapability(ty) or typeContainsResourcePlace(ty);
+}
+
+const OpaqueRuntimeCapabilityKind = enum {
+    storage,
+    resource,
+};
 
 fn typesFlowCompatible(expected_type: Type, actual_type: Type) bool {
     if (expected_type.kind() == .refinement) {
@@ -712,6 +784,9 @@ pub fn typeCheck(
                 else
                     try typechecker.resolveTypeExpr(type_alias.target_type);
             },
+            .Resource => |resource| {
+                item_types[index] = try typechecker.resolveResourceDomainType(ast.ItemId.fromIndex(index), resource);
+            },
             else => {},
         }
     }
@@ -831,12 +906,14 @@ const TypeChecker = struct {
     opaque_multi_error_patterns: []bool = &.{},
     try_scope_depth: usize = 0,
     active_aliases: InlineItemIdStack = .{},
+    active_resources: InlineItemIdStack = .{},
     current_return_type: ?Type = null,
     current_spec_clause_kind: ?ast.SpecClauseKind = null,
     current_contract: ?ast.ItemId = null,
     current_function_item: ?ast.ItemId = null,
     comptime_depth: usize = 0,
     effect_scratch_depth: usize = 0,
+    allow_resource_boundary_builtin_statement: bool = false,
     diagnostics: *diagnostics.DiagnosticList,
 
     fn setCallResolution(self: *TypeChecker, expr_id: ast.ExprId, resolved: ResolvedCall) !void {
@@ -1217,8 +1294,8 @@ const TypeChecker = struct {
                 var indexed_count: usize = 0;
                 for (log_decl.fields) |field| {
                     const field_type = try self.resolveTypeExpr(field.type_expr);
-                    if (typeContainsStorageCapability(field_type)) {
-                        try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque storage capability type '{s}'", .{
+                    if (try self.typeContainsOpaqueRuntimeCapabilityResolved(field_type)) {
+                        try self.emitRangeError(field.range, "log field '{s}' cannot expose opaque runtime capability type '{s}'", .{
                             field.name,
                             diagnosticTypeDisplayName(self, field_type),
                         });
@@ -1392,11 +1469,13 @@ const TypeChecker = struct {
                     if (try self.emitIntegerOverflowIfNeeded(field.range, expr_id, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
                     } else if (actual_type.kind() != .unknown and expected_type.kind() != .unknown) {
+                        try self.contextualizeLiteral(expr_id, expected_type);
+                        const contextual_actual_type = self.expr_types[expr_id.index()];
                         const expected = LocatedType.withRegion(expected_type, self.item_regions[item_id.index()]);
                         const actual_located = self.exprLocatedType(expr_id);
-                        const actual = locatedValue(actual_type, actual_located.region, actual_located.provenance);
-                        if (!typesFlowCompatible(expected_type, actual_type)) {
-                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, actual_type);
+                        const actual = locatedValue(contextual_actual_type, actual_located.region, actual_located.provenance);
+                        if (!typesFlowCompatible(expected_type, contextual_actual_type)) {
+                            try self.emitNamedSubjectExpectedTypeFoundRange(field.range, "field", field.name, expected_type, contextual_actual_type);
                         } else if (!region_rules.regionAssignable(actual.region, expected.region)) {
                             try self.emitNamedSubjectExpectedRegionFoundRange(field.range, "field", field.name, expected.region, actual.region);
                         }
@@ -1410,6 +1489,7 @@ const TypeChecker = struct {
                     self.item_types[item_id.index()] = self.expr_types[constant.value.index()];
                 } else {
                     const expected_type = self.item_types[item_id.index()];
+                    try self.contextualizeLiteral(constant.value, expected_type);
                     const actual_type = self.expr_types[constant.value.index()];
                     if (try self.emitIntegerOverflowIfNeeded(constant.range, constant.value, expected_type)) {
                         // Keep lowering/recovery moving after reporting the overflow.
@@ -1825,8 +1905,8 @@ const TypeChecker = struct {
             const param_type = self.pattern_types[parameter.pattern.index()].type;
             if (public_abi.supportsType(param_type, .input)) continue;
             const name = self.patternName(parameter.pattern) orelse "<param>";
-            if (typeContainsStorageCapability(param_type)) {
-                try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque storage capability type '{s}'", .{
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(param_type)) {
+                try self.emitRangeError(parameter.range, "public function parameter '{s}' cannot expose opaque runtime capability type '{s}'", .{
                     name,
                     diagnosticTypeDisplayName(self, param_type),
                 });
@@ -1847,8 +1927,8 @@ const TypeChecker = struct {
         }
 
         if (function.return_type != null and !public_abi.supportsType(self.current_return_type.?, .output)) {
-            if (typeContainsStorageCapability(self.current_return_type.?)) {
-                try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque storage capability return type '{s}'", .{
+            if (try self.typeContainsOpaqueRuntimeCapabilityResolved(self.current_return_type.?)) {
+                try self.emitRangeError(function.range, "public function '{s}' cannot expose opaque runtime capability return type '{s}'", .{
                     function.name,
                     diagnosticTypeDisplayName(self, self.current_return_type.?),
                 });
@@ -1867,10 +1947,12 @@ const TypeChecker = struct {
             if (self.parameterIsBareSelf(parameter)) continue;
             const parameter_type = self.pattern_types[parameter.pattern.index()].type;
             try self.checkRuntimeMapParameter(parameter.range, parameter.pattern, parameter_type);
+            try self.checkRuntimeResourcePlaceParameter(parameter.range, parameter.pattern, parameter_type);
         }
 
         if (function.return_type != null) {
             try self.checkRuntimeMapReturn(function.range, function.name, self.current_return_type.?);
+            try self.checkRuntimeResourcePlaceReturn(function.range, function.name, self.current_return_type.?);
         }
     }
 
@@ -1915,8 +1997,179 @@ const TypeChecker = struct {
         });
     }
 
+    fn typeContainsOpaqueRuntimeCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        if (try self.typeContainsCapabilityResolved(ty, .storage, 0)) return true;
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsStorageCapabilityResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .storage, 0);
+    }
+
+    fn typeContainsResourcePlaceResolved(self: *TypeChecker, ty: Type) anyerror!bool {
+        return self.typeContainsCapabilityResolved(ty, .resource, 0);
+    }
+
+    fn typeContainsCapabilityResolved(
+        self: *TypeChecker,
+        ty: Type,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        switch (kind) {
+            .storage => if (typeContainsStorageCapability(ty)) return true,
+            .resource => if (typeContainsResourcePlace(ty)) return true,
+        }
+
+        return switch (ty) {
+            .tuple => |elements| blk: {
+                for (elements) |element| {
+                    if (try self.typeContainsCapabilityResolved(element, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .anonymous_struct => |struct_type| blk: {
+                for (struct_type.fields) |field| {
+                    if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .array => |array| try self.typeContainsCapabilityResolved(array.element_type.*, kind, depth + 1),
+            .slice => |slice| try self.typeContainsCapabilityResolved(slice.element_type.*, kind, depth + 1),
+            .map => |map| (map.key_type != null and try self.typeContainsCapabilityResolved(map.key_type.?.*, kind, depth + 1)) or
+                (map.value_type != null and try self.typeContainsCapabilityResolved(map.value_type.?.*, kind, depth + 1)),
+            .error_union => |error_union| try self.typeContainsCapabilityResolved(error_union.payload_type.*, kind, depth + 1),
+            .resource_domain => |resource| try self.typeContainsCapabilityResolved(resource.carrier_type.*, kind, depth + 1),
+            .function => |function| blk: {
+                for (function.param_types) |param_type| {
+                    if (try self.typeContainsCapabilityResolved(param_type, kind, depth + 1)) break :blk true;
+                }
+                for (function.return_types) |return_type| {
+                    if (try self.typeContainsCapabilityResolved(return_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .refinement => |refinement| try self.typeContainsCapabilityResolved(refinement.base_type.*, kind, depth + 1),
+            .struct_ => |named| try self.namedStructContainsCapability(named.name, kind, depth + 1),
+            .named => |named| blk: {
+                if (self.isActiveGenericTypeParameterName(named.name)) break :blk false;
+                const item_id = self.lookupTypeItemInScope(named.name) orelse break :blk true;
+                break :blk try self.itemContainsCapability(item_id, kind, depth + 1);
+            },
+            .bitfield => |named| blk: {
+                if (self.instantiatedBitfieldByName(named.name)) |instantiated| {
+                    for (instantiated.fields) |field| {
+                        if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn namedStructContainsCapability(
+        self: *TypeChecker,
+        name: []const u8,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (self.instantiatedStructByName(name)) |instantiated| {
+            for (instantiated.fields) |field| {
+                if (try self.typeContainsCapabilityResolved(field.ty, kind, depth + 1)) return true;
+            }
+            return false;
+        }
+        const item_id = self.lookupTypeItemInScope(name) orelse return false;
+        return self.itemContainsCapability(item_id, kind, depth + 1);
+    }
+
+    fn isActiveGenericTypeParameterName(self: *const TypeChecker, name: []const u8) bool {
+        const function_item_id = self.current_function_item orelse return false;
+        const item = self.file.item(function_item_id).*;
+        if (item != .Function or !item.Function.is_generic) return false;
+        for (item.Function.parameters) |parameter| {
+            if (!self.isGenericTypeParameter(parameter)) continue;
+            const parameter_name = self.patternName(parameter.pattern) orelse continue;
+            if (std.mem.eql(u8, parameter_name, name)) return true;
+        }
+        return false;
+    }
+
+    fn itemContainsCapability(
+        self: *TypeChecker,
+        item_id: ast.ItemId,
+        kind: OpaqueRuntimeCapabilityKind,
+        depth: u8,
+    ) anyerror!bool {
+        if (depth > 64) return true;
+        return switch (self.file.item(item_id).*) {
+            .Struct => |struct_item| blk: {
+                for (struct_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .TypeAlias => |type_alias| blk: {
+                const target_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, type_alias.target_type) catch break :blk true;
+                break :blk try self.typeContainsCapabilityResolved(target_type, kind, depth + 1);
+            },
+            .Bitfield => |bitfield_item| blk: {
+                for (bitfield_item.fields) |field| {
+                    const field_type = descriptorFromTypeExpr(self.arena, self.file, self.item_index, field.type_expr) catch break :blk true;
+                    if (try self.typeContainsCapabilityResolved(field_type, kind, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
+        };
+    }
+
+    fn checkRuntimeResourcePlaceParameter(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<param>";
+        try self.emitRangeError(range, "function parameter '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceReturn(
+        self: *TypeChecker,
+        range: source.TextRange,
+        function_name: []const u8,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        try self.emitRangeError(range, "function '{s}' cannot return resource place type '{s}'; resource places are not first-class runtime values", .{
+            function_name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
+    fn checkRuntimeResourcePlaceLocal(
+        self: *TypeChecker,
+        range: source.TextRange,
+        pattern_id: ast.PatternId,
+        ty: Type,
+    ) !void {
+        if (!try self.typeContainsResourcePlaceResolved(ty)) return;
+        const name = self.patternName(pattern_id) orelse "<local>";
+        try self.emitRangeError(range, "local '{s}' cannot have resource place type '{s}' as a runtime value; use storage Resource<T> places directly", .{
+            name,
+            diagnosticTypeDisplayName(self, ty),
+        });
+    }
+
     fn checkStorageResultTypeSupport(self: *TypeChecker, range: source.TextRange, ty: Type) !void {
-        if (typeContainsStorageCapability(ty)) {
+        if (try self.typeContainsStorageCapabilityResolved(ty)) {
             try self.emitRangeError(range, "storage declarations cannot use opaque storage capability type '{s}'", .{
                 diagnosticTypeDisplayName(self, ty),
             });
@@ -2705,6 +2958,7 @@ const TypeChecker = struct {
                 }
                 if (decl.storage_class != .storage) {
                     try self.checkRuntimeMapLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    try self.checkRuntimeResourcePlaceLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
                     try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
@@ -2799,6 +3053,10 @@ const TypeChecker = struct {
                 try self.visitExpr(assign.value);
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
+                if (expected_type.kind() == .resource_place) {
+                    try self.emitRangeError(assign.range, "resource places can only be mutated with @move, @create, or @destroy", .{});
+                    return;
+                }
                 try self.contextualizeLiteral(assign.value, expected_type);
                 const actual_type = self.expr_types[assign.value.index()];
                 if (try self.emitIntegerOverflowIfNeeded(assign.range, assign.value, expected_type)) {
@@ -2813,11 +3071,24 @@ const TypeChecker = struct {
                     }
                 }
             },
-            .Expr => |expr_stmt| try self.visitExpr(expr_stmt.expr),
+            .Expr => |expr_stmt| {
+                const previous = self.allow_resource_boundary_builtin_statement;
+                self.allow_resource_boundary_builtin_statement = self.exprIsResourceBoundaryBuiltinStatement(expr_stmt.expr);
+                defer self.allow_resource_boundary_builtin_statement = previous;
+                try self.visitExpr(expr_stmt.expr);
+            },
             .Block => |block| try self.visitBody(block.body),
             .LabeledBlock => |block| try self.visitBody(block.body),
             else => {},
         }
+    }
+
+    fn exprIsResourceBoundaryBuiltinStatement(self: *const TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.exprIsResourceBoundaryBuiltinStatement(group.expr),
+            .Builtin => |builtin| if (builtinKind(builtin.name)) |kind| isResourceBoundaryBuiltin(kind) else false,
+            else => false,
+        };
     }
 
     fn visitExpr(self: *TypeChecker, expr_id: ast.ExprId) anyerror!void {
@@ -2970,7 +3241,7 @@ const TypeChecker = struct {
             },
             .Name => {
                 const binding_type = self.typeForBinding(self.resolution.expr_bindings[expr_id.index()]);
-                self.expr_types[expr_id.index()] = if (binding_type.kind() != .unknown)
+                const resolved_type: Type = if (binding_type.kind() != .unknown)
                     binding_type
                 else switch (self.file.expression(expr_id).*) {
                     .Name => |name| if (std.mem.eql(u8, name.name, "result"))
@@ -2979,6 +3250,7 @@ const TypeChecker = struct {
                         self.typeValueNameType(name.name),
                     else => .{ .unknown = {} },
                 };
+                self.expr_types[expr_id.index()] = resourcePlaceReadType(resolved_type) orelse resolved_type;
             },
             .Result => {
                 self.expr_types[expr_id.index()] = self.currentResultType();
@@ -3125,6 +3397,25 @@ const TypeChecker = struct {
                     return;
                 }
 
+                if (isResourceBoundaryBuiltin(kind)) {
+                    const allowed_as_statement = self.allow_resource_boundary_builtin_statement;
+                    const previous = self.allow_resource_boundary_builtin_statement;
+                    self.allow_resource_boundary_builtin_statement = false;
+                    defer self.allow_resource_boundary_builtin_statement = previous;
+
+                    for (builtin.args) |arg| try self.visitExpr(arg);
+                    if (!allowed_as_statement) {
+                        try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
+                            builtin.name,
+                        });
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                        return;
+                    }
+                    self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
+                    try self.checkBuiltinArguments(kind, builtin);
+                    return;
+                }
+
                 for (builtin.args) |arg| try self.visitExpr(arg);
                 if (kind == .lock or kind == .unlock) {
                     try self.emitExprError(expr_id, "@{s} is statement-only and cannot be used in expression position", .{
@@ -3143,10 +3434,11 @@ const TypeChecker = struct {
             .Field => |field| {
                 try self.visitExpr(field.base);
                 const base_type = self.expr_types[field.base.index()];
-                const result_type = self.environmentIntrinsicValueType(expr_id) orelse
+                const place_or_value_type = self.environmentIntrinsicValueType(expr_id) orelse
                     try self.fieldAccessTypeForExpr(field.base, field.name);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     if (!try self.emitTraitMethodFieldError(expr_id, field, base_type)) {
                         try self.emitExprError(expr_id, "type '{s}' has no field '{s}'", .{
                             diagnosticTypeDisplayName(self, base_type),
@@ -3159,9 +3451,10 @@ const TypeChecker = struct {
                 try self.visitExpr(index.base);
                 try self.visitExpr(index.index);
                 const base_type = self.expr_types[index.base.index()];
-                const result_type = self.indexAccessType(base_type, index.index);
+                const place_or_value_type = self.indexAccessType(base_type, index.index);
+                const result_type = resourcePlaceReadType(place_or_value_type) orelse place_or_value_type;
                 self.expr_types[expr_id.index()] = result_type;
-                if (result_type.kind() == .unknown and base_type.kind() != .unknown) {
+                if (place_or_value_type.kind() == .unknown and base_type.kind() != .unknown) {
                     try self.emitExprError(expr_id, "type '{s}' is not indexable", .{diagnosticTypeDisplayName(self, base_type)});
                 }
             },
@@ -4248,7 +4541,179 @@ const TypeChecker = struct {
             .storage_range_erase => try self.checkStorageRangeEraseBuiltinArguments(builtin),
             .storage_word_load => try self.checkStorageWordLoadBuiltinArguments(builtin),
             .storage_word_store => try self.checkStorageWordStoreBuiltinArguments(builtin),
+            .resource_move, .resource_create, .resource_destroy => try self.checkResourceBuiltinArguments(kind, builtin),
             else => {},
+        }
+    }
+
+    fn checkResourceBuiltinArguments(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr) !void {
+        const expected_args: usize = switch (kind) {
+            .resource_move => 3,
+            .resource_create, .resource_destroy => 2,
+            else => unreachable,
+        };
+        if (builtin.args.len != expected_args) {
+            try self.emitRangeError(builtin.range, "@{s} expects {d} arguments", .{ builtin.name, expected_args });
+            return;
+        }
+
+        const first_place = (self.resourcePlaceForExpr(builtin.args[0]) catch |err| switch (err) {
+            error.UnsupportedResourcePlaceShape => return,
+            else => return err,
+        }) orelse {
+            switch (kind) {
+                .resource_move => try self.emitExprError(builtin.args[0], "@move expects Resource<T> places as its first two arguments", .{}),
+                .resource_create => try self.emitExprError(builtin.args[0], "@create expects a Resource<T> place as its first argument", .{}),
+                .resource_destroy => try self.emitExprError(builtin.args[0], "@destroy expects a Resource<T> place as its first argument", .{}),
+                else => unreachable,
+            }
+            return;
+        };
+
+        const domain_type = first_place.domain_type;
+        if (kind == .resource_move) {
+            const second_place = (self.resourcePlaceForExpr(builtin.args[1]) catch |err| switch (err) {
+                error.UnsupportedResourcePlaceShape => return,
+                else => return err,
+            }) orelse {
+                try self.emitExprError(builtin.args[1], "@move expects Resource<T> places as its first two arguments", .{});
+                return;
+            };
+            if (!sameConcreteType(domain_type, second_place.domain_type)) {
+                try self.emitRangeError(builtin.range, "cannot move between Resource<{s}> and Resource<{s}>", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                    diagnosticTypeDisplayName(self, second_place.domain_type),
+                });
+                return;
+            }
+        }
+
+        const amount_expr = builtin.args[expected_args - 1];
+        try self.contextualizeLiteral(amount_expr, domain_type);
+        const actual_type = self.expr_types[amount_expr.index()];
+        if (actual_type.kind() != .unknown and !typesFlowCompatible(domain_type, actual_type)) {
+            try self.emitExprError(amount_expr, "resource amount must have type {s}", .{
+                diagnosticTypeDisplayName(self, domain_type),
+            });
+            return;
+        }
+        try self.checkResourceAmountNonNegative(amount_expr, domain_type);
+    }
+
+    fn resourcePlaceForExpr(self: *TypeChecker, expr_id: ast.ExprId) !?ResourcePlaceInfo {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.resourcePlaceForExpr(group.expr),
+            .Name => self.resourcePlaceFromLocated(expr_id, self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()])),
+            .Field => |field| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(field.base);
+                const place_type = try self.fieldAccessTypeForExpr(field.base, field.name);
+                if (place_type.kind() == .resource_place and (base.region == .storage or base.region == .transient)) {
+                    if (!self.resourceFieldBaseIsDirectRootPath(field.base)) {
+                        try self.emitExprError(
+                            expr_id,
+                            "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place",
+                            .{},
+                        );
+                        return error.UnsupportedResourcePlaceShape;
+                    }
+                }
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            .Index => |index| blk: {
+                if (!try self.validateResourcePlacePathKeys(expr_id)) break :blk null;
+                const base = self.exprLocatedType(index.base);
+                const base_type = self.expr_types[index.base.index()];
+                const place_type = self.indexAccessType(base_type, index.index);
+                break :blk self.resourcePlaceFromLocated(expr_id, .{
+                    .type = place_type,
+                    .region = base.region,
+                    .provenance = if (base.region == .storage) .storage else base.provenance,
+                });
+            },
+            else => null,
+        };
+    }
+
+    fn resourceFieldBaseIsDirectRootPath(self: *TypeChecker, expr_id: ast.ExprId) bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| self.resourceFieldBaseIsDirectRootPath(group.expr),
+            .Field => |field| self.resourceFieldBaseIsDirectRootPath(field.base),
+            .Name => blk: {
+                const located = self.locatedTypeForBinding(self.resolution.expr_bindings[expr_id.index()]);
+                break :blk located.region == .storage or located.region == .transient;
+            },
+            else => false,
+        };
+    }
+
+    fn validateResourcePlacePathKeys(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        return switch (self.file.expression(expr_id).*) {
+            .Group => |group| try self.validateResourcePlacePathKeys(group.expr),
+            .Field => |field| try self.validateResourcePlacePathKeys(field.base),
+            .Index => |index| (try self.validateResourcePlacePathKeys(index.base)) and
+                (try self.validateResourcePlaceKeyExpr(index.index)),
+            else => true,
+        };
+    }
+
+    fn resourcePlaceFromLocated(self: *TypeChecker, expr_id: ast.ExprId, located: LocatedType) ?ResourcePlaceInfo {
+        if (located.type.kind() != .resource_place) return null;
+        if (located.region != .storage and located.region != .transient) return null;
+        const domain_type = located.type.resource_place.domain_type.*;
+        const carrier_type: Type = if (domain_type.kind() == .resource_domain)
+            domain_type.resource_domain.carrier_type.*
+        else
+            .{ .unknown = {} };
+        return .{
+            .domain_type = domain_type,
+            .carrier_type = carrier_type,
+            .region = located.region,
+            .slot = self.lockSlotForExpr(expr_id),
+        };
+    }
+
+    fn validateResourcePlaceKeyExpr(self: *TypeChecker, expr_id: ast.ExprId) !bool {
+        switch (self.file.expression(expr_id).*) {
+            .Group => |group| return try self.validateResourcePlaceKeyExpr(group.expr),
+            .IntegerLiteral, .StringLiteral, .AddressLiteral, .BytesLiteral, .BoolLiteral => return true,
+            .Name => {
+                if (self.resolution.expr_bindings[expr_id.index()]) |binding| {
+                    switch (binding) {
+                        .pattern => |pattern_id| if (self.parameterIndexForPattern(pattern_id) != null) return true,
+                        .item => {},
+                    }
+                }
+            },
+            .Field => |field| {
+                const base = self.file.expression(field.base).*;
+                if (base == .Name and
+                    ((std.mem.eql(u8, base.Name.name, "msg") and std.mem.eql(u8, field.name, "sender")) or
+                        (std.mem.eql(u8, base.Name.name, "tx") and std.mem.eql(u8, field.name, "origin"))))
+                {
+                    return true;
+                }
+            },
+            else => {},
+        }
+        try self.emitExprError(expr_id, "resource place key expression must be side-effect-free", .{});
+        return false;
+    }
+
+    fn checkResourceAmountNonNegative(self: *TypeChecker, expr_id: ast.ExprId, domain_type: Type) !void {
+        if (domain_type.kind() != .resource_domain) return;
+        const carrier = unwrapRefinement(domain_type.resource_domain.carrier_type.*);
+        if (carrier.kind() != .integer or !carrier.integer.signed) return;
+        const value = (try self.integerValueForResolution(expr_id)) orelse {
+            return;
+        };
+        if (value != .integer) return;
+        if (!value.integer.isPositive() and !value.integer.eqlZero()) {
+            try self.emitExprError(expr_id, "resource amount must be non-negative", .{});
         }
     }
 
@@ -4260,8 +4725,8 @@ const TypeChecker = struct {
         }
 
         const target_type = try self.resolveTypeExprInCurrentContext(builtin.type_arg.?);
-        if (typeContainsStorageCapability(target_type)) {
-            try self.emitRangeError(builtin.range, "@{s} cannot construct opaque storage capability type '{s}'", .{
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(target_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot construct opaque runtime capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, target_type),
             });
@@ -4269,8 +4734,8 @@ const TypeChecker = struct {
         }
 
         const source_type = self.expr_types[builtin.args[0].index()];
-        if (typeContainsStorageCapability(source_type)) {
-            try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque storage capability type '{s}'", .{
+        if (try self.typeContainsOpaqueRuntimeCapabilityResolved(source_type)) {
+            try self.emitRangeError(builtin.range, "@{s} cannot reinterpret opaque runtime capability type '{s}'", .{
                 builtin.name,
                 diagnosticTypeDisplayName(self, source_type),
             });
@@ -4584,7 +5049,7 @@ const TypeChecker = struct {
 
     fn storageDeriveKeyTypeSupported(self: *const TypeChecker, ty: Type) bool {
         _ = self;
-        if (typeContainsStorageCapability(ty)) return false;
+        if (typeContainsOpaqueRuntimeCapability(ty)) return false;
         return switch (unwrapRefinement(ty)) {
             .integer, .comptime_integer, .bool, .address, .fixed_bytes => true,
             else => false,
@@ -5550,9 +6015,32 @@ const TypeChecker = struct {
             .Bitfield => .{ .bitfield = .{ .name = name } },
             .Enum => .{ .enum_ = .{ .name = name } },
             .ErrorDecl => .{ .named = .{ .name = name } },
+            .Resource => |resource| try self.resolveResourceDomainType(item_id, resource),
             .TypeAlias => |type_alias| try self.resolveTypeAliasTarget(item_id, type_alias, bindings),
             else => null,
         };
+    }
+
+    fn resolveResourceDomainType(self: *TypeChecker, item_id: ast.ItemId, resource: ast.ResourceItem) !Type {
+        if (self.active_resources.contains(item_id)) {
+            try self.emitRangeError(resource.range, "recursive resource declaration '{s}' is not supported", .{resource.name});
+            return .{ .unknown = {} };
+        }
+        try self.active_resources.push(self.arena, item_id);
+        defer _ = self.active_resources.pop();
+
+        const carrier_type = try self.resolveTypeExpr(resource.carrier_type);
+        if (carrier_type.kind() != .unknown and unwrapRefinement(carrier_type).kind() != .integer) {
+            try self.emitRangeError(resource.range, "resource carrier for '{s}' must be an integer type, found '{s}'", .{
+                resource.name,
+                diagnosticTypeDisplayName(self, carrier_type),
+            });
+            return .{ .unknown = {} };
+        }
+        return .{ .resource_domain = .{
+            .name = resource.name,
+            .carrier_type = try self.storeType(carrier_type),
+        } };
     }
 
     fn resolvePathTypeName(
@@ -5690,6 +6178,27 @@ const TypeChecker = struct {
                     try self.storeType(try self.resolveTypeExprWithBindings(generic.args[1].Type, bindings))
                 else
                     null,
+            } };
+        }
+
+        if (std.mem.eql(u8, generic.name, "Resource")) {
+            if (generic.args.len != 1) {
+                try self.emitGenericArityError(generic.range, "type", "Resource", 1, generic.args.len);
+                return .{ .unknown = {} };
+            }
+            if (generic.args[0] != .Type) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument", .{});
+                return .{ .unknown = {} };
+            }
+            const domain_type = try self.resolveTypeExprWithBindings(generic.args[0].Type, bindings);
+            if (domain_type.kind() != .resource_domain) {
+                try self.emitRangeError(generic.range, "Resource<T> expects a resource-domain type argument, found '{s}'", .{
+                    diagnosticTypeDisplayName(self, domain_type),
+                });
+                return .{ .unknown = {} };
+            }
+            return .{ .resource_place = .{
+                .domain_type = try self.storeType(domain_type),
             } };
         }
 
@@ -5960,6 +6469,7 @@ const TypeChecker = struct {
             .not_applicable => {},
             .resolved, .overflow => return,
         }
+        if (try self.resolveResourceDomainLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
         if (try self.resolveAddressLiteralExpression(self.exprRange(expr_id), expr_id, expected_type)) return;
 
         const expr = self.file.expression(expr_id).*;
@@ -6046,6 +6556,24 @@ const TypeChecker = struct {
                 self.expr_types[expr_id.index()] = expected_type;
             },
             else => {},
+        }
+    }
+
+    fn resolveResourceDomainLiteralExpression(self: *TypeChecker, range: source.TextRange, expr_id: ast.ExprId, expected_type: Type) !bool {
+        if (expected_type.kind() != .resource_domain) return false;
+        const value = (try self.integerValueForResolution(expr_id)) orelse return false;
+        if (value != .integer) return false;
+        const carrier_type = expected_type.resource_domain.carrier_type.*;
+        switch (try self.resolveIntegerExpression(range, expr_id, carrier_type)) {
+            .not_applicable => return false,
+            .resolved => {
+                self.expr_types[expr_id.index()] = expected_type;
+                return true;
+            },
+            .overflow => {
+                self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                return true;
+            },
         }
     }
 
@@ -6512,7 +7040,7 @@ const TypeChecker = struct {
 
             .size_of, .keccak256, .chain_id, .storage_word_load => descriptorFromPathName(self.file, self.item_index, "u256"),
 
-            .storage_range_erase, .storage_word_store => .{ .void = {} },
+            .storage_range_erase, .storage_word_store, .resource_move, .resource_create, .resource_destroy => .{ .void = {} },
 
             .storage_derive => .{ .storage_slot = {} },
 
@@ -6943,6 +7471,7 @@ const TypeChecker = struct {
                                 try self.checker.appendUniqueEffectSlot(&effects.writes, slot);
                             }
                         },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, &effects),
                         else => {},
                     };
                     try self.recordWrites(builtin.range, effects.writes.items());
@@ -7069,23 +7598,24 @@ const TypeChecker = struct {
     }
 
     fn validateExprLocks(self: *TypeChecker, expr_id: ast.ExprId, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkExpr(LockExprValidator, &visitor, self.file, expr_id, validation_expr_walk_options);
     }
 
     fn validateSwitchPatternLocks(self: *TypeChecker, pattern: ast.SwitchPattern, locked_slots: *InlineEffectSlotList) anyerror!void {
-        _ = locked_slots;
         var visitor = LockExprValidator{
             .checker = self,
+            .locked_slots = locked_slots,
         };
         try ast.walk.walkSwitchPattern(LockExprValidator, &visitor, self.file, pattern, validation_expr_walk_options);
     }
 
     const LockExprValidator = struct {
         checker: *TypeChecker,
+        locked_slots: *InlineEffectSlotList,
 
         pub fn exitExpr(self: *@This(), file: *const ast.AstFile, expr_id: ast.ExprId) anyerror!void {
             switch (file.expression(expr_id).*) {
@@ -7096,6 +7626,13 @@ const TypeChecker = struct {
                             else => {},
                         }
                     }
+                },
+                .Builtin => |builtin| {
+                    const kind = builtinKind(builtin.name) orelse return;
+                    if (!isResourceBoundaryBuiltin(kind)) return;
+                    var state = EffectCollectorState.init();
+                    try self.checker.collectResourceBuiltinEffects(kind, builtin, &state);
+                    try self.checker.emitLockedWriteDiagnostics(builtin.range, state.writes.items(), self.locked_slots.items());
                 },
                 else => {},
             }
@@ -7126,6 +7663,46 @@ const TypeChecker = struct {
             },
             else => null,
         };
+    }
+
+    fn placeSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?EffectSlot {
+        return switch (self.file.expression(expr_id).*) {
+            .Name => |name| self.lookupNamedFieldSlot(name.name),
+            .Group => |group| self.placeSlotForExpr(group.expr),
+            .Field => |field| blk: {
+                const base = self.placeSlotForExpr(field.base) orelse break :blk null;
+                break :blk self.slotWithField(base, field.name);
+            },
+            .Index => |index| blk: {
+                const base = self.placeSlotForExpr(index.base) orelse break :blk null;
+                break :blk self.slotWithIndexKey(base, index.index);
+            },
+            else => null,
+        };
+    }
+
+    fn collectResourceBuiltinEffects(self: *TypeChecker, kind: BuiltinKind, builtin: ast.BuiltinExpr, state: *EffectCollectorState) !void {
+        switch (kind) {
+            .resource_move => {
+                if (builtin.args.len != 3) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+                try self.collectResourcePlaceReadWrite(builtin.args[1], state);
+            },
+            .resource_create, .resource_destroy => {
+                if (builtin.args.len != 2) return;
+                try self.collectResourcePlaceReadWrite(builtin.args[0], state);
+            },
+            else => return,
+        }
+    }
+
+    fn collectResourcePlaceReadWrite(self: *TypeChecker, expr_id: ast.ExprId, state: *EffectCollectorState) !void {
+        const slot = self.placeSlotForExpr(expr_id) orelse {
+            try self.emitExprError(expr_id, "resource operation place does not resolve to a storage or transient effect slot", .{});
+            return;
+        };
+        try self.appendUniqueEffectSlot(&state.reads, slot);
+        try self.appendUniqueEffectSlot(&state.writes, slot);
     }
 
     fn runtimeLockSlotForExpr(self: *TypeChecker, expr_id: ast.ExprId, op_name: []const u8) !?EffectSlot {
@@ -7529,6 +8106,7 @@ const TypeChecker = struct {
                                 try self.checker.appendUniqueEffectSlot(&self.current().writes, slot);
                             }
                         },
+                        .resource_move, .resource_create, .resource_destroy => try self.checker.collectResourceBuiltinEffects(kind, builtin, self.current()),
                         else => {},
                     };
                 },
@@ -10425,6 +11003,11 @@ fn anonymousStructFieldType(base_type: Type, field_name: []const u8) ?Type {
 fn arithmeticResultType(lhs_type: Type, rhs_type: Type) Type {
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain or rhs.kind() == .resource_domain) {
+        if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+        if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
+        return if (sameConcreteType(lhs, rhs)) lhs else .{ .unknown = {} };
+    }
     if (isGenericTypeParam(lhs) and isGenericTypeParam(rhs) and sameConcreteType(lhs, rhs)) return lhs;
     if (isGenericTypeParam(lhs) and isIntegerType(rhs)) return lhs;
     if (isIntegerType(lhs) and isGenericTypeParam(rhs)) return rhs;
@@ -10583,12 +11166,16 @@ fn binaryComptimeIntegerOperandResolutionType(op: ast.BinaryOp, lhs_type: Type, 
 
     const lhs = unwrapRefinement(lhs_type);
     const rhs = unwrapRefinement(rhs_type);
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return lhs;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return rhs;
     if (lhs.kind() == .comptime_integer and rhs.kind() == .integer) return rhs;
     if (rhs.kind() == .comptime_integer and lhs.kind() == .integer) return lhs;
     return null;
 }
 
 fn integerOperandsHaveResolutionTarget(lhs: Type, rhs: Type) bool {
+    if (lhs.kind() == .resource_domain and rhs.kind() == .comptime_integer) return true;
+    if (rhs.kind() == .resource_domain and lhs.kind() == .comptime_integer) return true;
     if (!isIntegerType(lhs) or !isIntegerType(rhs)) return false;
     if (lhs.kind() == .comptime_integer or rhs.kind() == .comptime_integer) return true;
     return sameIntegerShape(lhs.integer, rhs.integer);
@@ -10632,6 +11219,8 @@ fn typeHasUnresolvedInteger(ty: Type) bool {
             }
             return false;
         },
+        .resource_domain => |resource| typeHasUnresolvedInteger(resource.carrier_type.*),
+        .resource_place => |place| typeHasUnresolvedInteger(place.domain_type.*),
         .refinement => |refinement| typeHasUnresolvedInteger(refinement.base_type.*),
         else => false,
     };
@@ -10720,6 +11309,11 @@ fn sameConcreteType(lhs_type: Type, rhs_type: Type) bool {
         .unknown, .never, .void, .bool, .comptime_integer, .string, .address, .bytes => true,
         .fixed_bytes => |left| left.len == rhs_type.fixed_bytes.len,
         .external_proxy => |left| std.mem.eql(u8, left.trait_name, rhs_type.external_proxy.trait_name),
+        .resource_domain => |left| blk: {
+            const right = rhs_type.resource_domain;
+            break :blk std.mem.eql(u8, left.name, right.name) and sameConcreteType(left.carrier_type.*, right.carrier_type.*);
+        },
+        .resource_place => |left| sameConcreteType(left.domain_type.*, rhs_type.resource_place.domain_type.*),
         .integer => |left| blk: {
             const right = rhs_type.integer;
             break :blk left.bits == right.bits and left.signed == right.signed and std.meta.eql(left.spelling, right.spelling);
@@ -10797,6 +11391,12 @@ fn appendDiagnosticTypeDisplayName(allocator: std.mem.Allocator, buffer: *std.Ar
         .storage_slot => try buffer.appendSlice(allocator, "StorageSlot"),
         .storage_range => try buffer.appendSlice(allocator, "StorageRange"),
         .external_proxy => |proxy| try buffer.writer(allocator).print("external<{s}>", .{proxy.trait_name}),
+        .resource_domain => |resource| try buffer.appendSlice(allocator, resource.name),
+        .resource_place => |place| {
+            try buffer.appendSlice(allocator, "Resource<");
+            try appendDiagnosticTypeDisplayName(allocator, buffer, place.domain_type.*);
+            try buffer.append(allocator, '>');
+        },
         .named => |named| try buffer.appendSlice(allocator, named.name),
         .function => |function| try buffer.appendSlice(allocator, function.name orelse "function"),
         .contract => |named| try buffer.appendSlice(allocator, named.name),
@@ -10883,6 +11483,8 @@ fn typeDisplayName(ty: Type) []const u8 {
         .storage_slot => "StorageSlot",
         .storage_range => "StorageRange",
         .external_proxy => "external proxy",
+        .resource_domain => |resource| resource.name,
+        .resource_place => "resource place",
         .named => |named| named.name,
         .function => |function| function.name orelse "function",
         .contract => |named| named.name,

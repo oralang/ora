@@ -1,0 +1,23 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceDynamicAlias {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn issue(to: address, amount: TokenUnit)
+        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(balances[to], amount);
+    }
+
+    pub fn transfer(from: address, to: address, amount: TokenUnit)
+        requires balances[from] >= amount
+        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @move(balances[from], balances[to], amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return balances[owner];
+    }
+}

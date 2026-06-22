@@ -1586,23 +1586,65 @@ def Ora_QuantifiedOp : Ora_PureOp<"quantified"> {
 }
 
 //===----------------------------------------------------------------------===//
-// Financial Operations
+// Resource Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_MoveOp : Ora_Op<"move"> {
-  let summary = "Move operation for financial transfers";
+class Ora_ResourceBoundaryOp<string mnemonic, string summaryText> :
+    Ora_Op<mnemonic, [MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = summaryText;
+  let arguments = (ins
+    Variadic<AnyType>:$place,
+    AnyType:$amount,
+    StrAttr:$domain,
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
+  );
+  let hasVerifier = 1;
+}
+
+def Ora_MoveOp : Ora_Op<"move", [AttrSizedOperandSegments, MemoryEffects<[MemRead, MemWrite]>]> {
+  let summary = "Move quantity between resource places";
   let description = [{
-    Moves an amount from one balance to another.
-    
+    Moves an amount between two Resource<T> storage places in the same resource
+    domain. The source_place and destination_place segments are place paths, not
+    copied values. The first value in each segment is the map root; subsequent
+    values are the evaluated map keys.
+
     Example:
     ```mlir
-    ora.move %amount from %source to %destination : (i256, i256, i256) -> ()
+    "ora.move"(%balances, %from, %balances, %to, %amount)
+      <{operand_segment_sizes = array<i32: 2, 2, 1>,
+        domain = "TokenUnit",
+        carrier_type = !ora.int<256, false>}>
+      : (!ora.map<!ora.address, !ora.int<256, false>>, !ora.address,
+         !ora.map<!ora.address, !ora.int<256, false>>, !ora.address,
+         !ora.int<256, false>) -> ()
     ```
   }];
-  
-  let arguments = (ins AnyType:$amount, AnyType:$source, AnyType:$destination);
-  
-  // let assemblyFormat = "$amount `from` $source `to` $destination attr-dict `:` type($amount) `,` type($source) `,` type($destination)";
+
+  let arguments = (ins
+    Variadic<AnyType>:$source_place,
+    Variadic<AnyType>:$destination_place,
+    AnyType:$amount,
+    StrAttr:$domain,
+    TypeAttr:$carrier_type,
+    BoolAttr:$carrier_signed
+  );
+  let hasVerifier = 1;
+}
+
+def Ora_CreateOp : Ora_ResourceBoundaryOp<"create", "Create quantity in a resource place"> {
+  let description = [{
+    Creates an amount in a Resource<T> storage place as an explicit domain
+    boundary delta. The place segment is a place path, not a copied value.
+  }];
+}
+
+def Ora_DestroyOp : Ora_ResourceBoundaryOp<"destroy", "Destroy quantity from a resource place"> {
+  let description = [{
+    Destroys an amount from a Resource<T> storage place as an explicit domain
+    boundary delta. The place segment is a place path, not a copied value.
+  }];
 }
 
 //===----------------------------------------------------------------------===//

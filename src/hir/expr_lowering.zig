@@ -83,6 +83,22 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 try @This().reportIndeterminateIntegerSignedness(self, exprRange(self.parent.file, expr_id));
         }
 
+        fn resourceDomainCarrierTarget(self: *FunctionLowerer, ty: sema.Type, range: source.TextRange) ?mlir.MlirType {
+            const unwrapped = support.unwrapRefinementSemaType(ty);
+            if (unwrapped.kind() != .resource_domain) return null;
+            return self.parent.lowerSemaType(unwrapped.resource_domain.carrier_type.*, range);
+        }
+
+        fn binaryComptimeIntegerTarget(
+            self: *FunctionLowerer,
+            expr_type: sema.Type,
+            other_type: sema.Type,
+            range: source.TextRange,
+        ) ?mlir.MlirType {
+            if (support.unwrapRefinementSemaType(expr_type).kind() != .comptime_integer) return null;
+            return @This().resourceDomainCarrierTarget(self, other_type, range);
+        }
+
         fn layoutContext(self: *FunctionLowerer) abi_layout_context.LayoutContext {
             return .{
                 .allocator = self.parent.allocator,
@@ -570,6 +586,20 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                     }
                     break :blk try self.lowerExpr(expr_id, locals);
                 },
+                .Unary => |unary| blk: {
+                    if (unary.op == .neg and mlir.oraTypeIsAInteger(target_type)) {
+                        switch (self.parent.file.expression(unary.operand).*) {
+                            .IntegerLiteral => |literal| {
+                                const parsed = parseUnsignedIntegerLiteral(u256, literal.text) orelse
+                                    break :blk try @This().loweringValueError(self, literal.range, target_type, "invalid integer literal '{s}'", .{literal.text});
+                                break :blk try @This().createWideIntegerConstant(self, target_type, parsed, true, unary.range);
+                            },
+                            else => {},
+                        }
+                    }
+                    const raw_value = try self.lowerExpr(expr_id, locals);
+                    break :blk try self.convertValueForFlow(raw_value, target_type, exprRange(self.parent.file, expr_id));
+                },
                 else => blk: {
                     const raw_value = try self.lowerExpr(expr_id, locals);
                     const value_type = mlir.oraValueGetType(raw_value);
@@ -925,16 +955,30 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
                 return try @This().lowerShortCircuitLogical(self, expr_id, binary, locals);
             }
 
-            var lhs = try self.lowerExpr(binary.lhs, locals);
+            const lhs_sema_type = self.parent.typecheck.exprType(binary.lhs);
+            const rhs_sema_type = self.parent.typecheck.exprType(binary.rhs);
+            const lhs_target = @This().binaryComptimeIntegerTarget(self, lhs_sema_type, rhs_sema_type, binary.range);
+            const rhs_target = @This().binaryComptimeIntegerTarget(self, rhs_sema_type, lhs_sema_type, binary.range);
+
+            var lhs = if (lhs_target) |target|
+                try self.lowerExprForFlowTarget(binary.lhs, target, locals)
+            else
+                try self.lowerExpr(binary.lhs, locals);
             var rhs = switch (binary.op) {
                 .shl, .shr, .wrapping_shl, .wrapping_shr => blk: {
+                    if (rhs_target) |target| {
+                        break :blk try self.lowerExprForFlowTarget(binary.rhs, target, locals);
+                    }
                     const lhs_type = mlir.oraValueGetType(lhs);
                     if (mlir.oraTypeIsAInteger(lhs_type)) {
                         break :blk try self.lowerExprForFlowTarget(binary.rhs, lhs_type, locals);
                     }
                     break :blk try self.lowerExpr(binary.rhs, locals);
                 },
-                else => try self.lowerExpr(binary.rhs, locals),
+                else => if (rhs_target) |target|
+                    try self.lowerExprForFlowTarget(binary.rhs, target, locals)
+                else
+                    try self.lowerExpr(binary.rhs, locals),
             };
             const loc = self.parent.location(binary.range);
             const result_type = self.parent.lowerExprType(expr_id);
@@ -2804,6 +2848,15 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (std.mem.eql(u8, builtin.name, "storageWordStore")) {
                 return try @This().lowerStorageWordStoreBuiltin(self, builtin, locals);
             }
+            if (std.mem.eql(u8, builtin.name, "move")) {
+                return try @This().lowerResourceMoveBuiltin(self, builtin, locals);
+            }
+            if (std.mem.eql(u8, builtin.name, "create")) {
+                return try @This().lowerResourceBoundaryBuiltin(self, "ora.create", builtin, locals);
+            }
+            if (std.mem.eql(u8, builtin.name, "destroy")) {
+                return try @This().lowerResourceBoundaryBuiltin(self, "ora.destroy", builtin, locals);
+            }
             if (std.mem.eql(u8, builtin.name, "abiEncode")) {
                 return try @This().lowerAbiEncodeBuiltin(self, expr_id, builtin, locals);
             }
@@ -3168,6 +3221,214 @@ pub fn mixin(FunctionLowerer: type, Lowerer: type) type {
             if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
             appendOp(self.block, op);
             return try @This().voidValue(self, builtin.range);
+        }
+
+        fn lowerResourceMoveBuiltin(self: *FunctionLowerer, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (builtin.args.len != 3) {
+                try self.parent.emitLoweringError(builtin.range, "@move expects Resource<T> source, destination, and amount", .{});
+                return error.MlirOperationCreationFailed;
+            }
+
+            const metadata = try @This().resourceDomainMetadata(self, builtin.args[0], builtin.range);
+            var source_place = std.array_list.Managed(mlir.MlirValue).init(self.parent.allocator);
+            defer source_place.deinit();
+            var destination_place = std.array_list.Managed(mlir.MlirValue).init(self.parent.allocator);
+            defer destination_place.deinit();
+            try @This().appendResourcePlacePath(self, builtin.args[0], locals, &source_place);
+            try @This().appendResourcePlacePath(self, builtin.args[1], locals, &destination_place);
+
+            const amount = try @This().lowerResourceAmount(self, builtin.args[2], metadata.carrier_type, locals);
+            const op = mlir.oraMoveOpCreate(
+                self.parent.context,
+                self.parent.location(builtin.range),
+                source_place.items.ptr,
+                source_place.items.len,
+                destination_place.items.ptr,
+                destination_place.items.len,
+                amount,
+                strRef(metadata.domain_name),
+                metadata.carrier_type,
+                metadata.carrier_signed,
+            );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+            return try @This().voidValue(self, builtin.range);
+        }
+
+        fn lowerResourceBoundaryBuiltin(self: *FunctionLowerer, op_name: []const u8, builtin: ast.BuiltinExpr, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            if (builtin.args.len != 2) {
+                try self.parent.emitLoweringError(builtin.range, "@{s} expects a Resource<T> place and amount", .{builtin.name});
+                return error.MlirOperationCreationFailed;
+            }
+
+            const metadata = try @This().resourceDomainMetadata(self, builtin.args[0], builtin.range);
+            var place = std.array_list.Managed(mlir.MlirValue).init(self.parent.allocator);
+            defer place.deinit();
+            try @This().appendResourcePlacePath(self, builtin.args[0], locals, &place);
+
+            const amount = try @This().lowerResourceAmount(self, builtin.args[1], metadata.carrier_type, locals);
+            const op = if (std.mem.eql(u8, op_name, "ora.create"))
+                mlir.oraCreateOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    place.items.ptr,
+                    place.items.len,
+                    amount,
+                    strRef(metadata.domain_name),
+                    metadata.carrier_type,
+                    metadata.carrier_signed,
+                )
+            else
+                mlir.oraDestroyOpCreate(
+                    self.parent.context,
+                    self.parent.location(builtin.range),
+                    place.items.ptr,
+                    place.items.len,
+                    amount,
+                    strRef(metadata.domain_name),
+                    metadata.carrier_type,
+                    metadata.carrier_signed,
+                );
+            if (mlir.oraOperationIsNull(op)) return error.MlirOperationCreationFailed;
+            appendOp(self.block, op);
+            return try @This().voidValue(self, builtin.range);
+        }
+
+        const ResourceDomainMetadata = struct {
+            domain_name: []const u8,
+            carrier_type: mlir.MlirType,
+            carrier_signed: bool,
+        };
+
+        fn resourceDomainMetadata(self: *FunctionLowerer, place_expr: ast.ExprId, range: source.TextRange) anyerror!ResourceDomainMetadata {
+            const place_type = @This().resourcePlaceTypeForExpr(self, place_expr) orelse {
+                try self.parent.emitLoweringError(range, "resource builtin place must have Resource<T> type", .{});
+                return error.MlirOperationCreationFailed;
+            };
+            const domain_type = place_type.resource_place.domain_type;
+            if (domain_type.* != .resource_domain) {
+                try self.parent.emitLoweringError(range, "resource builtin place has unresolved resource domain", .{});
+                return error.MlirOperationCreationFailed;
+            }
+            const carrier_type = domain_type.resource_domain.carrier_type;
+            const carrier_signed = (try support.resolvedIntegerSignedness(carrier_type.*)) orelse {
+                try self.parent.emitLoweringError(range, "resource carrier signedness must be resolved before HIR lowering", .{});
+                return error.MlirOperationCreationFailed;
+            };
+            return .{
+                .domain_name = domain_type.resource_domain.name,
+                .carrier_type = self.parent.lowerSemaType(carrier_type.*, range),
+                .carrier_signed = carrier_signed,
+            };
+        }
+
+        fn resourcePlaceTypeForExpr(self: *FunctionLowerer, expr_id: ast.ExprId) ?sema.Type {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().resourcePlaceTypeForExpr(self, group.expr),
+                .Name => |name| blk: {
+                    const item_id = self.parent.item_index.lookup(name.name) orelse break :blk null;
+                    const item = self.parent.file.item(item_id).*;
+                    if (item != .Field) break :blk null;
+                    const ty = self.parent.typecheck.item_types[item_id.index()];
+                    if (ty.kind() != .resource_place) break :blk null;
+                    break :blk ty;
+                },
+                .Index => |index| blk: {
+                    const base_type = self.parent.typecheck.exprType(index.base);
+                    if (base_type.kind() != .map) break :blk null;
+                    const value_type = base_type.map.value_type orelse break :blk null;
+                    if (value_type.kind() != .resource_place) break :blk null;
+                    break :blk value_type.*;
+                },
+                .Field => |field| blk: {
+                    const ty = @This().resourceFieldPlaceType(self, field.base, field.name) orelse break :blk null;
+                    if (ty.kind() != .resource_place) break :blk null;
+                    break :blk ty;
+                },
+                else => null,
+            };
+        }
+
+        fn resourceFieldPlaceType(self: *FunctionLowerer, base_expr: ast.ExprId, field_name: []const u8) ?sema.Type {
+            const base_type = switch (self.parent.file.expression(base_expr).*) {
+                .Group => |group| return @This().resourceFieldPlaceType(self, group.expr, field_name),
+                else => self.parent.typecheck.exprType(base_expr),
+            };
+            if (base_type.kind() == .anonymous_struct) {
+                if (base_type.anonymous_struct.fieldByName(field_name)) |field| return field.ty;
+            }
+            if (base_type.kind() == .struct_) {
+                if (self.parent.typecheck.instantiatedStructByName(base_type.struct_.name)) |instantiated| {
+                    if (instantiated.fieldByName(field_name)) |field| return field.ty;
+                }
+            }
+            const type_name = base_type.name() orelse return null;
+            if (self.parent.typecheck.instantiatedStructByName(type_name)) |instantiated| {
+                if (instantiated.fieldByName(field_name)) |field| return field.ty;
+            }
+            const item_id = self.parent.item_index.lookup(type_name) orelse return null;
+            return switch (self.parent.file.item(item_id).*) {
+                .Struct => blk: {
+                    const struct_field = self.parent.item_index.lookupStructField(self.parent.file, item_id, field_name) orelse break :blk null;
+                    break :blk type_descriptors.descriptorFromTypeExpr(self.parent.allocator, self.parent.file, self.parent.item_index, struct_field.type_expr) catch null;
+                },
+                else => null,
+            };
+        }
+
+        fn lowerResourceAmount(self: *FunctionLowerer, amount_expr: ast.ExprId, carrier_type: mlir.MlirType, locals: *LocalEnv) anyerror!mlir.MlirValue {
+            const range = exprRange(self.parent.file, amount_expr);
+            var amount = try @This().unwrapRefinementForCast(self, try self.lowerExpr(amount_expr, locals), range);
+            amount = try self.convertValueForFlow(amount, carrier_type, range);
+            return amount;
+        }
+
+        fn appendResourcePlacePath(self: *FunctionLowerer, expr_id: ast.ExprId, locals: *LocalEnv, operands: *std.array_list.Managed(mlir.MlirValue)) anyerror!void {
+            switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| try @This().appendResourcePlacePath(self, group.expr, locals, operands),
+                .Name => {
+                    const root = try self.lowerExpr(expr_id, locals);
+                    try operands.append(root);
+                },
+                .Field => |field| {
+                    if (!@This().resourceFieldBaseIsDirectRootPath(self, field.base)) {
+                        try self.parent.emitLoweringError(
+                            exprRange(self.parent.file, expr_id),
+                            "resource struct-field places inside maps are not supported yet; use a direct storage Resource<T> root, direct struct field, or map value resource place",
+                            .{},
+                        );
+                        return error.MlirOperationCreationFailed;
+                    }
+                    const field_place = try self.lowerExpr(expr_id, locals);
+                    try operands.append(field_place);
+                },
+                .Index => |index| {
+                    try @This().appendResourcePlacePath(self, index.base, locals, operands);
+                    const base_type = self.parent.typecheck.exprType(index.base);
+                    const key = if (base_type == .map and base_type.map.key_type != null) blk: {
+                        const key_type = self.parent.lowerSemaType(base_type.map.key_type.?.*, index.range);
+                        break :blk try self.lowerExprForFlowTarget(index.index, key_type, locals);
+                    } else try self.lowerExpr(index.index, locals);
+                    try operands.append(key);
+                },
+                else => {
+                    try self.parent.emitLoweringError(
+                        exprRange(self.parent.file, expr_id),
+                        "resource builtin place must be a storage map index path",
+                        .{},
+                    );
+                    return error.MlirOperationCreationFailed;
+                },
+            }
+        }
+
+        fn resourceFieldBaseIsDirectRootPath(self: *FunctionLowerer, expr_id: ast.ExprId) bool {
+            return switch (self.parent.file.expression(expr_id).*) {
+                .Group => |group| @This().resourceFieldBaseIsDirectRootPath(self, group.expr),
+                .Field => |field| @This().resourceFieldBaseIsDirectRootPath(self, field.base),
+                .Name => true,
+                else => false,
+            };
         }
 
         fn stringLiteralText(file: *const ast.AstFile, expr_id: ast.ExprId) ?[]const u8 {

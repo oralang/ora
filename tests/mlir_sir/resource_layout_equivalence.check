@@ -1,0 +1,18 @@
+// INPUT: tests/conformance/resource_layout_equivalence.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+//
+// CHECK-LABEL: func.func @rawBalance
+// CHECK-SAME: ora.read_slots = ["raw_balances"]
+// CHECK: %slot_raw_balances = sir.const 0
+// CHECK: sir.store %ptr
+// CHECK: sir.store %ptr_off
+// CHECK: sir.keccak256 %ptr
+// CHECK: %value = sir.sload
+//
+// CHECK-LABEL: func.func @resourceBalance
+// CHECK-SAME: ora.read_slots = ["resource_balances"]
+// CHECK: %slot_resource_balances = sir.const 1
+// CHECK: sir.store %ptr
+// CHECK: sir.store %ptr_off
+// CHECK: sir.keccak256 %ptr
+// CHECK: %value = sir.sload

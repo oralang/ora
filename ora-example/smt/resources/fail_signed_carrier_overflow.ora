@@ -1,0 +1,12 @@
+resource DebtUnit = i256;
+
+contract ResourceSmtFailSignedCarrierOverflow {
+    storage var debt: Resource<DebtUnit>;
+
+    pub fn credit(amount: DebtUnit)
+        modifies debt
+        requires amount >= 0
+    {
+        @create(debt, amount);
+    }
+}

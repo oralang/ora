@@ -16,7 +16,6 @@ const std_imports = [_]EmbeddedImport{
     .{ .alias = "constants", .specifier = "std/constants" },
     .{ .alias = "bytes", .specifier = "std/bytes" },
     .{ .alias = "result", .specifier = "std/result" },
-    .{ .alias = "interfaces", .specifier = "std/interfaces" },
 };
 
 const bytes_imports = [_]EmbeddedImport{

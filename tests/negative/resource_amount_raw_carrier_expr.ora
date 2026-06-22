@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract RawCarrierAmount {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn bad(to: address, amount: u256) {
+        @create(balances[to], amount + 1);
+    }
+}

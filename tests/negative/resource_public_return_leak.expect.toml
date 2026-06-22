@@ -1,0 +1,1 @@
+expect_error = "public function 'expose' cannot expose opaque runtime capability return type 'Resource<TokenUnit>'"

@@ -1,0 +1,28 @@
+resource USDC = u256;
+resource DAI = u256;
+comptime const std = @import("std");
+
+contract ResourceStaticAssetDomains {
+    storage var usdc: map<address, Resource<USDC>>;
+    storage var dai: map<address, Resource<DAI>>;
+
+    pub fn issue_usdc(to: address, amount: USDC)
+        requires usdc[to] <= @cast(USDC, std.constants.U256_MAX) - amount
+    {
+        @create(usdc[to], amount);
+    }
+
+    pub fn issue_dai(to: address, amount: DAI)
+        requires dai[to] <= @cast(DAI, std.constants.U256_MAX) - amount
+    {
+        @create(dai[to], amount);
+    }
+
+    pub fn usdcOf(owner: address) -> USDC {
+        return usdc[owner];
+    }
+
+    pub fn daiOf(owner: address) -> DAI {
+        return dai[owner];
+    }
+}

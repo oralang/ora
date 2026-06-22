@@ -20,7 +20,11 @@ const FUZZ_SEED: u64 = 0xA11CE; // fixed for gate reproducibility
 const FUZZ_ITERATIONS: usize = 128;
 
 const fuzz_source =
+    \\resource FuzzUnit = u256;
+    \\
     \\contract FuzzTarget {
+    \\    storage var balances: map<address, Resource<FuzzUnit>>;
+    \\
     \\    pub fn echo_len(s: string) -> u256 {
     \\        return s.len;
     \\    }
@@ -82,6 +86,32 @@ const fuzz_source =
     \\            }
     \\        }
     \\        return total + t.1.len;
+    \\    }
+    \\
+    \\    pub fn issue(to: address, amount: FuzzUnit)
+    \\        requires amount <= 1000
+    \\        requires balances[to] <= 1000 - amount
+    \\    {
+    \\        @create(balances[to], amount);
+    \\    }
+    \\
+    \\    pub fn transfer(from: address, to: address, amount: FuzzUnit)
+    \\        requires amount <= 1000
+    \\        requires balances[from] >= amount
+    \\        requires balances[to] <= 1000 - amount
+    \\    {
+    \\        @move(balances[from], balances[to], amount);
+    \\    }
+    \\
+    \\    pub fn burn(from: address, amount: FuzzUnit)
+    \\        requires amount <= 1000
+    \\        requires balances[from] >= amount
+    \\    {
+    \\        @destroy(balances[from], amount);
+    \\    }
+    \\
+    \\    pub fn resource_balance(owner: address) -> FuzzUnit {
+    \\        return balances[owner];
     \\    }
     \\}
 ;
@@ -309,6 +339,31 @@ fn validSignedI16Calldata(allocator: std.mem.Allocator, value: i16) ![]u8 {
     return buf;
 }
 
+fn wordForU256(value: u256) [32]u8 {
+    var word: [32]u8 = .{0} ** 32;
+    std.mem.writeInt(u256, &word, value, .big);
+    return word;
+}
+
+fn wordForAddress(address: [20]u8) [32]u8 {
+    var word: [32]u8 = .{0} ** 32;
+    @memcpy(word[12..32], address[0..]);
+    return word;
+}
+
+fn staticCalldata(allocator: std.mem.Allocator, signature: []const u8, words: []const [32]u8) ![]u8 {
+    var selector_hash: [32]u8 = undefined;
+    std.crypto.hash.sha3.Keccak256.hash(signature, &selector_hash, .{});
+
+    var buf = try allocator.alloc(u8, 4 + words.len * 32);
+    @memcpy(buf[0..4], selector_hash[0..4]);
+    for (words, 0..) |word, i| {
+        const start = 4 + i * 32;
+        @memcpy(buf[start .. start + 32], &word);
+    }
+    return buf;
+}
+
 const Mutation = enum { truncate_head, offset_oob, length_oob, length_overflow_word };
 
 const StaticElementMutation = enum { bool_noncanonical, address_high_padding, bytes4_right_padding, int16_bad_sign_extension };
@@ -350,6 +405,15 @@ fn expectU256Return(result: types.Evm.CallResult, expected: u256) !void {
     if (!result.success) return error.FuzzBaselineRejected;
     if (result.output.len != 32) return error.FuzzBaselineBadReturn;
     if (std.mem.readInt(u256, result.output[0..32], .big) != expected) return error.FuzzBaselineWrongValue;
+}
+
+fn expectEmptySuccess(result: types.Evm.CallResult) !void {
+    if (!result.success) return error.FuzzBaselineRejected;
+    if (result.output.len != 0) return error.FuzzBaselineBadReturn;
+}
+
+fn expectRevert(result: types.Evm.CallResult) !void {
+    if (result.success) return error.FuzzAcceptedMalformedCalldata;
 }
 
 fn rejectInvalidMutations(runtime: *runner.PropertyRuntime, base: []const u8, shape: DynamicShape, seed: u64) !void {
@@ -450,6 +514,70 @@ fn addressToU256(address: [20]u8) u256 {
     return std.mem.readInt(u256, &word, .big);
 }
 
+fn resourceCall(allocator: std.mem.Allocator, signature: []const u8, address0: [20]u8, address1: ?[20]u8, amount: ?u256) ![]u8 {
+    var words: [3][32]u8 = undefined;
+    var count: usize = 0;
+    words[count] = wordForAddress(address0);
+    count += 1;
+    if (address1) |addr| {
+        words[count] = wordForAddress(addr);
+        count += 1;
+    }
+    if (amount) |value| {
+        words[count] = wordForU256(value);
+        count += 1;
+    }
+    return try staticCalldata(allocator, signature, words[0..count]);
+}
+
+fn checkResourceAbiFuzz(runtime: *runner.PropertyRuntime, addr0: [20]u8, addr1: [20]u8) !void {
+    const issue_zero = try resourceCall(runtime.allocator, "issue(address,uint256)", addr0, null, 0);
+    try expectEmptySuccess(try runtime.callRaw(issue_zero));
+
+    const balance0_empty = try resourceCall(runtime.allocator, "resource_balance(address)", addr0, null, null);
+    try expectU256Return(try runtime.callRaw(balance0_empty), 0);
+
+    const issue_100 = try resourceCall(runtime.allocator, "issue(address,uint256)", addr0, null, 100);
+    try expectEmptySuccess(try runtime.callRaw(issue_100));
+    try expectU256Return(try runtime.callRaw(balance0_empty), 100);
+
+    const transfer_zero = try resourceCall(runtime.allocator, "transfer(address,address,uint256)", addr0, addr1, 0);
+    try expectEmptySuccess(try runtime.callRaw(transfer_zero));
+    try expectU256Return(try runtime.callRaw(balance0_empty), 100);
+
+    const transfer_self = try resourceCall(runtime.allocator, "transfer(address,address,uint256)", addr0, addr0, 13);
+    try expectEmptySuccess(try runtime.callRaw(transfer_self));
+    try expectU256Return(try runtime.callRaw(balance0_empty), 100);
+
+    const transfer_33 = try resourceCall(runtime.allocator, "transfer(address,address,uint256)", addr0, addr1, 33);
+    try expectEmptySuccess(try runtime.callRaw(transfer_33));
+    try expectU256Return(try runtime.callRaw(balance0_empty), 67);
+
+    const balance1 = try resourceCall(runtime.allocator, "resource_balance(address)", addr1, null, null);
+    try expectU256Return(try runtime.callRaw(balance1), 33);
+
+    const burn_30 = try resourceCall(runtime.allocator, "burn(address,uint256)", addr1, null, 30);
+    try expectEmptySuccess(try runtime.callRaw(burn_30));
+    try expectU256Return(try runtime.callRaw(balance1), 3);
+
+    const overdraw = try resourceCall(runtime.allocator, "transfer(address,address,uint256)", addr1, addr0, 4);
+    try expectRevert(try runtime.callRaw(overdraw));
+    try expectU256Return(try runtime.callRaw(balance0_empty), 67);
+    try expectU256Return(try runtime.callRaw(balance1), 3);
+
+    const max_issue = try resourceCall(runtime.allocator, "issue(address,uint256)", addr1, null, std.math.maxInt(u256));
+    try expectRevert(try runtime.callRaw(max_issue));
+    try expectU256Return(try runtime.callRaw(balance1), 3);
+
+    const near_cap_overflow = try resourceCall(runtime.allocator, "issue(address,uint256)", addr1, null, 998);
+    try expectRevert(try runtime.callRaw(near_cap_overflow));
+    try expectU256Return(try runtime.callRaw(balance1), 3);
+
+    const near_cap_ok = try resourceCall(runtime.allocator, "issue(address,uint256)", addr1, null, 997);
+    try expectEmptySuccess(try runtime.callRaw(near_cap_ok));
+    try expectU256Return(try runtime.callRaw(balance1), 1000);
+}
+
 fn runFuzz(runtime: *runner.PropertyRuntime) !void {
     const arena = runtime.allocator;
 
@@ -505,6 +633,8 @@ fn runFuzz(runtime: *runner.PropertyRuntime) !void {
     const bool_array_string_tuple_base = try validBoolArrayStringTupleCalldata(arena, &.{ true, false, true }, "ora");
     try expectU256Return(try runtime.callRaw(bool_array_string_tuple_base), 5);
     try rejectInvalidStaticElementMutations(runtime, bool_array_string_tuple_base, "(bool[],string).0", 132, 3, .bool_noncanonical, FUZZ_SEED ^ 0xb005);
+
+    try checkResourceAbiFuzz(runtime, addr0, addr1);
 }
 
 pub fn run(allocator: std.mem.Allocator) !void {

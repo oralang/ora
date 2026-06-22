@@ -64,6 +64,7 @@ const docs = std.StaticStringMap([]const u8).initComptime(.{
     .{ "or", "Logical disjunction operator." },
     .{ "pub", "Makes a declaration publicly visible." },
     .{ "requires", "Precondition that must hold when the function is called." },
+    .{ "resource", "Declares a nominal resource quantity domain." },
     .{ "result", "Refers to the return value in postconditions." },
     .{ "return", "Returns a value from the current function." },
     .{ "self", "Refers to the current contract instance." },

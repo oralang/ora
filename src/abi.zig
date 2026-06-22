@@ -1394,6 +1394,8 @@ const CompilerAbiGenerator = struct {
                 return self.resolvedTypeForIndex(idx);
             },
             .refinement => |refinement| return self.resolveRefinementType(ctx, refinement),
+            .resource_domain => |resource| return self.resolveSemaType(ctx, resource.carrier_type.*, &.{}),
+            .resource_place => return error.UnsupportedAbiType,
             .array => |array| return self.resolveArrayType(ctx, array),
             .slice => |slice| return self.resolveSliceType(ctx, slice),
             .tuple => |elements| return self.resolveTupleType(ctx, elements),

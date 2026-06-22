@@ -16,6 +16,8 @@ pub const TypeKind = enum {
     storage_slot,
     storage_range,
     external_proxy,
+    resource_domain,
+    resource_place,
     named,
     function,
     contract,
@@ -52,6 +54,15 @@ pub const NamedType = struct {
 
 pub const ExternalProxyType = struct {
     trait_name: []const u8,
+};
+
+pub const ResourceDomainType = struct {
+    name: []const u8,
+    carrier_type: *const Type,
+};
+
+pub const ResourcePlaceType = struct {
+    domain_type: *const Type,
 };
 
 pub const IntegerType = struct {
@@ -161,6 +172,8 @@ pub const Type = union(TypeKind) {
     storage_slot: void,
     storage_range: void,
     external_proxy: ExternalProxyType,
+    resource_domain: ResourceDomainType,
+    resource_place: ResourcePlaceType,
     named: NamedType,
     function: FunctionType,
     contract: NamedType,
@@ -187,6 +200,7 @@ pub const Type = union(TypeKind) {
             .storage_slot => "StorageSlot",
             .storage_range => "StorageRange",
             .external_proxy => |proxy| proxy.trait_name,
+            .resource_domain => |resource| resource.name,
             .named => |named| named.name,
             .function => |function| function.name,
             .contract => |named| named.name,
@@ -230,6 +244,14 @@ pub const Type = union(TypeKind) {
     pub fn refinementBaseType(self: *const Type) ?*const Type {
         return switch (self.*) {
             .refinement => |refinement| refinement.base_type,
+            else => null,
+        };
+    }
+
+    pub fn resourceCarrierType(self: *const Type) ?*const Type {
+        return switch (self.*) {
+            .resource_domain => |resource| resource.carrier_type,
+            .resource_place => |place| place.domain_type.resourceCarrierType(),
             else => null,
         };
     }
@@ -298,6 +320,11 @@ pub fn appendTypeMangleName(allocator: std.mem.Allocator, buffer: *std.ArrayList
         .storage_slot => try buffer.appendSlice(allocator, "StorageSlot"),
         .storage_range => try buffer.appendSlice(allocator, "StorageRange"),
         .external_proxy => |proxy| try buffer.writer(allocator).print("external_{s}", .{proxy.trait_name}),
+        .resource_domain => |resource| try buffer.writer(allocator).print("resource_{s}", .{resource.name}),
+        .resource_place => |place| {
+            try buffer.appendSlice(allocator, "Resource_");
+            try appendTypeMangleName(allocator, buffer, place.domain_type.*);
+        },
         .void => try buffer.appendSlice(allocator, "void"),
         .integer => |integer| try appendIntegerTypeMangleName(allocator, buffer, integer),
         .comptime_integer => |integer| try buffer.appendSlice(allocator, integer.spelling orelse "comptime_int"),
@@ -366,6 +393,8 @@ pub fn typeMangleNameLen(ty: Type) usize {
         .storage_slot => "StorageSlot".len,
         .storage_range => "StorageRange".len,
         .external_proxy => |proxy| "external_".len + proxy.trait_name.len,
+        .resource_domain => |resource| "resource_".len + resource.name.len,
+        .resource_place => |place| "Resource_".len + typeMangleNameLen(place.domain_type.*),
         .void => "void".len,
         .integer => |integer| integerTypeMangleNameLen(integer),
         .comptime_integer => |integer| if (integer.spelling) |spelling| spelling.len else "comptime_int".len,

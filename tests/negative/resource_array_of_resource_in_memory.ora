@@ -1,0 +1,5 @@
+resource TokenUnit = u256;
+
+contract ArrayOfResource {
+    pub fn bad(values: [Resource<TokenUnit>; 2]) {}
+}

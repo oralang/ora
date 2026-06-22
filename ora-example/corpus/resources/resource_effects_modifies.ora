@@ -1,0 +1,23 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceEffectsModifies {
+    storage var reserve: Resource<TokenUnit>;
+    storage var treasury: Resource<TokenUnit>;
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn sweep(amount: TokenUnit)
+        requires reserve >= amount
+        requires treasury <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        modifies reserve, treasury
+    {
+        @move(reserve, treasury, amount);
+    }
+
+    pub fn deposit(to: address, amount: TokenUnit)
+        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+        modifies balances[to]
+    {
+        @create(balances[to], amount);
+    }
+}

@@ -1,0 +1,20 @@
+resource TokenUnit = u256;
+comptime const std = @import("std");
+
+contract ResourceSelfTransfer {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn issue(to: address, amount: TokenUnit)
+        requires balances[to] <= @cast(TokenUnit, std.constants.U256_MAX) - amount
+    {
+        @create(balances[to], amount);
+    }
+
+    pub fn selfTransfer(owner: address, amount: TokenUnit) {
+        @move(balances[owner], balances[owner], amount);
+    }
+
+    pub fn balanceOf(owner: address) -> TokenUnit {
+        return balances[owner];
+    }
+}

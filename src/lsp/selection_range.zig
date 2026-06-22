@@ -129,6 +129,7 @@ fn itemTextRange(item: compiler.ast.nodes.Item) ?compiler.TextRange {
         .Struct => |struct_decl| struct_decl.range,
         .Bitfield => |bitfield_decl| bitfield_decl.range,
         .Enum => |enum_decl| enum_decl.range,
+        .Resource => |resource_decl| resource_decl.range,
         .Trait => |trait_decl| trait_decl.range,
         .Impl => |impl_decl| impl_decl.range,
         .TypeAlias => |type_alias| type_alias.range,

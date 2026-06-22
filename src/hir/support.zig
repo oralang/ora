@@ -462,6 +462,7 @@ pub fn resolvedIntegerSignedness(ty: Type) anyerror!?bool {
     return switch (unwrapRefinementSemaType(ty)) {
         .integer => |integer| integer.signed,
         .comptime_integer => error.MlirOperationCreationFailed,
+        .resource_domain => |resource| resolvedIntegerSignedness(resource.carrier_type.*),
         else => null,
     };
 }
@@ -567,6 +568,7 @@ pub fn itemRange(file: *const ast.AstFile, item_id: ast.ItemId) source.TextRange
         .Struct => |node| node.range,
         .Bitfield => |node| node.range,
         .Enum => |node| node.range,
+        .Resource => |node| node.range,
         .Trait => |node| node.range,
         .Impl => |node| node.range,
         .TypeAlias => |node| node.range,

@@ -236,7 +236,7 @@ test "imports: std import resolves through embedded stdlib graph" {
     var graph = try imports.resolveImportGraph(allocator, entry_path, .{});
     defer graph.deinit(allocator);
 
-    try testing.expectEqual(@as(usize, 6), graph.modules.len);
+    try testing.expectEqual(@as(usize, 5), graph.modules.len);
     const entry_module = for (graph.modules) |module| {
         if (std.mem.endsWith(u8, module.resolved_path, "entry.ora")) break module;
     } else return error.TestUnexpectedResult;
@@ -246,7 +246,6 @@ test "imports: std import resolves through embedded stdlib graph" {
     var found_std_bytes = false;
     var found_std_constants = false;
     var found_std_result = false;
-    var found_std_interfaces = false;
     for (graph.modules) |module| {
         if (module.package_name) |package_name| {
             if (std.mem.eql(u8, package_name, "std")) {
@@ -254,7 +253,6 @@ test "imports: std import resolves through embedded stdlib graph" {
                 if (std.mem.eql(u8, module.package_module_path.?, "bytes.ora")) found_std_bytes = true;
                 if (std.mem.eql(u8, module.package_module_path.?, "constants.ora")) found_std_constants = true;
                 if (std.mem.eql(u8, module.package_module_path.?, "result.ora")) found_std_result = true;
-                if (std.mem.eql(u8, module.package_module_path.?, "interfaces.ora")) found_std_interfaces = true;
             }
         }
     }
@@ -262,7 +260,6 @@ test "imports: std import resolves through embedded stdlib graph" {
     try testing.expect(found_std_bytes);
     try testing.expect(found_std_constants);
     try testing.expect(found_std_result);
-    try testing.expect(found_std_interfaces);
 }
 
 test "imports: std storage import resolves only storage helper graph" {

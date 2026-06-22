@@ -1,0 +1,22 @@
+// INPUT: tests/conformance/resource_basic_transfer.ora
+// CHECK-NOT: builtin.unrealized_conversion_cast
+
+// CHECK-LABEL: fn issue:
+// CHECK: slot_balances = const 0x0
+// CHECK: hash_balances = keccak256
+// CHECK: [[BEFORE:v[0-9]+]] = sload hash_balances
+// CHECK: [[AFTER:v[0-9]+]] = add [[BEFORE]] v1
+// CHECK: [[OVERFLOW:v[0-9]+]] = lt [[AFTER]] [[BEFORE]]
+// CHECK: [[OK:v[0-9]+]] = iszero [[OVERFLOW]]
+// CHECK: => [[OK]] ? @bb4 : @bb2
+// CHECK: sstore hash_balances [[AFTER]]
+
+// CHECK-LABEL: fn retire:
+// CHECK: slot_balances = const 0x0
+// CHECK: hash_balances = keccak256
+// CHECK: [[BEFORE:v[0-9]+]] = sload hash_balances
+// CHECK: [[AFTER:v[0-9]+]] = sub [[BEFORE]] v1
+// CHECK: [[UNDERFLOW:v[0-9]+]] = lt [[BEFORE]] v1
+// CHECK: [[OK:v[0-9]+]] = iszero [[UNDERFLOW]]
+// CHECK: => [[OK]] ? @bb2 : @bb0
+// CHECK: sstore hash_balances [[AFTER]]

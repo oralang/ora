@@ -1,0 +1,9 @@
+resource TokenUnit = u256;
+
+contract BadDestroyArity {
+    storage var balances: map<address, Resource<TokenUnit>>;
+
+    pub fn bad(from: address) {
+        @destroy(balances[from]);
+    }
+}

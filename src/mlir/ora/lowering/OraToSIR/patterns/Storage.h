@@ -307,6 +307,39 @@ namespace mlir
             MapHashCache *mapHashCache;
         };
 
+        class ConvertResourceCreateOp : public OpConversionPattern<ora::CreateOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::CreateOp op,
+                typename ora::CreateOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertResourceDestroyOp : public OpConversionPattern<ora::DestroyOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::DestroyOp op,
+                typename ora::DestroyOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
+        class ConvertResourceMoveOp : public OpConversionPattern<ora::MoveOp>
+        {
+        public:
+            using OpConversionPattern::OpConversionPattern;
+
+            LogicalResult matchAndRewrite(
+                ora::MoveOp op,
+                typename ora::MoveOp::Adaptor adaptor,
+                ConversionPatternRewriter &rewriter) const override;
+        };
+
         class ConvertTensorExtractOp : public OpConversionPattern<mlir::tensor::ExtractOp>
         {
         public:
