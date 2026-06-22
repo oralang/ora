@@ -1,6 +1,6 @@
 //===- SIRTextEmitter.cpp - SIR Text Emitter -------------------------===//
 //
-// Emits Sensei SIR text from SIR MLIR. Assumes SIR text legality has been
+// Emits Plank SIR text from SIR MLIR. Assumes SIR text legality has been
 // validated by the SIRTextLegalizer pass.
 //
 //===----------------------------------------------------------------------===//
@@ -74,7 +74,7 @@ namespace
                         std::string n = nameAttr.getValue().str();
                         if (!n.empty())
                         {
-                            // Sensei locals are block-scoped. Explicit const
+                            // Plank locals are block-scoped. Explicit const
                             // names can only be reused within the same block.
                             if (auto cOp = dyn_cast<sir::ConstOp>(def))
                             {
@@ -87,7 +87,7 @@ namespace
                                     return n;
                                 }
                                 // Same name already registered: reuse only for
-                                // an earlier const in this block. Sensei locals
+                                // an earlier const in this block. Plank locals
                                 // are block-scoped, so sharing a const name
                                 // across blocks emits a reference to a local
                                 // that is not in scope.
@@ -123,7 +123,7 @@ namespace
     std::string formatInt(const APInt &v)
     {
         llvm::SmallString<32> s;
-        // Sensei SIR text parser only accepts unsigned decimal/hex literals.
+        // Plank SIR text parser only accepts unsigned decimal/hex literals.
         // Emit all APInt values as unsigned hex (two's-complement for negatives).
         v.toString(s, 16, false, false);
         return ("0x" + s.str()).str();
@@ -522,7 +522,7 @@ namespace
             return;
 
         // select(cond, a, b) → or(and(sub(0,cond), a), and(not(sub(0,cond)), b))
-        // Expanded inline because sensei has no "select" mnemonic.
+        // Expanded inline because Plank SIR has no "select" mnemonic.
         if (auto sel = dyn_cast<sir::SelectOp>(op))
         {
             const char *ind = "        ";
@@ -573,7 +573,7 @@ namespace
         }
         else if (auto cst = dyn_cast<sir::ConstOp>(op))
         {
-            // Sensei uses "const" for u32 values, "large_const" for larger.
+            // Plank SIR uses "const" for u32 values, "large_const" for larger.
             if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
             {
                 if (intAttr.getValue().getActiveBits() > 32)
@@ -1223,7 +1223,7 @@ namespace mlir
         {
             // Extract source locations from SIR MLIR ops as JSON.
             // CRITICAL: The op indexing must exactly match the serialized backend
-            // execution order used by Sensei source-map emission. Skipped ops
+            // execution order used by Plank source-map emission. Skipped ops
             // (deduped consts, bitcasts, ErrorDeclOp) must be skipped here too,
             // and expanded ops (SelectOp -> 6 SIR ops) must produce matching
             // synthetic indices. The separate line map ties these backend indices

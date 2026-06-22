@@ -2148,7 +2148,7 @@ LogicalResult ConvertTStoreOp::matchAndRewrite(
 }
 
 // Lock/unlock/guard use a tx-scoped "locked set" stored in TSTORE at key = LOCK_PREFIX + slot.
-// Sensei text has no tstore.lock/unlock/guard; we expand to const/add/tstore/tload/cond_br/revert.
+// Plank SIR text has no tstore.lock/unlock/guard; we expand to const/add/tstore/tload/cond_br/revert.
 constexpr unsigned kLockPrefixBit = 255;
 static llvm::APInt getLockPrefixAPInt()
 {

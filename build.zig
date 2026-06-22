@@ -517,43 +517,47 @@ pub fn build(b: *std.Build) void {
     const evm_debug_dap_step = b.step("debug-dap", "Run the Ora EVM debugger DAP server (Content-Length-framed JSON-RPC over stdio)");
     evm_debug_dap_step.dependOn(&evm_debug_dap_cmd.step);
 
-    // Sensei SIR CLI integration (vendored Rust tool)
-    const sensei_root = "vendor/sensei/senseic";
-    const sensei_cargo = b.fmt("{s}/Cargo.toml", .{sensei_root});
-    var sensei_build_dependency: ?*std.Build.Step = null;
-    if (std.fs.cwd().access(sensei_cargo, .{}) catch null) |_| {
-        const sensei_build_cmd = b.addSystemCommand(&[_][]const u8{
+    // Plank SIR CLI integration (vendored Rust tool)
+    const plank_root = "vendor/plank/plankc";
+    const plank_cargo = b.fmt("{s}/Cargo.toml", .{plank_root});
+    var plank_build_dependency: ?*std.Build.Step = null;
+    if (std.fs.cwd().access(plank_cargo, .{}) catch null) |_| {
+        const plank_build_cmd = b.addSystemCommand(&[_][]const u8{
             "cargo",
             "build",
             "-p",
             "sir-cli",
             "--release",
         });
-        sensei_build_cmd.setCwd(b.path(sensei_root));
-        sensei_build_dependency = &sensei_build_cmd.step;
+        plank_build_cmd.setCwd(b.path(plank_root));
+        plank_build_dependency = &plank_build_cmd.step;
 
-        const sensei_build_step = b.step("sensei-sir", "Build Sensei SIR CLI");
-        sensei_build_step.dependOn(&sensei_build_cmd.step);
+        const plank_build_step = b.step("plank-sir", "Build Plank SIR CLI");
+        plank_build_step.dependOn(&plank_build_cmd.step);
 
         if (@import("builtin").os.tag != .windows) {
-            const sir_bin = b.fmt("{s}/target/release/sir", .{sensei_root});
-            const sample_input = "tests/sensei/sample.sir";
+            const sir_bin = b.fmt("{s}/target/release/sir", .{plank_root});
+            const sample_input = "tests/plank/sample.sir";
             const e2e_script = b.fmt(
                 "out=$({s} {s}); test \"${{out#0x}}\" != \"$out\" -a ${{#out}} -gt 2",
                 .{ sir_bin, sample_input },
             );
 
-            const sensei_e2e_cmd = b.addSystemCommand(&[_][]const u8{
+            const plank_e2e_cmd = b.addSystemCommand(&[_][]const u8{
                 "bash",
                 "-lc",
                 e2e_script,
             });
-            sensei_e2e_cmd.step.dependOn(&sensei_build_cmd.step);
+            plank_e2e_cmd.step.dependOn(&plank_build_cmd.step);
 
-            const sensei_e2e_step = b.step("sensei-e2e", "Run Sensei SIR -> bytecode smoke test");
-            sensei_e2e_step.dependOn(&sensei_e2e_cmd.step);
+            const plank_e2e_step = b.step("plank-e2e", "Run Plank SIR -> bytecode smoke test");
+            plank_e2e_step.dependOn(&plank_e2e_cmd.step);
         }
     }
+
+    // Build the vendored Plank SIR binary as part of the default build, so `zig build`
+    // produces a fully working compiler with no extra setup (no env vars, no separate step).
+    if (plank_build_dependency) |dep| b.getInstallStep().dependOn(dep);
 
     // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
@@ -627,7 +631,7 @@ pub fn build(b: *std.Build) void {
     conformance_tests.step.dependOn(&bootstrap_voltaire_crypto.step);
     const conformance_tests_run = b.addRunArtifact(conformance_tests);
     conformance_tests_run.step.dependOn(b.getInstallStep());
-    if (sensei_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
+    if (plank_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
 
     const test_conformance_step = b.step("test-conformance", "Run Ora bytecode conformance tests on lib/evm");
     test_conformance_step.dependOn(&conformance_tests_run.step);
@@ -1343,7 +1347,7 @@ pub fn build(b: *std.Build) void {
 
     const compiler_tests_run = b.addRunArtifact(compiler_tests);
     compiler_tests_run.step.dependOn(b.getInstallStep());
-    if (sensei_build_dependency) |dep| compiler_tests_run.step.dependOn(dep);
+    if (plank_build_dependency) |dep| compiler_tests_run.step.dependOn(dep);
     const evm_debug_probe_install_cmd = b.addSystemCommand(&[_][]const u8{
         "zig",
         "build",
