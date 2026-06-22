@@ -2318,8 +2318,8 @@
 // CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":655:9)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_is_paused : !sir.u256, %4 : !sir.u256 loc("ora.stmt.185"("ora.origin_stmt.185"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":658:9)))
-// CHECK-NEXT:     %value_3 = sir.sload %slot_is_paused : !sir.u256 : !sir.u256 loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":78:5)))
 // CHECK-NEXT:     %11 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":659:9)))
+// CHECK-NEXT:     %value_3 = sir.sload %slot_is_paused : !sir.u256 : !sir.u256 loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":78:5)))
 // CHECK-NEXT:     %12 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":659:9)))
 // CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %11 : !sir.u256 loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":659:9)))
 // CHECK-NEXT:     %13 = sir.bitcast %12 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.186"("ora.origin_stmt.186"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":659:9)))
@@ -2350,8 +2350,8 @@
 // CHECK-NEXT:     sir.revert %11 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":663:9)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.sstore %slot_is_paused : !sir.u256, %5 : !sir.u256 loc("ora.stmt.187"("ora.origin_stmt.187"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":666:9)))
-// CHECK-NEXT:     %value_3 = sir.sload %slot_is_paused : !sir.u256 : !sir.u256 loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":78:5)))
 // CHECK-NEXT:     %12 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":667:9)))
+// CHECK-NEXT:     %value_3 = sir.sload %slot_is_paused : !sir.u256 : !sir.u256 loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":78:5)))
 // CHECK-NEXT:     %13 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":667:9)))
 // CHECK-NEXT:     sir.store %13 : !sir.ptr<1>, %12 : !sir.u256 loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":667:9)))
 // CHECK-NEXT:     %14 = sir.bitcast %13 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.188"("ora.origin_stmt.188"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":667:9)))
@@ -2413,8 +2413,8 @@
 // CHECK-NEXT:     sir.cond_br %35 : !sir.u256, ^bb1, ^bb5 loc("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":673:9)
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.sstore %slot_max_ltv_3 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.189"("ora.origin_stmt.189"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":676:9)))
-// CHECK-NEXT:     %value_4 = sir.sload %slot_max_ltv_3 : !sir.u256 : !sir.u256 loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":74:5)))
 // CHECK-NEXT:     %36 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":677:9)))
+// CHECK-NEXT:     %value_4 = sir.sload %slot_max_ltv_3 : !sir.u256 : !sir.u256 loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":74:5)))
 // CHECK-NEXT:     %37 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":677:9)))
 // CHECK-NEXT:     sir.store %37 : !sir.ptr<1>, %36 : !sir.u256 loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":677:9)))
 // CHECK-NEXT:     %38 = sir.bitcast %37 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.190"("ora.origin_stmt.190"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":677:9)))
@@ -2476,8 +2476,8 @@
 // CHECK-NEXT:     sir.cond_br %35 : !sir.u256, ^bb1, ^bb5 loc("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":683:9)
 // CHECK-NEXT:   ^bb5:  // pred: ^bb4
 // CHECK-NEXT:     sir.sstore %slot_liquidation_threshold_3 : !sir.u256, %arg0 : !sir.u256 loc("ora.stmt.191"("ora.origin_stmt.191"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":686:9)))
-// CHECK-NEXT:     %value_4 = sir.sload %slot_liquidation_threshold_3 : !sir.u256 : !sir.u256 loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":75:5)))
 // CHECK-NEXT:     %36 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":687:9)))
+// CHECK-NEXT:     %value_4 = sir.sload %slot_liquidation_threshold_3 : !sir.u256 : !sir.u256 loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":75:5)))
 // CHECK-NEXT:     %37 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":687:9)))
 // CHECK-NEXT:     sir.store %37 : !sir.ptr<1>, %36 : !sir.u256 loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":687:9)))
 // CHECK-NEXT:     %38 = sir.bitcast %37 : !sir.ptr<1> : !sir.u256 loc("ora.stmt.192"("ora.origin_stmt.192"("{{.*}}/ora-example/apps/defi_lending_pool_fv.ora":687:9)))

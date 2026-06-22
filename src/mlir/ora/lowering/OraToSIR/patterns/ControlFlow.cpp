@@ -313,6 +313,50 @@ static Value phase0BuildWideErrorUnion(
     Value tag = isError
                     ? euh::narrowErrTagConst(rewriter, loc)
                     : euh::narrowOkTagConst(rewriter, loc);
+    if (!isError && llvm::isa<mlir::NoneType>(payload.getType()))
+        payload = constU256(rewriter, loc, 0);
+    if (!isError)
+    {
+        if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(errorUnionType))
+        {
+            Type carrierType = euh::getWideErrorUnionCarrierType(
+                rewriter.getContext(), errType.getSuccessType());
+            if (carrierType && payload.getType() != carrierType)
+            {
+                if (llvm::isa<sir::U256Type>(carrierType))
+                {
+                    payload = coerceToU256(rewriter, loc, payload);
+                }
+                else if (llvm::isa<sir::PtrType>(carrierType))
+                {
+                    if (auto materialized = ora::materializePtrCarrierFromOraValue(
+                            rewriter, loc, carrierType, payload))
+                    {
+                        payload = *materialized;
+                    }
+                    else if (llvm::isa<sir::U256Type>(payload.getType()))
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                    }
+                    else if (llvm::isa<ora::TupleType, ora::StructType, ora::AnonymousStructType,
+                                          ora::StringType, ora::BytesType, mlir::MemRefType,
+                                          mlir::UnrankedMemRefType>(payload.getType()))
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                    }
+                    else
+                    {
+                        payload = rewriter.create<sir::BitcastOp>(
+                            loc, carrierType, coerceToU256(rewriter, loc, payload));
+                    }
+                }
+                else
+                {
+                    payload = rewriter.create<sir::BitcastOp>(loc, carrierType, payload);
+                }
+            }
+        }
+    }
     return ora::createMaterializationCast(
         rewriter, loc, errorUnionType, ValueRange{tag, payload}, mat_kind::kWideErrorUnionJoin);
 }
