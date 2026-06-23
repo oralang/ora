@@ -1,7 +1,7 @@
 /// Storage management for the EVM
 /// Handles persistent storage, transient storage (EIP-1153), and original storage tracking
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const host = @import("host.zig");
 const errors = @import("errors.zig");
 const log = @import("logger.zig");

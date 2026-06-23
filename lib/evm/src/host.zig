@@ -4,7 +4,7 @@
 /// The EVM's inner_call method now uses CallParams/CallResult directly and does not
 /// go through this host interface - it handles nested calls internally.
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const Address = primitives.Address.Address;
 
 /// Minimal host interface for external state access (balances, storage, code, nonces)

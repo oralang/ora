@@ -1,6 +1,6 @@
 /// Execution context opcode handlers for the EVM
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Address = primitives.Address;
 

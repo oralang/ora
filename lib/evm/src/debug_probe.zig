@@ -1,6 +1,6 @@
 const std = @import("std");
-const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
+const primitives = ora_evm.primitives;
 
 const MOCK_RETURNDATA_PRECOMPILE_ADDRESS = primitives.Address.fromU256(0x300);
 

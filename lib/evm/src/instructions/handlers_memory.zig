@@ -1,6 +1,6 @@
 /// Memory opcode handlers for the EVM
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 
 /// Helper function for u32 addition with overflow check

@@ -36,7 +36,7 @@ pub fn parseArgArray(allocator: std.mem.Allocator, value: []const u8) ![]ArgValu
     const tokens = try splitTopLevelItems(allocator, trimmed[1 .. trimmed.len - 1]);
     defer allocator.free(tokens);
 
-    var args = std.ArrayList(ArgValue){};
+    var args: std.ArrayList(ArgValue) = .empty;
     errdefer args.deinit(allocator);
     for (tokens) |token| {
         if (token.len == 0) return error.InvalidArgs;
@@ -113,9 +113,9 @@ fn encodeAbiSequence(allocator: std.mem.Allocator, wires: []const []const u8, ar
         }
     }
 
-    var head = std.ArrayList(u8){};
+    var head: std.ArrayList(u8) = .empty;
     errdefer head.deinit(allocator);
-    var tail = std.ArrayList(u8){};
+    var tail: std.ArrayList(u8) = .empty;
     defer tail.deinit(allocator);
 
     for (wires, args) |wire, arg| {
@@ -194,7 +194,7 @@ fn encodeDynamicArray(allocator: std.mem.Allocator, element_type: []const u8, ar
     const body = try encodeAbiSequence(allocator, wires, values);
     defer allocator.free(body);
 
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendU256Word(&out, allocator, @intCast(elements.len));
     try out.appendSlice(allocator, body);
@@ -215,7 +215,7 @@ fn encodeTuple(allocator: std.mem.Allocator, wire_type: []const u8, arg: ArgValu
 }
 
 fn encodeDynamicBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     try appendU256Word(&out, allocator, @intCast(bytes.len));
     try out.appendSlice(allocator, bytes);
@@ -517,7 +517,7 @@ pub fn splitTopLevelItems(allocator: std.mem.Allocator, text: []const u8) ![][]c
     const trimmed = std.mem.trim(u8, text, " \t");
     if (trimmed.len == 0) return allocator.alloc([]const u8, 0);
 
-    var items = std.ArrayList([]const u8){};
+    var items: std.ArrayList([]const u8) = .empty;
     errdefer items.deinit(allocator);
 
     var paren_depth: usize = 0;

@@ -21,11 +21,11 @@ const runner = @import("runner.zig");
 const types = @import("types.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch {
         std.debug.print("metrics-snapshot: ora binary not found; run 'zig build' first\n", .{});
         std.process.exit(2);
     };
@@ -35,7 +35,7 @@ pub fn main() !void {
     defer runner.freeStringList(allocator, specs);
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
+    var stdout = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buf);
     const w = &stdout.interface;
 
     for (specs) |spec_name| {
@@ -47,7 +47,7 @@ pub fn main() !void {
         const spec_path = try std.fs.path.join(allocator, &.{ dir, spec_name });
         defer allocator.free(spec_path);
 
-        var list = std.ArrayList(runner.MetricSample){};
+        var list: std.ArrayList(runner.MetricSample) = .empty;
         defer {
             for (list.items) |s| allocator.free(s.key);
             list.deinit(allocator);

@@ -1,9 +1,9 @@
 /// System opcode handlers for the EVM (CALL, CREATE, SELFDESTRUCT)
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Address = primitives.Address.Address;
-const precompiles = @import("precompiles");
+const precompiles = @import("../precompiles.zig");
 
 /// Handlers struct - provides system operation handlers for a Frame type
 /// The FrameType must have methods: getEvm, consumeGas, popStack, pushStack

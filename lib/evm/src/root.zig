@@ -1,5 +1,7 @@
 //! Ora EVM runtime and debugger support.
 const std = @import("std");
+pub const primitives = @import("primitives.zig");
+pub const precompiles = @import("precompiles.zig");
 
 // Export configuration
 pub const evm_config = @import("evm_config.zig");
@@ -16,11 +18,15 @@ pub const StorageSlotKey = evm.StorageSlotKey;
 // AccessListParam removed - use primitives.AccessList.AccessList instead
 // AccessListStorageKey is now primitives.AccessList.StorageSlotKey
 pub const BlockContext = evm.BlockContext;
+pub const Address = primitives.Address;
+pub const ZERO_ADDRESS = primitives.ZERO_ADDRESS;
+pub const AccessList = primitives.AccessList;
+pub const GasConstants = primitives.GasConstants;
 
 // Export CallParams and CallResult (polymorphic API with guillotine core)
 pub const call_params = @import("call_params.zig");
 pub const call_result = @import("call_result.zig");
-pub const Log = @import("voltaire").logs.Log;
+pub const Log = primitives.Log;
 pub const SelfDestructRecord = call_result.SelfDestructRecord;
 pub const StorageAccess = call_result.StorageAccess;
 pub const TraceStep = call_result.TraceStep;
@@ -35,7 +41,6 @@ pub const host = @import("host.zig");
 pub const HostInterface = host.HostInterface;
 
 // Export Hardfork from primitives
-const primitives = @import("voltaire");
 pub const Hardfork = primitives.Hardfork;
 pub const ForkTransition = primitives.ForkTransition;
 

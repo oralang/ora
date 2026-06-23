@@ -2,7 +2,7 @@
 /// Wraps the EVM with breakpoints, statement-level stepping, and state inspection.
 /// Does NOT modify evm.zig or frame.zig — it drives them externally via step().
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const source_map = @import("source_map.zig");
 const SourceMap = source_map.SourceMap;
 const debug_info_mod = @import("debug_info.zig");

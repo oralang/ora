@@ -83,8 +83,8 @@ const CallBuilder = struct {
     reverts: ?types.ExpectedOutcome = null,
     succeeds: ?types.ExpectedOutcome = null,
     gas_max: ?u64 = null,
-    storage: std.ArrayList(types.StorageAssertion) = .{},
-    logs: std.ArrayList(types.LogAssertion) = .{},
+    storage: std.ArrayList(types.StorageAssertion) = .empty,
+    logs: std.ArrayList(types.LogAssertion) = .empty,
 
     fn toSpec(self: *CallBuilder, allocator: std.mem.Allocator) !types.CallSpec {
         const expected_outcome = try self.outcome();
@@ -104,8 +104,8 @@ const CallBuilder = struct {
         const storage = try self.storage.toOwnedSlice(allocator);
         errdefer allocator.free(storage);
         const logs = try self.logs.toOwnedSlice(allocator);
-        self.storage = .{};
-        self.logs = .{};
+        self.storage = .empty;
+        self.logs = .empty;
         return .{
             .to = self.to,
             .@"fn" = self.@"fn",
@@ -192,9 +192,9 @@ pub fn parse(allocator: std.mem.Allocator, source: []const u8) !ParsedSpec {
 fn parseInto(allocator: std.mem.Allocator, source: []const u8) !types.Spec {
     var deploy = DeployBuilder{};
     var deploy_seen = false;
-    var calls = std.ArrayList(types.CallSpec){};
+    var calls: std.ArrayList(types.CallSpec) = .empty;
     errdefer calls.deinit(allocator);
-    var contracts = std.ArrayList(types.ContractSpec){};
+    var contracts: std.ArrayList(types.ContractSpec) = .empty;
     errdefer contracts.deinit(allocator);
 
     var current_call: ?CallBuilder = null;
@@ -554,7 +554,7 @@ fn parseTopicArray(allocator: std.mem.Allocator, value: []const u8) ![]u256 {
     const inner = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
     if (inner.len == 0) return allocator.alloc(u256, 0);
 
-    var topics = std.ArrayList(u256){};
+    var topics: std.ArrayList(u256) = .empty;
     errdefer topics.deinit(allocator);
     var parts = std.mem.splitScalar(u8, inner, ',');
     while (parts.next()) |part| {
