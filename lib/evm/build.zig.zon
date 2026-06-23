@@ -4,9 +4,6 @@
     .fingerprint = 0x953ec4ef3870178a,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        .voltaire = .{
-            .path = "../../vendor/voltaire",
-        },
         .vaxis = .{
             .path = "../../vendor/vaxis",
         },
@@ -14,8 +11,11 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "Cargo.toml",
+        "Cargo.lock",
         "src",
         "test",
+        "vendor/c-kzg-4844",
         "LICENSE",
         "DEBUGGER_PLAN.md",
     },

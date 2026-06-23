@@ -7,8 +7,9 @@ const testing = std.testing;
 const test_helpers = @import("test_helpers.zig");
 const TestHelper = test_helpers.TestHelper;
 const TestAddresses = test_helpers.TestAddresses;
-const GasConstants = @import("voltaire").GasConstants;
-const Hardfork = @import("voltaire").Hardfork;
+const primitives = @import("../primitives.zig");
+const GasConstants = primitives.GasConstants;
+const Hardfork = primitives.Hardfork;
 
 // Import handler modules for testing
 const handlers_arithmetic = @import("handlers_arithmetic.zig");

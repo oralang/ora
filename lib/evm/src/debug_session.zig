@@ -5,7 +5,7 @@
 //! source-map-rebase logic. This module is the single home for that code so
 //! the two consumers can't drift.
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const evm_mod = @import("evm.zig");
 const evm_config = @import("evm_config.zig");
 const frame_mod = @import("frame.zig");

@@ -2,12 +2,12 @@
 /// This mirrors the architecture of frame/frame.zig but simplified for validation
 const std = @import("std");
 const log = @import("logger.zig");
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const GasConstants = primitives.GasConstants;
 const Address = primitives.Address.Address;
-const Hardfork = @import("voltaire").Hardfork;
+const Hardfork = primitives.Hardfork;
 const opcode_utils = @import("opcode.zig");
-const precompiles = @import("precompiles");
+const precompiles = @import("precompiles.zig");
 const evm_mod = @import("evm.zig");
 const EvmConfig = @import("evm_config.zig").EvmConfig;
 const Bytecode = @import("bytecode.zig").Bytecode;

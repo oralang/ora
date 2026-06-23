@@ -43,12 +43,13 @@ pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
 /// copy of `s` like `"foo\\nbar"` (with surrounding quotes
 /// included). Caller frees.
 pub fn allocJsonString(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try buf.append(allocator, '"');
-    try writeJsonEscaped(buf.writer(allocator), s);
-    try buf.append(allocator, '"');
-    return try buf.toOwnedSlice(allocator);
+    var buf = std.Io.Writer.Allocating.init(allocator);
+    errdefer buf.deinit();
+    const writer = &buf.writer;
+    try writer.writeByte('"');
+    try writeJsonEscaped(writer, s);
+    try writer.writeByte('"');
+    return try buf.toOwnedSlice();
 }
 
 /// Write a Content-Length-framed body to `file`. Header is
@@ -176,10 +177,10 @@ fn readDapMessageInner(allocator: std.mem.Allocator, source: Source) ![]u8 {
 const testing = std.testing;
 
 fn escapedToOwned(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    try writeJsonEscaped(buf.writer(allocator), s);
-    return try buf.toOwnedSlice(allocator);
+    var buf = std.Io.Writer.Allocating.init(allocator);
+    errdefer buf.deinit();
+    try writeJsonEscaped(&buf.writer, s);
+    return try buf.toOwnedSlice();
 }
 
 test "writeJsonEscaped: plain ASCII passes through unchanged" {

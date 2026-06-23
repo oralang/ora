@@ -99,7 +99,7 @@ test "falsification harness detects a kept-check divergence" {
 }
 
 test "falsification corpus executes with checks removed and checks kept" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -205,7 +205,7 @@ fn expectSameCall(
 // spec passes, and the SAME spec with one wrong expected value is caught. If a
 // corrupted expectation still "passed", the whole layer would be vacuously green.
 test "conformance runner detects a wrong expected return (suite teeth)" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -222,7 +222,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\}
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth.ora", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth.ora", .data = source });
 
     const good_spec =
         \\[deploy]
@@ -238,7 +238,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth_good.spec.toml", .data = good_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth_good.spec.toml", .data = good_spec });
 
     // Same call, deliberately wrong expected value.
     const bad_spec =
@@ -255,7 +255,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
         \\returns = { u256 = 43 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "teeth_bad.spec.toml", .data = bad_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "teeth_bad.spec.toml", .data = bad_spec });
 
     const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "teeth.ora");
     defer allocator.free(source_path);
@@ -274,7 +274,7 @@ test "conformance runner detects a wrong expected return (suite teeth)" {
 }
 
 test "conformance runner detects gas ceilings (suite teeth)" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -291,7 +291,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\}
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth.ora", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth.ora", .data = source });
 
     const good_spec =
         \\[deploy]
@@ -308,7 +308,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_good.spec.toml", .data = good_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth_good.spec.toml", .data = good_spec });
 
     const bad_spec =
         \\[deploy]
@@ -325,7 +325,7 @@ test "conformance runner detects gas ceilings (suite teeth)" {
         \\returns = { u256 = 42 }
         \\
     ;
-    try tmp.dir.writeFile(.{ .sub_path = "gas_teeth_bad.spec.toml", .data = bad_spec });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "gas_teeth_bad.spec.toml", .data = bad_spec });
 
     const source_path = try runner.pathFromTmpAlloc(allocator, tmp, "gas_teeth.ora");
     defer allocator.free(source_path);
@@ -345,7 +345,7 @@ test "conformance corpus files have sidecars or explicit skips" {
 }
 
 test "conformance corpus specs execute" {
-    std.fs.cwd().access(types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
+    std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
         else => return err,
     };
@@ -377,7 +377,7 @@ test "conformance corpus completeness rejects orphan ora files" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "orphan.ora",
         .data = "contract Orphan {}",
     });
@@ -391,11 +391,11 @@ test "conformance corpus completeness accepts explicit skips" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "orphan.ora",
         .data = "contract Orphan {}",
     });
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "SKIP",
         .data = "# known intentionally unchecked case\norphan.ora\n",
     });

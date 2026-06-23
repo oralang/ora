@@ -94,8 +94,7 @@ contract ERC20Token {
 
     // Read-only ERC20 metadata and views expose resource amounts as u256 ABI
     // words. They do not move, create, or destroy resources.
-    pub fn getTotalSupply() -> u256
-    {
+    pub fn getTotalSupply() -> u256 {
         return tokenValue(totalSupply);
     }
 
@@ -107,13 +106,11 @@ contract ERC20Token {
         return "EXT";
     }
 
-    pub fn balanceOf(account: address) -> u256
-    {
+    pub fn balanceOf(account: address) -> u256 {
         return tokenValue(balances[account]);
     }
 
-    pub fn allowance(owner: address, spender: address) -> u256
-    {
+    pub fn allowance(owner: address, spender: address) -> u256 {
         return tokenValue(allowances[owner][spender]);
     }
 

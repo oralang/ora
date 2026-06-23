@@ -222,30 +222,38 @@ pub fn build(b: *std.Build) void {
     mlir_helpers_mod.addImport("mlir_c_api", mlir_c_mod);
     mlir_helpers_mod.addImport("ora_types", ora_types_mod);
 
-    const voltaire_dep = b.dependency("voltaire", .{
+    const evm_blst_lib = createEvmBlstLibrary(b, target, optimize);
+    const evm_c_kzg_lib = createEvmCKzgLibrary(b, target, optimize, evm_blst_lib);
+    const evm_c_kzg_mod = b.addModule("c_kzg", .{
+        .root_source_file = b.path("lib/evm/vendor/c-kzg-4844/bindings/zig/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const evm_primitives_mod = voltaire_dep.module("primitives");
-    const evm_crypto_mod = voltaire_dep.module("crypto");
-    const evm_precompiles_mod = voltaire_dep.module("precompiles");
-    const bootstrap_voltaire_crypto = b.addSystemCommand(&.{
+    evm_c_kzg_mod.linkLibrary(evm_c_kzg_lib);
+    evm_c_kzg_mod.linkLibrary(evm_blst_lib);
+    evm_c_kzg_mod.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/src"));
+    evm_c_kzg_mod.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    const evm_rust_crypto_lib_path = b.path("lib/evm/target/release/libora_evm_crypto_wrappers.a");
+
+    const bootstrap_ora_evm_crypto = b.addSystemCommand(&.{
         "cargo",
         "build",
         "--manifest-path",
-        b.pathJoin(&.{ "vendor/voltaire", "Cargo.toml" }),
+        b.path("lib/evm/Cargo.toml").getPath(b),
         "--release",
     });
-    bootstrap_voltaire_crypto.setName("bootstrap-voltaire-crypto");
+    bootstrap_ora_evm_crypto.setName("bootstrap-ora-evm-crypto");
 
     const ora_evm_mod = b.createModule(.{
         .root_source_file = b.path("lib/evm/src/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "c_kzg", .module = evm_c_kzg_mod },
+        },
     });
-    ora_evm_mod.addImport("voltaire", evm_primitives_mod);
-    ora_evm_mod.addImport("crypto", evm_crypto_mod);
-    ora_evm_mod.addImport("precompiles", evm_precompiles_mod);
+    ora_evm_mod.addObjectFile(evm_rust_crypto_lib_path);
+    ora_evm_mod.link_libc = true;
 
     // modules can depend on one another using the `std.Build.Module.addImport` function.
     // this is what allows Zig source code to use `@import("foo")` where 'foo' is not a
@@ -623,12 +631,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     conformance_test_mod.addImport("ora_evm", ora_evm_mod);
-    conformance_test_mod.addImport("voltaire", evm_primitives_mod);
     const conformance_tests = b.addTest(.{
         .name = "ora-conformance-tests",
         .root_module = conformance_test_mod,
     });
-    conformance_tests.step.dependOn(&bootstrap_voltaire_crypto.step);
+    conformance_tests.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const conformance_tests_run = b.addRunArtifact(conformance_tests);
     conformance_tests_run.step.dependOn(b.getInstallStep());
     if (plank_build_dependency) |dep| conformance_tests_run.step.dependOn(dep);
@@ -644,12 +651,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     conformance_one_mod.addImport("ora_evm", ora_evm_mod);
-    conformance_one_mod.addImport("voltaire", evm_primitives_mod);
     const conformance_one_exe = b.addExecutable(.{
         .name = "conformance-one",
         .root_module = conformance_one_mod,
     });
-    conformance_one_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    conformance_one_exe.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const conformance_one_install = b.addInstallArtifact(conformance_one_exe, .{});
     const conformance_one_step = b.step("conformance-one", "Build the single-spec lib/evm runner");
     conformance_one_step.dependOn(&conformance_one_install.step);
@@ -674,12 +680,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     metrics_snapshot_mod.addImport("ora_evm", ora_evm_mod);
-    metrics_snapshot_mod.addImport("voltaire", evm_primitives_mod);
     const metrics_snapshot_exe = b.addExecutable(.{
         .name = "metrics-snapshot",
         .root_module = metrics_snapshot_mod,
     });
-    metrics_snapshot_exe.step.dependOn(&bootstrap_voltaire_crypto.step);
+    metrics_snapshot_exe.step.dependOn(&bootstrap_ora_evm_crypto.step);
     const metrics_snapshot_install = b.addInstallArtifact(metrics_snapshot_exe, .{});
     const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
     metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
@@ -2684,6 +2689,76 @@ fn addBoostPaths(b: *std.Build, compile_step: *std.Build.Step.Compile, target: s
         compile_step.root_module.addSystemIncludePath(.{ .cwd_relative = include_path });
         compile_step.root_module.addLibraryPath(.{ .cwd_relative = lib_path });
     }
+}
+
+fn createEvmBlstLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) *std.Build.Step.Compile {
+    const is_wasm = target.result.cpu.arch == .wasm32 or target.result.cpu.arch == .wasm64;
+    const lib = b.addLibrary(.{
+        .name = "blst",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+
+    if (!is_wasm) {
+        const blst_build_cmd = if (target.result.os.tag == .windows)
+            b.addSystemCommand(&.{ "bash", "./build.sh" })
+        else
+            b.addSystemCommand(&.{"./build.sh"});
+        blst_build_cmd.setCwd(b.path("lib/evm/vendor/c-kzg-4844/blst"));
+        lib.step.dependOn(&blst_build_cmd.step);
+        lib.root_module.addAssemblyFile(b.path("lib/evm/vendor/c-kzg-4844/blst/build/assembly.S"));
+    }
+
+    const c_flags = if (is_wasm)
+        &[_][]const u8{ "-std=c99", "-D__BLST_PORTABLE__", "-D__BLST_NO_ASM__", "-fno-sanitize=undefined" }
+    else
+        &[_][]const u8{ "-std=c99", "-fPIC", "-D__BLST_PORTABLE__", "-fno-sanitize=undefined" };
+
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "lib/evm/vendor/c-kzg-4844/blst/src/server.c",
+        },
+        .flags = c_flags,
+    });
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    return lib;
+}
+
+fn createEvmCKzgLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    blst_lib: *std.Build.Step.Compile,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .name = "c-kzg-4844",
+        .linkage = .static,
+        .use_llvm = true,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    lib.root_module.link_libc = true;
+    lib.root_module.linkLibrary(blst_lib);
+    lib.root_module.addCSourceFiles(.{
+        .files = &.{
+            "lib/evm/vendor/c-kzg-4844/src/ckzg.c",
+        },
+        .flags = &.{ "-std=c99", "-fPIC", "-fno-sanitize=undefined" },
+    });
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/src"));
+    lib.root_module.addIncludePath(b.path("lib/evm/vendor/c-kzg-4844/blst/bindings"));
+    return lib;
 }
 
 fn optimizeModeName(optimize: std.builtin.OptimizeMode) []const u8 {

@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vaxis = @import("vaxis");
-const primitives = @import("voltaire");
 const ora_evm = @import("ora_evm");
+const primitives = ora_evm.primitives;
 const opcode_utils = ora_evm.opcode;
 
 const Evm = ora_evm.Evm(.{});

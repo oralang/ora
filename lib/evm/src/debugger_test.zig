@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const primitives = @import("voltaire");
+const primitives = @import("primitives.zig");
 const Address = primitives.Address.Address;
 const Hardfork = primitives.Hardfork;
 

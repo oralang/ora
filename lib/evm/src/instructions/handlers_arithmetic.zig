@@ -1,6 +1,6 @@
 /// Arithmetic opcode handlers for the EVM
 const std = @import("std");
-const primitives = @import("voltaire");
+const primitives = @import("../primitives.zig");
 const GasConstants = primitives.GasConstants;
 
 /// Handlers struct - provides arithmetic operation handlers for a Frame type

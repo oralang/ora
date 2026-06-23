@@ -39,16 +39,16 @@
         .lsp_kit = .{
             .path = "vendor/lsp_kit",
         },
-        .voltaire = .{
-            .path = "vendor/voltaire",
-        },
     },
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "lib/evm/Cargo.toml",
+        "lib/evm/Cargo.lock",
         "lib/evm/build.zig",
         "lib/evm/build.zig.zon",
         "lib/evm/src",
+        "lib/evm/vendor/c-kzg-4844",
         "src",
         "tests/conformance",
         // For example...
