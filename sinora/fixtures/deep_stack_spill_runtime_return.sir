@@ -1,0 +1,33 @@
+fn init:
+    entry {
+        start = runtime_start_offset
+        len = runtime_length
+        ptr = malloc len
+        codecopy ptr start len
+        return ptr len
+    }
+
+fn main:
+    entry {
+        ptr = const 0x0
+        len = const 0x20
+        value = const 0x2a
+        filler_0 = const 0x0
+        filler_1 = const 0x0
+        filler_2 = const 0x0
+        filler_3 = const 0x0
+        filler_4 = const 0x0
+        filler_5 = const 0x0
+        filler_6 = const 0x0
+        filler_7 = const 0x0
+        filler_8 = const 0x0
+        filler_9 = const 0x0
+        filler_10 = const 0x0
+        filler_11 = const 0x0
+        filler_12 = const 0x0
+        filler_13 = const 0x0
+        filler_14 = const 0x0
+        filler_15 = const 0x0
+        mstore256 ptr value
+        return ptr len
+    }

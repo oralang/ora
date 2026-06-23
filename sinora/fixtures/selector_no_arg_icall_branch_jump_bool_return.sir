@@ -1,0 +1,81 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn f:
+    entry {
+        v0 = const 0x1
+        v1 = const 0x20
+        v2 = const 0x0
+        v3 = iszero v0
+        v4 = iszero v3
+        => v4 ? @bb0 : @bb1
+    }
+    bb0 -> v8 v1 {
+        v5 = iszero v0
+        v6 = iszero v5
+        v7 = and v6 v0
+        v8 = malloc v1
+        mstore256 v8 v7
+        iret
+    }
+    bb1 {
+        => @bb2
+    }
+    bb2 -> v12 v1 {
+        v9 = iszero v2
+        v10 = iszero v9
+        v11 = and v10 v0
+        v12 = malloc v1
+        mstore256 v12 v11
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x26121FF0 => @f_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    f_ {
+        v4 v5 = icall @f
+        return v4 v5
+    }

@@ -1,0 +1,258 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn not_u8:
+    entry v0 -> v6 v1 {
+        v1 = const 0x20
+        c255 = const 0xFF
+        v2 = and v0 c255
+        v3 = xor v2 c255
+        v4 = and v3 c255
+        v5 = and v4 c255
+        v6 = malloc v1
+        mstore256 v6 v5
+        iret
+    }
+
+fn not_u16:
+    entry v0 -> v7 v1 {
+        v1 = const 0x20
+        v2 = const 0xFFFF
+        v3 = and v0 v2
+        v4 = xor v3 v2
+        v5 = and v4 v2
+        v6 = and v5 v2
+        v7 = malloc v1
+        mstore256 v7 v6
+        iret
+    }
+
+fn not_u32:
+    entry v0 -> v7 v1 {
+        v1 = const 0x20
+        v2 = const 0xFFFFFFFF
+        v3 = and v0 v2
+        v4 = xor v3 v2
+        v5 = and v4 v2
+        v6 = and v5 v2
+        v7 = malloc v1
+        mstore256 v7 v6
+        iret
+    }
+
+fn not_u64:
+    entry v0 -> v7 v1 {
+        v1 = const 0x20
+        v2 = large_const 0xFFFFFFFFFFFFFFFF
+        v3 = and v0 v2
+        v4 = xor v3 v2
+        v5 = and v4 v2
+        v6 = and v5 v2
+        v7 = malloc v1
+        mstore256 v7 v6
+        iret
+    }
+
+fn not_u128:
+    entry v0 -> v7 v1 {
+        v1 = const 0x20
+        v2 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        v3 = and v0 v2
+        v4 = xor v3 v2
+        v5 = and v4 v2
+        v6 = and v5 v2
+        v7 = malloc v1
+        mstore256 v7 v6
+        iret
+    }
+
+fn not_u256:
+    entry v0 -> v4 v1 {
+        v1 = const 0x20
+        v2 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        v3 = xor v0 v2
+        v4 = malloc v1
+        mstore256 v4 v3
+        iret
+    }
+
+fn double_not_u256:
+    entry v0 -> v2 v1 {
+        v1 = const 0x20
+        v2 = malloc v1
+        mstore256 v2 v0
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xCD3EE204 => @not_u8_
+        0xE84E4C0C => @not_u16_
+        0xEED6E2E8 => @not_u32_
+        0xA52477B8 => @not_u64_
+        0x88E9D68E => @not_u128_
+        0x362248AD => @not_u256_
+        0x22E145DF => @double_not_u256_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    not_u8_ {
+        cdsize_not_u8 = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_not_u8 = lt min_cdsize_1arg_0 cdsize_not_u8
+        => valid_not_u8 ? @bb0 : @revert_error
+    }
+    not_u8_exec {
+        v7 v8 = icall @not_u8 v5
+        return v7 v8
+    }
+    not_u16_ {
+        cdsize_not_u16 = calldatasize
+        min_cdsize_1arg_1 = const 0x23
+        valid_not_u16 = lt min_cdsize_1arg_1 cdsize_not_u16
+        => valid_not_u16 ? @bb1 : @revert_error
+    }
+    not_u16_exec {
+        v14 v15 = icall @not_u16 v12
+        return v14 v15
+    }
+    not_u32_ {
+        cdsize_not_u32 = calldatasize
+        min_cdsize_1arg_2 = const 0x23
+        valid_not_u32 = lt min_cdsize_1arg_2 cdsize_not_u32
+        => valid_not_u32 ? @bb2 : @revert_error
+    }
+    not_u32_exec {
+        v19 v20 = icall @not_u32 v17
+        return v19 v20
+    }
+    not_u64_ {
+        cdsize_not_u64 = calldatasize
+        min_cdsize_1arg_3 = const 0x23
+        valid_not_u64 = lt min_cdsize_1arg_3 cdsize_not_u64
+        => valid_not_u64 ? @bb3 : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_not_u8 = calldataload selector_offset_0
+        v4 = const 0xFF
+        v5 = and a_not_u8 v4
+        v6 = eq a_not_u8 v5
+        => v6 ? @not_u8_exec : @abi_decode_revert_3
+    }
+    not_u64_exec {
+        v24 v25 = icall @not_u64 v22
+        return v24 v25
+    }
+    not_u128_ {
+        cdsize_not_u128 = calldatasize
+        min_cdsize_1arg_4 = const 0x23
+        valid_not_u128 = lt min_cdsize_1arg_4 cdsize_not_u128
+        => valid_not_u128 ? @bb4 : @revert_error
+    }
+    abi_decode_revert_3 {
+        word_size_0 = const 0x20
+        v9 = const 0x3
+        v10 = sallocany 0x20
+        mstore256 v10 v9
+        revert v10 word_size_0
+    }
+    not_u128_exec {
+        v29 v30 = icall @not_u128 v27
+        return v29 v30
+    }
+    not_u256_ {
+        cdsize_not_u256 = calldatasize
+        min_cdsize_1arg_5 = const 0x23
+        valid_not_u256 = lt min_cdsize_1arg_5 cdsize_not_u256
+        => valid_not_u256 ? @not_u256_exec : @revert_error
+    }
+    bb1 {
+        selector_offset_1 = const 0x4
+        a_not_u16 = calldataload selector_offset_1
+        v11 = const 0xFFFF
+        v12 = and a_not_u16 v11
+        v13 = eq a_not_u16 v12
+        => v13 ? @not_u16_exec : @abi_decode_revert_3
+    }
+    not_u256_exec {
+        selector_offset_5 = const 0x4
+        a_not_u256 = calldataload selector_offset_5
+        v31 v32 = icall @not_u256 a_not_u256
+        return v31 v32
+    }
+    double_not_u256_ {
+        cdsize_double_not_u256 = calldatasize
+        min_cdsize_1arg_6 = const 0x23
+        valid_double_not_u256 = lt min_cdsize_1arg_6 cdsize_double_not_u256
+        => valid_double_not_u256 ? @double_not_u256_exec : @revert_error
+    }
+    bb2 {
+        selector_offset_2 = const 0x4
+        a_not_u32 = calldataload selector_offset_2
+        v16 = const 0xFFFFFFFF
+        v17 = and a_not_u32 v16
+        v18 = eq a_not_u32 v17
+        => v18 ? @not_u32_exec : @abi_decode_revert_3
+    }
+    double_not_u256_exec {
+        selector_offset_6 = const 0x4
+        a_double_not_u256 = calldataload selector_offset_6
+        v33 v34 = icall @double_not_u256 a_double_not_u256
+        return v33 v34
+    }
+    bb3 {
+        selector_offset_3 = const 0x4
+        a_not_u64 = calldataload selector_offset_3
+        v21 = large_const 0xFFFFFFFFFFFFFFFF
+        v22 = and a_not_u64 v21
+        v23 = eq a_not_u64 v22
+        => v23 ? @not_u64_exec : @abi_decode_revert_3
+    }
+    bb4 {
+        selector_offset_4 = const 0x4
+        a_not_u128 = calldataload selector_offset_4
+        v26 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        v27 = and a_not_u128 v26
+        v28 = eq a_not_u128 v27
+        => v28 ? @not_u128_exec : @abi_decode_revert_3
+    }
