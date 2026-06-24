@@ -4,6 +4,11 @@ doc.md
 code-bin/
 .DS_Store
 
+# Lean (formal/) build output
+formal/.lake/
+formal/build/
+formal/lake-packages/
+
 # Build artifacts
 *.bin
 *.yul
@@ -48,3 +53,5 @@ zig-out/
 # Python bytecode (scripts/ helpers)
 __pycache__/
 *.pyc
+
+examples-projects/
