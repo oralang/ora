@@ -13,12 +13,12 @@ usage() {
   cat >&2 <<'USAGE'
 usage: scripts/backend-metrics-compare.sh [--run-id ID] [--out-dir DIR] [--no-build] [variant...]
 
-Runs the conformance gas/bytecode metrics harness once per backend variant and
+Runs the conformance gas/bytecode metrics harness once per snapshot label and
 writes a non-overwriting snapshot under:
 
   tests/conformance/backend_metrics/runs/<run-id>/
 
-Variants are passed through ORA_PLANK_BACKEND. Defaults: debug release.
+Defaults: sinora.
 
 Environment:
   ORA_BACKEND_METRICS_DIR      override snapshot root
@@ -61,7 +61,7 @@ while (($#)); do
 done
 
 if ((${#VARIANTS[@]} == 0)); then
-  VARIANTS=(debug release)
+  VARIANTS=(sinora)
 fi
 
 if ((BUILD_HARNESS)); then
@@ -111,7 +111,7 @@ for variant in "${VARIANTS[@]}"; do
       ;;
   esac
   echo "backend-metrics-compare: running $variant"
-  ORA_PLANK_BACKEND="$variant" "$HARNESS" > "$RUN_DIR/$variant.tsv"
+  "$HARNESS" > "$RUN_DIR/$variant.tsv"
 done
 
 python3 - "$RUN_DIR" "${VARIANTS[@]}" <<'PY'

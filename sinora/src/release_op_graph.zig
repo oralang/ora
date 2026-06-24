@@ -1,13 +1,5 @@
 //! Zig port of Plank's release stack-scheduling op graph.
 //!
-//! Rust source of truth:
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/mod.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/builder.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/build_effectful.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/build_simple.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/greedy_shuffler/mod.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/state.rs
-
 const std = @import("std");
 const diagnostics = @import("diagnostics.zig");
 const effects = @import("effects.zig");
@@ -1308,71 +1300,71 @@ fn expectStackOpsEqual(actual: []const release_schedule.StackOp, expected: []con
     }
 }
 
-test "greedy shuffler matches plank oracle: noop" {
+test "greedy shuffler fixture: noop" {
     try expectShuffle(.{}, &.{ 1, 2, 3 }, &.{ 1, 2, 3 }, &.{});
 }
 
-test "greedy shuffler matches plank oracle: pops_unneeded" {
+test "greedy shuffler fixture: pops_unneeded" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 4, 2, 3, 1 }, &.{ 1, 2, 3 }, &.{ .pop, .{ .swap = 1 }, .{ .swap = 2 } });
 }
 
-test "greedy shuffler matches plank oracle: swaps_top_to_correct_position" {
+test "greedy shuffler fixture: swaps_top_to_correct_position" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 9, 3, 4 }, &.{ 3, 1, 4, 3 }, &.{ .{ .swap = 1 }, .pop, .{ .swap = 1 }, .{ .swap = 2 }, .{ .swap = 1 }, .{ .store = 0 }, .{ .dup = 1 }, .{ .load = 0 }, .{ .swap = 1 } });
 }
 
-test "greedy shuffler matches plank oracle: pops_extra_top_value_single" {
+test "greedy shuffler fixture: pops_extra_top_value_single" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 1, 2, 3 }, &.{ 1, 2, 3, 2 }, &.{ .pop, .{ .swap = 1 }, .{ .swap = 2 }, .{ .swap = 1 }, .{ .store = 0 }, .{ .dup = 1 }, .{ .load = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: swaps_and_pops_extra_value" {
+test "greedy shuffler fixture: swaps_and_pops_extra_value" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 2, 1, 1, 3 }, &.{ 2, 1, 3, 2 }, &.{ .{ .swap = 2 }, .pop, .{ .swap = 1 }, .{ .swap = 2 }, .{ .swap = 1 }, .{ .store = 0 }, .{ .dup = 1 }, .{ .load = 0 }, .{ .swap = 1 } });
 }
 
-test "greedy shuffler matches plank oracle: pops_duplicate_top_value" {
+test "greedy shuffler fixture: pops_duplicate_top_value" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 1, 2, 4 }, &.{ 1, 1, 4, 2 }, &.{ .pop, .{ .swap = 1 }, .{ .swap = 2 }, .{ .swap = 1 }, .{ .dup = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: spills_when_no_shrink_step_applies" {
+test "greedy shuffler fixture: spills_when_no_shrink_step_applies" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 2, 3, 4 }, &.{ 1, 2, 4, 3 }, &.{ .{ .store = 0 }, .{ .swap = 1 }, .{ .swap = 2 }, .{ .swap = 1 }, .{ .load = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: repeatedly_pops_extra_top_values" {
+test "greedy shuffler fixture: repeatedly_pops_extra_top_values" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 1, 1, 2, 3 }, &.{ 1, 2, 3, 2, 3 }, &.{ .pop, .pop, .{ .store = 0 }, .{ .dup = 1 }, .{ .dup = 1 }, .{ .load = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: repeatedly_swaps_and_pops_extra_values" {
+test "greedy shuffler fixture: repeatedly_swaps_and_pops_extra_values" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 2, 1, 1, 3, 3 }, &.{ 2, 1, 3, 2, 2 }, &.{ .{ .swap = 2 }, .pop, .{ .swap = 2 }, .pop, .{ .swap = 2 }, .{ .store = 0 }, .{ .dup = 1 }, .{ .swap = 1 }, .{ .dup = 1 }, .{ .swap = 1 }, .{ .load = 0 }, .{ .swap = 2 } });
 }
 
-test "greedy shuffler matches plank oracle: simple_swap_only" {
+test "greedy shuffler fixture: simple_swap_only" {
     try expectShuffle(.{}, &.{ 5, 1, 2, 3, 4 }, &.{ 1, 2, 3, 4, 5 }, &.{ .{ .swap = 4 }, .{ .swap = 3 }, .{ .swap = 2 }, .{ .swap = 1 } });
 }
 
-test "greedy shuffler matches plank oracle: needs_unspill" {
+test "greedy shuffler fixture: needs_unspill" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(3), &.{ 1, 2, 3, 4, 5, 6 }, &.{ 1, 6, 3, 4, 5, 6 }, &.{ .{ .swap = 1 }, .pop, .{ .store = 0 }, .{ .store = 1 }, .{ .dup = 2 }, .{ .load = 1 }, .{ .swap = 1 }, .{ .load = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: current_is_already_correct_prefix" {
+test "greedy shuffler fixture: current_is_already_correct_prefix" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(2), &.{ 1, 0 }, &.{0}, &.{.pop});
 }
 
-test "greedy shuffler matches plank oracle: correct_after_swap_but_trash_top" {
+test "greedy shuffler fixture: correct_after_swap_but_trash_top" {
     try expectShuffle(.{}, &.{ 1, 3, 2 }, &.{ 1, 2 }, &.{ .{ .swap = 1 }, .pop });
 }
 
-test "greedy shuffler matches plank oracle: pop_lower2" {
+test "greedy shuffler fixture: pop_lower2" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(1), &.{ 0, 1, 2 }, &.{0}, &.{ .{ .swap = 1 }, .pop, .{ .swap = 1 }, .pop });
 }
 
-test "greedy shuffler matches plank oracle: unspill_horizon_before_dup_top1" {
+test "greedy shuffler fixture: unspill_horizon_before_dup_top1" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(1), &.{ 0, 1 }, &.{ 1, 1, 0, 1 }, &.{ .{ .store = 0 }, .{ .dup = 0 }, .{ .load = 0 }, .{ .swap = 1 }, .{ .dup = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: unspill_horizon_before_dup_top2" {
+test "greedy shuffler fixture: unspill_horizon_before_dup_top2" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(1), &.{ 0, 1 }, &.{ 0, 0, 1, 1, 0 }, &.{ .{ .swap = 1 }, .{ .store = 0 }, .{ .dup = 0 }, .{ .load = 0 }, .{ .swap = 1 }, .{ .load = 0 }, .{ .swap = 1 }, .{ .dup = 0 } });
 }
 
-test "greedy shuffler matches plank oracle: intricate_spill_dup_swap" {
+test "greedy shuffler fixture: intricate_spill_dup_swap" {
     try expectShuffle(release_schedule.ScheduleConfig.maxSwapNoExchange(3), &.{ 10, 17, 2 }, &.{ 10, 2, 2, 10, 17, 17 }, &.{ .{ .dup = 1 }, .{ .swap = 3 }, .{ .dup = 1 }, .{ .dup = 1 }, .{ .swap = 1 } });
 }
 

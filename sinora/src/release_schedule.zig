@@ -1,9 +1,5 @@
 //! Zig port of Plank's generic release stack primitives and op scheduler.
 //!
-//! Rust source of truth:
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/stack.rs
-//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/scheduler.rs
-//!
 //! The graph builder and greedy final-stack shuffler live in
 //! `release_op_graph.zig`; this file owns the EVM stack model, emitted stack
 //! operations, spills, unspills, and single-operation scheduling. Do not add Ora

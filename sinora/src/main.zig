@@ -1,14 +1,12 @@
 const std = @import("std");
 const sinora = @import("sinora");
 
-// Developer CLI for the standalone Sinora port. This file intentionally stays
-// thin: parse SIR text, run structural legality once, then hand the verified IR
-// to either the local backend or the Rust Plank oracle.
+// Developer CLI for the standalone Sinora backend. This file intentionally
+// stays thin: parse SIR text, run structural legality once, then hand the
+// verified IR to the local bytecode emitter.
 const max_sir_file_bytes = 64 * 1024 * 1024;
 
 const SpecialCommand = enum {
-    compare,
-    compare_corpus,
     emit_debug,
     emit_release,
     emit_release_generic,
@@ -16,38 +14,10 @@ const SpecialCommand = enum {
 };
 
 const special_command_map = std.StaticStringMap(SpecialCommand).initComptime(.{
-    .{ "compare", .compare },
-    .{ "compare-corpus", .compare_corpus },
     .{ "emit-debug", .emit_debug },
     .{ "emit-release", .emit_release },
     .{ "emit-release-generic", .emit_release_generic },
     .{ "trace-release", .trace_release },
-});
-
-const mode_flag_map = std.StaticStringMap(sinora.oracle.BackendMode).initComptime(.{
-    .{ "--debug", .debug },
-    .{ "--release", .release },
-    .{ "--release-generic", .release_generic },
-});
-
-const OutputFormat = enum {
-    text,
-    json,
-};
-
-const output_flag_map = std.StaticStringMap(OutputFormat).initComptime(.{
-    .{ "--text", .text },
-    .{ "--json", .json },
-});
-
-const CorpusFlag = enum {
-    details,
-    pending_only,
-};
-
-const corpus_flag_map = std.StaticStringMap(CorpusFlag).initComptime(.{
-    .{ "--details", .details },
-    .{ "--pending-only", .pending_only },
 });
 
 const DefaultCommand = enum {
@@ -75,24 +45,10 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (special_command_map.get(args[1])) |special_command| {
-        // Special commands either consult the Rust oracle or emit bytecode.
-        // They have stricter arity than the default "check file.sir" path, so
-        // dispatch them before interpreting the first argument as a filename.
+        // Emitter commands have stricter arity than the default "check
+        // file.sir" path, so dispatch them before interpreting the first
+        // argument as a filename.
         switch (special_command) {
-            .compare => {
-                const compare_options = parseCompareOptions(args[2..]) catch |err| {
-                    try usage(io, args[0]);
-                    return err;
-                };
-                try compareWithRustOracle(allocator, io, compare_options);
-            },
-            .compare_corpus => {
-                const corpus_options = parseCorpusOptions(args[2..]) catch |err| {
-                    try usage(io, args[0]);
-                    return err;
-                };
-                try compareCorpusWithRustOracle(allocator, io, corpus_options);
-            },
             .emit_debug => {
                 if (args.len < 3 or args.len > 4) {
                     try usage(io, args[0]);
@@ -238,238 +194,15 @@ fn usage(io: std.Io, argv0: []const u8) !void {
         \\  {s} <file.sir>
         \\  {s} check <file.sir>
         \\  {s} render <file.sir>
-        \\  {s} compare [--release|--release-generic|--debug] [--text|--json] [--expect <classification>] <file.sir>
-        \\  {s} compare-corpus [--release|--release-generic|--debug] [--text|--json] [--details] [--pending-only] <dir>
         \\  {s} emit-debug <file.sir> [function]
         \\  {s} emit-release [--source-map <path>] <file.sir>
         \\  {s} emit-release-generic [--source-map <path>] <file.sir>
         \\  {s} trace-release <file.sir>
         \\
-        \\compare runs Sinora parse/legality plus the Rust Plank oracle.
         \\emit-debug emits conservative debug bytecode for one supported root.
-        \\Set SINORA_PLANK_SIR or ORA_PLANK_SIR to override the Rust oracle path.
         \\
-    , .{ argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0, argv0 });
+    , .{ argv0, argv0, argv0, argv0, argv0, argv0, argv0 });
     try stderr.flush();
-}
-
-const CompareOptions = struct {
-    path: []const u8,
-    mode: sinora.oracle.BackendMode = .release,
-    output: OutputFormat = .text,
-    expected: ?sinora.oracle.Classification = null,
-};
-
-const CorpusOptions = struct {
-    root: []const u8,
-    mode: sinora.oracle.BackendMode = .release,
-    output: OutputFormat = .text,
-    details: bool = false,
-    pending_only: bool = false,
-};
-
-fn parseCompareOptions(args: []const []const u8) !CompareOptions {
-    var result: CompareOptions = .{ .path = "" };
-
-    var index: usize = 0;
-    while (index < args.len) : (index += 1) {
-        const arg = args[index];
-        if (mode_flag_map.get(arg)) |mode| {
-            result.mode = mode;
-        } else if (output_flag_map.get(arg)) |output| {
-            result.output = output;
-        } else if (std.mem.eql(u8, arg, "--expect")) {
-            index += 1;
-            if (index >= args.len) return error.InvalidArguments;
-            result.expected = sinora.oracle.Classification.parse(args[index]) orelse return error.InvalidArguments;
-        } else if (std.mem.startsWith(u8, arg, "--")) {
-            return error.InvalidArguments;
-        } else if (result.path.len == 0) {
-            result.path = arg;
-        } else {
-            return error.InvalidArguments;
-        }
-    }
-
-    if (result.path.len == 0) return error.InvalidArguments;
-    return result;
-}
-
-fn parseCorpusOptions(args: []const []const u8) !CorpusOptions {
-    var result: CorpusOptions = .{ .root = "" };
-
-    for (args) |arg| {
-        if (mode_flag_map.get(arg)) |mode| {
-            result.mode = mode;
-        } else if (output_flag_map.get(arg)) |output| {
-            result.output = output;
-        } else if (corpus_flag_map.get(arg)) |flag| {
-            switch (flag) {
-                .details => result.details = true,
-                .pending_only => result.pending_only = true,
-            }
-        } else if (std.mem.startsWith(u8, arg, "--")) {
-            return error.InvalidArguments;
-        } else if (result.root.len == 0) {
-            result.root = arg;
-        } else {
-            return error.InvalidArguments;
-        }
-    }
-
-    if (result.root.len == 0) return error.InvalidArguments;
-    if (result.pending_only and !result.details) return error.InvalidArguments;
-    return result;
-}
-
-fn compareWithRustOracle(allocator: std.mem.Allocator, io: std.Io, options: CompareOptions) !void {
-    // Oracle commands intentionally keep the Rust Plank executable outside the
-    // normal parse/check flow. This lets corpus migration compare Sinora and
-    // upstream behavior without making the local backend depend on Rust.
-    const rust_plank_path = try resolveRustPlankPathOrReport(allocator, io);
-    defer allocator.free(rust_plank_path);
-
-    var comparison = try sinora.oracle.compareSirFile(allocator, io, options.path, rust_plank_path, options.mode);
-    defer {
-        sinora.oracle.freeDiagnostics(allocator, comparison.zig.diagnostics);
-        comparison.deinit(allocator);
-    }
-
-    var stdout_buffer: [2048]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-    switch (options.output) {
-        .text => try writeComparisonText(stdout, comparison, options.mode),
-        .json => try writeComparisonJson(stdout, comparison, options.mode),
-    }
-    try stdout.flush();
-
-    if (options.expected) |expected| {
-        if (comparison.classification != expected) {
-            var stderr_buffer: [256]u8 = undefined;
-            var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
-            const stderr = &stderr_writer.interface;
-            try stderr.print(
-                "error: expected classification {s}, got {s}\n",
-                .{ expected.label(), comparison.classification.label() },
-            );
-            try stderr.flush();
-            std.process.exit(1);
-        }
-    }
-}
-
-fn compareCorpusWithRustOracle(allocator: std.mem.Allocator, io: std.Io, options: CorpusOptions) !void {
-    const rust_plank_path = try resolveRustPlankPathOrReport(allocator, io);
-    defer allocator.free(rust_plank_path);
-
-    const expected = sinora.corpus.expectedLabel(options.mode);
-
-    var stdout_buffer: [16 * 1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    if (options.details and options.output == .json) return error.InvalidArguments;
-
-    var summary = if (options.details) blk: {
-        const filter: sinora.corpus.RecordFilter = if (options.pending_only) .pending_only else .all;
-        break :blk try sinora.corpus.compareDirectoryTextRecords(allocator, io, options.root, rust_plank_path, options.mode, filter, stdout);
-    } else try sinora.corpus.compareDirectory(allocator, io, options.root, rust_plank_path, options.mode);
-    defer summary.deinit(allocator);
-
-    switch (options.output) {
-        .text => try sinora.corpus.writeSummaryText(stdout, summary, options.mode, expected),
-        .json => try sinora.corpus.writeSummaryJson(stdout, summary, options.mode, expected),
-    }
-    try stdout.flush();
-
-    if (!summary.ok()) std.process.exit(1);
-}
-
-fn resolveRustPlankPathOrReport(allocator: std.mem.Allocator, io: std.Io) ![]const u8 {
-    return sinora.oracle.resolveRustPlankPath(allocator, io) catch |err| {
-        if (err == error.PlankSirNotFound) {
-            var stderr_buffer: [512]u8 = undefined;
-            var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
-            const stderr = &stderr_writer.interface;
-            try stderr.writeAll("error: Rust Plank SIR oracle not found; run `zig build plank-sir` from Ora root or set SINORA_PLANK_SIR\n");
-            try stderr.flush();
-        }
-        return err;
-    };
-}
-
-fn writeComparisonText(writer: anytype, comparison: sinora.oracle.Comparison, mode: sinora.oracle.BackendMode) !void {
-    try writer.print("classification={s}\n", .{comparison.classification.label()});
-    try writer.print("mode={s}\n", .{mode.label()});
-    try writer.print("zig.accepted={}\n", .{comparison.zig.accepted});
-    if (comparison.rust) |rust| {
-        try writer.print("rust.accepted={}\n", .{rust.accepted});
-        try writer.print("rust.stdout_bytes={d}\n", .{rust.stdout.len});
-        try writer.print("rust.stderr_bytes={d}\n", .{rust.stderr.len});
-    }
-    if (comparison.debug_bytecode) |debug| {
-        try writer.print("debug.zig_codegen_accepted={}\n", .{debug.zig_accepted});
-        try writer.print("debug.zig_stdout_bytes={d}\n", .{debug.zig_stdout_bytes});
-        try writer.print("debug.rust_stdout_bytes={d}\n", .{debug.rust_stdout_bytes});
-        if (debug.equal) |equal| {
-            try writer.print("debug.bytecode_equal={}\n", .{equal});
-        }
-    }
-    if (comparison.release_bytecode) |release| {
-        try writer.print("release.zig_codegen_accepted={}\n", .{release.zig_accepted});
-        try writer.print("release.zig_stdout_bytes={d}\n", .{release.zig_stdout_bytes});
-        try writer.print("release.rust_stdout_bytes={d}\n", .{release.rust_stdout_bytes});
-        if (release.equal) |equal| {
-            try writer.print("release.bytecode_equal={}\n", .{equal});
-        }
-    }
-    if (comparison.zig.diagnostics.len > 0) {
-        try writer.print("zig.diagnostics={d}\n", .{comparison.zig.diagnostics.len});
-    }
-}
-
-fn writeComparisonJson(writer: anytype, comparison: sinora.oracle.Comparison, mode: sinora.oracle.BackendMode) !void {
-    try writer.print(
-        \\{{"classification":"{s}","mode":"{s}","zig":{{"accepted":{},"diagnostics":{d}}}
-    , .{
-        comparison.classification.label(),
-        mode.label(),
-        comparison.zig.accepted,
-        comparison.zig.diagnostics.len,
-    });
-    if (comparison.rust) |rust| {
-        try writer.print(
-            \\,"rust":{{"accepted":{},"stdout_bytes":{d},"stderr_bytes":{d}}}
-        , .{ rust.accepted, rust.stdout.len, rust.stderr.len });
-    } else {
-        try writer.writeAll(",\"rust\":null");
-    }
-    if (comparison.debug_bytecode) |debug| {
-        try writer.print(
-            ",\"debug_bytecode\":{{\"zig_codegen_accepted\":{},\"zig_stdout_bytes\":{d},\"rust_stdout_bytes\":{d},\"equal\":",
-            .{ debug.zig_accepted, debug.zig_stdout_bytes, debug.rust_stdout_bytes },
-        );
-        if (debug.equal) |equal| {
-            try writer.print("{}", .{equal});
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll("}");
-    }
-    if (comparison.release_bytecode) |release| {
-        try writer.print(
-            ",\"release_bytecode\":{{\"zig_codegen_accepted\":{},\"zig_stdout_bytes\":{d},\"rust_stdout_bytes\":{d},\"equal\":",
-            .{ release.zig_accepted, release.zig_stdout_bytes, release.rust_stdout_bytes },
-        );
-        if (release.equal) |equal| {
-            try writer.print("{}", .{equal});
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll("}");
-    }
-    try writer.writeAll("}\n");
 }
 
 fn emitDebugBytecode(
@@ -564,8 +297,8 @@ fn emitReleaseBackendBytecode(
     }
 
     // `emit-release` and `emit-release-generic` both target the generic release
-    // backend today. Keeping both command names lets the migration scripts
-    // compare old labels without duplicating codegen entry points.
+    // backend today. Keeping both command names avoids breaking local scripts
+    // while using one codegen entry point.
     const bytes = sinora.release_generic_backend.emitRelease(allocator, program) catch |err| {
         try writeDiagnostics(io, &bag);
         return err;

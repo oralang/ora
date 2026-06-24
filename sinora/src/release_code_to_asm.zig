@@ -1,8 +1,5 @@
 //! Zig port of Plank's generic release `code_to_asm` emitter.
 //!
-//! Rust source of truth:
-//! - vendor/plank/plankc/sir/crates/release-backend/src/code_to_asm.rs
-//!
 //! This module consumes scheduled stack ops and emits EVM bytecode for generic
 //! SIR blocks. It is separate from the old selector-shape scaffold and is the
 //! bytecode emission half of the owned release backend.

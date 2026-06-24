@@ -1140,10 +1140,6 @@ fn runBuildArtifacts(
     defer allocator.free(hex_file);
     try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
 
-    const plank_hex_file = try std.fmt.allocPrint(allocator, "{s}.hexp", .{stem});
-    defer allocator.free(plank_hex_file);
-    try moveArtifactFile(allocator, artifact_root, plank_hex_file, bin_dir);
-
     const source_map_file = try std.fmt.allocPrint(allocator, "{s}.sourcemap.json", .{stem});
     defer allocator.free(source_map_file);
     try moveArtifactFileIfExists(allocator, artifact_root, source_map_file, bin_dir);
@@ -1169,9 +1165,6 @@ fn printBuildArtifactSummary(
     const bytecode_path = try pathJoinWithStem(allocator, bin_dir, stem, ".hex");
     defer allocator.free(bytecode_path);
 
-    const plank_bytecode_path = try pathJoinWithStem(allocator, bin_dir, stem, ".hexp");
-    defer allocator.free(plank_bytecode_path);
-
     const source_map_path = try pathJoinWithStem(allocator, bin_dir, stem, ".sourcemap.json");
     defer allocator.free(source_map_path);
 
@@ -1187,7 +1180,6 @@ fn printBuildArtifactSummary(
     defer allocator.free(smt_json_path);
 
     try stdout.print("Bytecode saved to {s}\n", .{bytecode_path});
-    try stdout.print("Plank bytecode saved to {s}\n", .{plank_bytecode_path});
     try stdout.print("Source map saved to {s}\n", .{source_map_path});
     try stdout.print("SIR saved to {s}\n", .{sir_path});
     try stdout.print("Ora MLIR saved to {s}\n", .{ora_mlir_path});
@@ -4507,7 +4499,7 @@ fn runMlirEmitAdvanced(
 
         // Extract source locations from SIR MLIR (sidecar to SIR text).
         // Op indices match the SIR text op ordering for later correlation
-        // with Plank's bytecode offsets.
+        // with backend bytecode offsets.
         const mlir_c_api = @import("mlir_c_api");
         const sir_locations_ref = c.oraExtractSIRLocations(ctx, final_module);
         defer if (sir_locations_ref.data != null) {
@@ -5001,85 +4993,45 @@ fn writeSmtReportArtifacts(
 // SECTION 6: MLIR Integration & Code Generation
 // ============================================================================
 
-fn resolvePlankSirPath(allocator: std.mem.Allocator) ![]const u8 {
-    if (libcEnv("ORA_PLANK_SIR")) |path| {
-        if (std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), path, .{}) catch null) |_| {
+fn resolveSinoraPath(allocator: std.mem.Allocator) ![]const u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const candidates = [_][]const u8{
+        "sinora/zig-out/bin/sinora",
+        "zig-out/bin/sinora",
+        "/usr/local/bin/sinora",
+    };
+    for (candidates) |path| {
+        if (std.Io.Dir.cwd().access(io, path, .{}) catch null) |_| {
             return allocator.dupe(u8, path);
         }
-        return error.PlankSirNotFound;
-    }
-
-    // Use the vendored Plank SIR binary built from the `vendor/plank` submodule.
-    const default_path = "vendor/plank/plankc/target/release/sir";
-    if (std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), default_path, .{}) catch null) |_| {
-        return allocator.dupe(u8, default_path);
-    }
-
-    return error.PlankSirNotFound;
-}
-
-const PlankSirBackend = enum {
-    debug,
-    release,
-};
-
-fn resolvePlankSirBackend(default_backend: PlankSirBackend) !PlankSirBackend {
-    const value = libcEnv("ORA_PLANK_BACKEND") orelse return default_backend;
-    if (std.mem.eql(u8, value, "debug")) return .debug;
-    if (std.mem.eql(u8, value, "release")) return .release;
-    return error.InvalidPlankBackend;
-}
-
-const SirBytecodeBackend = enum { plank, sinora };
-
-// Source-level rollout switch for the artifact writer. During Sinora bring-up
-// every compilation still runs both backends and hard-fails on bytecode drift;
-// this constant only decides which already-verified bytecode is written.
-const active_sir_bytecode_backend: SirBytecodeBackend = .sinora;
-
-fn resolveSinoraPath(allocator: std.mem.Allocator) ![]const u8 {
-    const default_path = "sinora/zig-out/bin/sinora";
-    if (std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), default_path, .{}) catch null) |_| {
-        return allocator.dupe(u8, default_path);
     }
     return error.SinoraNotFound;
 }
 
-// Runs Sinora to produce deployment bytecode from a SIR file. Sinora's
-// `emit-release`/`emit-debug` stdout is a byte-identical drop-in for Plank's
-// stdout (`0x...` hex). Returns owned stdout (caller frees + trims); on a
-// Sinora failure it reports and exits, matching the Plank failure path.
+// Runs Sinora to produce deployment bytecode from a SIR file. Returns owned
+// stdout (caller frees + trims); failures are reported with the saved SIR path
+// so the emitted text can be inspected directly.
 fn runSinoraBytecode(
     allocator: std.mem.Allocator,
     sinora_path: []const u8,
     sir_file_path: []const u8,
-    backend: PlankSirBackend,
     source_map_path: ?[]const u8,
     stdout: anytype,
 ) ![]const u8 {
-    var argv_buf: [6][]const u8 = undefined;
+    var argv_buf: [5][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = sinora_path;
     argc += 1;
-    argv_buf[argc] = switch (backend) {
-        .release => "emit-release",
-        .debug => "emit-debug",
-    };
+    argv_buf[argc] = "emit-release";
     argc += 1;
-    if (backend == .release) {
-        if (source_map_path) |path| {
-            argv_buf[argc] = "--source-map";
-            argc += 1;
-            argv_buf[argc] = path;
-            argc += 1;
-        }
+    if (source_map_path) |path| {
+        argv_buf[argc] = "--source-map";
+        argc += 1;
+        argv_buf[argc] = path;
+        argc += 1;
     }
     argv_buf[argc] = sir_file_path;
     argc += 1;
-    if (backend == .debug) {
-        argv_buf[argc] = "init";
-        argc += 1;
-    }
 
     const max_output = 16 * 1024 * 1024;
     var process_io = std.Io.Threaded.init(allocator, .{
@@ -5111,50 +5063,9 @@ fn runSinoraBytecode(
     return run_result.stdout;
 }
 
-fn reportSinoraPlankMismatch(
-    stdout: anytype,
-    plank_hex: []const u8,
-    sinora_hex: []const u8,
-    sir_file_path: []const u8,
-) !void {
-    try stdout.print("\nError: Sinora bytecode differs from Plank\n", .{});
-    try stdout.print("  plank_len={d} sinora_len={d}\n", .{ plank_hex.len, sinora_hex.len });
-    const shared = @min(plank_hex.len, sinora_hex.len);
-    var diff: usize = 0;
-    while (diff < shared and plank_hex[diff] == sinora_hex[diff]) : (diff += 1) {}
-    try stdout.print("  first diff at hex offset {d}\n", .{diff});
-    const ctx_start = if (diff > 12) diff - 12 else 0;
-    try stdout.print("  plank : ...{s}\n", .{plank_hex[ctx_start..@min(plank_hex.len, diff + 24)]});
-    try stdout.print("  sinora: ...{s}\n", .{sinora_hex[ctx_start..@min(sinora_hex.len, diff + 24)]});
-    try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-}
-
 fn hexByteLength(hex: []const u8) usize {
     const payload = if (std.mem.startsWith(u8, hex, "0x")) hex[2..] else hex;
     return payload.len / 2;
-}
-
-fn plankBytecodeSidecarPath(allocator: std.mem.Allocator, bytecode_output_path: []const u8) ![]u8 {
-    if (std.mem.endsWith(u8, bytecode_output_path, ".hex")) {
-        return std.mem.concat(allocator, u8, &.{ bytecode_output_path[0 .. bytecode_output_path.len - ".hex".len], ".hexp" });
-    }
-    return std.mem.concat(allocator, u8, &.{ bytecode_output_path, ".hexp" });
-}
-
-fn writePlankBytecodeSidecar(
-    allocator: std.mem.Allocator,
-    bytecode_output_path: []const u8,
-    plank_bytecode: []const u8,
-    stdout: anytype,
-    suppress_log: bool,
-) !void {
-    const sidecar_path = try plankBytecodeSidecarPath(allocator, bytecode_output_path);
-    defer allocator.free(sidecar_path);
-    try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
-        .sub_path = sidecar_path,
-        .data = plank_bytecode,
-    });
-    if (!suppress_log) try stdout.print("Plank bytecode saved to {s}\n", .{sidecar_path});
 }
 
 fn emitBytecodeFromSirText(
@@ -5173,14 +5084,6 @@ fn emitBytecodeFromSirText(
     stdout: anytype,
     suppress_log: bool,
 ) !void {
-    const sir_path = resolvePlankSirPath(allocator) catch |err| {
-        if (err == error.PlankSirNotFound) {
-            try stdout.print("\nError: Plank SIR compiler not found; run `zig build plank-sir` or set ORA_PLANK_SIR to the `sir` binary\n", .{});
-        }
-        return err;
-    };
-    defer allocator.free(sir_path);
-
     const basename = std.fs.path.stem(file_path);
     const sir_extension = ".sir";
     const sir_filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, sir_extension });
@@ -5200,111 +5103,12 @@ fn emitBytecodeFromSirText(
         .data = sir_text,
     });
 
-    // Request a Plank source map when Ora debug-info sidecars are requested.
-    // Both Plank backends support the same op_index -> pc JSON contract in our
-    // vendored debugger layer; release mode maps scheduled bytecode PCs back to
-    // the pre-scheduling SIR operation indices.
-    const plank_srcmap_path = if (sir_debug_info_json != null)
-        try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "plank_srcmap.json" })
-    else
-        null;
-    defer if (plank_srcmap_path) |p| allocator.free(p);
-
     const sinora_srcmap_path = if (sir_debug_info_json != null)
         try std.fs.path.join(allocator, &[_][]const u8{ temp_dir, "sinora_srcmap.json" })
     else
         null;
     defer if (sinora_srcmap_path) |p| allocator.free(p);
 
-    const default_backend: PlankSirBackend = .release;
-    const backend = resolvePlankSirBackend(default_backend) catch |err| {
-        if (err == error.InvalidPlankBackend) {
-            try stdout.print("\nError: ORA_PLANK_BACKEND must be 'debug' or 'release'\n", .{});
-        }
-        return err;
-    };
-    // Build argv. Without debug info we default to optimized release bytecode. With debug
-    // info, the selected backend still emits bytecode while Plank also writes the source map.
-    var argv_buf: [5][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = sir_path;
-    argc += 1;
-    argv_buf[argc] = sir_file_path;
-    argc += 1;
-    if (backend == .release) {
-        argv_buf[argc] = "--release";
-        argc += 1;
-    }
-    if (plank_srcmap_path) |srcmap_path| {
-        argv_buf[argc] = "--source-map";
-        argc += 1;
-        argv_buf[argc] = srcmap_path;
-        argc += 1;
-    }
-    const argv = argv_buf[0..argc];
-    const max_output = 16 * 1024 * 1024;
-    var process_io = std.Io.Threaded.init(allocator, .{
-        .async_limit = .nothing,
-        .concurrent_limit = .nothing,
-    });
-    defer process_io.deinit();
-
-    const run_result = try std.process.run(allocator, process_io.io(), .{
-        .argv = argv,
-        .stdout_limit = std.Io.Limit.limited(max_output),
-        .stderr_limit = std.Io.Limit.limited(max_output),
-    });
-    defer allocator.free(run_result.stdout);
-    defer allocator.free(run_result.stderr);
-
-    switch (run_result.term) {
-        .exited => |code| {
-            if (code != 0) {
-                try stdout.print("\nError: Plank SIR bytecode compilation failed (exit code {d})\n", .{code});
-                // Show Plank's error output (the actual error reason)
-                const trimmed_stderr = std.mem.trim(u8, run_result.stderr, " \n\r\t");
-                if (trimmed_stderr.len > 0) {
-                    // Extract the meaningful error line (skip Rust backtrace noise)
-                    var line_iter = std.mem.splitScalar(u8, trimmed_stderr, '\n');
-                    while (line_iter.next()) |line| {
-                        const trimmed = std.mem.trim(u8, line, " \r\t");
-                        if (trimmed.len == 0) continue;
-                        // Skip Rust backtrace/thread info noise
-                        if (std.mem.startsWith(u8, trimmed, "note: run with")) continue;
-                        if (std.mem.startsWith(u8, trimmed, "stack backtrace:")) continue;
-                        if (trimmed.len > 3 and trimmed[0] >= '0' and trimmed[0] <= '9' and trimmed[1] == ':') continue;
-                        try stdout.print("  {s}\n", .{trimmed});
-                    }
-                } else {
-                    const trimmed_stdout_err = std.mem.trim(u8, run_result.stdout, " \n\r\t");
-                    if (trimmed_stdout_err.len > 0) {
-                        try stdout.print("  {s}\n", .{trimmed_stdout_err});
-                    }
-                }
-                try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-                try stdout.flush();
-                std.process.exit(1);
-            }
-        },
-        else => {
-            try stdout.print("\nError: Plank SIR bytecode compiler terminated unexpectedly\n", .{});
-            try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-            try stdout.flush();
-            std.process.exit(1);
-        },
-    }
-
-    const bytecode = std.mem.trim(u8, run_result.stdout, " \n\r\t");
-    if (bytecode.len == 0) {
-        try stdout.print("\nError: Plank SIR produced empty bytecode\n", .{});
-        try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
-        try stdout.flush();
-        std.process.exit(1);
-    }
-
-    // During the Sinora rollout every Ora compilation is a live differential:
-    // Plank emits first, Sinora emits from the exact same SIR text, and any
-    // byte mismatch fails the build before artifacts are written.
     const sinora_path = resolveSinoraPath(allocator) catch |err| {
         if (err == error.SinoraNotFound) {
             try stdout.print("\nError: Sinora binary not found; run `zig build sinora`\n", .{});
@@ -5317,8 +5121,7 @@ fn emitBytecodeFromSirText(
         allocator,
         sinora_path,
         sir_file_path,
-        backend,
-        if (backend == .release) sinora_srcmap_path else null,
+        sinora_srcmap_path,
         stdout,
     );
     defer allocator.free(sinora_stdout);
@@ -5329,19 +5132,9 @@ fn emitBytecodeFromSirText(
         try stdout.flush();
         std.process.exit(1);
     }
-    if (!std.mem.eql(u8, sinora_bytecode, bytecode)) {
-        try reportSinoraPlankMismatch(stdout, bytecode, sinora_bytecode, sir_file_path);
-        try stdout.flush();
-        std.process.exit(1);
-    }
     if (!suppress_log) {
-        try stdout.print("Sinora matches Plank ({d} bytes)\n", .{hexByteLength(bytecode)});
+        try stdout.print("Sinora bytecode emitted ({d} bytes)\n", .{hexByteLength(sinora_bytecode)});
     }
-
-    const effective_bytecode = switch (active_sir_bytecode_backend) {
-        .plank => bytecode,
-        .sinora => sinora_bytecode,
-    };
 
     var bytecode_output_path: ?[]const u8 = null;
     defer if (bytecode_output_path) |p| allocator.free(p);
@@ -5349,9 +5142,8 @@ fn emitBytecodeFromSirText(
     if (output_file) |out_path| {
         try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
             .sub_path = out_path,
-            .data = effective_bytecode,
+            .data = sinora_bytecode,
         });
-        try writePlankBytecodeSidecar(allocator, out_path, bytecode, stdout, suppress_log);
         bytecode_output_path = try allocator.dupe(u8, out_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{out_path});
     } else if (output_dir) |out_dir| {
@@ -5365,23 +5157,18 @@ fn emitBytecodeFromSirText(
 
         try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
             .sub_path = output_path,
-            .data = effective_bytecode,
+            .data = sinora_bytecode,
         });
-        try writePlankBytecodeSidecar(allocator, output_path, bytecode, stdout, suppress_log);
         bytecode_output_path = try allocator.dupe(u8, output_path);
         if (!suppress_log) try stdout.print("Bytecode saved to {s}\n", .{output_path});
     } else {
-        try stdout.print("{s}\n", .{effective_bytecode});
+        try stdout.print("{s}\n", .{sinora_bytecode});
     }
 
-    // Merge source maps: sir_locations (op_idx → file:line:col) + Plank (op_idx → pc)
-    // into final .sourcemap.json
-    if (sir_locations_json != null and plank_srcmap_path != null and bytecode_output_path != null) {
-        const source_map_pc_path = switch (active_sir_bytecode_backend) {
-            .sinora => if (backend == .release) (sinora_srcmap_path orelse plank_srcmap_path.?) else plank_srcmap_path.?,
-            .plank => plank_srcmap_path.?,
-        };
-        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, source_map_pc_path, bytecode_output_path.?, stdout, suppress_log);
+    // Merge source maps: SIR locations (op_idx -> file:line:col) + Sinora's
+    // backend source map (op_idx -> pc) into final .sourcemap.json.
+    if (sir_locations_json != null and sinora_srcmap_path != null and bytecode_output_path != null) {
+        try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sinora_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
         try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
@@ -5395,42 +5182,42 @@ fn mergeSourceMaps(
     sir_locations_json: []const u8,
     sir_line_map_json: ?[]const u8,
     sir_debug_info_json: ?[]const u8,
-    plank_srcmap_path: []const u8,
+    backend_srcmap_path: []const u8,
     bytecode_output_path: []const u8,
     stdout: anytype,
     suppress_log: bool,
 ) !void {
-    // Read Plank's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
-    const plank_json = std.Io.Dir.cwd().readFileAlloc(
+    // Read Sinora's source map: {"runtime_start_pc":123,"ops":[{"idx":0,"pc":0},{"idx":1,"pc":5},...]}
+    const backend_json = std.Io.Dir.cwd().readFileAlloc(
         std.Io.Threaded.global_single_threaded.io(),
-        plank_srcmap_path,
+        backend_srcmap_path,
         allocator,
         std.Io.Limit.limited(16 * 1024 * 1024),
     ) catch |err| {
-        try stdout.print("Warning: could not read Plank source map: {}\n", .{err});
+        try stdout.print("Warning: could not read backend source map: {}\n", .{err});
         return;
     };
-    defer allocator.free(plank_json);
+    defer allocator.free(backend_json);
 
-    // Parse Plank ops into a map: op_idx → pc
-    const PlankMap = struct {
+    // Parse backend ops into a map: op_idx -> pc.
+    const BackendMap = struct {
         runtime_start_pc: ?u32 = null,
         ops: []const struct { idx: u32, pc: u32 } = &.{},
     };
-    const plank_parsed = std.json.parseFromSlice(PlankMap, allocator, plank_json, .{
+    const backend_parsed = std.json.parseFromSlice(BackendMap, allocator, backend_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse Plank source map: {}\n", .{err});
+        try stdout.print("Warning: could not parse backend source map: {}\n", .{err});
         return;
     };
-    defer plank_parsed.deinit();
+    defer backend_parsed.deinit();
 
     // Build lookup: op_idx → pc
     var idx_to_pc = std.AutoHashMap(u32, u32).init(allocator);
     defer idx_to_pc.deinit();
     var max_mapped_idx: u32 = 0;
     var have_mapped_idx = false;
-    for (plank_parsed.value.ops) |op| {
+    for (backend_parsed.value.ops) |op| {
         try idx_to_pc.put(op.idx, op.pc);
         if (!have_mapped_idx or op.idx > max_mapped_idx) {
             max_mapped_idx = op.idx;
@@ -5527,7 +5314,7 @@ fn mergeSourceMaps(
     var executable_lines = try buildExecutableLineMap(allocator, db, root_module_id);
     defer deinitExecutableLineMap(allocator, &executable_lines);
 
-    // Merge: for each SIR location entry, look up its PC from Plank
+    // Merge: for each SIR location entry, look up its backend PC.
     // Collect unique source files
     var sources: std.ArrayList([]const u8) = .empty;
     defer sources.deinit(allocator);
@@ -5539,7 +5326,7 @@ fn mergeSourceMaps(
     defer out.deinit();
     const writer = &out.writer;
 
-    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{plank_parsed.value.runtime_start_pc orelse 0});
+    try writer.print("{{\"version\":1,\"runtime_start_pc\":{},\"sources\":[", .{backend_parsed.value.runtime_start_pc orelse 0});
 
     // First pass: collect sources and build entries
     const MergedEntry = struct {

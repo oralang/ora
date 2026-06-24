@@ -21,7 +21,7 @@ EXPECTED_PASS_EXCEPTIONS = {
 TYPE_FALLBACK_RE = re.compile(
     r"^debug: HIR type fallback: (?P<reason>[a-z_]+)(?: at (?P<file>.*):(?P<line>\d+):(?P<column>\d+))?$"
 )
-BYTECODE_BACKEND_MATCH_RE = re.compile(r"Sinora matches Plank \((?P<bytes>\d+) bytes\)")
+BYTECODE_BACKEND_EMIT_RE = re.compile(r"Sinora bytecode emitted \((?P<bytes>\d+) bytes\)")
 BYTECODE_SAVED_RE = re.compile(r"^Bytecode saved to (?P<path>.+)$", re.MULTILINE)
 
 
@@ -138,23 +138,16 @@ def compiler_command(compiler_path, emit_mode, file_path):
 
 
 def bytecode_backend_validation_required(emit_mode, has_contract_decl):
-    """Build/bytecode contract runs must exercise Ora's Plank/Sinora bytecode differential."""
+    """Build/bytecode contract runs must exercise Ora's Sinora bytecode backend."""
     return emit_mode in ("build", "bytecode") and has_contract_decl
 
 
-def plank_sidecar_path(bytecode_path):
-    path = Path(bytecode_path)
-    if path.suffix == ".hex":
-        return path.with_suffix(".hexp")
-    return Path(f"{bytecode_path}.hexp")
-
-
 def validate_bytecode_backend_outputs(stdout, stderr):
-    """Return Sinora/Plank validation details from compiler output or .hex/.hexp artifacts."""
-    bytecode_validation_match = BYTECODE_BACKEND_MATCH_RE.search(stdout) or BYTECODE_BACKEND_MATCH_RE.search(stderr)
+    """Return Sinora bytecode emission details from compiler output or a .hex artifact."""
+    bytecode_validation_match = BYTECODE_BACKEND_EMIT_RE.search(stdout) or BYTECODE_BACKEND_EMIT_RE.search(stderr)
     if bytecode_validation_match:
         return {
-            "backend": "sinora-vs-plank",
+            "backend": "sinora",
             "bytes": int(bytecode_validation_match.group("bytes")),
             "source": "compiler-output",
         }, None
@@ -163,35 +156,25 @@ def validate_bytecode_backend_outputs(stdout, stderr):
     if not saved_match:
         return None, (
             "feature-test bytecode backend validation missing: expected compiler output "
-            "`Sinora matches Plank (...)` or a `Bytecode saved to ...` artifact path"
+            "`Sinora bytecode emitted (...)` or a `Bytecode saved to ...` artifact path"
         )
 
     bytecode_path = Path(saved_match.group("path").strip())
-    sidecar_path = plank_sidecar_path(bytecode_path)
     try:
         bytecode = bytecode_path.read_bytes()
     except OSError as exc:
         return None, f"feature-test bytecode backend validation failed: cannot read {bytecode_path}: {exc}"
-    try:
-        plank_bytecode = sidecar_path.read_bytes()
-    except OSError as exc:
-        return None, f"feature-test bytecode backend validation failed: cannot read {sidecar_path}: {exc}"
-
-    if bytecode != plank_bytecode:
-        return None, (
-            "feature-test bytecode backend validation failed: Sinora .hex differs from Plank .hexp "
-            f"({bytecode_path} vs {sidecar_path})"
-        )
 
     payload = bytecode.strip()
     if payload.startswith(b"0x"):
         payload = payload[2:]
+    if len(payload) == 0:
+        return None, f"feature-test bytecode backend validation failed: empty bytecode artifact {bytecode_path}"
     return {
-        "backend": "sinora-vs-plank",
+        "backend": "sinora",
         "bytes": len(payload) // 2,
-        "source": "artifact-sidecar",
+        "source": "artifact",
         "bytecode_path": str(bytecode_path),
-        "plank_path": str(sidecar_path),
     }, None
 
 
@@ -430,7 +413,7 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
         f.write(f"- **❌ Failed:** {failed_count} ({failed_count*100//total if total > 0 else 0}%)\n")
         f.write(f"- **Success rate:** {success_count*100//total if total > 0 else 0}%\n\n")
         bytecode_validation_count = sum(1 for r in results if r.get("bytecode_validation"))
-        f.write(f"- **Sinora/Plank bytecode validations:** {bytecode_validation_count}\n\n")
+        f.write(f"- **Sinora bytecode validations:** {bytecode_validation_count}\n\n")
         
         f.write("### Key Findings\n\n")
         f.write("**✅ Working Features:**\n")
@@ -468,7 +451,7 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
             if r.get("expected_failure"):
                 f.write("**Expected failure:** yes\n\n")
             if r.get("bytecode_validation"):
-                f.write(f"**Bytecode backend validation:** Sinora matched Plank ({r['bytecode_validation']['bytes']} bytes)\n\n")
+                f.write(f"**Bytecode backend validation:** Sinora emitted bytecode ({r['bytecode_validation']['bytes']} bytes)\n\n")
             
             if r['error']:
                 f.write(f"**Error Output:**\n```\n{r['error']}\n```\n\n")
@@ -676,7 +659,7 @@ Examples:
         print(f"Emit: {result['emit']}")
         print(f"Status: {result['status']}")
         if result.get("bytecode_validation"):
-            print(f"Bytecode backend validation: Sinora matched Plank ({result['bytecode_validation']['bytes']} bytes)")
+            print(f"Bytecode backend validation: Sinora emitted bytecode ({result['bytecode_validation']['bytes']} bytes)")
         print(f"Return code: {result['return_code']}")
         print(f"Timed out: {result['timed_out']}")
         print("\n[stdout]")
@@ -724,7 +707,7 @@ Examples:
             if failures_only:
                 print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
             if result.get("bytecode_validation"):
-                print(f"{result['status']} (Sinora=Plank, {result['bytecode_validation']['bytes']} bytes)")
+                print(f"{result['status']} (Sinora, {result['bytecode_validation']['bytes']} bytes)")
             else:
                 print(result["status"])
         if args.show_all_output:

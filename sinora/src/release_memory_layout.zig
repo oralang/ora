@@ -1,8 +1,5 @@
 //! Zig port of Plank's `sir_static_memory_allocator::BumpAllocateAll`.
 //!
-//! Rust source of truth:
-//! - vendor/plank/plankc/sir/crates/static-memory-allocator/src/bump_allocate_all.rs
-//!
 //! The layout is computed from reachable SIR and the release scheduler output:
 //! scheduler spills, explicit static allocations, switch scratch, and the
 //! dynamic free-pointer slot all come from this single bump allocator.

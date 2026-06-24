@@ -256,8 +256,7 @@ pub fn emitDeploymentWithSourceMap(
 
 /// Emit generic release bytecode for a whole program, choosing the deployment
 /// path when an `init` function is present and the runtime-only path otherwise.
-/// This is the single entry point shared by the `emit-release-generic` CLI
-/// command and the `--release-generic` oracle so the two never drift.
+/// This is the single entry point behind the release CLI aliases.
 pub fn emitRelease(allocator: std.mem.Allocator, program: ir.Program) ![]const u8 {
     if (findFunction(program, "init") != null) {
         return emitDeploymentSimple(allocator, program);

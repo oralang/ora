@@ -18,8 +18,6 @@ pub const release_op_graph = @import("release_op_graph.zig");
 pub const release_code_to_asm = @import("release_code_to_asm.zig");
 pub const release_memory_layout = @import("release_memory_layout.zig");
 pub const release_generic_backend = @import("release_generic_backend.zig");
-pub const oracle = @import("oracle.zig");
-pub const corpus = @import("corpus.zig");
 
 pub const DiagnosticBag = diagnostics.Bag;
 pub const Program = ir.Program;

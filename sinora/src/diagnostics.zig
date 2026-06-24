@@ -14,13 +14,11 @@ pub const Severity = enum {
 
 pub const Diagnostic = struct {
     // 1-based source location in the SIR text. Sinora diagnostics intentionally
-    // stay line-oriented because the parser is line-oriented and the Plank SIR
-    // oracle reports line-level failures too.
+    // stay line-oriented because the parser is line-oriented.
     severity: Severity,
     line: u32,
     column: u32,
-    // Owned by the diagnostic bag that produced it. Snapshots copied out of a
-    // bag (see oracle.zig) duplicate this slice and must free it separately.
+    // Owned by the diagnostic bag that produced it.
     message: []const u8,
 };
 
@@ -54,7 +52,7 @@ pub const Bag = struct {
         args: anytype,
     ) !void {
         // Format once and store the owned message. Diagnostics must survive
-        // parser arena teardown and may be cloned into corpus comparison records.
+        // parser arena teardown.
         const message = try std.fmt.allocPrint(self.allocator, fmt, args);
         errdefer self.allocator.free(message);
         try self.items.append(self.allocator, .{

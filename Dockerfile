@@ -7,8 +7,6 @@ ARG LLVM_REPO=https://github.com/llvm/llvm-project.git
 ARG LLVM_REF=ee8c14be14deabace692ab51f5d5d432b0a83d58
 ARG Z3_REPO=https://github.com/Z3Prover/z3.git
 ARG Z3_REF=master
-ARG PLANK_REPO=https://github.com/plankevm/plank-monorepo.git
-ARG PLANK_REF=main
 
 FROM ubuntu:${UBUNTU_VERSION} AS builder
 ARG DEBIAN_FRONTEND=noninteractive
@@ -19,8 +17,6 @@ ARG LLVM_REPO
 ARG LLVM_REF
 ARG Z3_REPO
 ARG Z3_REF
-ARG PLANK_REPO
-ARG PLANK_REF
 
 ENV CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS} \
     CARGO_BUILD_JOBS=${BUILD_JOBS} \
@@ -63,31 +59,25 @@ COPY . .
 
 # Recreate vendor toolchains explicitly inside the image.
 RUN set -eux; \
-    rm -rf vendor/llvm-project vendor/z3 vendor/plank; \
+    rm -rf vendor/llvm-project vendor/z3; \
     mkdir -p vendor; \
     git init vendor/llvm-project; \
     git -C vendor/llvm-project remote add origin "${LLVM_REPO}"; \
     git -C vendor/llvm-project fetch --depth=1 origin "${LLVM_REF}"; \
     git -C vendor/llvm-project checkout --detach FETCH_HEAD; \
-    git clone --depth=1 --branch "${Z3_REF}" "${Z3_REPO}" vendor/z3; \
-    git clone --depth=1 --branch "${PLANK_REF}" "${PLANK_REPO}" vendor/plank
-
-# Require the Plank compiler workspace manifest from the selected ref.
-RUN test -f vendor/plank/plankc/Cargo.toml \
-    || (echo "error: missing vendor/plank/plankc/Cargo.toml in selected Plank ref" && exit 1)
+    git clone --depth=1 --branch "${Z3_REF}" "${Z3_REPO}" vendor/z3
 
 # Build Ora (includes MLIR + vendored Z3 compilation as needed).
 RUN zig build -j${BUILD_JOBS}
 
 RUN test -x zig-out/bin/ora \
     && test -x zig-out/bin/ora-lsp \
-    && test -x vendor/plank/plankc/target/release/sir \
-    && /src/zig-out/bin/ora --help >/dev/null \
-    && /src/vendor/plank/plankc/target/release/sir --help >/dev/null
+    && test -x sinora/zig-out/bin/sinora \
+    && /src/zig-out/bin/ora --help >/dev/null
 
 # Collect runtime shared libraries used by executables.
 RUN mkdir -p /tmp/ora-runtime/lib \
-    && for bin in /src/zig-out/bin/ora /src/zig-out/bin/ora-lsp /src/vendor/plank/plankc/target/release/sir; do \
+    && for bin in /src/zig-out/bin/ora /src/zig-out/bin/ora-lsp /src/sinora/zig-out/bin/sinora; do \
         ldd "$bin" 2>/dev/null | awk '/=> \/.* \(/ {print $3} /^\// {print $1}' | sort -u | while read -r lib; do \
           [ -f "$lib" ] || continue; \
           cp -L "$lib" /tmp/ora-runtime/lib/; \
@@ -105,11 +95,10 @@ WORKDIR /work
 
 COPY --from=builder /src/zig-out/bin/ora /usr/local/bin/ora
 COPY --from=builder /src/zig-out/bin/ora-lsp /usr/local/bin/ora-lsp
-COPY --from=builder /src/vendor/plank/plankc/target/release/sir /usr/local/bin/sir
+COPY --from=builder /src/sinora/zig-out/bin/sinora /usr/local/bin/sinora
 COPY --from=builder /tmp/ora-runtime/lib/ /usr/local/lib/ora/
 
 ENV LD_LIBRARY_PATH=/usr/local/lib/ora
-ENV ORA_PLANK_SIR=/usr/local/bin/sir
 
 ENTRYPOINT ["/usr/local/bin/ora"]
 CMD ["--help"]

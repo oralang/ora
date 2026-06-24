@@ -44,22 +44,6 @@ fn expectBinaryAvailable(path: []const u8, build_hint: []const u8) !void {
 
 /// Run `ora debug --no-tui <fixture> -o <output_dir>`.
 fn runOraDebug(allocator: std.mem.Allocator, fixture: Fixture, output_dir: []const u8) !void {
-    return runOraDebugWithBackend(allocator, fixture, output_dir, null);
-}
-
-fn runOraDebugWithBackend(
-    allocator: std.mem.Allocator,
-    fixture: Fixture,
-    output_dir: []const u8,
-    plank_backend: ?[]const u8,
-) !void {
-    var env_map: ?std.process.Environ.Map = null;
-    defer if (env_map) |*map| map.deinit();
-    if (plank_backend) |backend| {
-        env_map = std.process.Environ.Map.init(allocator);
-        try env_map.?.put("ORA_PLANK_BACKEND", backend);
-    }
-
     var process_io = std.Io.Threaded.init(allocator, .{
         .async_limit = .nothing,
         .concurrent_limit = .nothing,
@@ -75,7 +59,6 @@ fn runOraDebugWithBackend(
             "-o",
             output_dir,
         },
-        .environ_map = if (env_map) |*map| map else null,
         .stdout_limit = std.Io.Limit.limited(4 * 1024 * 1024),
         .stderr_limit = std.Io.Limit.limited(4 * 1024 * 1024),
     });
@@ -366,7 +349,7 @@ test "debug-artifacts regression corpus matches goldens" {
     }
 }
 
-test "debug-artifacts source map can be emitted with Plank release backend" {
+test "debug-artifacts source map can be emitted with Sinora release backend" {
     if (!binaryAvailable()) {
         std.debug.print(
             "skip: {s} not found — run `zig build install` first to enable debug-artifact regression tests\n",
@@ -380,7 +363,7 @@ test "debug-artifacts source map can be emitted with Plank release backend" {
     const out_dir = "/tmp/ora_dbg_artifacts_release_srcmap";
 
     std.Io.Dir.cwd().deleteTree(std.testing.io, out_dir) catch {};
-    try runOraDebugWithBackend(allocator, fixture, out_dir, "release");
+    try runOraDebug(allocator, fixture, out_dir);
 
     const stem = std.fs.path.stem(fixture.source_relpath);
     const sourcemap_path = try std.fmt.allocPrint(
