@@ -1,5 +1,5 @@
 contract RegionOkTstoreAssign {
-    tstore let temp: u256;
+    tstore var temp: u256;
 
     fn setTemp(x: u256) {
         temp = x;

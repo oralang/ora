@@ -351,6 +351,78 @@ test "compiler permits var local reassignment" {
     try testing.expect(typecheck.diagnostics.isEmpty());
 }
 
+test "compiler rejects assignment to non-var storage fields" {
+    const source_text =
+        \\struct Config {
+        \\    value: u256,
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage let fixed: u256;
+        \\    storage const capped: u256 = 1;
+        \\    storage let config: Config;
+        \\    storage let balances: map<address, u256>;
+        \\    tstore let scratch: u256;
+        \\
+        \\    pub fn bad_direct(next: u256) {
+        \\        fixed = next;
+        \\    }
+        \\
+        \\    pub fn bad_const(next: u256) {
+        \\        capped = next;
+        \\    }
+        \\
+        \\    pub fn bad_field(next: u256) {
+        \\        config.value = next;
+        \\    }
+        \\
+        \\    pub fn bad_index(who: address, next: u256) {
+        \\        balances[who] = next;
+        \\    }
+        \\
+        \\    pub fn bad_transient(next: u256) {
+        \\        scratch = next;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'fixed' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'capped' declared with 'const'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'config' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to storage variable 'balances' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to transient variable 'scratch' declared with 'let'"));
+}
+
+test "compiler permits storage var assignment" {
+    const source_text =
+        \\struct Config {
+        \\    value: u256,
+        \\}
+        \\
+        \\contract Vault {
+        \\    storage var fixed: u256;
+        \\    storage var config: Config;
+        \\    storage var balances: map<address, u256>;
+        \\
+        \\    pub fn ok(who: address, next: u256) {
+        \\        fixed = next;
+        \\        config.value = next;
+        \\        balances[who] = next;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
 test "compiler rejects reassigned stable modifies aliases" {
     const source_text =
         \\contract Vault {

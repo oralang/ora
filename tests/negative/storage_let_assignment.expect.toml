@@ -1,0 +1,1 @@
+expect_error = "cannot assign to storage variable 'fixed' declared with 'let'"

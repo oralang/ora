@@ -1,0 +1,15 @@
+fn main:
+    entry {
+        ptr = const 0x0
+        len = const 0x20
+        cond = const 0x1
+        => cond ? @yes : @no
+    }
+    yes {
+        value = const 0x2a
+        mstore256 ptr value
+        return ptr len
+    }
+    no {
+        revert ptr ptr
+    }

@@ -1,0 +1,101 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn provenMinValueMultiple:
+    entry v0 {
+        v1 = const 0x0
+        c1000 = const 0x3E8
+        c10000 = const 0x2710
+        v2 = gt v0 c1000
+        v3 = eq v0 c1000
+        v4 = or v2 v3
+        v5 = iszero v4
+        v6 = iszero v5
+        => v6 ? @bb1 : @bb0
+    }
+    bb0 {
+        revert v1 v1
+    }
+    bb1 {
+        v7 = lt v0 c10000
+        v8 = eq v0 c10000
+        v9 = or v7 v8
+        v10 = iszero v9
+        v11 = iszero v10
+        => v11 ? @bb2 : @bb0
+    }
+    bb2 {
+        iret
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0xD8448A55 => @provenMinValueMultiple_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    provenMinValueMultiple_ {
+        cdsize_provenMinValueMultiple = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_provenMinValueMultiple = lt min_cdsize_1arg_0 cdsize_provenMinValueMultiple
+        => valid_provenMinValueMultiple ? @bb0 : @revert_error
+    }
+    bb0 {
+        selector_offset_0 = const 0x4
+        a_provenMinValueMultiple = calldataload selector_offset_0
+        v15 = const 0x3E8
+        v16 = lt a_provenMinValueMultiple v15
+        v17 = iszero v16
+        => v17 ? @provenMinValueMultiple_exec : @abi_decode_revert_10
+    }
+    provenMinValueMultiple_exec {
+        icall @provenMinValueMultiple a_provenMinValueMultiple
+        v18 = const 0x0
+        return v18 v18
+    }
+    abi_decode_revert_10 {
+        word_size_0 = const 0x20
+        v19 = const 0xA
+        v20 = sallocany 0x20
+        mstore256 v20 v19
+        revert v20 word_size_0
+    }

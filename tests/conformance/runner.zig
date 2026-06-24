@@ -258,10 +258,13 @@ fn runConformanceSpecImpl(
         };
     }
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDir(std.testing.io, "out", .default_dir);
-    const out_path = try pathFromTmpAlloc(arena, tmp, "out");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const tmp_path = try std.fmt.allocPrint(arena, ".zig-cache/tmp/conformance-{x}", .{std.hash.Wyhash.hash(0, spec_path)});
+    std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io, tmp_path) catch {};
+    try std.Io.Dir.cwd().createDirPath(io, tmp_path);
+    const out_path = try std.fmt.allocPrint(arena, "{s}/out", .{tmp_path});
+    try std.Io.Dir.cwd().createDir(io, out_path, .default_dir);
 
     // Compile the primary contract, then every [[contract]] secondary. Each
     // .ora has a distinct stem so all artifacts coexist in one out dir.
@@ -698,12 +701,13 @@ pub fn compileAndRunPropertySource(
     defer run_arena.deinit();
     const arena = run_arena.allocator();
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDir(std.testing.io, "out", .default_dir);
+    try tmp.dir.createDir(io, "out", .default_dir);
 
     const source_name = try std.fmt.allocPrint(arena, "{s}.ora", .{stem});
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = source_name, .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = source_name, .data = source });
 
     const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
     const out_path = try pathFromTmpAlloc(arena, tmp, "out");
@@ -731,13 +735,14 @@ pub fn compileAndRunPropertySourceDifferential(
     defer run_arena.deinit();
     const arena = run_arena.allocator();
 
+    const io = std.Io.Threaded.global_single_threaded.io();
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDir(std.testing.io, "lhs", .default_dir);
-    try tmp.dir.createDir(std.testing.io, "rhs", .default_dir);
+    try tmp.dir.createDir(io, "lhs", .default_dir);
+    try tmp.dir.createDir(io, "rhs", .default_dir);
 
     const source_name = try std.fmt.allocPrint(arena, "{s}.ora", .{stem});
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = source_name, .data = source });
+    try tmp.dir.writeFile(io, .{ .sub_path = source_name, .data = source });
 
     const source_path = try pathFromTmpAlloc(arena, tmp, source_name);
     const lhs_out = try pathFromTmpAlloc(arena, tmp, "lhs");

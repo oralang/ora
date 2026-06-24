@@ -1,0 +1,127 @@
+fn init:
+    entry {
+        v0 = runtime_start_offset
+        v1 = runtime_length
+        v2 = malloc v1
+        codecopy v2 v0 v1
+        return v2 v1
+    }
+
+fn checkedAddMemoryJoin:
+    entry v0 {
+        v1 = large_const 0xB6D338200000000000000000000000000000000000000000000000000000000
+        v2 = const 0x4
+        c100 = const 0x64
+        v3 = const 0x20
+        v4 = large_const 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+        c0 = const 0x0
+        v5 = const 0x1
+        v6 = lt v0 v4
+        v7 = iszero v6
+        v8 = iszero v7
+        => v8 ? @bb1 : @bb0
+    }
+    bb0 {
+        revert c0 c0
+    }
+    bb1 {
+        v9 = eq v0 c0
+        v10 = and v9 v5
+        base = malloc v3
+        mstore256 base c0
+        base_0 = malloc v3
+        v11 = iszero v10
+        v12 = iszero v11
+        => v12 ? @bb2 : @bb3
+    }
+    bb2 {
+        mstore256 base_0 c100
+        mstore256 base v5
+        => @bb6
+    }
+    bb3 {
+        v13 = add v0 v5
+        v14 = gt v13 v0
+        v15 = eq v13 v0
+        v16 = or v14 v15
+        v17 = iszero v16
+        v18 = iszero v17
+        => v18 ? @bb5 : @bb4
+    }
+    bb4 {
+        v19 = malloc v2
+        mstore256 v19 v1
+        revert v19 v2
+    }
+    bb5 {
+        mstore256 base_0 v13
+        mstore256 base v5
+        => @bb6
+    }
+    bb6 {
+        elem0 = mload256 base
+        v20 = iszero elem0
+        v21 = iszero v20
+        => v21 ? @bb7 : @bb8
+    }
+    bb7 -> v22 v3 {
+        elem1 = mload256 base_0
+        v22 = malloc v3
+        mstore256 v22 elem1
+        iret
+    }
+    bb8 {
+        => @bb7
+    }
+
+fn main:
+    main_entry {
+        zero = const 0x0
+        selector_offset = const 0x4
+        word_size = const 0x20
+        min_cdsize_1arg = const 0x23
+        arg1_offset = const 0x24
+        min_cdsize_2args = const 0x43
+        arg2_offset = const 0x44
+        min_cdsize_3args = const 0x63
+        selector_shift = const 0xE0
+        v0 = codesize
+        v1 = mload256 word_size
+        v2 = lt v1 v0
+        sel_zero = const 0x0
+        sel_mask = sub sel_zero v2
+        sel_t = and sel_mask v0
+        sel_inv = not sel_mask
+        sel_f = and sel_inv v1
+        v3 = or sel_t sel_f
+        mstore256 word_size v3
+        cv = callvalue
+        cv_nonzero = iszero cv
+        => cv_nonzero ? @load_selector : @revert_error
+    }
+    load_selector {
+        zero_0 = const 0x0
+        selector_shift_0 = const 0xE0
+        selector_word = calldataload zero_0
+        selector = shr selector_shift_0 selector_word
+        switch selector {
+        0x3BCC1204 => @checkedAddMemoryJoin_
+        default => @revert_error
+    }
+    }
+    revert_error {
+        zero_1 = const 0x0
+        revert zero_1 zero_1
+    }
+    checkedAddMemoryJoin_ {
+        cdsize_checkedAddMemoryJoin = calldatasize
+        min_cdsize_1arg_0 = const 0x23
+        valid_checkedAddMemoryJoin = lt min_cdsize_1arg_0 cdsize_checkedAddMemoryJoin
+        => valid_checkedAddMemoryJoin ? @checkedAddMemoryJoin_exec : @revert_error
+    }
+    checkedAddMemoryJoin_exec {
+        selector_offset_0 = const 0x4
+        a_checkedAddMemoryJoin = calldataload selector_offset_0
+        v4 v5 = icall @checkedAddMemoryJoin a_checkedAddMemoryJoin
+        return v4 v5
+    }

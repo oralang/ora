@@ -1,0 +1,17 @@
+# Ora formal development — Lake package.
+#
+# Phase 0 scaffold. Deliberately minimal: no external dependencies (no mathlib
+# yet — Lean 4 core + the `omega`/`simp` tactics cover the scaffold, and the
+# Phase 1 core-calculus mechanization can add `mathlib` here with a single
+# `[[require]]` block if/when the proofs need it).
+#
+# This package is a standalone PROOF project. It is checked by `lake build`
+# (the Lean kernel does the trusting). It is NOT a build or runtime dependency
+# of the `ora` compiler: `build.zig` does not reference it and nothing links
+# against it. See README.md ("Dependency posture").
+
+name = "ora"
+defaultTargets = ["Ora"]
+
+[[lean_lib]]
+name = "Ora"

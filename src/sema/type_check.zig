@@ -82,6 +82,13 @@ fn isReferenceConstevalBuiltin(kind: BuiltinKind) bool {
     };
 }
 
+fn isReflectionMetadataBuiltin(kind: BuiltinKind) bool {
+    return switch (kind) {
+        .struct_fields, .trait_methods => true,
+        else => false,
+    };
+}
+
 fn isResourceBoundaryBuiltin(kind: BuiltinKind) bool {
     return switch (kind) {
         .resource_move, .resource_create, .resource_destroy => true,
@@ -2958,7 +2965,9 @@ const TypeChecker = struct {
                 }
                 if (decl.storage_class != .storage) {
                     try self.checkRuntimeMapLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
-                    try self.checkRuntimeResourcePlaceLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    if (self.comptime_depth == 0) {
+                        try self.checkRuntimeResourcePlaceLocal(decl.range, decl.pattern, self.pattern_types[decl.pattern.index()].type);
+                    }
                     try self.checkLocalResultAggregateTypeSupport(decl.range, self.pattern_types[decl.pattern.index()].type);
                 }
             },
@@ -3393,6 +3402,11 @@ const TypeChecker = struct {
                 };
 
                 if (isReferenceConstevalBuiltin(kind)) {
+                    if (isReflectionMetadataBuiltin(kind) and self.comptime_depth == 0) {
+                        try self.checkBuiltinArguments(kind, builtin);
+                        self.expr_types[expr_id.index()] = .{ .unknown = {} };
+                        return;
+                    }
                     self.expr_types[expr_id.index()] = try self.builtinReturnType(kind, builtin);
                     try self.checkBuiltinArguments(kind, builtin);
                     return;
@@ -5068,6 +5082,10 @@ const TypeChecker = struct {
     ) !void {
         if (builtin.args.len != 1) {
             try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " expects 1 argument, found {d}", .{builtin.args.len});
+            return;
+        }
+        if (self.comptime_depth == 0) {
+            try self.emitRangeError(builtin.range, "@" ++ builtin_name ++ " is comptime-only; wrap it in a comptime block", .{});
             return;
         }
 
@@ -8575,7 +8593,7 @@ const TypeChecker = struct {
     ) !bool {
         const kind: ?ast.BindingKind = if (binding) |resolved| switch (resolved) {
             .pattern => |decl_pattern| self.patternBindingKind(decl_pattern),
-            .item => null,
+            .item => |item_id| return try self.emitNonVarItemAssignmentIfNeeded(range, name, item_id),
         } else null;
         const binding_kind = kind orelse return false;
         switch (binding_kind) {
@@ -8591,9 +8609,53 @@ const TypeChecker = struct {
         }
     }
 
+    fn emitNonVarItemAssignmentIfNeeded(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        item_id: ast.ItemId,
+    ) !bool {
+        switch (self.file.item(item_id).*) {
+            .Field => |field| {
+                switch (field.binding_kind) {
+                    .var_ => return false,
+                    .let_, .constant => {
+                        try self.emitRangeError(range, "cannot assign to {s} '{s}' declared with '{s}'", .{
+                            fieldBindingSubject(field),
+                            name,
+                            bindingKindKeyword(field.binding_kind),
+                        });
+                        return true;
+                    },
+                    .immutable => {
+                        try self.emitRangeError(range, "cannot assign to immutable {s} '{s}'", .{
+                            fieldBindingSubject(field),
+                            name,
+                        });
+                        return true;
+                    },
+                }
+            },
+            .Constant => {
+                try self.emitRangeError(range, "cannot assign to global constant '{s}'", .{name});
+                return true;
+            },
+            else => return false,
+        }
+    }
+
     fn patternBindingKind(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.BindingKind {
         if (pattern_id.index() >= self.pattern_binding_kinds.len) return null;
         return self.pattern_binding_kinds[pattern_id.index()];
+    }
+
+    fn fieldBindingSubject(field: ast.FieldItem) []const u8 {
+        return switch (field.storage_class) {
+            .none => "contract field",
+            .storage => "storage variable",
+            .tstore => "transient variable",
+            .memory => "memory variable",
+        };
     }
 
     fn bindingKindKeyword(kind: ast.BindingKind) []const u8 {

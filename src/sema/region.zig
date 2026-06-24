@@ -1,6 +1,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const type_descriptors = @import("type_descriptors.zig");
+const region_assign = @import("ora_types").region_assign;
 
 const LocatedType = model.LocatedType;
 const Region = model.Region;
@@ -23,28 +24,12 @@ pub fn isAssignable(from: LocatedType, to: LocatedType) bool {
     return type_descriptors.typesAssignable(to.type, from.type) and regionAssignable(from.region, to.region);
 }
 
+/// Region implicit-coercion rule. Delegates to the pure single source of truth
+/// in `src/types/region_assign.zig`, which the Lean spec emitter
+/// (`tools`/`emit_formal_snapshot.zig`) also consumes — so the type checker and
+/// the formal spec can never disagree on this relation.
 pub fn regionAssignable(from: Region, to: Region) bool {
-    if (from == to) return true;
-
-    return switch (from) {
-        .none => true,
-        .memory => switch (to) {
-            .none, .storage, .transient => true,
-            .memory, .calldata => false,
-        },
-        .storage => switch (to) {
-            .none, .memory => true,
-            .storage, .transient, .calldata => false,
-        },
-        .transient => switch (to) {
-            .none, .memory => true,
-            .storage, .transient, .calldata => false,
-        },
-        .calldata => switch (to) {
-            .none, .memory => true,
-            .storage, .transient, .calldata => false,
-        },
-    };
+    return region_assign.regionAssignable(from, to);
 }
 
 test "regionDisplayName formats all regions" {
