@@ -1,0 +1,10 @@
+contract V {
+    storage var balances: map<address, u256>;
+
+    pub fn set(value: u256)
+        modifies balances[msg.sender]
+    {
+        var sender: address = std.msg.sender();
+        balances[sender] = value;
+    }
+}

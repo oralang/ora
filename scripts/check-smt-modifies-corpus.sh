@@ -23,6 +23,7 @@ SEMA_FAIL_CASES=(
   "ora-example/corpus/modifies/fail_external_storage_path.ora|only supports current-contract storage paths"
   "ora-example/corpus/modifies/fail_mixed_indexed_field_path.ora|does not support mixed indexed-field storage paths"
   "ora-example/corpus/modifies/fail_unsupported_map_key.ora|map keys must be literals"
+  "ora-example/corpus/modifies/fail_mutable_msg_sender_alias.ora|storage write to 'balances[?]' is not covered"
   "ora-example/corpus/modifies/fail_write_outside_declared.ora|storage write to 'balances[other]' is not covered|storage write to 'buckets[43]' is not covered|storage write to 'balances[recipient]' is not covered|storage write to 'config.admin' is not covered"
 )
 
@@ -34,6 +35,7 @@ PASS_CASES=(
   "ora-example/smt/modifies/pass_staticcall_modifies_empty_frame.ora"
   "ora-example/smt/modifies/pass_locked_call_root_frame.ora"
   "ora-example/smt/modifies/pass_locked_call_map_key_frame.ora"
+  "ora-example/smt/modifies/pass_stable_msg_sender_alias_frame.ora"
 )
 
 OPAQUE_PASS_CASES=(
