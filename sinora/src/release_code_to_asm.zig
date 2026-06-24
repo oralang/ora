@@ -1,10 +1,11 @@
-//! Partial Zig port of Plank's generic release `code_to_asm` emitter.
+//! Zig port of Plank's generic release `code_to_asm` emitter.
 //!
 //! Rust source of truth:
 //! - vendor/plank/plankc/sir/crates/release-backend/src/code_to_asm.rs
 //!
-//! This module consumes scheduled stack ops and emits generic SIR blocks. It is
-//! separate from release_codegen.zig's legacy selector-shape parity scaffold.
+//! This module consumes scheduled stack ops and emits EVM bytecode for generic
+//! SIR blocks. It is separate from the old selector-shape scaffold and is the
+//! bytecode emission half of the owned release backend.
 
 const std = @import("std");
 
@@ -52,6 +53,180 @@ pub const BlockSchedule = struct {
     function_name: []const u8,
     block_name: []const u8,
     ops: []const release_schedule.StackOp,
+};
+
+pub const SourceMapEntry = struct {
+    idx: u32,
+    pc: u32,
+};
+
+const SourceMapMark = struct {
+    label: evm_asm.Label,
+    idx: u32,
+};
+
+pub const SourceIndexMap = struct {
+    allocator: std.mem.Allocator,
+    op_indices: []const OpSourceIndex,
+    control_indices: []const ControlSourceIndex,
+
+    const OpSourceIndex = struct {
+        function_name: []const u8,
+        block_name: []const u8,
+        instruction_index: usize,
+        idx: u32,
+    };
+
+    const ControlSourceIndex = struct {
+        function_name: []const u8,
+        block_name: []const u8,
+        idx: u32,
+    };
+
+    pub fn deinit(self: *SourceIndexMap) void {
+        self.allocator.free(self.control_indices);
+        self.allocator.free(self.op_indices);
+        self.* = undefined;
+    }
+
+    pub fn fromProgram(allocator: std.mem.Allocator, program: ir.Program) !SourceIndexMap {
+        var builder = SourceIndexBuilder.init(allocator, program);
+        defer builder.deinit();
+        try builder.visitEntry("init");
+        try builder.visitEntry("main");
+        return .{
+            .allocator = allocator,
+            .op_indices = try builder.op_indices.toOwnedSlice(allocator),
+            .control_indices = try builder.control_indices.toOwnedSlice(allocator),
+        };
+    }
+
+    fn opIndex(self: SourceIndexMap, function_name: []const u8, block_name: []const u8, instruction_index: usize) ?u32 {
+        for (self.op_indices) |entry| {
+            if (entry.instruction_index == instruction_index and
+                std.mem.eql(u8, entry.function_name, function_name) and
+                std.mem.eql(u8, entry.block_name, block_name))
+            {
+                return entry.idx;
+            }
+        }
+        return null;
+    }
+
+    fn controlIndex(self: SourceIndexMap, function_name: []const u8, block_name: []const u8) ?u32 {
+        for (self.control_indices) |entry| {
+            if (std.mem.eql(u8, entry.function_name, function_name) and
+                std.mem.eql(u8, entry.block_name, block_name))
+            {
+                return entry.idx;
+            }
+        }
+        return null;
+    }
+};
+
+pub const EmitResult = struct {
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+    source_map: []const SourceMapEntry,
+    runtime_start_pc: u32,
+
+    pub fn deinit(self: *EmitResult) void {
+        self.allocator.free(self.source_map);
+        self.allocator.free(self.bytes);
+        self.* = undefined;
+    }
+};
+
+const SourceIndexBuilder = struct {
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    op_indices: std.ArrayList(SourceIndexMap.OpSourceIndex) = .empty,
+    control_indices: std.ArrayList(SourceIndexMap.ControlSourceIndex) = .empty,
+    worklist: std.ArrayList(BlockRef) = .empty,
+    visited: std.ArrayList(BlockRef) = .empty,
+    next_idx: u32 = 0,
+
+    fn init(allocator: std.mem.Allocator, program: ir.Program) SourceIndexBuilder {
+        return .{
+            .allocator = allocator,
+            .program = program,
+        };
+    }
+
+    fn deinit(self: *SourceIndexBuilder) void {
+        self.visited.deinit(self.allocator);
+        self.worklist.deinit(self.allocator);
+        self.control_indices.deinit(self.allocator);
+        self.op_indices.deinit(self.allocator);
+    }
+
+    fn visitEntry(self: *SourceIndexBuilder, function_name: []const u8) !void {
+        const function = findFunction(self.program, function_name) orelse return;
+        if (function.blocks.len == 0) return;
+        try self.enqueue(function.name, function.blocks[0].name);
+
+        while (self.worklist.pop()) |block_ref| {
+            if (self.hasVisited(block_ref.function_name, block_ref.block_name)) continue;
+            try self.visited.append(self.allocator, block_ref);
+
+            const function_for_block = findFunction(self.program, block_ref.function_name) orelse return CodeToAsmError.FunctionNotFound;
+            const block = findBlock(function_for_block, block_ref.block_name) orelse return CodeToAsmError.BlockNotFound;
+
+            var callees: std.ArrayList([]const u8) = .empty;
+            defer callees.deinit(self.allocator);
+            for (block.instructions, 0..) |instruction, instruction_index| {
+                try self.op_indices.append(self.allocator, .{
+                    .function_name = function_for_block.name,
+                    .block_name = block.name,
+                    .instruction_index = instruction_index,
+                    .idx = self.takeIndex(),
+                });
+                if (std.mem.eql(u8, instruction.mnemonic, "icall")) {
+                    if (instruction.operands.len != 0 and instruction.operands[0].len > 1 and instruction.operands[0][0] == '@') {
+                        try callees.append(self.allocator, instruction.operands[0][1..]);
+                    }
+                }
+            }
+
+            try self.control_indices.append(self.allocator, .{
+                .function_name = function_for_block.name,
+                .block_name = block.name,
+                .idx = self.takeIndex(),
+            });
+
+            for (callees.items) |callee_name| {
+                const callee = findFunction(self.program, callee_name) orelse continue;
+                if (callee.blocks.len != 0) try self.enqueue(callee.name, callee.blocks[0].name);
+            }
+
+            var successors = ir.successors(&block);
+            while (successors.next()) |target| {
+                try self.enqueue(function_for_block.name, target);
+            }
+        }
+    }
+
+    fn takeIndex(self: *SourceIndexBuilder) u32 {
+        const result = self.next_idx;
+        self.next_idx += 1;
+        return result;
+    }
+
+    fn enqueue(self: *SourceIndexBuilder, function_name: []const u8, block_name: []const u8) !void {
+        try self.worklist.append(self.allocator, .{ .function_name = function_name, .block_name = block_name });
+    }
+
+    fn hasVisited(self: SourceIndexBuilder, function_name: []const u8, block_name: []const u8) bool {
+        for (self.visited.items) |entry| {
+            if (std.mem.eql(u8, entry.function_name, function_name) and
+                std.mem.eql(u8, entry.block_name, block_name))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 const ReferenceMode = enum {
@@ -103,7 +278,7 @@ pub fn emitFromEntry(
     schedules: []const BlockSchedule,
     layout: MemoryLayout,
 ) ![]const u8 {
-    var emitter = GenericEmitter.init(allocator, program, schedules, layout);
+    var emitter = GenericEmitter.init(allocator, program, schedules, layout, null);
     defer emitter.deinit();
     try emitter.prepare();
     try emitter.markRuncodeStart();
@@ -115,6 +290,28 @@ pub fn emitFromEntry(
     try emitter.emitUsedData(null);
     try emitter.markInitcodeEnd();
     return emitter.bytecode.toOwnedSlice();
+}
+
+pub fn emitFromEntryWithSourceMap(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    entry_function_name: []const u8,
+    schedules: []const BlockSchedule,
+    layout: MemoryLayout,
+    source_indices: *const SourceIndexMap,
+) !EmitResult {
+    var emitter = GenericEmitter.init(allocator, program, schedules, layout, source_indices);
+    defer emitter.deinit();
+    try emitter.prepare();
+    try emitter.markRuncodeStart();
+    const entry = findFunction(program, entry_function_name) orelse return CodeToAsmError.FunctionNotFound;
+    try emitter.emitFromFunction(entry, .{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
+    try emitter.emitUsedData(null);
+    try emitter.markInitcodeEnd();
+    return emitter.finishWithSourceMap();
 }
 
 pub fn emitDeployment(
@@ -129,7 +326,7 @@ pub fn emitDeployment(
     var runtime_data = try collectRuntimeData(allocator, program, runtime_function_name);
     defer runtime_data.deinit(allocator);
 
-    var emitter = GenericEmitter.init(allocator, program, schedules, init_layout);
+    var emitter = GenericEmitter.init(allocator, program, schedules, init_layout, null);
     defer emitter.deinit();
     try emitter.prepare();
 
@@ -153,6 +350,45 @@ pub fn emitDeployment(
     }
     try emitter.markInitcodeEnd();
     return emitter.bytecode.toOwnedSlice();
+}
+
+pub fn emitDeploymentWithSourceMap(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    init_function_name: []const u8,
+    runtime_function_name: ?[]const u8,
+    schedules: []const BlockSchedule,
+    init_layout: MemoryLayout,
+    runtime_layout: MemoryLayout,
+    source_indices: *const SourceIndexMap,
+) !EmitResult {
+    var runtime_data = try collectRuntimeData(allocator, program, runtime_function_name);
+    defer runtime_data.deinit(allocator);
+
+    var emitter = GenericEmitter.init(allocator, program, schedules, init_layout, source_indices);
+    defer emitter.deinit();
+    try emitter.prepare();
+
+    const init_entry = findFunction(program, init_function_name) orelse return CodeToAsmError.FunctionNotFound;
+    emitter.layout = init_layout;
+    try emitter.emitFromFunction(init_entry, .{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
+    try emitter.emitUsedData(runtime_data.items);
+
+    try emitter.markRuncodeStart();
+    if (runtime_function_name) |runtime_name| {
+        const runtime_entry = findFunction(program, runtime_name) orelse return CodeToAsmError.FunctionNotFound;
+        emitter.layout = runtime_layout;
+        try emitter.emitFromFunction(runtime_entry, .{
+            .reference_mode = .runcode_delta,
+            .allow_initcode_introspection = false,
+        });
+        try emitter.emitSelectedData(runtime_data.items);
+    }
+    try emitter.markInitcodeEnd();
+    return emitter.finishWithSourceMap();
 }
 
 pub fn operationId(
@@ -191,6 +427,8 @@ const GenericEmitter = struct {
     visited_blocks: std.ArrayList(VisitedBlock) = .empty,
     operations: std.ArrayList(OperationEntry) = .empty,
     icall_return_marks: std.ArrayList(IcallReturnMark) = .empty,
+    source_indices: ?*const SourceIndexMap = null,
+    source_map_marks: std.ArrayList(SourceMapMark) = .empty,
     runcode_start: ?evm_asm.Label = null,
     initcode_end: ?evm_asm.Label = null,
 
@@ -199,17 +437,20 @@ const GenericEmitter = struct {
         program: ir.Program,
         schedules: []const BlockSchedule,
         layout: MemoryLayout,
+        source_indices: ?*const SourceIndexMap,
     ) GenericEmitter {
         return .{
             .allocator = allocator,
             .program = program,
             .schedules = schedules,
             .layout = layout,
+            .source_indices = source_indices,
             .bytecode = evm_asm.LabelBytecode.init(allocator),
         };
     }
 
     fn deinit(self: *GenericEmitter) void {
+        self.source_map_marks.deinit(self.allocator);
         self.icall_return_marks.deinit(self.allocator);
         self.operations.deinit(self.allocator);
         self.visited_blocks.deinit(self.allocator);
@@ -232,25 +473,28 @@ const GenericEmitter = struct {
         try self.data_labels.ensureTotalCapacity(self.allocator, stats.data_segments);
         try self.used_data.ensureTotalCapacity(self.allocator, stats.data_segments);
         try self.operations.ensureTotalCapacity(self.allocator, stats.instructions);
+        try self.source_map_marks.ensureTotalCapacity(self.allocator, stats.instructions + stats.terminators);
         try self.pending_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
         try self.visited_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
 
         self.runcode_start = try self.bytecode.newLabel();
         self.initcode_end = try self.bytecode.newLabel();
         for (self.program.data_segments) |_| {
-            try self.data_labels.append(self.allocator, try self.bytecode.newLabel());
-            try self.used_data.append(self.allocator, false);
+            const label = try self.bytecode.newLabel();
+            self.data_labels.appendAssumeCapacity(label);
+            self.used_data.appendAssumeCapacity(false);
         }
 
         for (self.program.functions, 0..) |function, function_index| {
             for (function.blocks, 0..) |block, block_index| {
-                try self.block_labels.append(self.allocator, .{
+                const label = try self.bytecode.newLabel();
+                self.block_labels.appendAssumeCapacity(.{
                     .function_name = function.name,
                     .block_name = block.name,
-                    .label = try self.bytecode.newLabel(),
+                    .label = label,
                 });
                 for (block.instructions, 0..) |_, instruction_index| {
-                    try self.operations.append(self.allocator, .{
+                    self.operations.appendAssumeCapacity(.{
                         .function_index = function_index,
                         .block_index = block_index,
                         .instruction_index = instruction_index,
@@ -266,6 +510,57 @@ const GenericEmitter = struct {
 
     fn markInitcodeEnd(self: *GenericEmitter) !void {
         try self.bytecode.mark(self.initcode_end orelse return CodeToAsmError.MissingLabel);
+    }
+
+    fn finishWithSourceMap(self: *GenericEmitter) !EmitResult {
+        var finalized = try self.bytecode.toOwnedFinalized();
+        errdefer finalized.deinit();
+
+        const entries = try self.allocator.alloc(SourceMapEntry, self.source_map_marks.items.len);
+        errdefer self.allocator.free(entries);
+        for (self.source_map_marks.items, entries) |mark, *entry| {
+            entry.* = .{
+                .idx = mark.idx,
+                .pc = evm_asm.LabelBytecode.labelOffset(finalized, mark.label) orelse return CodeToAsmError.MissingLabel,
+            };
+        }
+
+        const runtime_start_pc = evm_asm.LabelBytecode.labelOffset(
+            finalized,
+            self.runcode_start orelse return CodeToAsmError.MissingLabel,
+        ) orelse return CodeToAsmError.MissingLabel;
+        const bytes = finalized.bytes;
+        self.allocator.free(finalized.label_offsets);
+        finalized.bytes = &.{};
+        finalized.label_offsets = &.{};
+        return .{
+            .allocator = self.allocator,
+            .bytes = bytes,
+            .source_map = entries,
+            .runtime_start_pc = runtime_start_pc,
+        };
+    }
+
+    fn pushSourceMapMark(self: *GenericEmitter, idx: u32) !void {
+        const label = try self.bytecode.newLabel();
+        try self.bytecode.mark(label);
+        try self.source_map_marks.append(self.allocator, .{ .label = label, .idx = idx });
+    }
+
+    fn pushOpSourceMapMark(self: *GenericEmitter, op_id: release_schedule.OpId) !void {
+        const source_indices = self.source_indices orelse return;
+        if (op_id >= self.operations.items.len) return CodeToAsmError.MissingInstruction;
+        const entry = self.operations.items[op_id];
+        const function = self.program.functions[entry.function_index];
+        const block = function.blocks[entry.block_index];
+        const idx = source_indices.opIndex(function.name, block.name, entry.instruction_index) orelse return;
+        try self.pushSourceMapMark(idx);
+    }
+
+    fn pushControlSourceMapMark(self: *GenericEmitter, function: ir.Function, block: ir.Block) !void {
+        const source_indices = self.source_indices orelse return;
+        const idx = source_indices.controlIndex(function.name, block.name) orelse return;
+        try self.pushSourceMapMark(idx);
     }
 
     fn emitFromFunction(self: *GenericEmitter, entry: ir.Function, context: EmitContext) !void {
@@ -326,6 +621,7 @@ const GenericEmitter = struct {
     }
 
     fn emitOperation(self: *GenericEmitter, op_id: release_schedule.OpId, context: EmitContext) !void {
+        try self.pushOpSourceMapMark(op_id);
         const instruction = self.instructionById(op_id) orelse return CodeToAsmError.MissingInstruction;
         const spec = ops.lookup(instruction.mnemonic) orelse return CodeToAsmError.UnsupportedSir;
         switch (spec) {
@@ -511,6 +807,7 @@ const GenericEmitter = struct {
     }
 
     fn emitControl(self: *GenericEmitter, function: ir.Function, block: ir.Block, context: EmitContext) !void {
+        try self.pushControlSourceMapMark(function, block);
         switch (block.terminator) {
             .jump => |target| {
                 try self.pushBlockLabel(function.name, target, context);
@@ -715,9 +1012,15 @@ fn collectRuntimeData(
     var seen_blocks: std.ArrayList(BlockRef) = .empty;
     defer seen_blocks.deinit(allocator);
 
+    const stats = program.stats();
+    try result.ensureTotalCapacity(allocator, program.data_segments.len);
+    try function_worklist.ensureTotalCapacity(allocator, @max(program.functions.len, 1));
+    try seen_functions.ensureTotalCapacity(allocator, program.functions.len);
+    try block_worklist.ensureTotalCapacity(allocator, @max(stats.blocks, 1));
+    try seen_blocks.ensureTotalCapacity(allocator, stats.blocks);
+
     try enqueueFunctionName(allocator, &seen_functions, &function_worklist, runtime_name);
-    while (function_worklist.items.len != 0) {
-        const function_name = function_worklist.orderedRemove(function_worklist.items.len - 1);
+    while (function_worklist.pop()) |function_name| {
         const function = findFunction(program, function_name) orelse return CodeToAsmError.FunctionNotFound;
         if (function.blocks.len == 0) return CodeToAsmError.BlockNotFound;
         try enqueueBlockRef(allocator, &seen_blocks, &block_worklist, .{
@@ -725,8 +1028,7 @@ fn collectRuntimeData(
             .block_name = function.blocks[0].name,
         });
 
-        while (block_worklist.items.len != 0) {
-            const block_ref = block_worklist.orderedRemove(block_worklist.items.len - 1);
+        while (block_worklist.pop()) |block_ref| {
             const block_function = findFunction(program, block_ref.function_name) orelse return CodeToAsmError.FunctionNotFound;
             const block = findBlock(block_function, block_ref.block_name) orelse return CodeToAsmError.BlockNotFound;
 
@@ -859,6 +1161,14 @@ fn parseTestProgram(source: []const u8) !ir.Program {
 
 fn testOperationId(program: ir.Program, function_name: []const u8, block_name: []const u8, instruction_index: usize) release_schedule.OpId {
     return operationId(program, function_name, block_name, instruction_index) catch unreachable;
+}
+
+fn countByte(bytes: []const u8, needle: u8) usize {
+    var count: usize = 0;
+    for (bytes) |byte| {
+        if (byte == needle) count += 1;
+    }
+    return count;
 }
 
 test "generic code-to-asm emits scheduled straight-line stack operations" {
@@ -996,12 +1306,4 @@ test "generic code-to-asm emits internal call return label pattern" {
     try std.testing.expectEqual(@as(usize, 3), countByte(bytes, evm_asm.op.JUMPDEST));
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.JUMP) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.STOP) != null);
-}
-
-fn countByte(bytes: []const u8, needle: u8) usize {
-    var count: usize = 0;
-    for (bytes) |byte| {
-        if (byte == needle) count += 1;
-    }
-    return count;
 }

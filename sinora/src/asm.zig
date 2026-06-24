@@ -457,14 +457,43 @@ pub const LabelBytecode = struct {
         try self.pushOp(op.JUMPI);
     }
 
+    pub const Finalized = struct {
+        allocator: std.mem.Allocator,
+        bytes: []const u8,
+        label_offsets: []const u32,
+
+        pub fn deinit(self: *Finalized) void {
+            self.allocator.free(self.label_offsets);
+            self.allocator.free(self.bytes);
+            self.* = undefined;
+        }
+    };
+
     pub fn toOwnedSlice(self: *LabelBytecode) ![]const u8 {
+        const finalized = try self.toOwnedFinalized();
+        self.allocator.free(finalized.label_offsets);
+        return finalized.bytes;
+    }
+
+    pub fn toOwnedFinalized(self: *LabelBytecode) !Finalized {
         // Two-phase finalization:
         // 1. find the minimal width required by every label reference;
         // 2. rewrite the raw placeholder stream into final bytecode.
         const layout = try self.computePatchLayout();
-        defer self.allocator.free(layout.label_offsets);
         defer self.allocator.free(layout.widths);
-        return self.assembleWithLayout(layout);
+        errdefer self.allocator.free(layout.label_offsets);
+        const bytes = try self.assembleWithLayout(layout);
+        return .{
+            .allocator = self.allocator,
+            .bytes = bytes,
+            .label_offsets = layout.label_offsets,
+        };
+    }
+
+    pub fn labelOffset(finalized: Finalized, label: Label) ?u32 {
+        const index: usize = @intCast(label.id);
+        if (index >= finalized.label_offsets.len) return null;
+        return finalized.label_offsets[index];
     }
 
     fn computePatchLayout(self: *LabelBytecode) !PatchLayout {

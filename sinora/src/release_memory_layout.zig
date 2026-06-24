@@ -1,7 +1,11 @@
-//! Partial Zig port of Plank's `sir_static_memory_allocator::BumpAllocateAll`.
+//! Zig port of Plank's `sir_static_memory_allocator::BumpAllocateAll`.
 //!
 //! Rust source of truth:
 //! - vendor/plank/plankc/sir/crates/static-memory-allocator/src/bump_allocate_all.rs
+//!
+//! The layout is computed from reachable SIR and the release scheduler output:
+//! scheduler spills, explicit static allocations, switch scratch, and the
+//! dynamic free-pointer slot all come from this single bump allocator.
 
 const std = @import("std");
 
@@ -45,9 +49,14 @@ pub fn generateSimple(
     var seen_blocks: std.ArrayList(BlockRef) = .empty;
     defer seen_blocks.deinit(allocator);
 
+    const stats = program.stats();
+    try function_worklist.ensureTotalCapacity(allocator, @max(program.functions.len, 1));
+    try seen_functions.ensureTotalCapacity(allocator, program.functions.len);
+    try block_worklist.ensureTotalCapacity(allocator, @max(stats.blocks, 1));
+    try seen_blocks.ensureTotalCapacity(allocator, stats.blocks);
+
     try enqueueFunction(allocator, &seen_functions, &function_worklist, entry_function_name);
-    while (function_worklist.items.len != 0) {
-        const function_name = function_worklist.orderedRemove(function_worklist.items.len - 1);
+    while (function_worklist.pop()) |function_name| {
         const function = findFunction(program, function_name) orelse return error.MissingFunction;
         if (function.blocks.len == 0) return error.MissingBlock;
         try enqueueBlock(allocator, &seen_blocks, &block_worklist, .{
@@ -55,8 +64,7 @@ pub fn generateSimple(
             .block_name = function.blocks[0].name,
         });
 
-        while (block_worklist.items.len != 0) {
-            const block_ref = block_worklist.orderedRemove(block_worklist.items.len - 1);
+        while (block_worklist.pop()) |block_ref| {
             const block_function = findFunction(program, block_ref.function_name) orelse return error.MissingFunction;
             const block = findBlock(block_function, block_ref.block_name) orelse return error.MissingBlock;
 

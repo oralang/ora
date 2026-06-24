@@ -1,11 +1,13 @@
-//! Partial Zig port of Plank's generic release stack scheduler.
+//! Zig port of Plank's generic release stack primitives and op scheduler.
 //!
 //! Rust source of truth:
 //! - vendor/plank/plankc/sir/crates/stack-scheduling/src/stack.rs
 //! - vendor/plank/plankc/sir/crates/stack-scheduling/src/scheduler.rs
 //!
-//! This is the path that should replace release_codegen.zig's temporary
-//! selector-shape parity adapters. Do not add Ora ABI/dispatcher concepts here.
+//! The graph builder and greedy final-stack shuffler live in
+//! `release_op_graph.zig`; this file owns the EVM stack model, emitted stack
+//! operations, spills, unspills, and single-operation scheduling. Do not add Ora
+//! ABI/dispatcher concepts here.
 
 const std = @import("std");
 
@@ -61,6 +63,11 @@ pub const OpShape = struct {
 
 pub const EvmStack = struct {
     allocator: std.mem.Allocator,
+    // The first element is the EVM top-of-stack. This matches Plank's scheduler
+    // model and keeps depth calculations direct: DUP/SWAP depth is just an
+    // index into this slice. Push/pop are therefore front operations; changing
+    // that representation would touch every shuffler invariant, so local
+    // cleanups keep the top-at-zero convention.
     items: std.ArrayList(ValueId) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) EvmStack {
@@ -213,9 +220,9 @@ pub fn loadInputForUse(
         }
 
         const delta_to_max = depth - config.max_dup_depth;
-        var in_the_way: std.ArrayList(ValueId) = .empty;
-        defer in_the_way.deinit(allocator);
-        try in_the_way.appendSlice(allocator, stack.stack.fifo()[0..delta_to_max]);
+        const in_the_way = try allocator.alloc(ValueId, delta_to_max);
+        defer allocator.free(in_the_way);
+        @memcpy(in_the_way, stack.stack.fifo()[0..delta_to_max]);
 
         var spill_count: usize = 0;
         while (spill_count < delta_to_max) : (spill_count += 1) {
@@ -230,10 +237,10 @@ pub fn loadInputForUse(
         try stack.dup(config.max_dup_depth);
         _ = try stack.spillTop();
 
-        var restore_index = in_the_way.items.len;
+        var restore_index = in_the_way.len;
         while (restore_index > 0) {
             restore_index -= 1;
-            try stack.unspill(in_the_way.items[restore_index]);
+            try stack.unspill(in_the_way[restore_index]);
         }
 
         try stack.unspill(input);

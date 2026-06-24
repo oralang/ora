@@ -1,12 +1,15 @@
-//! Generic release backend orchestration under migration from Plank.
+//! Generic release backend orchestration ported from Plank.
 //!
-//! This wires the current simple op-graph scheduler into the generic
-//! code-to-asm emitter. It is intentionally separate from release_codegen.zig's
-//! legacy selector-shape parity scaffold.
+//! This wires critical-edge normalization, effect-aware op-graph scheduling,
+//! Plank-style static memory layout, and generic code-to-asm emission into one
+//! release bytecode path. Some public helper names still say "Simple" because
+//! they predate the effect-aware scheduler port; they now call the effectful
+//! graph builder.
 
 const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
+const effects = @import("effects.zig");
 const evm_asm = @import("asm.zig");
 const ir = @import("ir.zig");
 const parser = @import("parser.zig");
@@ -43,14 +46,17 @@ pub fn scheduleProgramSimple(
         for (blocks.items) |block| block.deinit(allocator);
         blocks.deinit(allocator);
     }
+    try blocks.ensureTotalCapacity(allocator, program.stats().blocks);
 
     var layout_cache = release_op_graph.LayoutCache.init(allocator, program);
     defer layout_cache.deinit();
+    var function_effects = try effects.analyzeFunctions(allocator, program);
+    defer function_effects.deinit();
 
     var next_alloc_id = initial_alloc_id;
     for (program.functions) |function| {
         for (function.blocks) |block| {
-            const scheduled = try release_op_graph.scheduleBlockSimple(
+            const scheduled = try release_op_graph.scheduleBlockEffectful(
                 allocator,
                 program,
                 function.name,
@@ -58,9 +64,10 @@ pub fn scheduleProgramSimple(
                 config,
                 next_alloc_id,
                 &layout_cache,
+                &function_effects,
             );
             next_alloc_id = scheduled.next_alloc_id;
-            try blocks.append(allocator, scheduled);
+            blocks.appendAssumeCapacity(scheduled);
         }
     }
 
@@ -111,6 +118,48 @@ pub fn emitSimple(
     );
 }
 
+pub fn emitSimpleWithSourceMap(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    entry_function_name: []const u8,
+    layout: release_code_to_asm.MemoryLayout,
+    source_indices: *const release_code_to_asm.SourceIndexMap,
+) !release_code_to_asm.EmitResult {
+    var normalized = try release_critical_edges.split(allocator, program);
+    defer normalized.deinit();
+
+    var scheduled = try scheduleProgramSimple(
+        allocator,
+        normalized,
+        release_schedule.ScheduleConfig.pre_amsterdam,
+        0,
+    );
+    defer scheduled.deinit();
+
+    var generated_layout = try release_memory_layout.generateSimple(allocator, normalized, entry_function_name, scheduled.blocks);
+    defer generated_layout.deinit();
+    const emit_layout = mergeLayout(layout, generated_layout.layout);
+
+    const block_schedules = try allocator.alloc(release_code_to_asm.BlockSchedule, scheduled.blocks.len);
+    defer allocator.free(block_schedules);
+    for (scheduled.blocks, block_schedules) |scheduled_block, *block_schedule| {
+        block_schedule.* = .{
+            .function_name = scheduled_block.function_name,
+            .block_name = scheduled_block.block_name,
+            .ops = scheduled_block.ops,
+        };
+    }
+
+    return release_code_to_asm.emitFromEntryWithSourceMap(
+        allocator,
+        normalized,
+        entry_function_name,
+        block_schedules,
+        emit_layout,
+        source_indices,
+    );
+}
+
 pub fn emitDeploymentSimple(
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -157,6 +206,54 @@ pub fn emitDeploymentSimple(
     );
 }
 
+pub fn emitDeploymentWithSourceMap(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    source_indices: *const release_code_to_asm.SourceIndexMap,
+) !release_code_to_asm.EmitResult {
+    var normalized = try release_critical_edges.split(allocator, program);
+    defer normalized.deinit();
+
+    var scheduled = try scheduleProgramSimple(
+        allocator,
+        normalized,
+        release_schedule.ScheduleConfig.pre_amsterdam,
+        0,
+    );
+    defer scheduled.deinit();
+
+    var init_layout = try release_memory_layout.generateSimple(allocator, normalized, "init", scheduled.blocks);
+    defer init_layout.deinit();
+
+    const runtime_function_name: ?[]const u8 = if (findFunction(normalized, "main") != null) "main" else null;
+    var runtime_layout: ?release_memory_layout.OwnedLayout = if (runtime_function_name) |name|
+        try release_memory_layout.generateSimple(allocator, normalized, name, scheduled.blocks)
+    else
+        null;
+    defer if (runtime_layout) |*layout| layout.deinit();
+
+    const block_schedules = try allocator.alloc(release_code_to_asm.BlockSchedule, scheduled.blocks.len);
+    defer allocator.free(block_schedules);
+    for (scheduled.blocks, block_schedules) |scheduled_block, *block_schedule| {
+        block_schedule.* = .{
+            .function_name = scheduled_block.function_name,
+            .block_name = scheduled_block.block_name,
+            .ops = scheduled_block.ops,
+        };
+    }
+
+    return release_code_to_asm.emitDeploymentWithSourceMap(
+        allocator,
+        normalized,
+        "init",
+        runtime_function_name,
+        block_schedules,
+        init_layout.layout,
+        if (runtime_layout) |layout| layout.layout else .{},
+        source_indices,
+    );
+}
+
 /// Emit generic release bytecode for a whole program, choosing the deployment
 /// path when an `init` function is present and the runtime-only path otherwise.
 /// This is the single entry point shared by the `emit-release-generic` CLI
@@ -166,6 +263,15 @@ pub fn emitRelease(allocator: std.mem.Allocator, program: ir.Program) ![]const u
         return emitDeploymentSimple(allocator, program);
     }
     return emitSimple(allocator, program, "main", .{});
+}
+
+pub fn emitReleaseWithSourceMap(allocator: std.mem.Allocator, program: ir.Program) !release_code_to_asm.EmitResult {
+    var source_indices = try release_code_to_asm.SourceIndexMap.fromProgram(allocator, program);
+    defer source_indices.deinit();
+    if (findFunction(program, "init") != null) {
+        return emitDeploymentWithSourceMap(allocator, program, &source_indices);
+    }
+    return emitSimpleWithSourceMap(allocator, program, "main", .{}, &source_indices);
 }
 
 fn mergeLayout(

@@ -567,6 +567,20 @@ pub fn build(b: *std.Build) void {
     // produces a fully working compiler with no extra setup (no env vars, no separate step).
     if (plank_build_dependency) |dep| b.getInstallStep().dependOn(dep);
 
+    // Sinora: Ora's owned Zig SIR->EVM backend. Build it by default so Ora can
+    // run the Plank/Sinora differential on every bytecode emission.
+    const sinora_root = "sinora";
+    var sinora_build_dependency: ?*std.Build.Step = null;
+    if (std.Io.Dir.cwd().access(b.graph.io, b.fmt("{s}/build.zig", .{sinora_root}), .{}) catch null) |_| {
+        const sinora_build_cmd = b.addSystemCommand(&[_][]const u8{ "zig", "build" });
+        sinora_build_cmd.setCwd(b.path(sinora_root));
+        sinora_build_dependency = &sinora_build_cmd.step;
+
+        const sinora_build_step = b.step("sinora", "Build the Sinora SIR -> EVM backend binary");
+        sinora_build_step.dependOn(&sinora_build_cmd.step);
+    }
+    if (sinora_build_dependency) |dep| b.getInstallStep().dependOn(dep);
+
     // create optimization demo executable
     const optimization_demo_mod = b.createModule(.{
         .root_source_file = b.path("examples/demos/optimization_demo.zig"),

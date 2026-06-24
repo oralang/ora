@@ -1,3 +1,12 @@
+//! Migration oracle used by the Sinora parity gates.
+//!
+//! This file is not part of production bytecode emission. It parses the same
+//! SIR text twice: once through Sinora and once through the Rust/Plank `sir`
+//! binary, then classifies the result as accept/reject/pending/mismatch. The
+//! important distinction is "emitted-but-different" versus "not implemented
+//! yet": a release backend codegen gap is pending; bytecode emitted for both
+//! sides and differing is a real mismatch.
+
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -46,21 +55,19 @@ pub const Classification = enum {
     }
 
     pub fn parse(text: []const u8) ?Classification {
-        const values = [_]Classification{
-            .both_accept_codegen_pending,
-            .both_accept_bytecode_equal,
-            .bytecode_mismatch,
-            .zig_codegen_rejected,
-            .zig_rejected,
-            .rust_rejected,
-            .both_rejected,
-        };
-        for (values) |value| {
-            if (std.mem.eql(u8, text, value.label())) return value;
-        }
-        return null;
+        return classification_map.get(text);
     }
 };
+
+const classification_map = std.StaticStringMap(Classification).initComptime(.{
+    .{ "both-accept-codegen-pending", .both_accept_codegen_pending },
+    .{ "both-accept-bytecode-equal", .both_accept_bytecode_equal },
+    .{ "bytecode-mismatch", .bytecode_mismatch },
+    .{ "zig-codegen-rejected", .zig_codegen_rejected },
+    .{ "zig-rejected", .zig_rejected },
+    .{ "rust-rejected", .rust_rejected },
+    .{ "both-rejected", .both_rejected },
+});
 
 pub const ZigCheck = struct {
     accepted: bool,
@@ -170,18 +177,17 @@ pub fn compareSirFile(
 
     const rust = try runRustPlank(allocator, io, rust_plank_path, sir_path, mode);
     errdefer rust.deinit(allocator);
+    const rust_hex = std.mem.trim(u8, rust.stdout, " \t\r\n");
 
     if (debug_bytecode) |*debug| {
         debug.rust_stdout_bytes = rust.stdout.len;
         if (debug.zig_accepted and rust.accepted) {
-            const rust_hex = std.mem.trim(u8, rust.stdout, " \t\r\n");
             debug.equal = std.mem.eql(u8, generated_debug_hex.?, rust_hex);
         }
     }
     if (release_bytecode) |*release| {
         release.rust_stdout_bytes = rust.stdout.len;
         if (release.zig_accepted and rust.accepted) {
-            const rust_hex = std.mem.trim(u8, rust.stdout, " \t\r\n");
             release.equal = std.mem.eql(u8, generated_release_hex.?, rust_hex);
         }
     }
@@ -203,6 +209,10 @@ pub fn compareSirFile(
     };
 }
 
+/// Classify parser/legalizer/codegen outcomes without conflating a missing
+/// Sinora implementation with wrong emitted bytecode. The corpus gate is now
+/// armed to require `.both_accept_bytecode_equal`, but the finer labels are
+/// still useful when reviewing a migration regression.
 pub fn classify(zig_accepted: bool, rust_accepted: bool, debug_bytecode: ?DebugBytecodeComparison) Classification {
     if (zig_accepted and rust_accepted) {
         if (debug_bytecode) |debug| {

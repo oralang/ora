@@ -1,6 +1,19 @@
+//! Minimal in-memory SIR model shared by the parser, legality checks, analyses,
+//! optimization passes, and debug/release codegen.
+//!
+//! SIR is block-parameter SSA. A block owns local instruction results, plus
+//! `inputs` that behave like phi parameters and `outputs` that are transferred
+//! to successor blocks by the terminator edge. That is why control-flow helpers
+//! in this file talk about successor block names rather than source-line order:
+//! the scheduler and liveness passes reason over CFG edges, not just statement
+//! lists.
+
 const std = @import("std");
 
 pub const Program = struct {
+    // The parsed/transformed IR is immutable after construction. An arena keeps
+    // strings, slices, blocks, and data segments pointer-stable for all analysis
+    // caches; consumers can borrow names without copying.
     arena: std.heap.ArenaAllocator,
     functions: []const Function,
     data_segments: []const DataSegment,
@@ -22,7 +35,7 @@ pub const Program = struct {
         return self.arena.allocator();
     }
 
-    pub fn stats(self: Program) Stats {
+    pub fn stats(self: *const Program) Stats {
         var result: Stats = .{};
         result.functions = self.functions.len;
         result.data_segments = self.data_segments.len;
@@ -34,9 +47,12 @@ pub const Program = struct {
             for (function.blocks) |block| {
                 result.instructions += block.instructions.len;
                 result.terminators += 1;
-                if (block.terminator == .switch_) {
-                    result.switches += 1;
-                    result.switch_cases += block.terminator.switch_.cases.len;
+                switch (block.terminator) {
+                    .switch_ => |switch_term| {
+                        result.switches += 1;
+                        result.switch_cases += switch_term.cases.len;
+                    },
+                    else => {},
                 }
             }
         }
@@ -44,6 +60,9 @@ pub const Program = struct {
     }
 };
 
+/// Cheap aggregate counters used to pre-size release codegen data structures.
+/// This deliberately stays semantic-free: no reachability, no validation, just
+/// the raw shape of the current IR value.
 pub const Stats = struct {
     functions: usize = 0,
     data_segments: usize = 0,
@@ -56,6 +75,7 @@ pub const Stats = struct {
 };
 
 pub const Function = struct {
+    /// Function symbol without the textual `@` prefix used at call sites.
     name: []const u8,
     blocks: []const Block,
     line: u32,
@@ -69,7 +89,12 @@ pub const DataSegment = struct {
 
 pub const Block = struct {
     name: []const u8,
+    /// Block parameters. Predecessor `outputs` are transferred into these
+    /// positions when control reaches this block.
     inputs: []const []const u8,
+    /// Values this block transfers to each successor. Current SIR has one
+    /// shared output tuple per block, so all outgoing edges carry the same
+    /// arity; critical-edge splitting/SSA normalization preserve that contract.
     outputs: []const []const u8,
     instructions: []const Instruction,
     terminator: Terminator,
@@ -77,6 +102,8 @@ pub const Block = struct {
 };
 
 pub const Instruction = struct {
+    /// SSA locals defined by this operation. Multi-result ops keep result order
+    /// significant because later stack scheduling maps each position separately.
     results: []const []const u8,
     mnemonic: []const u8,
     operands: []const []const u8,
@@ -91,11 +118,15 @@ pub const SwitchCase = struct {
 
 pub const SwitchTerminator = struct {
     selector: []const u8,
+    /// Cases are ordered exactly as they appeared in SIR text. Successor
+    /// iteration preserves this order because Plank's release pipeline does.
     cases: []const SwitchCase,
     default_target: []const u8,
 };
 
 pub const Terminator = union(enum) {
+    // Control-flow terminators store target block names; legality/analyses
+    // resolve those names through per-function block indexes.
     jump: []const u8,
     branch: struct {
         condition: []const u8,
@@ -122,12 +153,15 @@ pub const Terminator = union(enum) {
 /// matches Plank's successor iterator: jump target; branch zero-target then
 /// non-zero-target; switch cases in order then the default.
 pub const SuccessorIter = struct {
-    block: Block,
+    // Successor enumeration only needs a borrowed terminator. Avoid copying the
+    // whole Block/Terminator union in release scheduling, where this iterator is
+    // called during liveness/layout fixpoints over every block edge.
+    terminator: *const Terminator,
     index: usize = 0,
 
     pub fn next(self: *SuccessorIter) ?[]const u8 {
         const i = self.index;
-        switch (self.block.terminator) {
+        switch (self.terminator.*) {
             .jump => |target| {
                 if (i != 0) return null;
                 self.index += 1;
@@ -160,8 +194,8 @@ pub const SuccessorIter = struct {
     }
 };
 
-pub fn successors(block: Block) SuccessorIter {
-    return .{ .block = block };
+pub fn successors(block: *const Block) SuccessorIter {
+    return .{ .terminator = &block.terminator };
 }
 
 test "successor iterator enumerates a large switch without truncation" {
@@ -182,7 +216,7 @@ test "successor iterator enumerates a large switch without truncation" {
         .line = 0,
     };
 
-    var it = successors(block);
+    var it = successors(&block);
     var seen: usize = 0;
     var last: []const u8 = "";
     while (it.next()) |target| {
@@ -202,7 +236,7 @@ test "successor iterator order: branch zero-target then non-zero-target" {
         .terminator = .{ .branch = .{ .condition = "c", .non_zero_target = "nz", .zero_target = "z" } },
         .line = 0,
     };
-    var it = successors(block);
+    var it = successors(&block);
     try std.testing.expectEqualStrings("z", it.next().?);
     try std.testing.expectEqualStrings("nz", it.next().?);
     try std.testing.expectEqual(@as(?[]const u8, null), it.next());

@@ -4646,6 +4646,26 @@ test "compiler @traitMethods exposes receiver and return type metadata" {
     try testing.expect(consteval.values[second_ret.value.?.index()].?.boolean);
 }
 
+test "compiler @traitMethods is comptime-only" {
+    const source_text =
+        \\trait ERC20 {
+        \\    fn balanceOf(self, owner: address) -> u256;
+        \\}
+        \\
+        \\pub fn run() -> u256 {
+        \\    const methods = @traitMethods(ERC20);
+        \\    return methods.len;
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expectEqual(@as(usize, 1), typecheck.diagnostics.items.items.len);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "@traitMethods is comptime-only; wrap it in a comptime block"));
+}
+
 test "compiler @structFields rejects trait arguments" {
     const source_text =
         \\trait Foo {
@@ -4741,6 +4761,23 @@ test "compiler corpus covers reflection builtins" {
     var expected_size = try std.math.big.int.Managed.initSet(testing.allocator, 20);
     defer expected_size.deinit();
     try testing.expect(consteval.values[size_index.?].?.integer.eql(expected_size));
+}
+
+test "compiler std interfaceId uses traitMethods reflection in comptime only" {
+    var compilation = try compilePackage("ora-example/corpus/comptime/interface_id.ora");
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+
+    const consteval = try compilation.db.constEval(compilation.root_module_id);
+    try testing.expect(consteval.diagnostics.isEmpty());
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    const hir_text = try hir_result.renderText(testing.allocator);
+    defer testing.allocator.free(hir_text);
+
+    try testing.expect(!std.mem.containsAtLeast(u8, hir_text, 1, "resource place type"));
 }
 
 test "compiler reflection corpus lowers without ora.default_value escaping HIR" {

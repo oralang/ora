@@ -1,0 +1,17 @@
+struct Config {
+    value: u256,
+}
+
+contract StorageLetAssignment {
+    storage let fixed: u256;
+    storage let config: Config;
+    storage let balances: map<address, u256>;
+    tstore let scratch: u256;
+
+    pub fn bad(who: address, next: u256) {
+        fixed = next;
+        config.value = next;
+        balances[who] = next;
+        scratch = next;
+    }
+}

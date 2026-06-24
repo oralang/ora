@@ -1,3 +1,13 @@
+//! Line-oriented parser for Plank/Sinora SIR text.
+//!
+//! The SIR text format is intentionally simple: functions contain named blocks,
+//! blocks contain SSA instructions, and each block ends in exactly one
+//! terminator. This parser keeps that model direct instead of building a token
+//! tree. It owns all returned strings in the `ir.Program` arena, reports
+//! recoverable syntax issues into `diagnostics.Bag`, and uses `<error>` /
+//! `.invalid` placeholders only so later validation can report more than the
+//! first malformed line.
+
 const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
@@ -26,6 +36,9 @@ pub fn parse(backing_allocator: std.mem.Allocator, source: []const u8, bag: *dia
     var program = ir.Program.init(backing_allocator);
     errdefer program.deinit();
 
+    // All SIR identifiers and slices returned by the parser are arena-owned by
+    // the Program. That lets later passes cheaply replace the whole Program
+    // after a transform without per-node frees.
     const arena = program.allocator();
     var functions: std.ArrayList(ir.Function) = .empty;
     var data_segments: std.ArrayList(ir.DataSegment) = .empty;
@@ -273,13 +286,14 @@ fn parseInstruction(arena: std.mem.Allocator, line: []const u8, line_no: u32, ba
 }
 
 fn isTerminatorLine(line: []const u8) bool {
-    return std.mem.startsWith(u8, line, "=>") or
-        std.mem.startsWith(u8, line, "return ") or
-        std.mem.startsWith(u8, line, "revert ") or
-        std.mem.eql(u8, line, "stop") or
-        std.mem.eql(u8, line, "invalid") or
-        std.mem.startsWith(u8, line, "selfdestruct ") or
-        std.mem.eql(u8, line, "iret");
+    if (line.len == 0) return false;
+    return switch (line[0]) {
+        '=' => std.mem.startsWith(u8, line, "=>"),
+        'r' => std.mem.startsWith(u8, line, "return ") or std.mem.startsWith(u8, line, "revert "),
+        's' => std.mem.eql(u8, line, "stop") or std.mem.startsWith(u8, line, "selfdestruct "),
+        'i' => std.mem.eql(u8, line, "invalid") or std.mem.eql(u8, line, "iret"),
+        else => false,
+    };
 }
 
 fn parseTerminator(arena: std.mem.Allocator, line: []const u8, line_no: u32, bag: *diagnostics.Bag) !ir.Terminator {
@@ -360,6 +374,9 @@ fn parseSwitch(
         try bag.errorAt(line_no.*, 1, "switch terminator is missing a selector", .{});
     }
 
+    // Switch bodies are the one multiline terminator in the text format. The
+    // parser consumes lines until the matching `}`, so the outer function/block
+    // loop never sees individual case lines as instructions.
     var cases: std.ArrayList(ir.SwitchCase) = .empty;
     var default_target: ?[]const u8 = null;
     while (lines.next()) |raw_case_line| {
@@ -412,12 +429,18 @@ fn targetName(arena: std.mem.Allocator, target: []const u8, line_no: u32, bag: *
 }
 
 fn tokenize(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
-    var tokens: std.ArrayList([]const u8) = .empty;
+    var count: usize = 0;
+    var counter = std.mem.tokenizeAny(u8, text, " \t");
+    while (counter.next()) |_| count += 1;
+    if (count == 0) return &.{};
+
+    const tokens = try arena.alloc([]const u8, count);
     var it = std.mem.tokenizeAny(u8, text, " \t");
-    while (it.next()) |token| {
-        try tokens.append(arena, try arena.dupe(u8, token));
+    var index: usize = 0;
+    while (it.next()) |token| : (index += 1) {
+        tokens[index] = try arena.dupe(u8, token);
     }
-    return tokens.toOwnedSlice(arena);
+    return tokens;
 }
 
 fn finishBlock(arena: std.mem.Allocator, blocks: *std.ArrayList(ir.Block), block: *BlockBuilder) !void {

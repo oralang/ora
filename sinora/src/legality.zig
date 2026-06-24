@@ -1,3 +1,11 @@
+//! Structural SIR legality checks.
+//!
+//! This pass sits between the forgiving line parser and bytecode generation. It
+//! is intentionally not an optimizer and not a semantic Ora checker; it only
+//! verifies the SIR shape that Sinora must trust before debug/release codegen:
+//! names are unique, targets exist, op arities match, and every value use has a
+//! definition.
+
 const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
@@ -9,20 +17,30 @@ pub const ValidateError = error{
 };
 
 pub fn validate(allocator: std.mem.Allocator, program: ir.Program, bag: *diagnostics.Bag) !void {
+    // Three global tables are enough for whole-program structural checks:
+    // function names for duplicate detection, function signatures for `icall`,
+    // and data segment names for `.data` references. Value names stay
+    // function-local and are validated below.
     var function_names = std.StringHashMap(u32).init(allocator);
     defer function_names.deinit();
+    try function_names.ensureTotalCapacity(hashCapacity(program.functions.len));
 
     var signatures = std.StringHashMap(FunctionSignature).init(allocator);
     defer signatures.deinit();
+    try signatures.ensureTotalCapacity(hashCapacity(program.functions.len));
 
     var data_names = std.StringHashMap(u32).init(allocator);
     defer data_names.deinit();
+    try data_names.ensureTotalCapacity(hashCapacity(program.data_segments.len));
 
+    // Build the function signature table first so icall validation can resolve
+    // forward references without depending on source order.
     for (program.functions) |function| {
-        if (function_names.get(function.name)) |first_line| {
-            try bag.errorAt(function.line, 1, "duplicate function '{s}' first declared at line {d}", .{ function.name, first_line });
+        const entry = try function_names.getOrPut(function.name);
+        if (entry.found_existing) {
+            try bag.errorAt(function.line, 1, "duplicate function '{s}' first declared at line {d}", .{ function.name, entry.value_ptr.* });
         } else {
-            try function_names.put(function.name, function.line);
+            entry.value_ptr.* = function.line;
             try signatures.put(function.name, try inferFunctionSignature(function, bag));
         }
     }
@@ -32,10 +50,11 @@ pub fn validate(allocator: std.mem.Allocator, program: ir.Program, bag: *diagnos
             try bag.errorAt(segment.line, 1, "data segment is missing a name", .{});
             continue;
         }
-        if (data_names.get(segment.name)) |first_line| {
-            try bag.errorAt(segment.line, 1, "duplicate data segment '{s}' first declared at line {d}", .{ segment.name, first_line });
+        const entry = try data_names.getOrPut(segment.name);
+        if (entry.found_existing) {
+            try bag.errorAt(segment.line, 1, "duplicate data segment '{s}' first declared at line {d}", .{ segment.name, entry.value_ptr.* });
         } else {
-            try data_names.put(segment.name, segment.line);
+            entry.value_ptr.* = segment.line;
         }
     }
 
@@ -90,11 +109,13 @@ fn validateFunction(
 
     var block_names = std.StringHashMap(u32).init(allocator);
     defer block_names.deinit();
+    try block_names.ensureTotalCapacity(hashCapacity(function.blocks.len));
     for (function.blocks) |block| {
-        if (block_names.get(block.name)) |first_line| {
-            try bag.errorAt(block.line, 1, "duplicate block '{s}' first declared at line {d}", .{ block.name, first_line });
+        const entry = try block_names.getOrPut(block.name);
+        if (entry.found_existing) {
+            try bag.errorAt(block.line, 1, "duplicate block '{s}' first declared at line {d}", .{ block.name, entry.value_ptr.* });
         } else {
-            try block_names.put(block.name, block.line);
+            entry.value_ptr.* = block.line;
         }
     }
 
@@ -102,8 +123,7 @@ fn validateFunction(
         try validateTerminatorTargets(function.name, block, &block_names, bag);
     }
 
-    try validateInstructions(function, signatures, data_names, bag);
-    try validateValues(allocator, function, bag);
+    try validateValuesAndInstructions(allocator, function, signatures, data_names, bag);
 }
 
 fn validateTerminatorTargets(
@@ -140,10 +160,20 @@ fn requireBlock(
     }
 }
 
-fn validateValues(allocator: std.mem.Allocator, function: ir.Function, bag: *diagnostics.Bag) !void {
+fn validateValuesAndInstructions(
+    allocator: std.mem.Allocator,
+    function: ir.Function,
+    signatures: *const std.StringHashMap(FunctionSignature),
+    data_names: *const std.StringHashMap(u32),
+    bag: *diagnostics.Bag,
+) !void {
     var values = std.StringHashMap(u32).init(allocator);
     defer values.deinit();
+    try values.ensureTotalCapacity(hashCapacity(valueDefinitionCount(function)));
 
+    // First pass: collect all SSA definitions in the function. Block inputs are
+    // definitions too; they are the block-parameter SSA values supplied by
+    // predecessor block outputs.
     for (function.blocks) |block| {
         for (block.inputs) |input| {
             try defineValue(&values, input, block.line, "block input", bag);
@@ -155,30 +185,24 @@ fn validateValues(allocator: std.mem.Allocator, function: ir.Function, bag: *dia
         }
     }
 
+    // Second pass: validate uses. A two-pass walk lets values be used before
+    // their textual definition in a later block while still rejecting undefined
+    // names and non-value immediates in the right places.
     for (function.blocks) |block| {
         for (block.outputs) |output| {
             try requireValue(&values, output, block.line, "block output", bag);
         }
         for (block.instructions) |instruction| {
+            // Validate opcode shape and classify operands from the same lookup.
+            // Unknown opcodes return null, then operandRequiresValue keeps the
+            // old conservative fallback so undefined values are still reported.
+            const spec = try validateInstruction(function.name, instruction, signatures, data_names, bag);
             for (instruction.operands, 0..) |operand, index| {
-                if (!operandRequiresValue(instruction.mnemonic, index, operand)) continue;
+                if (!operandRequiresValue(spec, index, operand)) continue;
                 try requireValue(&values, operand, instruction.line, "instruction operand", bag);
             }
         }
         try validateTerminatorValues(&values, block, bag);
-    }
-}
-
-fn validateInstructions(
-    function: ir.Function,
-    signatures: *const std.StringHashMap(FunctionSignature),
-    data_names: *const std.StringHashMap(u32),
-    bag: *diagnostics.Bag,
-) !void {
-    for (function.blocks) |block| {
-        for (block.instructions) |instruction| {
-            try validateInstruction(function.name, instruction, signatures, data_names, bag);
-        }
     }
 }
 
@@ -188,10 +212,10 @@ fn validateInstruction(
     signatures: *const std.StringHashMap(FunctionSignature),
     data_names: *const std.StringHashMap(u32),
     bag: *diagnostics.Bag,
-) !void {
+) !?ops.Spec {
     const spec = ops.lookup(instruction.mnemonic) orelse {
         try bag.errorAt(instruction.line, 1, "unknown instruction opcode '{s}' in function '{s}'", .{ instruction.mnemonic, function_name });
-        return;
+        return null;
     };
 
     switch (spec) {
@@ -206,6 +230,7 @@ fn validateInstruction(
         },
         .internal_call => try validateInternalCall(instruction, signatures, bag),
     }
+    return spec;
 }
 
 fn validateFixedInstruction(
@@ -265,13 +290,13 @@ fn validateInternalCall(
 fn requireCount(
     line: u32,
     mnemonic: []const u8,
-    role: []const u8,
+    comptime role: []const u8,
     expected: usize,
     actual: usize,
     bag: *diagnostics.Bag,
 ) !void {
     if (expected != actual) {
-        try bag.errorAt(line, 1, "instruction '{s}' expects {d} {s}, got {d}", .{ mnemonic, expected, role, actual });
+        try bag.errorAt(line, 1, "instruction '{s}' expects {d} " ++ role ++ ", got {d}", .{ mnemonic, expected, actual });
     }
 }
 
@@ -279,18 +304,19 @@ fn defineValue(
     values: *std.StringHashMap(u32),
     name: []const u8,
     line: u32,
-    role: []const u8,
+    comptime role: []const u8,
     bag: *diagnostics.Bag,
 ) !void {
     if (!isValueName(name)) {
-        try bag.errorAt(line, 1, "{s} '{s}' is not a valid value name", .{ role, name });
+        try bag.errorAt(line, 1, role ++ " '{s}' is not a valid value name", .{name});
         return;
     }
-    if (values.get(name)) |first_line| {
-        try bag.errorAt(line, 1, "duplicate value '{s}' first defined at line {d}", .{ name, first_line });
+    const entry = try values.getOrPut(name);
+    if (entry.found_existing) {
+        try bag.errorAt(line, 1, "duplicate value '{s}' first defined at line {d}", .{ name, entry.value_ptr.* });
         return;
     }
-    try values.put(name, line);
+    entry.value_ptr.* = line;
 }
 
 fn validateTerminatorValues(values: *const std.StringHashMap(u32), block: ir.Block, bag: *diagnostics.Bag) !void {
@@ -314,24 +340,23 @@ fn requireValue(
     values: *const std.StringHashMap(u32),
     name: []const u8,
     line: u32,
-    role: []const u8,
+    comptime role: []const u8,
     bag: *diagnostics.Bag,
 ) !void {
     if (!isValueName(name)) {
-        try bag.errorAt(line, 1, "{s} '{s}' is not a valid value name", .{ role, name });
+        try bag.errorAt(line, 1, role ++ " '{s}' is not a valid value name", .{name});
         return;
     }
     if (!values.contains(name)) {
-        try bag.errorAt(line, 1, "{s} references undefined value '{s}'", .{ role, name });
+        try bag.errorAt(line, 1, role ++ " references undefined value '{s}'", .{name});
     }
 }
 
-fn operandRequiresValue(mnemonic: []const u8, index: usize, operand: []const u8) bool {
+fn operandRequiresValue(spec: ?ops.Spec, index: usize, operand: []const u8) bool {
     if (operand.len == 0) return true;
     if (isNumericLiteral(operand)) return false;
 
-    const spec = ops.lookup(mnemonic) orelse return !isFunctionRef(operand) and !isDataRef(operand);
-    return switch (spec) {
+    return switch (spec orelse return !isFunctionRef(operand) and !isDataRef(operand)) {
         .fixed => |fixed| !(fixed.extra != .none and index == fixed.inputs),
         .memory_load, .memory_store => true,
         .internal_call => index != 0,
@@ -380,15 +405,34 @@ fn stripOptionalMinus(text: []const u8) []const u8 {
 }
 
 fn isFunctionRef(text: []const u8) bool {
-    return text.len > 1 and text[0] == '@';
+    return isSigilRef('@', text);
 }
 
 fn isDataRef(text: []const u8) bool {
-    return text.len > 1 and text[0] == '.';
+    return isSigilRef('.', text);
 }
 
 fn dataRefName(text: []const u8) []const u8 {
     return if (isDataRef(text)) text[1..] else text;
+}
+
+fn isSigilRef(comptime sigil: u8, text: []const u8) bool {
+    return text.len > 1 and text[0] == sigil;
+}
+
+fn valueDefinitionCount(function: ir.Function) usize {
+    var count: usize = 0;
+    for (function.blocks) |block| {
+        count += block.inputs.len;
+        for (block.instructions) |instruction| {
+            count += instruction.results.len;
+        }
+    }
+    return count;
+}
+
+fn hashCapacity(count: usize) u32 {
+    return @intCast(@min(count, std.math.maxInt(u32)));
 }
 
 test "validator rejects missing target" {

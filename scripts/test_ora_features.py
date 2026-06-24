@@ -21,6 +21,8 @@ EXPECTED_PASS_EXCEPTIONS = {
 TYPE_FALLBACK_RE = re.compile(
     r"^debug: HIR type fallback: (?P<reason>[a-z_]+)(?: at (?P<file>.*):(?P<line>\d+):(?P<column>\d+))?$"
 )
+BYTECODE_BACKEND_MATCH_RE = re.compile(r"Sinora matches Plank \((?P<bytes>\d+) bytes\)")
+BYTECODE_SAVED_RE = re.compile(r"^Bytecode saved to (?P<path>.+)$", re.MULTILINE)
 
 
 def extract_type_fallbacks(*texts):
@@ -135,6 +137,64 @@ def compiler_command(compiler_path, emit_mode, file_path):
     raise ValueError(f"unsupported emit mode: {emit_mode}")
 
 
+def bytecode_backend_validation_required(emit_mode, has_contract_decl):
+    """Build/bytecode contract runs must exercise Ora's Plank/Sinora bytecode differential."""
+    return emit_mode in ("build", "bytecode") and has_contract_decl
+
+
+def plank_sidecar_path(bytecode_path):
+    path = Path(bytecode_path)
+    if path.suffix == ".hex":
+        return path.with_suffix(".hexp")
+    return Path(f"{bytecode_path}.hexp")
+
+
+def validate_bytecode_backend_outputs(stdout, stderr):
+    """Return Sinora/Plank validation details from compiler output or .hex/.hexp artifacts."""
+    bytecode_validation_match = BYTECODE_BACKEND_MATCH_RE.search(stdout) or BYTECODE_BACKEND_MATCH_RE.search(stderr)
+    if bytecode_validation_match:
+        return {
+            "backend": "sinora-vs-plank",
+            "bytes": int(bytecode_validation_match.group("bytes")),
+            "source": "compiler-output",
+        }, None
+
+    saved_match = BYTECODE_SAVED_RE.search(stdout) or BYTECODE_SAVED_RE.search(stderr)
+    if not saved_match:
+        return None, (
+            "feature-test bytecode backend validation missing: expected compiler output "
+            "`Sinora matches Plank (...)` or a `Bytecode saved to ...` artifact path"
+        )
+
+    bytecode_path = Path(saved_match.group("path").strip())
+    sidecar_path = plank_sidecar_path(bytecode_path)
+    try:
+        bytecode = bytecode_path.read_bytes()
+    except OSError as exc:
+        return None, f"feature-test bytecode backend validation failed: cannot read {bytecode_path}: {exc}"
+    try:
+        plank_bytecode = sidecar_path.read_bytes()
+    except OSError as exc:
+        return None, f"feature-test bytecode backend validation failed: cannot read {sidecar_path}: {exc}"
+
+    if bytecode != plank_bytecode:
+        return None, (
+            "feature-test bytecode backend validation failed: Sinora .hex differs from Plank .hexp "
+            f"({bytecode_path} vs {sidecar_path})"
+        )
+
+    payload = bytecode.strip()
+    if payload.startswith(b"0x"):
+        payload = payload[2:]
+    return {
+        "backend": "sinora-vs-plank",
+        "bytes": len(payload) // 2,
+        "source": "artifact-sidecar",
+        "bytecode_path": str(bytecode_path),
+        "plank_path": str(sidecar_path),
+    }, None
+
+
 def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40):
     """Test a single .ora file and return results."""
     normalized_path = str(Path(file_path))
@@ -182,6 +242,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         stderr = stderr_raw.decode('utf-8', errors='ignore') if stderr_raw else ""
 
     type_fallbacks = extract_type_fallbacks(stdout, stderr)
+    bytecode_validation, bytecode_validation_error = validate_bytecode_backend_outputs(stdout, stderr)
 
     if timeout_note:
         if stderr:
@@ -230,6 +291,17 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         has_critical = any(p in filtered_stderr for p in critical_patterns)
         if empty_module and not has_critical:
             has_error = False
+
+    if (
+        not has_error
+        and not timed_out
+        and not expected_failure
+        and bytecode_backend_validation_required(emit_mode, has_contract_decl)
+        and bytecode_validation is None
+    ):
+        has_error = True
+        validation_error = bytecode_validation_error or "feature-test bytecode backend validation missing"
+        stderr = f"{stderr.rstrip()}\n{validation_error}\n" if stderr else validation_error
 
     if timed_out:
         status = "✅ EXPECTED FAIL (TIMEOUT)" if expected_failure else "❌ TIMEOUT"
@@ -281,6 +353,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
         "timed_out": timed_out,
         "expected_failure": expected_failure,
         "type_fallbacks": type_fallbacks,
+        "bytecode_validation": bytecode_validation,
     }
 
 
@@ -356,6 +429,8 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
         f.write(f"- **✅ Successful:** {success_count} ({success_count*100//total if total > 0 else 0}%)\n")
         f.write(f"- **❌ Failed:** {failed_count} ({failed_count*100//total if total > 0 else 0}%)\n")
         f.write(f"- **Success rate:** {success_count*100//total if total > 0 else 0}%\n\n")
+        bytecode_validation_count = sum(1 for r in results if r.get("bytecode_validation"))
+        f.write(f"- **Sinora/Plank bytecode validations:** {bytecode_validation_count}\n\n")
         
         f.write("### Key Findings\n\n")
         f.write("**✅ Working Features:**\n")
@@ -392,6 +467,8 @@ def generate_report(results, ops, output_file="docs/ORA_FEATURE_TEST_REPORT.md")
             f.write(f"**Status:** {r['status']}\n\n")
             if r.get("expected_failure"):
                 f.write("**Expected failure:** yes\n\n")
+            if r.get("bytecode_validation"):
+                f.write(f"**Bytecode backend validation:** Sinora matched Plank ({r['bytecode_validation']['bytes']} bytes)\n\n")
             
             if r['error']:
                 f.write(f"**Error Output:**\n```\n{r['error']}\n```\n\n")
@@ -598,6 +675,8 @@ Examples:
         print(f"File: {result['file']}")
         print(f"Emit: {result['emit']}")
         print(f"Status: {result['status']}")
+        if result.get("bytecode_validation"):
+            print(f"Bytecode backend validation: Sinora matched Plank ({result['bytecode_validation']['bytes']} bytes)")
         print(f"Return code: {result['return_code']}")
         print(f"Timed out: {result['timed_out']}")
         print("\n[stdout]")
@@ -644,7 +723,10 @@ Examples:
         if not failures_only or result["status"].startswith("❌"):
             if failures_only:
                 print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
-            print(result["status"])
+            if result.get("bytecode_validation"):
+                print(f"{result['status']} (Sinora=Plank, {result['bytecode_validation']['bytes']} bytes)")
+            else:
+                print(result["status"])
         if args.show_all_output:
             snippet = result["stderr"].strip() or result["stdout"].strip()
             if snippet:

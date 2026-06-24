@@ -1,12 +1,16 @@
-//! Partial Zig port of Plank's release stack-scheduling op graph.
+//! Zig port of Plank's release stack-scheduling op graph.
 //!
 //! Rust source of truth:
 //! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/mod.rs
 //! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/builder.rs
+//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/build_effectful.rs
+//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/op_graph/build_simple.rs
+//! - vendor/plank/plankc/sir/crates/stack-scheduling/src/greedy_shuffler/mod.rs
 //! - vendor/plank/plankc/sir/crates/stack-scheduling/src/state.rs
 
 const std = @import("std");
 const diagnostics = @import("diagnostics.zig");
+const effects = @import("effects.zig");
 const ir = @import("ir.zig");
 const ops = @import("ops.zig");
 const parser = @import("parser.zig");
@@ -132,9 +136,11 @@ pub const OpSetMut = struct {
     }
 
     pub fn first(self: OpSetMut) ?OpNodeId {
-        var op: OpNodeId = 0;
-        while (op < self.total_ops) : (op += 1) {
-            if (self.contains(op)) return op;
+        for (self.words, 0..) |word, word_index| {
+            if (word == 0) continue;
+            const bit_index: usize = @ctz(word);
+            const op: OpNodeId = @intCast(word_index * @bitSizeOf(BitsetWord) + bit_index);
+            if (op < self.total_ops) return op;
         }
         return null;
     }
@@ -234,6 +240,88 @@ const LocalValue = struct {
     value: ValueNodeId,
 };
 
+const GraphOrder = union(enum) {
+    source_order,
+    effectful: *const effects.FunctionEffects,
+};
+
+const EffectChannel = struct {
+    minor: effects.Effect,
+    major: effects.Effect,
+};
+
+const effect_channels = [_]EffectChannel{
+    .{ .minor = effects.Effect.MEMORY_READ, .major = effects.Effect.MEMORY_WRITE },
+    .{ .minor = effects.Effect.RETURNDATA_READ, .major = effects.Effect.RETURNDATA_WRITE },
+    .{ .minor = effects.Effect.ACCOUNTS_READ, .major = effects.Effect.ACCOUNTS_WRITE },
+    .{ .minor = effects.Effect.PERSISTENT_READ, .major = effects.Effect.PERSISTENT_WRITE },
+    .{ .minor = effects.Effect.TRANSIENT_READ, .major = effects.Effect.TRANSIENT_WRITE },
+    .{ .minor = effects.Effect.REVERT, .major = effects.Effect.TERMINATE },
+    .{ .minor = effects.Effect.ALLOC_ADVANCE, .major = effects.Effect.ALLOC_USE_FREE },
+};
+
+const ChannelState = struct {
+    last_major: ?OpNodeId = null,
+    minors_since_major: std.ArrayList(OpNodeId) = .empty,
+
+    fn deinit(self: *ChannelState, allocator: std.mem.Allocator) void {
+        self.minors_since_major.deinit(allocator);
+    }
+};
+
+const EffectOrderTracker = struct {
+    allocator: std.mem.Allocator,
+    channels: [effect_channels.len]ChannelState = [_]ChannelState{.{}} ** effect_channels.len,
+    last_logs: ?OpNodeId = null,
+
+    fn init(allocator: std.mem.Allocator) EffectOrderTracker {
+        return .{ .allocator = allocator };
+    }
+
+    fn deinit(self: *EffectOrderTracker) void {
+        for (&self.channels) |*channel| channel.deinit(self.allocator);
+    }
+
+    fn addEffectPredecessors(self: *EffectOrderTracker, op_builder: *OpBuilder, effect: effects.Effect) !void {
+        var ordered = effect;
+        // A terminating operation commits all previous effects and prevents
+        // later effects from happening, so it is ordered against every major
+        // channel and against logs.
+        if (ordered.contains(effects.Effect.TERMINATE)) {
+            ordered = ordered.unionWith(effects.Effect.MAJOR).unionWith(effects.Effect.LOGS);
+        }
+
+        for (&self.channels, effect_channels) |*channel, effect_channel| {
+            // MINOR effects commute with other MINOR effects in the same
+            // channel but must stay after the latest MAJOR. A MAJOR must stay
+            // after both the previous MAJOR and every MINOR since it. This is
+            // Plank's effect model in graph-edge form.
+            if (ordered.intersects(effect_channel.major)) {
+                if (channel.last_major) |last_major| {
+                    try op_builder.addPredecessor(last_major);
+                }
+                for (channel.minors_since_major.items) |minor_op| {
+                    try op_builder.addPredecessor(minor_op);
+                }
+                channel.minors_since_major.clearRetainingCapacity();
+                channel.last_major = op_builder.id();
+            } else if (ordered.intersects(effect_channel.minor)) {
+                if (channel.last_major) |last_major| {
+                    try op_builder.addPredecessor(last_major);
+                }
+                try channel.minors_since_major.append(self.allocator, op_builder.id());
+            }
+        }
+
+        if (ordered.intersects(effects.Effect.LOGS)) {
+            if (self.last_logs) |last_logs| {
+                try op_builder.addPredecessor(last_logs);
+            }
+            self.last_logs = op_builder.id();
+        }
+    }
+};
+
 const LayoutMember = union(enum) {
     return_dest,
     input_output: u32,
@@ -317,6 +405,28 @@ pub fn buildBlockGraphSimple(
     block_name: []const u8,
     cache: ?*LayoutCache,
 ) !OpGraph {
+    return buildBlockGraphOrdered(allocator, program, function_name, block_name, cache, .source_order);
+}
+
+pub fn buildBlockGraphEffectful(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    function_name: []const u8,
+    block_name: []const u8,
+    cache: ?*LayoutCache,
+    function_effects: *const effects.FunctionEffects,
+) !OpGraph {
+    return buildBlockGraphOrdered(allocator, program, function_name, block_name, cache, .{ .effectful = function_effects });
+}
+
+fn buildBlockGraphOrdered(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    function_name: []const u8,
+    block_name: []const u8,
+    cache: ?*LayoutCache,
+    order: GraphOrder,
+) !OpGraph {
     const function = findFunction(program, function_name) orelse return ScheduleGraphError.MissingFunction;
     const block = findBlock(function, block_name) orelse return ScheduleGraphError.MissingBlock;
     var owned_layouts: ?FunctionLayouts = null;
@@ -351,6 +461,8 @@ pub fn buildBlockGraphSimple(
     builder.endInputsBeginOps();
 
     var previous: ?OpNodeId = null;
+    var effect_order = EffectOrderTracker.init(allocator);
+    defer effect_order.deinit();
     for (block.instructions, 0..) |instruction, instruction_index| {
         const op_id = try operationId(program, function_name, block_name, instruction_index);
         if (std.mem.eql(u8, instruction.mnemonic, "icall")) {
@@ -377,8 +489,7 @@ pub fn buildBlockGraphSimple(
                 .{ .flippable = op_id }
             else
                 .{ .normal = op_id });
-            if (previous) |predecessor| try op_builder.addPredecessor(predecessor);
-            previous = op_builder.id();
+            try addOrderPredecessors(order, &previous, &effect_order, &op_builder, instruction, callee_name);
 
             for (callee_entry_layout.input) |member| {
                 switch (member) {
@@ -402,8 +513,7 @@ pub fn buildBlockGraphSimple(
             .{ .flippable = op_id }
         else
             .{ .normal = op_id });
-        if (previous) |predecessor| try op_builder.addPredecessor(predecessor);
-        previous = op_builder.id();
+        try addOrderPredecessors(order, &previous, &effect_order, &op_builder, instruction, null);
 
         for (instruction.operands) |operand| {
             if (isNonValueOperand(instruction.mnemonic, operand)) continue;
@@ -441,6 +551,29 @@ pub fn buildBlockGraphSimple(
     return builder.finish();
 }
 
+fn addOrderPredecessors(
+    order: GraphOrder,
+    previous: *?OpNodeId,
+    effect_order: *EffectOrderTracker,
+    op_builder: *OpBuilder,
+    instruction: ir.Instruction,
+    callee_name: ?[]const u8,
+) !void {
+    switch (order) {
+        .source_order => {
+            if (previous.*) |predecessor| try op_builder.addPredecessor(predecessor);
+            previous.* = op_builder.id();
+        },
+        .effectful => |function_effects| {
+            const effect = if (std.mem.eql(u8, instruction.mnemonic, "icall"))
+                function_effects.effectOf(callee_name orelse return ScheduleGraphError.UnsupportedSir) orelse effects.Effect.FULL_BARRIER
+            else
+                effects.ofInstruction(instruction) orelse effects.Effect.FULL_BARRIER;
+            try effect_order.addEffectPredecessors(op_builder, effect);
+        },
+    }
+}
+
 pub fn scheduleBlockSimple(
     allocator: std.mem.Allocator,
     program: ir.Program,
@@ -450,9 +583,24 @@ pub fn scheduleBlockSimple(
     next_alloc_id: release_schedule.AllocId,
     cache: ?*LayoutCache,
 ) !ScheduledBlock {
+    var function_effects = try effects.analyzeFunctions(allocator, program);
+    defer function_effects.deinit();
+    return scheduleBlockEffectful(allocator, program, function_name, block_name, config, next_alloc_id, cache, &function_effects);
+}
+
+pub fn scheduleBlockEffectful(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    function_name: []const u8,
+    block_name: []const u8,
+    config: release_schedule.ScheduleConfig,
+    next_alloc_id: release_schedule.AllocId,
+    cache: ?*LayoutCache,
+    function_effects: *const effects.FunctionEffects,
+) !ScheduledBlock {
     const function = findFunction(program, function_name) orelse return ScheduleGraphError.MissingFunction;
     const block = findBlock(function, block_name) orelse return ScheduleGraphError.MissingBlock;
-    var graph = try buildBlockGraphSimple(allocator, program, function_name, block_name, cache);
+    var graph = try buildBlockGraphEffectful(allocator, program, function_name, block_name, cache, function_effects);
     defer graph.deinit();
 
     var stack = release_schedule.TrackedStack.init(allocator, next_alloc_id);
@@ -1432,7 +1580,7 @@ fn buildFunctionLayouts(allocator: std.mem.Allocator, program: ir.Program, funct
     for (parent, 0..) |*p, i| p.* = i;
 
     for (function.blocks, 0..) |block, block_index| {
-        var it = ir.successors(block);
+        var it = ir.successors(&block);
         while (it.next()) |target| {
             const target_index = blockIndex(function, target) orelse continue;
             // out(block_index) ~ in(target_index)
@@ -1678,7 +1826,7 @@ fn predecessorOutputForSuccessorInput(
 }
 
 fn blockTargets(block: ir.Block, target_name: []const u8) bool {
-    var it = ir.successors(block);
+    var it = ir.successors(&block);
     while (it.next()) |target| {
         if (std.mem.eql(u8, target, target_name)) return true;
     }
@@ -1686,7 +1834,7 @@ fn blockTargets(block: ir.Block, target_name: []const u8) bool {
 }
 
 fn blockHasSuccessors(block: ir.Block) bool {
-    var it = ir.successors(block);
+    var it = ir.successors(&block);
     return it.next() != null;
 }
 
@@ -2204,6 +2352,112 @@ test "simple block graph takes icall inputs from callee entry layout" {
     const icall = graph.getOp(3);
     try std.testing.expectEqual(OpNodeKind{ .normal = try operationId(program, "main", "entry", 2) }, icall.kind);
     try std.testing.expectEqual(@as(usize, 2), icall.inputs_fifo.len);
+}
+
+test "effectful graph leaves pure siblings ordered only by dataflow" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        a = const 0x01
+        \\        b = const 0x02
+        \\        c = add a b
+        \\        d = not b
+        \\        stop
+        \\    }
+    );
+    defer program.deinit();
+
+    var function_effects = try effects.analyzeFunctions(std.testing.allocator, program);
+    defer function_effects.deinit();
+    var graph = try buildBlockGraphEffectful(std.testing.allocator, program, "main", "entry", null, &function_effects);
+    defer graph.deinit();
+
+    try expectOpSetMembers(graph.getPredecessors(0), &.{});
+    try expectOpSetMembers(graph.getPredecessors(1), &.{});
+    try expectOpSetMembers(graph.getPredecessors(2), &.{ 0, 1 });
+    try expectOpSetMembers(graph.getPredecessors(3), &.{1});
+}
+
+test "effectful graph orders memory reads around writes" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        p = const 0x00
+        \\        v = const 0x01
+        \\        mstore256 p v
+        \\        a = mload32 p
+        \\        b = mload32 p
+        \\        mstore256 p b
+        \\        stop
+        \\    }
+    );
+    defer program.deinit();
+
+    var function_effects = try effects.analyzeFunctions(std.testing.allocator, program);
+    defer function_effects.deinit();
+    var graph = try buildBlockGraphEffectful(std.testing.allocator, program, "main", "entry", null, &function_effects);
+    defer graph.deinit();
+
+    try expectOpSetMembers(graph.getPredecessors(3), &.{ 0, 2 });
+    try expectOpSetMembers(graph.getPredecessors(4), &.{ 0, 2 });
+    try expectOpSetMembers(graph.getPredecessors(5), &.{ 0, 2, 3, 4 });
+}
+
+test "effectful graph chains logs because log order is observable" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        p = const 0x00
+        \\        l = const 0x20
+        \\        log0 p l
+        \\        log0 p l
+        \\        stop
+        \\    }
+    );
+    defer program.deinit();
+
+    var function_effects = try effects.analyzeFunctions(std.testing.allocator, program);
+    defer function_effects.deinit();
+    var graph = try buildBlockGraphEffectful(std.testing.allocator, program, "main", "entry", null, &function_effects);
+    defer graph.deinit();
+
+    try expectOpSetMembers(graph.getPredecessors(2), &.{ 0, 1 });
+    try expectOpSetMembers(graph.getPredecessors(3), &.{ 0, 1, 2 });
+}
+
+test "effectful graph uses callee effects for internal calls" {
+    var program = try parseTestProgram(
+        \\fn store_it:
+        \\    entry v {
+        \\        k = const 0x00
+        \\        sstore k v
+        \\        iret
+        \\    }
+        \\
+        \\fn pure_id:
+        \\    entry a -> a {
+        \\        iret
+        \\    }
+        \\
+        \\fn main:
+        \\    entry {
+        \\        x = const 0x01
+        \\        icall @store_it x
+        \\        icall @store_it x
+        \\        y = icall @pure_id x
+        \\        stop
+        \\    }
+    );
+    defer program.deinit();
+
+    var function_effects = try effects.analyzeFunctions(std.testing.allocator, program);
+    defer function_effects.deinit();
+    var graph = try buildBlockGraphEffectful(std.testing.allocator, program, "main", "entry", null, &function_effects);
+    defer graph.deinit();
+
+    try expectOpSetMembers(graph.getPredecessors(2), &.{ 0, 1 });
+    try expectOpSetMembers(graph.getPredecessors(4), &.{ 0, 2, 3 });
+    try expectOpSetMembers(graph.getPredecessors(6), &.{ 0, 5 });
 }
 
 fn parseTestProgram(source: []const u8) !ir.Program {

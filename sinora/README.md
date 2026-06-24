@@ -2,10 +2,13 @@
 
 Sinora is Ora's owned Zig implementation of the SIR backend migration path.
 
-This directory is intentionally separate from the current Rust Plank subprocess
-path. The first goal is a small, honest backend foundation that can ingest the
-SIR text Ora already emits, diagnose malformed IR without panics, and grow into
-a dual-backend comparison and bytecode-emission harness.
+This directory is intentionally separate from the old Rust Plank subprocess
+path. The first goal was a small, honest backend foundation that could ingest
+the SIR text Ora already emits, diagnose malformed IR without panics, and grow
+into a dual-backend comparison and bytecode-emission harness. It now owns the
+Plank SIR backend surface Ora depends on: parsing/rendering, legality,
+analyses, SSA/critical-edge transforms, optimization passes, debug/release
+codegen, and bytecode/gas comparison harnesses.
 
 Current slice:
 
@@ -15,6 +18,16 @@ Current slice:
 - Normalized renderer for parsed SIR.
 - Structural legality checks for blocks, values, terminator targets, and
   duplicate definitions.
+- Plank-style pass framework with cached analyses and invalidation masks:
+  legalizer, reachability, predecessors, reverse post-order, dominators,
+  dominance frontiers, def-use, local liveness, allocation liveness, function
+  effects, basic-block ownership, and CFG in/out bundling.
+- Plank-style transforms for critical-edge splitting and sealed-block SSA
+  construction, including pre-SSA function-entry regularization.
+- Plank-style SIR optimization passes: SCCP, copy propagation, unused-operation
+  elimination, defragmenter, and switch peephole. The pass manager also exposes
+  the same `s/c/u/d/l` optimization-string ordering surface for tests and
+  future production pipeline decisions.
 - Opcode metadata for the Plank SIR operation surface, including memory-width
   mnemonics such as `mload256`/`mstore256`.
 - Internal-call target and signature-shape checks inferred from SIR function
@@ -34,6 +47,9 @@ Current slice:
 - Plank-compatible debug static memory layout, runtime-relative code offsets,
   and generic memory load/store lowering for bytecode parity on supported
   debug slices.
+- Plank-compatible effect model and effect-aware release scheduling over
+  memory, returndata, accounts, persistent storage, transient storage,
+  revert/terminate, allocation, and logs.
 - Narrow release deployment codegen for the standard `init` runtime copier and
   the no-arg `__ora_user_init` constructor wrapper with empty or straight-line
   storage-writing init bodies, the one-argument constructor ABI tail decoder
@@ -127,10 +143,21 @@ Current slice:
 Explicit non-goals for this slice:
 
 - No Plank frontend.
-- No full bytecode generation.
-- No release scheduler.
-- No SIR optimizer.
 - No default backend integration.
+
+Production pipeline decision for this port:
+
+- Ora already emits block-parameter SSA SIR, so the release bytecode path does
+  not run `SSATransform` by default. The pass is still owned and tested here so
+  non-Ora/pre-SSA SIR can be normalized deliberately when needed.
+- The release bytecode path does run critical-edge splitting before scheduling,
+  because Plank's release scheduler expects normalized CFG value transfers.
+- The release bytecode path uses the effect-aware op graph, not the old
+  source-order-only scheduler.
+- SCCP/copy-prop/DCE/defragment/switch-peephole are ported and selectable
+  through the pass manager, but they are not enabled automatically in Ora's
+  production codegen until a separate metrics/semantics review decides the
+  optimization sequence.
 
 Run locally:
 
@@ -290,23 +317,21 @@ zig build run -- emit-debug fixtures/init_runtime_offsets.sir init
 
 `compare` runs Sinora parse/legality checks and the pinned Rust Plank SIR oracle
 against the same SIR text. The command defaults to Rust Plank release mode and
-text output. Release mode emits and compares bytecode only for the narrow
-supported deployment subset; other dual-accepted release programs remain
-`both-accept-codegen-pending` until the stack scheduler is ported. With
-`--debug`, Sinora emits the debug deployment package and reports
-`both-accept-bytecode-equal`, `bytecode-mismatch`, or `zig-codegen-rejected`.
-Use `--json` for stable harness output.
+text output. Release mode emits and compares full deployment bytecode through
+the generic Plank-port backend, which is byte-for-byte equal to Rust Plank on
+the entire artifact corpus (586/586). With `--debug`, Sinora emits the debug
+deployment package and reports `both-accept-bytecode-equal`,
+`bytecode-mismatch`, or `zig-codegen-rejected`. Use `--json` for stable harness
+output.
 
 `compare-corpus` recursively compares every `.sir` file under a directory and
-exits non-zero if any file falls outside the expected migration state. Debug
-mode expects bytecode equality. Release mode accepts either bytecode equality
-for supported slices or `both-accept-codegen-pending` for dual-accepted SIR
-that the release port still rejects honestly. The summary reports both counts
-so release coverage can grow without weakening mismatch detection. The
-`fixtures/` directory is intentionally not a corpus because some fixtures are
-single-root `main` tests that Rust Plank's CLI rejects without an `init` entry
-point, while the release deployment fixtures are focused bytecode parity tests
-for the first release subset.
+exits non-zero if any file is not byte-equal to Rust Plank. The gate is ARMED
+for every mode: only `both-accept-bytecode-equal` passes, so a codegen gap
+(`both-accept-codegen-pending`) or a wrong bytecode (`bytecode-mismatch`) fails
+the gate and catches regressions. The `fixtures/` directory is intentionally not
+a corpus because some fixtures are single-root `main` tests that Rust Plank's CLI
+rejects without an `init` entry point, while the release deployment fixtures are
+focused bytecode parity tests.
 
 The named build step `test-fixtures-release` checks the focused release
 deployment fixtures for byte-for-byte parity with Rust Plank. The named build
@@ -323,5 +348,7 @@ segments. It reports unsupported SIR instead of trying to fake recursive calls,
 source maps, shared init/runtime helper re-emission, release-quality
 init/runtime packaging, or release scheduling.
 
-`emit-release` emits release deployment hex for the currently supported release
-subset and reports unsupported SIR instead of falling back to Rust Plank.
+`emit-release` emits release deployment hex through the generic Plank-port
+backend (byte-equal to Rust Plank across the artifact corpus) and reports
+unsupported SIR instead of falling back to Rust Plank. `emit-release-generic` is
+a retained alias for the same backend.
