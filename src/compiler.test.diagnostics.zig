@@ -2209,7 +2209,7 @@ test "compiler reports integer constant overflow against declared widths" {
         \\const LIMIT: u8 = 256;
         \\pub fn narrow() -> u8 {
         \\    let a: u8 = 256;
-        \\    let b: u8 = 1;
+        \\    var b: u8 = 1;
         \\    b = 256;
         \\    return 256;
         \\}

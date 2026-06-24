@@ -32,14 +32,14 @@ contract BitfieldBasic {
 
     // Write a single field back into storage.
     fn set_retries(val: u8) {
-        let f: ConfigFlags = flags;
+        var f: ConfigFlags = flags;
         f.retries = val;
         flags = f;
     }
 
     // Multiple field writes in sequence (tests storage batching path).
     fn configure(m: u8, r: u8, e: u16) {
-        let f: ConfigFlags = flags;
+        var f: ConfigFlags = flags;
         f.mode = m;
         f.retries = r;
         f.epoch = e;

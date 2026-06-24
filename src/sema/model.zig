@@ -794,6 +794,7 @@ fn contractMemberRole(item: ast.Item) ?ContractMemberRole {
 pub const NameResolutionResult = struct {
     arena: std.heap.ArenaAllocator,
     expr_bindings: []?ResolvedBinding,
+    pattern_bindings: []?ResolvedBinding,
     diagnostics: diagnostics.DiagnosticList,
 
     pub fn deinit(self: *NameResolutionResult) void {

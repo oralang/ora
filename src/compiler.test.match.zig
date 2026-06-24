@@ -1573,7 +1573,7 @@ test "compiler reports sema diagnostics for declaration assignment and return mi
         \\
         \\pub fn broken(flag: bool) -> u256 {
         \\    let a: u256 = flag;
-        \\    let b = 1;
+        \\    var b = 1;
         \\    b = flag;
         \\    return flag;
         \\}

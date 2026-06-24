@@ -265,7 +265,7 @@ test "compiler enforces modifies declarations against storage writes" {
     try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "storage write to 'config.admin' is not covered by this function's `modifies` clause"));
 }
 
-test "compiler matches modifies environment keys through direct uses and immutable local aliases" {
+test "compiler matches modifies environment keys through direct uses and stable let or const local aliases" {
     const source_text =
         \\contract Vault {
         \\    storage balances: map<address, u256>;
@@ -305,6 +305,72 @@ test "compiler matches modifies environment keys through direct uses and immutab
 
     const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
     try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects assignment to let and const local bindings" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn bad_let() -> u256 {
+        \\        let fixed: u256 = 1;
+        \\        fixed = 2;
+        \\        return fixed;
+        \\    }
+        \\
+        \\    pub fn bad_const() -> u256 {
+        \\        const fixed: u256 = 1;
+        \\        fixed += 2;
+        \\        return fixed;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'fixed' declared with 'let'"));
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'fixed' declared with 'const'"));
+}
+
+test "compiler permits var local reassignment" {
+    const source_text =
+        \\contract Vault {
+        \\    pub fn ok() -> u256 {
+        \\        var mutable: u256 = 1;
+        \\        mutable = 2;
+        \\        mutable += 1;
+        \\        return mutable;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(typecheck.diagnostics.isEmpty());
+}
+
+test "compiler rejects reassigned stable modifies aliases" {
+    const source_text =
+        \\contract Vault {
+        \\    storage balances: map<address, u256>;
+        \\
+        \\    pub fn bad(other: address, value: u256)
+        \\        modifies balances[msg.sender]
+        \\    {
+        \\        let sender: address = std.msg.sender();
+        \\        sender = other;
+        \\        balances[sender] = value;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const typecheck = try compilation.db.moduleTypeCheck(compilation.root_module_id);
+    try testing.expect(diagnosticMessagesContain(&typecheck.diagnostics, "cannot assign to local 'sender' declared with 'let'"));
 }
 
 test "compiler does not match modifies environment keys through mutable local aliases" {

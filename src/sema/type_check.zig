@@ -3051,6 +3051,7 @@ const TypeChecker = struct {
             .Havoc => {},
             .Assign => |assign| {
                 try self.visitExpr(assign.value);
+                if (try self.emitNonVarAssignmentIfNeeded(assign.target)) return;
                 const expected = try self.patternLocatedType(assign.target);
                 const expected_type = expected.type;
                 if (expected_type.kind() == .resource_place) {
@@ -8541,6 +8542,67 @@ const TypeChecker = struct {
         }
         const value = self.initializerExprForPattern(pattern_id) orelse return null;
         return self.environmentKeySegmentForExpr(value);
+    }
+
+    fn emitNonVarAssignmentIfNeeded(self: *TypeChecker, pattern_id: ast.PatternId) !bool {
+        return switch (self.file.pattern(pattern_id).*) {
+            .Name => |name| blk: {
+                if (std.mem.eql(u8, name.name, "_")) break :blk false;
+                const binding = if (pattern_id.index() < self.resolution.pattern_bindings.len)
+                    self.resolution.pattern_bindings[pattern_id.index()]
+                else
+                    null;
+                break :blk try self.emitNonVarBindingAssignmentIfNeeded(name.range, name.name, binding);
+            },
+            .Field => |field| try self.emitNonVarAssignmentIfNeeded(field.base),
+            .Index => |index| try self.emitNonVarAssignmentIfNeeded(index.base),
+            .StructDestructure => |destructure| blk: {
+                var emitted = false;
+                for (destructure.fields) |field| {
+                    emitted = try self.emitNonVarAssignmentIfNeeded(field.binding) or emitted;
+                }
+                break :blk emitted;
+            },
+            .Error => false,
+        };
+    }
+
+    fn emitNonVarBindingAssignmentIfNeeded(
+        self: *TypeChecker,
+        range: source.TextRange,
+        name: []const u8,
+        binding: ?ResolvedBinding,
+    ) !bool {
+        const kind: ?ast.BindingKind = if (binding) |resolved| switch (resolved) {
+            .pattern => |decl_pattern| self.patternBindingKind(decl_pattern),
+            .item => null,
+        } else null;
+        const binding_kind = kind orelse return false;
+        switch (binding_kind) {
+            .var_ => return false,
+            .let_, .constant => {
+                try self.emitRangeError(range, "cannot assign to local '{s}' declared with '{s}'", .{ name, bindingKindKeyword(binding_kind) });
+                return true;
+            },
+            .immutable => {
+                try self.emitRangeError(range, "cannot assign to immutable local '{s}'", .{name});
+                return true;
+            },
+        }
+    }
+
+    fn patternBindingKind(self: *const TypeChecker, pattern_id: ast.PatternId) ?ast.BindingKind {
+        if (pattern_id.index() >= self.pattern_binding_kinds.len) return null;
+        return self.pattern_binding_kinds[pattern_id.index()];
+    }
+
+    fn bindingKindKeyword(kind: ast.BindingKind) []const u8 {
+        return switch (kind) {
+            .let_ => "let",
+            .constant => "const",
+            .var_ => "var",
+            .immutable => "immutable",
+        };
     }
 
     fn environmentKeySegmentForExpr(self: *TypeChecker, expr_id: ast.ExprId) ?KeySegment {

@@ -9,7 +9,7 @@ contract BitfieldStorageSmoke {
     storage var flags: PackedFlags;
 
     pub fn configure(mode: u8, threshold: u16) {
-        let f: PackedFlags = flags;
+        var f: PackedFlags = flags;
         f.enabled = true;
         f.locked = false;
         f.mode = mode;
@@ -18,13 +18,13 @@ contract BitfieldStorageSmoke {
     }
 
     pub fn set_locked(value: bool) {
-        let f: PackedFlags = flags;
+        var f: PackedFlags = flags;
         f.locked = value;
         flags = f;
     }
 
     pub fn set_mode(value: u8) {
-        let f: PackedFlags = flags;
+        var f: PackedFlags = flags;
         f.mode = value;
         flags = f;
     }
