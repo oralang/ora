@@ -25,7 +25,13 @@ EMITTER="src/types/emit_formal_snapshot.zig"
 SNAPSHOT="formal/Ora/Generated/CompilerSnapshot.lean"
 
 echo "==> [1/3] regenerating $SNAPSHOT from the compiler"
-zig run "$EMITTER" > "$SNAPSHOT"
+zig run \
+  --cache-dir "$ROOT/.zig-cache/formal-sync" \
+  --global-cache-dir "$ROOT/.zig-cache/formal-sync-global" \
+  --dep ora_refinements \
+  -Mroot="$EMITTER" \
+  -Mora_refinements=src/refinements/root.zig \
+  > "$SNAPSHOT"
 
 echo "==> [2/3] data-only lint"
 # Strip the /- … -/ header comment, then reject any non-data construct.

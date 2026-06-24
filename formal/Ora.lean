@@ -13,6 +13,7 @@ import Ora.Types.Region
 import Ora.Types.Prim
 import Ora.Types.Ty
 import Ora.Types.WF
+import Ora.Types.Refinement
 import Ora.Spec.Facts
 import Ora.Generated.CompilerSnapshot
 import Ora.Sync
