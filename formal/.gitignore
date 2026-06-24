@@ -1,0 +1,5 @@
+# Lake build output / fetched packages (Lean's equivalent of zig-out / .zig-cache).
+/.lake/
+/build/
+/lake-packages/
+*.olean.tmp

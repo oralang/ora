@@ -8,6 +8,7 @@ pub const region = @import("region.zig");
 pub const builtin = @import("builtin.zig");
 pub const integer_constants = @import("integer_constants.zig");
 pub const semantic = @import("semantic.zig");
+pub const region_assign = @import("region_assign.zig");
 pub const value = @import("value.zig");
 pub const refinement_semantics = @import("refinement_semantics.zig");
 pub const ast_arena = @import("ast_arena.zig");
