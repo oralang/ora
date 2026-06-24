@@ -82,7 +82,7 @@ pub fn generateSimple(
             }
 
             if (block.terminator == .switch_ and collector.switch_store == null) {
-                collector.switch_store = collector.alloc(word_size);
+                collector.switch_store = try collector.alloc(word_size);
             }
 
             try enqueueSuccessors(
@@ -138,7 +138,7 @@ const Collector = struct {
             std.mem.eql(u8, instruction.mnemonic, "freeptr")) and
             self.dyn_free_pointer_store == null)
         {
-            self.dyn_free_pointer_store = self.alloc(word_size);
+            self.dyn_free_pointer_store = try self.alloc(word_size);
         }
 
         if (std.mem.eql(u8, instruction.mnemonic, "salloc") or
@@ -168,7 +168,7 @@ const Collector = struct {
         if (self.hasAlloc(alloc_id)) return;
         try self.alloc_start.append(self.allocator, .{
             .alloc = alloc_id,
-            .address = self.alloc(bytes),
+            .address = try self.alloc(bytes),
         });
     }
 
@@ -181,7 +181,7 @@ const Collector = struct {
         if (self.hasStaticAlloc(op_id)) return;
         try self.static_alloc_start.append(self.allocator, .{
             .op = op_id,
-            .address = self.alloc(bytes),
+            .address = try self.alloc(bytes),
             .needs_zeroing = needs_zeroing,
         });
     }
@@ -200,9 +200,12 @@ const Collector = struct {
         return false;
     }
 
-    fn alloc(self: *Collector, bytes: u32) u32 {
+    fn alloc(self: *Collector, bytes: u32) !u32 {
         const address = self.next_free;
-        self.next_free = std.math.add(u32, self.next_free, bytes) catch unreachable;
+        // Fail closed on a huge/malformed allocation that exceeds the u32 EVM
+        // address space rather than panicking (`catch unreachable` would be UB
+        // in ReleaseFast). The whole emit is rejected as unsupported.
+        self.next_free = std.math.add(u32, self.next_free, bytes) catch return error.StaticMemoryOverflow;
         return address;
     }
 };

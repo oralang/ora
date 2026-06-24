@@ -80,20 +80,21 @@ pub const RecordFilter = enum {
 };
 
 pub fn expectedLabel(mode: oracle.BackendMode) []const u8 {
+    // ARMED: now that the generic backend reaches full corpus byte parity, every
+    // mode requires byte-equal bytecode. A codegen gap (pending) or a wrong
+    // bytecode (mismatch) both fail the gate, so future regressions cannot pass
+    // by silently dropping to "pending".
     return switch (mode) {
-        .debug => oracle.Classification.both_accept_bytecode_equal.label(),
-        .release, .release_generic => "both-accept-bytecode-equal|both-accept-codegen-pending",
+        .debug, .release, .release_generic => oracle.Classification.both_accept_bytecode_equal.label(),
     };
 }
 
 pub fn isExpectedClassification(mode: oracle.BackendMode, classification: oracle.Classification) bool {
     return switch (mode) {
-        .debug => classification == .both_accept_bytecode_equal,
-        // For both release backends an honest codegen gap (pending) is allowed;
-        // an emitted-but-wrong bytecode (mismatch) is not. This is what makes
-        // the generic gate ratchet: it goes green only when zero fixtures emit
-        // wrong bytes, which is the precondition for deleting the legacy path.
-        .release, .release_generic => classification == .both_accept_bytecode_equal or classification == .both_accept_codegen_pending,
+        // Every mode: only byte-equal is acceptable. Pending (an emit gap, which
+        // for release means emitRelease returned an error) and mismatch (wrong
+        // bytes) are both unexpected and fail the corpus gate.
+        .debug, .release, .release_generic => classification == .both_accept_bytecode_equal,
     };
 }
 
@@ -313,14 +314,18 @@ fn lessThanString(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.lessThan(u8, lhs, rhs);
 }
 
-test "expected corpus classification follows backend mode" {
+test "expected corpus classification is byte-equal-only for every mode (armed gate)" {
     try std.testing.expectEqualStrings("both-accept-bytecode-equal", expectedLabel(.debug));
-    try std.testing.expectEqualStrings("both-accept-bytecode-equal|both-accept-codegen-pending", expectedLabel(.release));
+    try std.testing.expectEqualStrings("both-accept-bytecode-equal", expectedLabel(.release));
+    try std.testing.expectEqualStrings("both-accept-bytecode-equal", expectedLabel(.release_generic));
     try std.testing.expect(isExpectedClassification(.debug, .both_accept_bytecode_equal));
     try std.testing.expect(!isExpectedClassification(.debug, .both_accept_codegen_pending));
     try std.testing.expect(isExpectedClassification(.release, .both_accept_bytecode_equal));
-    try std.testing.expect(isExpectedClassification(.release, .both_accept_codegen_pending));
+    // Armed: a codegen gap (pending) and a wrong bytecode (mismatch) are both
+    // unexpected for release now that the backend reaches full byte parity.
+    try std.testing.expect(!isExpectedClassification(.release, .both_accept_codegen_pending));
     try std.testing.expect(!isExpectedClassification(.release, .bytecode_mismatch));
+    try std.testing.expect(!isExpectedClassification(.release_generic, .both_accept_codegen_pending));
 }
 
 test "summary tracks classifications and first unexpected" {

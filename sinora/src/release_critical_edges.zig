@@ -22,8 +22,8 @@ fn splitFunction(arena: std.mem.Allocator, function: ir.Function) !ir.Function {
     const predecessor_counts = try arena.alloc(usize, function.blocks.len);
     @memset(predecessor_counts, 0);
     for (function.blocks) |block| {
-        var targets: [max_successors][]const u8 = undefined;
-        for (successors(block, &targets)) |target| {
+        var it = ir.successors(block);
+        while (it.next()) |target| {
             if (blockIndex(function, target)) |index| {
                 predecessor_counts[index] += 1;
             }
@@ -121,37 +121,6 @@ fn splitEdge(
         .line = source.line,
     });
     return forwarding_name;
-}
-
-const max_successors = 128;
-
-fn successors(block: ir.Block, storage: *[max_successors][]const u8) []const []const u8 {
-    var count: usize = 0;
-    switch (block.terminator) {
-        .jump => |target| {
-            storage[count] = target;
-            count += 1;
-        },
-        .branch => |branch| {
-            storage[count] = branch.zero_target;
-            count += 1;
-            storage[count] = branch.non_zero_target;
-            count += 1;
-        },
-        .switch_ => |switch_term| {
-            for (switch_term.cases) |case| {
-                if (count >= storage.len) break;
-                storage[count] = case.target;
-                count += 1;
-            }
-            if (switch_term.default_target.len != 0 and count < storage.len) {
-                storage[count] = switch_term.default_target;
-                count += 1;
-            }
-        },
-        .return_, .revert, .stop, .invalid, .selfdestruct, .iret => {},
-    }
-    return storage[0..count];
 }
 
 fn blockIndex(function: ir.Function, block_name: []const u8) ?usize {

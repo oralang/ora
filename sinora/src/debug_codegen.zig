@@ -13,12 +13,30 @@ pub const CodegenError = error{
 
 const word_size: u32 = 32;
 
+// Debug bytecode uses a simple memory-backed execution model. SIR SSA values
+// are stored in EVM memory slots, block parameters/results travel through a
+// shared transfer buffer, and internal calls return through a per-function
+// return-destination slot. This is intentionally straightforward and byte-for-
+// byte compatible with Plank's debug backend; release codegen uses a different
+// stack-scheduled model.
 const MemoryLayout = struct {
+    // One scratch word used while lowering switch terminators. The selector is
+    // stored once, then each case reloads it before comparing with the case
+    // constant.
     switch_store: u32,
+    // Conventional bump-pointer slot. malloc/salloc load this word, return the
+    // old pointer, and write back old + size.
     free_pointer: u32,
+    // Shared block-argument/result buffer. A predecessor writes block.outputs()
+    // here; the successor entry reads its block.inputs() from the same slots.
     transfer_start: u32,
+    // Dense storage for every SIR local in every reachable/topologically-known
+    // function. local_slots maps (function, value name) to an index here.
     locals_start: u32,
+    // Internal-call return addresses. Each callable function gets one memory
+    // word that callers fill with their continuation label before jumping.
     return_destinations_start: u32,
+    // First dynamic byte after all fixed debug-codegen bookkeeping.
     dynamic_start: u32,
 
     fn empty() MemoryLayout {
@@ -33,38 +51,47 @@ const MemoryLayout = struct {
     }
 };
 
-const ScopedLocal = struct {
-    function_name: []const u8,
-    local_name: []const u8,
-    slot: u32,
-};
-
-const BlockLabel = struct {
-    function_name: []const u8,
-    block_name: []const u8,
-    label: evm_asm.Label,
-};
-
-const FunctionSlot = struct {
-    function_name: []const u8,
-    slot: u32,
-};
-
 const PendingBlock = struct {
+    // Worklist entry for CFG traversal. We keep the function with the block name
+    // because block names are scoped to functions.
     function: ir.Function,
     block_name: []const u8,
 };
 
-const TranslatedBlock = struct {
+// Borrowed composite key for values and blocks scoped by function. The parser
+// owns the slices through Program's arena, so the maps can borrow them directly
+// without allocating "function:name" strings for every lookup.
+const ScopedName = struct {
     function_name: []const u8,
-    block_name: []const u8,
-};
-
-const DataLabel = struct {
     name: []const u8,
-    label: evm_asm.Label,
 };
 
+const ScopedNameContext = struct {
+    pub fn hash(_: @This(), key: ScopedName) u64 {
+        var hasher = std.hash.Wyhash.init(0);
+        const function_len = key.function_name.len;
+        const name_len = key.name.len;
+        // Include lengths before bytes so ("ab","c") and ("a","bc") cannot
+        // collide by simple concatenation.
+        hasher.update(std.mem.asBytes(&function_len));
+        hasher.update(key.function_name);
+        hasher.update(std.mem.asBytes(&name_len));
+        hasher.update(key.name);
+        return hasher.final();
+    }
+
+    pub fn eql(_: @This(), lhs: ScopedName, rhs: ScopedName) bool {
+        return std.mem.eql(u8, lhs.function_name, rhs.function_name) and
+            std.mem.eql(u8, lhs.name, rhs.name);
+    }
+};
+
+fn ScopedNameMap(comptime V: type) type {
+    return std.HashMap(ScopedName, V, ScopedNameContext, std.hash_map.default_max_load_percentage);
+}
+
+// DFS mark used for reachability/topological walks. `visiting` detects an
+// internal-call cycle early; the debug backend currently has no call stack.
 const VisitState = enum {
     visiting,
     done,
@@ -81,6 +108,9 @@ pub fn emitFunction(
     function_name: ?[]const u8,
     bag: *diagnostics.Bag,
 ) ![]const u8 {
+    // The public entry point keeps root selection simple: explicit function,
+    // otherwise main, otherwise the first function. The emitter builds indexes
+    // only after this root is known.
     const function = findFunction(program, function_name) orelse return CodegenError.FunctionNotFound;
     var emitter = DebugEmitter.init(allocator, program, bag);
     defer emitter.deinit();
@@ -106,16 +136,37 @@ const DebugEmitter = struct {
     program: ir.Program,
     bag: *diagnostics.Bag,
     bytecode: evm_asm.LabelBytecode,
-    locals: std.ArrayList(ScopedLocal),
-    block_labels: std.ArrayList(BlockLabel),
+
+    // Debug codegen materializes SIR locals and transfer buffers in memory.
+    // Every emitted instruction may load/store locals, so these indexes are
+    // kept as hash maps instead of rescanning the whole program-shaped tables.
+    local_slots: ScopedNameMap(u32),
+    // block_indexes gives O(1) lookup from (function, block name) to the parsed
+    // block. block_labels maps the same key to the EVM jump label.
+    block_indexes: ScopedNameMap(usize),
+    block_labels: ScopedNameMap(evm_asm.Label),
+    // Pending and translated sets drive CFG emission. A block can be enqueued
+    // many times through multiple predecessors but is emitted once.
     pending_blocks: std.ArrayList(PendingBlock),
-    translated_blocks: std.ArrayList(TranslatedBlock),
-    data_labels: std.ArrayList(DataLabel),
-    function_slots: std.ArrayList(FunctionSlot),
+    translated_blocks: ScopedNameMap(void),
+    // Data/function maps are also keyed by borrowed parser slices. They replace
+    // tiny linear tables from the first Sinora version.
+    data_labels: std.StringHashMap(evm_asm.Label),
+    function_slots: std.StringHashMap(u32),
+    functions: std.StringHashMap(ir.Function),
+    // Reachability is rooted at init/main. It keeps debug codegen from assigning
+    // jump labels for unreachable functions while still assigning local slots
+    // for topological call targets consistently.
     reachable_functions: std.ArrayList(ir.Function),
+
+    // Deployment mode emits init bytecode first and runtime bytecode second.
+    // These labels let runtime_start_offset/init_end_offset/runtime_length be
+    // patched after final byte widths are known.
     root_function_name: []const u8 = "",
     runtime_start_label: ?evm_asm.Label = null,
     init_end_label: ?evm_asm.Label = null,
+    // When true, label/data offsets are emitted relative to runtime_start so
+    // runtime bytecode embedded in deployment output sees local offsets.
     translating_runtime_code: bool = false,
     layout: MemoryLayout = MemoryLayout.empty(),
     next_slot: u32 = 0,
@@ -126,28 +177,35 @@ const DebugEmitter = struct {
             .program = program,
             .bag = bag,
             .bytecode = evm_asm.LabelBytecode.init(allocator),
-            .locals = .empty,
-            .block_labels = .empty,
+            .local_slots = ScopedNameMap(u32).init(allocator),
+            .block_indexes = ScopedNameMap(usize).init(allocator),
+            .block_labels = ScopedNameMap(evm_asm.Label).init(allocator),
             .pending_blocks = .empty,
-            .translated_blocks = .empty,
-            .data_labels = .empty,
-            .function_slots = .empty,
+            .translated_blocks = ScopedNameMap(void).init(allocator),
+            .data_labels = std.StringHashMap(evm_asm.Label).init(allocator),
+            .function_slots = std.StringHashMap(u32).init(allocator),
+            .functions = std.StringHashMap(ir.Function).init(allocator),
             .reachable_functions = .empty,
         };
     }
 
     fn deinit(self: *DebugEmitter) void {
         self.reachable_functions.deinit(self.allocator);
-        self.function_slots.deinit(self.allocator);
-        self.data_labels.deinit(self.allocator);
-        self.translated_blocks.deinit(self.allocator);
+        self.functions.deinit();
+        self.function_slots.deinit();
+        self.data_labels.deinit();
+        self.translated_blocks.deinit();
         self.pending_blocks.deinit(self.allocator);
-        self.block_labels.deinit(self.allocator);
-        self.locals.deinit(self.allocator);
+        self.block_labels.deinit();
+        self.block_indexes.deinit();
+        self.local_slots.deinit();
         self.bytecode.deinit();
     }
 
     fn emitProgram(self: *DebugEmitter, root_function: ir.Function) !void {
+        // In Ora/SIR artifacts, `init` means deployment bytecode that returns
+        // the runtime package. Any other selected root is emitted as standalone
+        // runtime/debug bytecode.
         if (std.mem.eql(u8, root_function.name, "init")) {
             try self.emitDeployment(root_function);
             return;
@@ -163,6 +221,10 @@ const DebugEmitter = struct {
         }
 
         self.root_function_name = root_function.name;
+        try self.indexFunctions(root_function.line);
+        // Reachability and topological collection are separate on purpose:
+        // reachability decides which blocks get labels/emitted; topological
+        // order decides stable function return slots and local memory slots.
         try self.reachable_functions.ensureTotalCapacity(self.allocator, self.program.functions.len);
         var visits: std.ArrayList(FunctionVisit) = .empty;
         defer visits.deinit(self.allocator);
@@ -181,7 +243,8 @@ const DebugEmitter = struct {
     fn emitDeployment(self: *DebugEmitter, init_function: ir.Function) !void {
         if (init_function.blocks.len == 0) return self.failIfUnsupported();
 
-        const runtime_function = findFunction(self.program, "main") orelse {
+        try self.indexFunctions(init_function.line);
+        const runtime_function = self.getFunction("main") orelse {
             try self.unsupported(init_function.line, "debug deployment codegen requires a 'main' runtime function", .{});
             return CodegenError.UnsupportedSir;
         };
@@ -194,6 +257,9 @@ const DebugEmitter = struct {
         }
 
         self.root_function_name = init_function.name;
+        // The assembler may need multiple width-solving passes before these
+        // label offsets are final, so we emit symbolic references instead of
+        // concrete offsets here.
         self.runtime_start_label = try self.bytecode.newLabel();
         self.init_end_label = try self.bytecode.newLabel();
 
@@ -209,6 +275,9 @@ const DebugEmitter = struct {
         self.translating_runtime_code = false;
         try self.emitBlocksFromEntry(init_function);
 
+        // Runtime bytecode is appended after init code. Blocks are considered
+        // un-emitted again because init/main may have identical block names but
+        // must produce distinct JUMPDESTs in the final byte stream.
         const runtime_start = self.runtime_start_label orelse return CodegenError.UnsupportedSir;
         try self.bytecode.mark(runtime_start);
         try self.emitFreePointerInit();
@@ -226,6 +295,9 @@ const DebugEmitter = struct {
 
     fn emitBlocksFromEntry(self: *DebugEmitter, function: ir.Function) !void {
         if (function.blocks.len == 0) return;
+        // Depth/worklist order matches the old implementation: push the entry,
+        // pop a pending block, emit it, enqueue successors. The translated set
+        // prevents duplicated bytecode for join blocks.
         try self.pending_blocks.append(self.allocator, .{
             .function = function,
             .block_name = function.blocks[0].name,
@@ -233,24 +305,51 @@ const DebugEmitter = struct {
 
         while (self.pending_blocks.pop()) |pending| {
             if (self.hasTranslatedBlock(pending.function.name, pending.block_name)) continue;
-            const block = findBlock(pending.function, pending.block_name) orelse {
+            const block = self.getBlock(pending.function, pending.block_name) orelse {
                 try self.unsupported(pending.function.line, "missing pending block '{s}' in function '{s}'", .{ pending.block_name, pending.function.name });
                 return CodegenError.UnsupportedSir;
             };
-            try self.translated_blocks.append(self.allocator, .{
+            try self.translated_blocks.put(.{
                 .function_name = pending.function.name,
-                .block_name = pending.block_name,
-            });
+                .name = pending.block_name,
+            }, {});
 
             const label = self.getBlockLabel(pending.function.name, block.name) orelse return CodegenError.UnsupportedSir;
             try self.bytecode.markJumpDest(label);
+            // Block parameters are loaded from the transfer buffer before any
+            // instruction in the block runs, implementing SIR block arguments.
             try self.emitBlockInputTransfer(pending.function, block);
             for (block.instructions) |instruction| {
                 try self.emitInstruction(pending.function, instruction);
             }
+            // Successors are enqueued before the branch/jump bytes are emitted.
+            // That keeps traversal independent from the terminator's final
+            // patched byte width.
             try self.enqueueSuccessors(pending.function, block);
             try self.emitTerminator(pending.function, block);
         }
+    }
+
+    fn indexFunctions(self: *DebugEmitter, line: u32) !void {
+        try self.functions.ensureTotalCapacity(try self.hashCapacity(line, self.program.functions.len, "function index"));
+        for (self.program.functions) |function| {
+            // Keep the first definition, matching the old linear findFunction().
+            if (!self.functions.contains(function.name)) {
+                try self.functions.put(function.name, function);
+            }
+        }
+    }
+
+    fn getFunction(self: *DebugEmitter, name: []const u8) ?ir.Function {
+        return self.functions.get(name);
+    }
+
+    fn getBlock(self: *DebugEmitter, function: ir.Function, block_name: []const u8) ?ir.Block {
+        const index = self.block_indexes.get(.{
+            .function_name = function.name,
+            .name = block_name,
+        }) orelse return null;
+        return function.blocks[index];
     }
 
     fn collectReachableFunction(
@@ -258,6 +357,10 @@ const DebugEmitter = struct {
         function: ir.Function,
         visits: *std.ArrayList(FunctionVisit),
     ) !void {
+        // Walk the internal-call graph from the selected roots. Debug codegen
+        // has a single return-destination slot per function, so recursive call
+        // cycles are unsupported and rejected instead of producing broken
+        // continuation state.
         for (visits.items) |*visit| {
             if (!std.mem.eql(u8, visit.function_name, function.name)) continue;
             switch (visit.state) {
@@ -275,7 +378,7 @@ const DebugEmitter = struct {
             for (block.instructions) |instruction| {
                 if (!std.mem.eql(u8, instruction.mnemonic, "icall")) continue;
                 const callee_name = try self.requireIcallTarget(instruction);
-                const callee = findFunction(self.program, callee_name) orelse {
+                const callee = self.getFunction(callee_name) orelse {
                     try self.unsupported(instruction.line, "icall targets missing function '{s}'", .{callee_name});
                     return CodegenError.UnsupportedSir;
                 };
@@ -292,18 +395,29 @@ const DebugEmitter = struct {
 
     fn prepareProgram(self: *DebugEmitter, line: u32) !void {
         const stats = self.program.stats();
+        // Reserve bytecode/label/patch capacity once from whole-program stats.
+        // Exact byte sizes are still solved by asm.zig; this only avoids many
+        // ArrayList/hash-map growth operations while walking the corpus.
         const reserve_hint = evm_asm.estimateReserveHint(stats);
         try self.bytecode.reserve(
             reserve_hint.byte_capacity,
             reserve_hint.label_capacity,
             reserve_hint.patch_capacity,
         );
-        try self.data_labels.ensureTotalCapacity(self.allocator, stats.data_segments);
-        try self.function_slots.ensureTotalCapacity(self.allocator, stats.functions);
-        try self.block_labels.ensureTotalCapacity(self.allocator, stats.blocks);
+        try self.data_labels.ensureTotalCapacity(try self.hashCapacity(line, stats.data_segments, "data label index"));
+        try self.function_slots.ensureTotalCapacity(try self.hashCapacity(line, stats.functions, "function return-slot index"));
+        try self.block_indexes.ensureTotalCapacity(try self.hashCapacity(line, stats.blocks, "block index"));
+        try self.block_labels.ensureTotalCapacity(try self.hashCapacity(line, stats.blocks, "block label index"));
         try self.pending_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
-        try self.translated_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
-        try self.locals.ensureTotalCapacity(self.allocator, stats.instructions * 2 + stats.blocks * 4);
+        try self.translated_blocks.ensureTotalCapacity(try self.hashCapacity(line, @max(stats.blocks, 1), "translated-block index"));
+        const local_slot_capacity = self.localSlotCapacityHint(stats) catch |err| {
+            if (err == error.Overflow) {
+                try self.unsupported(line, "local slot index exceeds debug codegen index capacity", .{});
+                return CodegenError.UnsupportedSir;
+            }
+            return err;
+        };
+        try self.local_slots.ensureTotalCapacity(try self.hashCapacity(line, local_slot_capacity, "local slot index"));
 
         var max_transfer_slots: usize = 0;
         var topo_functions: std.ArrayList(ir.Function) = .empty;
@@ -317,32 +431,45 @@ const DebugEmitter = struct {
             try self.collectTopoFunction(function, &topo_visits, &topo_functions);
         }
 
+        // Data labels are code labels because data segments are appended to the
+        // same byte stream and referenced by CODECOPY offsets.
         for (self.program.data_segments) |segment| {
-            try self.data_labels.append(self.allocator, .{
-                .name = segment.name,
-                .label = try self.bytecode.newLabel(),
-            });
+            // Keep the first label if invalid duplicate data names reach here.
+            if (!self.data_labels.contains(segment.name)) {
+                try self.data_labels.put(segment.name, try self.bytecode.newLabel());
+            }
         }
 
+        // A function's return slot stores the caller continuation for icall.
+        // Slots are assigned in postorder so callees receive stable addresses
+        // before their callers use them.
         for (topo_functions.items) |function| {
-            try self.function_slots.append(self.allocator, .{
-                .function_name = function.name,
-                .slot = @intCast(self.function_slots.items.len),
-            });
+            try self.function_slots.put(function.name, @intCast(self.function_slots.count()));
         }
 
+        // Only reachable functions get block labels. Unreachable functions may
+        // still have local slots for stable topological layout, but no bytecode.
         for (self.reachable_functions.items) |function| {
-            for (function.blocks) |block| {
-                try self.block_labels.append(self.allocator, .{
+            for (function.blocks, 0..) |block, block_index| {
+                const block_key: ScopedName = .{
                     .function_name = function.name,
-                    .block_name = block.name,
-                    .label = try self.bytecode.newLabel(),
-                });
+                    .name = block.name,
+                };
+                // Keep first-definition behavior if invalid SIR reaches codegen.
+                if (!self.block_indexes.contains(block_key)) {
+                    try self.block_indexes.put(block_key, block_index);
+                }
+                if (!self.block_labels.contains(block_key)) {
+                    try self.block_labels.put(block_key, try self.bytecode.newLabel());
+                }
             }
         }
 
         for (topo_functions.items) |function| {
             for (function.blocks) |block| {
+                // Transfer buffer size must handle both predecessor outputs and
+                // successor inputs. Legal SIR has matching counts per edge, but
+                // the debug backend still computes a safe maximum.
                 max_transfer_slots = @max(max_transfer_slots, block.inputs.len);
                 max_transfer_slots = @max(max_transfer_slots, block.outputs.len);
                 for (block.inputs) |name| try self.defineLocal(function, name);
@@ -361,6 +488,8 @@ const DebugEmitter = struct {
         visits: *std.ArrayList(FunctionVisit),
         output: *std.ArrayList(ir.Function),
     ) !void {
+        // Postorder over the call graph. The output is used for deterministic
+        // local/return-slot allocation, not for bytecode emission order.
         for (visits.items) |*visit| {
             if (!std.mem.eql(u8, visit.function_name, function.name)) continue;
             switch (visit.state) {
@@ -377,7 +506,7 @@ const DebugEmitter = struct {
             for (block.instructions) |instruction| {
                 if (!std.mem.eql(u8, instruction.mnemonic, "icall")) continue;
                 const callee_name = try self.requireIcallTarget(instruction);
-                const callee = findFunction(self.program, callee_name) orelse {
+                const callee = self.getFunction(callee_name) orelse {
                     try self.unsupported(instruction.line, "icall targets missing function '{s}'", .{callee_name});
                     return CodegenError.UnsupportedSir;
                 };
@@ -395,6 +524,8 @@ const DebugEmitter = struct {
     }
 
     fn emitInstruction(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction) !void {
+        // ops.zig classifies SIR mnemonics into fixed EVM-like operations,
+        // width-parametric memory ops, and Sinora's internal-call pseudo-op.
         const spec = ops.lookup(instruction.mnemonic) orelse {
             try self.unsupported(instruction.line, "unknown opcode '{s}'", .{instruction.mnemonic});
             return;
@@ -409,6 +540,9 @@ const DebugEmitter = struct {
     }
 
     fn emitFixedInstruction(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction, fixed: ops.Fixed) !void {
+        // Some SIR mnemonics are debug-backend intrinsics rather than direct
+        // one-byte EVM opcodes. Handle those before falling through to the
+        // generic stack operation path.
         if (std.mem.eql(u8, instruction.mnemonic, "const") or std.mem.eql(u8, instruction.mnemonic, "large_const")) {
             const value = parseU256(instruction.operands[0]) orelse {
                 try self.unsupported(instruction.line, "invalid numeric literal '{s}'", .{instruction.operands[0]});
@@ -473,6 +607,8 @@ const DebugEmitter = struct {
     }
 
     fn emitMemoryLoad(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction, bits: u16) !void {
+        // SIR memory loads are right-aligned EVM words. Narrow loads read a full
+        // MLOAD and shift away high padding bits.
         try self.emitLocalLoad(function, instruction.operands[0]);
         try self.bytecode.pushOp(evm_asm.op.MLOAD);
         try self.bytecode.pushU32(256 - bits);
@@ -481,6 +617,8 @@ const DebugEmitter = struct {
     }
 
     fn emitMemoryStore(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction, bits: u16) !void {
+        // Narrow stores preserve the untouched high bits of the destination word
+        // and splice the new value into the low `bits` region.
         try self.emitLocalLoad(function, instruction.operands[0]);
         try self.bytecode.pushOp(evm_asm.op.DUP1);
         try self.bytecode.pushOp(evm_asm.op.MLOAD);
@@ -497,6 +635,9 @@ const DebugEmitter = struct {
     }
 
     fn emitTerminator(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // Terminators are the only place block output transfer happens. This
+        // mirrors SIR's per-block transfer model: the source block writes a
+        // single output vector before choosing its successor.
         switch (block.terminator) {
             .return_ => |ret| try self.emitSimpleOperation(function, evm_asm.op.RETURN, &.{ ret.ptr, ret.len }, &.{}),
             .revert => |revert| try self.emitSimpleOperation(function, evm_asm.op.REVERT, &.{ revert.ptr, revert.len }, &.{}),
@@ -531,6 +672,9 @@ const DebugEmitter = struct {
         inputs: []const []const u8,
         outputs: []const []const u8,
     ) !void {
+        // EVM operands are stack-based. SIR lists operands left-to-right, so we
+        // load them in reverse order before pushing the opcode. This preserves
+        // non-commutative operations like `sub a b`.
         var index = inputs.len;
         while (index > 0) {
             index -= 1;
@@ -543,11 +687,13 @@ const DebugEmitter = struct {
     }
 
     fn emitLocalLoad(self: *DebugEmitter, function: ir.Function, name: []const u8) !void {
+        // A SIR local is a memory word in locals_start + slot*32.
         try self.bytecode.pushU32(try self.localAddr(function, name));
         try self.bytecode.pushOp(evm_asm.op.MLOAD);
     }
 
     fn emitLocalStore(self: *DebugEmitter, function: ir.Function, name: []const u8) !void {
+        // Store the current top-of-stack into the local's memory word.
         try self.bytecode.pushU32(try self.localAddr(function, name));
         try self.bytecode.pushOp(evm_asm.op.MSTORE);
     }
@@ -561,16 +707,19 @@ const DebugEmitter = struct {
     }
 
     fn defineLocal(self: *DebugEmitter, function: ir.Function, name: []const u8) !void {
+        // First definition wins. This matches the previous linear table and
+        // avoids changing behavior if invalid duplicate values reach codegen.
         if (self.localSlot(function.name, name) != null) return;
-        try self.locals.append(self.allocator, .{
+        try self.local_slots.put(.{
             .function_name = function.name,
-            .local_name = name,
-            .slot = self.next_slot,
-        });
+            .name = name,
+        }, self.next_slot);
         self.next_slot += 1;
     }
 
     fn emitBlockInputTransfer(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // Read transfer[i] into each block parameter. The predecessor wrote the
+        // values immediately before jumping/branching here.
         for (block.inputs, 0..) |input, index| {
             try self.bytecode.pushU32(try self.transferAddr(block.line, index));
             try self.bytecode.pushOp(evm_asm.op.MLOAD);
@@ -579,6 +728,8 @@ const DebugEmitter = struct {
     }
 
     fn emitBlockOutputTransfer(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // Write each block output into transfer[i]. All outgoing edges from this
+        // block share that vector in the current SIR model.
         for (block.outputs, 0..) |output, index| {
             try self.emitLocalLoad(function, output);
             try self.bytecode.pushU32(try self.transferAddr(block.line, index));
@@ -600,6 +751,9 @@ const DebugEmitter = struct {
     }
 
     fn emitCodeOffset(self: *DebugEmitter, label: evm_asm.Label) !void {
+        // Init code refers to absolute offsets in the whole deployment package.
+        // Runtime code refers to offsets relative to runtime_start because that
+        // is the bytecode that will actually live at the account address.
         if (self.translating_runtime_code) {
             const runtime_start = self.runtime_start_label orelse {
                 try self.unsupported(0, "runtime code offset requires a runtime start label", .{});
@@ -612,6 +766,8 @@ const DebugEmitter = struct {
     }
 
     fn emitSwitch(self: *DebugEmitter, function: ir.Function, switch_term: ir.SwitchTerminator) !void {
+        // Store the selector once in scratch memory. Each case reloads it so the
+        // generated stack shape is simple and independent of case count.
         try self.emitLocalLoad(function, switch_term.selector);
         try self.bytecode.pushU32(self.layout.switch_store);
         try self.bytecode.pushOp(evm_asm.op.MSTORE);
@@ -633,8 +789,11 @@ const DebugEmitter = struct {
     }
 
     fn emitInternalCall(self: *DebugEmitter, caller: ir.Function, instruction: ir.Instruction) !void {
+        // Debug icall is not an EVM CALL. It is a jump into another SIR function
+        // plus a manually stored continuation. Arguments and results use the
+        // same transfer buffer as block parameters.
         const callee_name = try self.requireIcallTarget(instruction);
-        const callee = findFunction(self.program, callee_name) orelse {
+        const callee = self.getFunction(callee_name) orelse {
             try self.unsupported(instruction.line, "icall targets missing function '{s}'", .{callee_name});
             return CodegenError.UnsupportedSir;
         };
@@ -647,6 +806,9 @@ const DebugEmitter = struct {
         }
 
         const return_label = try self.bytecode.newLabel();
+        // The callee's iret loads this return-destination slot and jumps back
+        // here. Recursion is rejected earlier because one slot per function
+        // cannot represent nested activations.
         try self.emitCodeOffset(return_label);
         try self.bytecode.pushU32(try self.returnDestinationAddr(callee.name));
         try self.bytecode.pushOp(evm_asm.op.MSTORE);
@@ -667,6 +829,8 @@ const DebugEmitter = struct {
     }
 
     fn emitInternalReturn(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // iret writes the function output vector, then jumps to the continuation
+        // slot most recently written by the caller.
         if (std.mem.eql(u8, function.name, self.root_function_name)) {
             try self.unsupported(block.line, "root function '{s}' cannot use iret without a caller", .{function.name});
             return;
@@ -678,6 +842,8 @@ const DebugEmitter = struct {
     }
 
     fn emitDeploymentOffsetIntrinsic(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction) !void {
+        // These pseudo-ops are only valid while building deployment bytecode.
+        // They let SIR copy the runtime package out of the init byte stream.
         const runtime_start = self.runtime_start_label orelse {
             try self.unsupported(instruction.line, "debug codegen only supports '{s}' while emitting the init deployment package", .{instruction.mnemonic});
             return;
@@ -700,6 +866,8 @@ const DebugEmitter = struct {
     }
 
     fn emitDataOffset(self: *DebugEmitter, function: ir.Function, instruction: ir.Instruction) !void {
+        // data_offset .name materializes a code offset for an appended data
+        // segment. In runtime mode the offset is relative to runtime_start.
         if (instruction.operands.len != 1 or instruction.operands[0].len <= 1 or instruction.operands[0][0] != '.') {
             try self.unsupported(instruction.line, "data_offset expects a data reference like '.name'", .{});
             return;
@@ -724,6 +892,8 @@ const DebugEmitter = struct {
     }
 
     fn emitDataSegments(self: *DebugEmitter) !void {
+        // Data is appended after executable blocks and marked with normal code
+        // labels so CODECOPY can reference it through the same patch solver.
         for (self.program.data_segments) |segment| {
             const label = self.getDataLabel(segment.name) orelse {
                 try self.unsupported(segment.line, "missing data label for segment '{s}'", .{segment.name});
@@ -735,6 +905,9 @@ const DebugEmitter = struct {
     }
 
     fn validateSuccessorTransferCounts(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // The legalizer should already enforce this, but debug codegen checks it
+        // before emitting bytecode because a mismatch would silently read/write
+        // the wrong transfer slots.
         switch (block.terminator) {
             .jump => |target| try self.validateTransferCount(function, block, target),
             .branch => |branch| {
@@ -752,6 +925,8 @@ const DebugEmitter = struct {
     }
 
     fn enqueueSuccessors(self: *DebugEmitter, function: ir.Function, block: ir.Block) !void {
+        // Enqueue in the same successor order as ir.SuccessorIter/Plank debug:
+        // branch zero-target before non-zero-target; switch cases then default.
         switch (block.terminator) {
             .jump => |target| try self.enqueueBlock(function, target),
             .branch => |branch| {
@@ -778,16 +953,14 @@ const DebugEmitter = struct {
     }
 
     fn hasTranslatedBlock(self: *DebugEmitter, function_name: []const u8, block_name: []const u8) bool {
-        for (self.translated_blocks.items) |entry| {
-            if (std.mem.eql(u8, entry.function_name, function_name) and std.mem.eql(u8, entry.block_name, block_name)) {
-                return true;
-            }
-        }
-        return false;
+        return self.translated_blocks.contains(.{
+            .function_name = function_name,
+            .name = block_name,
+        });
     }
 
     fn validateTransferCount(self: *DebugEmitter, function: ir.Function, block: ir.Block, target: []const u8) !void {
-        const target_block = findBlock(function, target) orelse {
+        const target_block = self.getBlock(function, target) orelse {
             try self.unsupported(block.line, "missing target block '{s}' during codegen", .{target});
             return;
         };
@@ -801,6 +974,8 @@ const DebugEmitter = struct {
     }
 
     fn validateIcallShape(self: *DebugEmitter, instruction: ir.Instruction, callee: ir.Function) !void {
+        // Keep shape errors grouped on this icall. If any diagnostic was added,
+        // abort this path instead of trying to emit partial call bytecode.
         const diagnostics_before = self.bag.items.items.len;
         if (callee.blocks.len == 0) {
             try self.unsupported(instruction.line, "icall target function '{s}' has no blocks", .{callee.name});
@@ -828,6 +1003,8 @@ const DebugEmitter = struct {
     }
 
     fn iretOutputCount(self: *DebugEmitter, function: ir.Function) !usize {
+        // A callable function may have multiple iret blocks, but every iret must
+        // return the same arity so callers know how many result slots to read.
         var result: ?usize = null;
         for (function.blocks) |block| {
             if (block.terminator != .iret) continue;
@@ -852,9 +1029,16 @@ const DebugEmitter = struct {
     }
 
     fn computeMemoryLayout(self: *DebugEmitter, line: u32, max_transfer_slots: usize) !void {
+        // Fixed debug memory areas are laid out once:
+        //   0x00 switch scratch
+        //   0x20 free pointer
+        //   0x40 transfer buffer
+        //   ...  local slots
+        //   ...  return-destination slots
+        //   ...  dynamic allocations
         const transfer_bytes = try self.checkedWordsToBytes(line, max_transfer_slots, "block transfer area");
         const locals_bytes = try self.checkedWordsToBytes(line, self.next_slot, "local area");
-        const return_destination_bytes = try self.checkedWordsToBytes(line, self.function_slots.items.len, "return destination area");
+        const return_destination_bytes = try self.checkedWordsToBytes(line, self.function_slots.count(), "return destination area");
         const free_pointer = word_size;
         const transfer_start = try self.checkedAdd(line, free_pointer, word_size, "block transfer area");
         const locals_start = try self.checkedAdd(line, transfer_start, transfer_bytes, "local area");
@@ -882,6 +1066,9 @@ const DebugEmitter = struct {
     }
 
     fn emitDynamicMemoryAlloc(self: *DebugEmitter, function: ir.Function, size_local: []const u8, result_local: []const u8) !void {
+        // Match Plank debug's bump allocation sequence. The CALLDATACOPY uses
+        // zero-sized/out-of-range calldata as cheap memory initialization while
+        // preserving byte parity with the Rust backend.
         try self.emitFreePtrLoad();
         try self.bytecode.pushOp(evm_asm.op.DUP1);
         try self.emitLocalLoad(function, size_local);
@@ -896,6 +1083,8 @@ const DebugEmitter = struct {
     }
 
     fn emitStaticMemoryAlloc(self: *DebugEmitter, function: ir.Function, size: u32, result_local: []const u8) !void {
+        // Static allocation is the same bump-pointer sequence with the size
+        // already known at compile time.
         try self.emitFreePtrLoad();
         try self.bytecode.pushOp(evm_asm.op.DUP1);
         try self.bytecode.pushU32(size);
@@ -910,43 +1099,34 @@ const DebugEmitter = struct {
     }
 
     fn getBlockLabel(self: *DebugEmitter, function_name: []const u8, block_name: []const u8) ?evm_asm.Label {
-        for (self.block_labels.items) |entry| {
-            if (std.mem.eql(u8, entry.function_name, function_name) and std.mem.eql(u8, entry.block_name, block_name)) {
-                return entry.label;
-            }
-        }
-        return null;
+        return self.block_labels.get(.{
+            .function_name = function_name,
+            .name = block_name,
+        });
     }
 
     fn getDataLabel(self: *DebugEmitter, data_name: []const u8) ?evm_asm.Label {
-        for (self.data_labels.items) |entry| {
-            if (std.mem.eql(u8, entry.name, data_name)) {
-                return entry.label;
-            }
-        }
-        return null;
+        return self.data_labels.get(data_name);
     }
 
     fn localSlot(self: *DebugEmitter, function_name: []const u8, local_name: []const u8) ?u32 {
-        for (self.locals.items) |entry| {
-            if (std.mem.eql(u8, entry.function_name, function_name) and std.mem.eql(u8, entry.local_name, local_name)) {
-                return entry.slot;
-            }
-        }
-        return null;
+        return self.local_slots.get(.{
+            .function_name = function_name,
+            .name = local_name,
+        });
     }
 
     fn returnDestinationAddr(self: *DebugEmitter, function_name: []const u8) !u32 {
-        for (self.function_slots.items) |entry| {
-            if (std.mem.eql(u8, entry.function_name, function_name)) {
-                return self.layout.return_destinations_start + entry.slot * word_size;
-            }
+        if (self.function_slots.get(function_name)) |slot| {
+            return self.layout.return_destinations_start + slot * word_size;
         }
         try self.unsupported(0, "missing return destination slot for function '{s}'", .{function_name});
         return CodegenError.UnsupportedSir;
     }
 
     fn requireIcallTarget(self: *DebugEmitter, instruction: ir.Instruction) ![]const u8 {
+        // SIR text writes function references as @name. Strip the sigil only
+        // after validating it, so bad text gets a precise diagnostic.
         if (instruction.operands.len == 0) {
             try self.unsupported(instruction.line, "icall is missing a function target", .{});
             return CodegenError.UnsupportedSir;
@@ -965,6 +1145,8 @@ const DebugEmitter = struct {
     }
 
     fn checkedWordsToBytes(self: *DebugEmitter, line: u32, words: anytype, role: []const u8) !u32 {
+        // Debug memory addresses are emitted as u32 immediates. Oversized SIR
+        // therefore fails closed instead of wrapping slot arithmetic.
         const words_usize: usize = @intCast(words);
         const max_words: usize = @as(usize, std.math.maxInt(u32) / word_size);
         if (words_usize > max_words) {
@@ -980,16 +1162,29 @@ const DebugEmitter = struct {
             return CodegenError.UnsupportedSir;
         };
     }
+
+    fn hashCapacity(self: *DebugEmitter, line: u32, count: usize, role: []const u8) !u32 {
+        // Zig's managed hash maps use a u32 count internally. Treat impossible
+        // program sizes as unsupported SIR rather than allowing @intCast traps.
+        if (count > std.math.maxInt(u32)) {
+            try self.unsupported(line, "{s} exceeds debug codegen index capacity", .{role});
+            return CodegenError.UnsupportedSir;
+        }
+        return @intCast(count);
+    }
+
+    fn localSlotCapacityHint(_: *DebugEmitter, stats: ir.Stats) !usize {
+        // Upper-bound local slots before reserving the local-slot index. Inputs
+        // and results are the only named locals this debug backend materializes.
+        const result_slots = try std.math.mul(usize, stats.instructions, 2);
+        const block_slots = try std.math.mul(usize, stats.blocks, 4);
+        return std.math.add(usize, result_slots, block_slots);
+    }
 };
 
-fn findBlock(function: ir.Function, name: []const u8) ?ir.Block {
-    for (function.blocks) |block| {
-        if (std.mem.eql(u8, block.name, name)) return block;
-    }
-    return null;
-}
-
 fn parseU256(text: []const u8) ?u256 {
+    // SIR constants are word-sized. Negative literals are represented in the
+    // EVM/SIR bit pattern by wrapping subtraction from zero.
     if (text.len == 0) return null;
     const negative = text[0] == '-';
     const unsigned = if (negative) text[1..] else text;
@@ -1004,6 +1199,8 @@ fn parseU256(text: []const u8) ?u256 {
 }
 
 fn parseU32(text: []const u8) ?u32 {
+    // Address/size immediates in this debug backend are intentionally capped at
+    // u32 because LabelBytecode emits compact PUSH immediates for them.
     const parsed = parseU256(text) orelse return null;
     if (parsed > std.math.maxInt(u32)) return null;
     return @intCast(parsed);

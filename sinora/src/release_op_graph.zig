@@ -1431,9 +1431,9 @@ fn buildFunctionLayouts(allocator: std.mem.Allocator, program: ir.Program, funct
     defer allocator.free(parent);
     for (parent, 0..) |*p, i| p.* = i;
 
-    var successor_storage: [max_successors][]const u8 = undefined;
     for (function.blocks, 0..) |block, block_index| {
-        for (successors(block, &successor_storage)) |target| {
+        var it = ir.successors(block);
+        while (it.next()) |target| {
             const target_index = blockIndex(function, target) orelse continue;
             // out(block_index) ~ in(target_index)
             unionMerge(parent, block_count + block_index, target_index);
@@ -1557,37 +1557,6 @@ fn solveLiveness(
     }
 }
 
-const max_successors = 128;
-
-fn successors(block: ir.Block, storage: *[max_successors][]const u8) []const []const u8 {
-    var count: usize = 0;
-    switch (block.terminator) {
-        .jump => |target| {
-            storage[count] = target;
-            count += 1;
-        },
-        .branch => |branch| {
-            storage[count] = branch.zero_target;
-            count += 1;
-            storage[count] = branch.non_zero_target;
-            count += 1;
-        },
-        .switch_ => |switch_term| {
-            for (switch_term.cases) |case| {
-                if (count >= storage.len) break;
-                storage[count] = case.target;
-                count += 1;
-            }
-            if (switch_term.default_target.len != 0 and count < storage.len) {
-                storage[count] = switch_term.default_target;
-                count += 1;
-            }
-        },
-        .return_, .revert, .stop, .invalid, .selfdestruct, .iret => {},
-    }
-    return storage[0..count];
-}
-
 fn blockIndex(function: ir.Function, block_name: []const u8) ?usize {
     for (function.blocks, 0..) |block, index| {
         if (std.mem.eql(u8, block.name, block_name)) return index;
@@ -1709,16 +1678,16 @@ fn predecessorOutputForSuccessorInput(
 }
 
 fn blockTargets(block: ir.Block, target_name: []const u8) bool {
-    var storage: [max_successors][]const u8 = undefined;
-    for (successors(block, &storage)) |target| {
+    var it = ir.successors(block);
+    while (it.next()) |target| {
         if (std.mem.eql(u8, target, target_name)) return true;
     }
     return false;
 }
 
 fn blockHasSuccessors(block: ir.Block) bool {
-    var storage: [max_successors][]const u8 = undefined;
-    return successors(block, &storage).len != 0;
+    var it = ir.successors(block);
+    return it.next() != null;
 }
 
 fn layoutMemberForInput(block: ir.Block, name: []const u8) LayoutMember {
@@ -1934,22 +1903,7 @@ fn isNonValueOperand(mnemonic: []const u8, operand: []const u8) bool {
 }
 
 fn isFlippable(mnemonic: []const u8) bool {
-    const spec = ops.lookup(mnemonic) orelse return false;
-    return switch (spec) {
-        .fixed => std.mem.eql(u8, mnemonic, "add") or
-            std.mem.eql(u8, mnemonic, "mul") or
-            std.mem.eql(u8, mnemonic, "addmod") or
-            std.mem.eql(u8, mnemonic, "mulmod") or
-            std.mem.eql(u8, mnemonic, "lt") or
-            std.mem.eql(u8, mnemonic, "gt") or
-            std.mem.eql(u8, mnemonic, "slt") or
-            std.mem.eql(u8, mnemonic, "sgt") or
-            std.mem.eql(u8, mnemonic, "eq") or
-            std.mem.eql(u8, mnemonic, "and") or
-            std.mem.eql(u8, mnemonic, "or") or
-            std.mem.eql(u8, mnemonic, "xor"),
-        .memory_load, .memory_store, .internal_call => false,
-    };
+    return ops.isFlippable(mnemonic);
 }
 
 fn expectOpSetMembers(set: OpSet, expected: []const OpNodeId) !void {
