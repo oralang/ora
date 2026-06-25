@@ -3962,6 +3962,17 @@ namespace
     {
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1)
         {
+            const bool addressToCarrier =
+                llvm::isa<sir::U256Type>(c.resultType) &&
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.input.getType());
+            const bool carrierToAddress =
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.resultType) &&
+                llvm::isa<sir::U256Type>(c.input.getType());
+            const bool addressIdentity =
+                llvm::isa<ora::AddressType, ora::NonZeroAddressType>(c.resultType) &&
+                c.input.getType() == c.resultType;
+            if (!addressToCarrier && !carrierToAddress && !addressIdentity)
+                return failure();
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
@@ -4000,6 +4011,13 @@ namespace
 
     static CastHandlerResult castPtrView(CastCtx &c)
     {
+        auto resultIsPointerBackedView = [](Type type) {
+            return llvm::isa<sir::PtrType, ora::TupleType, ora::StructType,
+                             ora::AnonymousStructType, ora::StringType, ora::BytesType,
+                             ora::AdtType, ora::MapType, mlir::MemRefType,
+                             mlir::UnrankedMemRefType>(type);
+        };
+
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
             llvm::isa<sir::PtrType>(c.resultType))
         {
@@ -4035,6 +4053,8 @@ namespace
         if (c.op.getNumOperands() == 1 && c.op.getNumResults() == 1 &&
             llvm::isa<sir::PtrType>(c.input.getType()))
         {
+            if (!resultIsPointerBackedView(c.resultType))
+                return failure();
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
@@ -4105,6 +4125,46 @@ namespace
         return failure();
     }
 
+    static CastHandlerResult castAdtHandleView(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return failure();
+        if (!llvm::isa<ora::AdtType>(c.resultType))
+            return failure();
+        if (!llvm::isa<sir::U256Type, sir::PtrType>(c.input.getType()))
+            return failure();
+
+        Value view = c.op.getResult(0);
+        if (view.use_empty())
+        {
+            c.rewriter.eraseOp(c.op);
+            return success();
+        }
+
+        SmallVector<mlir::UnrealizedConversionCastOp, 4> normalizedUsers;
+        for (Operation *user : view.getUsers())
+        {
+            auto split = dyn_cast<mlir::UnrealizedConversionCastOp>(user);
+            if (!split || !ora::hasMaterializationKind(split, mat_kind::kNormalizedAdt) ||
+                split.getNumOperands() != 1 || split.getOperand(0) != view ||
+                split.getNumResults() != 2 ||
+                !llvm::isa<sir::U256Type>(split.getResult(0).getType()) ||
+                !llvm::isa<sir::U256Type>(split.getResult(1).getType()))
+                return failure();
+            normalizedUsers.push_back(split);
+        }
+
+        for (auto split : normalizedUsers)
+        {
+            c.rewriter.setInsertionPoint(split);
+            auto [tag, payload] = adt_helpers::loadAdtPartsFromHandle(c.rewriter, split.getLoc(), c.input);
+            c.rewriter.replaceOp(split, {tag, payload});
+        }
+
+        c.rewriter.eraseOp(c.op);
+        return success();
+    }
+
     // Common body for the "split into (tag, payload-carrier)" cast — used by
     // both the kWideErrorUnionSplit kind handler and the generic 1->2 shape
     // handler that mops up wide error-union splits without an explicit kind.
@@ -4168,6 +4228,7 @@ namespace
             {mat_kind::kPtrView, castPtrView},
             {mat_kind::kNormalizedErrorUnion, castNormalizedErrorUnion},
             {mat_kind::kNormalizedAdt, castNormalizedAdt},
+            {mat_kind::kAdtHandleView, castAdtHandleView},
             {mat_kind::kWideErrorUnionSplit, castWideErrorUnionSplit},
         };
         for (const auto &e : table)
@@ -4247,7 +4308,28 @@ namespace
             c.rewriter.replaceOp(c.op, c.input);
             return success();
         }
+        if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(c.resultType) &&
+            llvm::isa<sir::U256Type>(c.input.getType()))
+        {
+            auto ptrType = sir::PtrType::get(c.rewriter.getContext(), /*addrSpace*/ 1);
+            Value ptr = c.rewriter.create<sir::BitcastOp>(c.loc, ptrType, c.input);
+            c.rewriter.replaceOp(c.op, ptr);
+            return success();
+        }
         return std::nullopt;
+    }
+
+    static CastHandlerResult castScalarCarrierBridge(CastCtx &c)
+    {
+        if (c.op.getNumOperands() != 1 || c.op.getNumResults() != 1)
+            return std::nullopt;
+        if (!llvm::isa<sir::U256Type>(c.input.getType()) ||
+            !llvm::isa<mlir::IntegerType>(c.resultType))
+            return std::nullopt;
+
+        Value casted = c.rewriter.create<sir::BitcastOp>(c.loc, c.resultType, c.input);
+        c.rewriter.replaceOp(c.op, casted);
+        return success();
     }
 
     static CastHandlerResult castDynamicAggregateView(CastCtx &c)
@@ -4409,6 +4491,7 @@ LogicalResult ConvertUnrealizedConversionCastOp::matchAndRewrite(
     if (auto r = tryHandlers({castRefinementBridge,
                               castAddressIndexBridge,
                               castMemrefPtrBridge,
+                              castScalarCarrierBridge,
                               castDynamicAggregateView,
                               castPayloadlessErrorStruct,
                               castNarrowErrorUnionPack1to1}))

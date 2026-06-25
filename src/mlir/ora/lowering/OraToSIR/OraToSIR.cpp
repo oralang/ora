@@ -187,6 +187,9 @@ namespace
 
     static bool canDropExplicitIntegerCarrierRoundTrip(sir::BitcastOp inner, sir::BitcastOp outer)
     {
+        if (inner->getNumOperands() != 1 || inner->getNumResults() != 1 ||
+            outer->getNumOperands() != 1 || outer->getNumResults() != 1)
+            return false;
         if (!llvm::isa<sir::U256Type>(inner.getInput().getType()) ||
             !llvm::isa<sir::U256Type>(outer.getResult().getType()))
             return false;
@@ -199,31 +202,86 @@ namespace
         return producer && isIntegerNormalizationProducer(producer, middleInt.getWidth());
     }
 
+    static bool canDropSirBitcastRoundTrip(sir::BitcastOp inner, sir::BitcastOp outer)
+    {
+        if (inner->getNumOperands() != 1 || inner->getNumResults() != 1 ||
+            outer->getNumOperands() != 1 || outer->getNumResults() != 1)
+            return false;
+        Type middle = inner.getResult().getType();
+        const bool middleIsWordCarrier =
+            llvm::isa<sir::PtrType, sir::U256Type>(middle) ||
+            (llvm::isa<mlir::IntegerType>(middle) &&
+             llvm::cast<mlir::IntegerType>(middle).getWidth() == 256);
+        return middleIsWordCarrier &&
+               inner.getInput().getType() == outer.getResult().getType() &&
+               inner.getResult().hasOneUse();
+    }
+
     static void foldExplicitIntegerCarrierRoundTripBitcasts(ModuleOp module)
     {
-        // Retain only the OraToSIR-specific carrier cleanup here. Generic
-        // identity and same-width sir.bitcast folding belongs to the SIR dialect
-        // folder. Removing this before lowering stops emitting the round trips
-        // reintroduces address/narrow carrier churn across the golden corpus.
+        // Retain only representational SIR-bitcast cleanup here. Same-type
+        // identities and round trips with an explicit normalization producer
+        // are safe to erase. Arbitrary carrier-changing A->B->A shapes stay
+        // visible unless a kind-specific lowering owns them.
         bool localChanged = true;
         while (localChanged)
         {
             localChanged = false;
 
-            SmallVector<std::pair<sir::BitcastOp, sir::BitcastOp>, 32> folds;
-            module.walk([&](sir::BitcastOp op)
-                        {
-                if (auto inner = op.getInput().getDefiningOp<sir::BitcastOp>())
-                    if (canDropExplicitIntegerCarrierRoundTrip(inner, op))
-                        folds.push_back({op, inner}); });
-            for (auto [op, inner] : folds)
+            sir::BitcastOp identityToErase;
+            SmallVector<sir::BitcastOp, 32> bitcasts;
+            module.walk([&](sir::BitcastOp op) { bitcasts.push_back(op); });
+            for (auto op : bitcasts)
             {
-                op.getResult().replaceAllUsesWith(inner.getInput());
-                op.erase();
+                if (identityToErase)
+                    break;
+                if (!op->getBlock())
+                    continue;
+                if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+                    continue;
+                if (op.getInput().getType() == op.getResult().getType())
+                    identityToErase = op;
+            }
+            if (identityToErase)
+            {
+                identityToErase.getResult().replaceAllUsesWith(identityToErase.getInput());
+                identityToErase.erase();
+                localChanged = true;
+                continue;
+            }
+
+            sir::BitcastOp outerToFold;
+            sir::BitcastOp innerToFold;
+            bitcasts.clear();
+            module.walk([&](sir::BitcastOp op) { bitcasts.push_back(op); });
+            for (auto op : bitcasts)
+            {
+                if (outerToFold)
+                    break;
+                if (!op->getBlock())
+                    continue;
+                if (op->getNumOperands() != 1 || op->getNumResults() != 1)
+                    continue;
+                auto inner = op.getInput().getDefiningOp<sir::BitcastOp>();
+                if (!inner || !inner->getBlock() || inner.getResult() != op.getInput())
+                    continue;
+                if (inner->getNumOperands() != 1 || inner->getNumResults() != 1)
+                    continue;
+                if (canDropSirBitcastRoundTrip(inner, op) ||
+                    canDropExplicitIntegerCarrierRoundTrip(inner, op))
+                {
+                    outerToFold = op;
+                    innerToFold = inner;
+                }
+            }
+            if (outerToFold)
+            {
+                outerToFold.getResult().replaceAllUsesWith(innerToFold.getInput());
+                outerToFold.erase();
                 localChanged = true;
 
-                if (inner.getResult().use_empty())
-                    inner.erase();
+                if (innerToFold.getResult().use_empty())
+                    innerToFold.erase();
             }
         }
     }
@@ -778,6 +836,74 @@ static LogicalResult eraseRefinements(ModuleOp module)
     if (failed(applyFullConversion(module, target, std::move(patterns))))
         return failure();
 
+    return success();
+}
+
+static bool isPreservedUnrealizedMaterialization(mlir::UnrealizedConversionCastOp castOp)
+{
+    return ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
+           ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit);
+}
+
+static LogicalResult verifyNoUnexpectedUnrealizedCasts(ModuleOp module)
+{
+    const bool debug = mlir::ora::isDebugEnabled();
+    bool leftoverUnrealized = false;
+    for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
+    {
+        if (isPreservedUnrealizedMaterialization(castOp))
+            continue;
+        leftoverUnrealized = true;
+        if (!debug)
+            break;
+        llvm::errs() << "[OraToSIR] Phase4 post-scan: unrealized cast at "
+                     << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                     << " results=" << castOp.getNumResults() << "\n";
+    }
+    if (debug)
+        llvm::errs().flush();
+    if (leftoverUnrealized)
+    {
+        module.emitError("[OraToSIR] Phase4 post-scan: unrealized casts remain");
+        return failure();
+    }
+
+    if (mlir::ora::isDebugEnabled())
+    {
+        llvm::errs() << "[OraToSIR] Post-Phase4: name-scan start\n";
+        llvm::errs().flush();
+    }
+    int64_t unrealizedByName = 0;
+    module.walk([&](mlir::UnrealizedConversionCastOp castOp) {
+        if (isPreservedUnrealizedMaterialization(castOp))
+            return;
+        ++unrealizedByName;
+        if (!debug)
+            return;
+        llvm::errs() << "[OraToSIR] Phase4 name-scan: unrealized cast at "
+                     << castOp.getLoc() << " operands=" << castOp.getNumOperands()
+                     << " results=" << castOp.getNumResults();
+        if (castOp.getNumOperands() > 0)
+            llvm::errs() << " in=" << castOp.getOperand(0).getType();
+        if (castOp.getNumResults() > 0)
+            llvm::errs() << " out=" << castOp.getResult(0).getType();
+        llvm::errs() << "\n";
+    });
+    if (mlir::ora::isDebugEnabled())
+    {
+        llvm::errs() << "[OraToSIR] Post-Phase4: name-scan done (count=" << unrealizedByName << ")\n";
+        llvm::errs().flush();
+    }
+    if (unrealizedByName > 0)
+    {
+        module.emitError("[OraToSIR] Phase4 name-scan: unrealized casts remain");
+        return failure();
+    }
     return success();
 }
 
@@ -1997,6 +2123,16 @@ public:
                         continue;
                     }
 
+                    if (llvm::isa<mlir::MemRefType, mlir::UnrankedMemRefType>(resultType) &&
+                        llvm::isa<sir::U256Type>(input.getType()))
+                    {
+                        Value repl = b.create<sir::BitcastOp>(
+                            loc, sir::PtrType::get(ctx, /*addrSpace*/ 1), input);
+                        castOp.getResult(0).replaceAllUsesWith(repl);
+                        eraseResidualCast(castOp);
+                        continue;
+                    }
+
                     if (auto errType = llvm::dyn_cast<ora::ErrorUnionType>(resultType))
                     {
                         if (isNarrowErr(errType) && llvm::isa<mlir::IntegerType>(input.getType()))
@@ -2076,30 +2212,91 @@ public:
                 }
             }
 
-            // Cleanup: collapse every surviving unrealized cast.
-            //   - 1:1 cast → forward operand and erase.
-            //   - normalized_error_union / normalized_adt with all u256 operands
-            //     → users have been rewired earlier; just erase the carrier.
-            // Earlier "kind-specific preservation" walks were redundant because
-            // the catch-all 1:1 forward already swept those kinds.
-            auto isNormalizedU256Pack = [](mlir::UnrealizedConversionCastOp op) {
+            // Cleanup: collapse only trivially-safe surviving unrealized casts.
+            //   - same-type 1:1 cast → forward operand and erase.
+            //   - dead normalized_error_union / normalized_adt with all u256
+            //     operands → users have been rewired earlier; just erase the
+            //     unused carrier.
+            // Any other 1:1 cast must be handled by a kind-specific conversion
+            // pattern or fail the later residual-cast scans. Forwarding arbitrary
+            // operands here would silently bless an unmodeled representation
+            // change.
+            auto isSameTypeIdentityCast = [](mlir::UnrealizedConversionCastOp op) {
+                return op.getNumOperands() == 1 &&
+                       op.getNumResults() == 1 &&
+                       op.getOperand(0).getType() == op.getResult(0).getType();
+            };
+            auto isTypedU256CarrierView = [](Type type) {
+                return llvm::isa<mlir::IntegerType,
+                                 ora::IntegerType,
+                                 ora::AddressType,
+                                 ora::NonZeroAddressType,
+                                 ora::MinValueType,
+                                 ora::MaxValueType,
+                                 ora::InRangeType,
+                                 ora::ScaledType,
+                                 ora::ExactType,
+                                 ora::ErrorUnionType>(type);
+            };
+            auto isDeadNormalizedU256Pack = [](mlir::UnrealizedConversionCastOp op) {
                 if (!ora::hasMaterializationKind(op, mat_kind::kNormalizedErrorUnion) &&
                     !ora::hasMaterializationKind(op, mat_kind::kNormalizedAdt))
                     return false;
                 if (op.getNumResults() != 1)
+                    return false;
+                if (!op.getResult(0).use_empty())
                     return false;
                 return llvm::all_of(op.getOperands(),
                                     [](Value v) { return llvm::isa<sir::U256Type>(v.getType()); });
             };
             SmallVector<mlir::UnrealizedConversionCastOp, 32> castsToDrop;
             module.walk([&](mlir::UnrealizedConversionCastOp op) {
-                if ((op.getNumOperands() == 1 && op.getNumResults() == 1) || isNormalizedU256Pack(op))
+                if (isSameTypeIdentityCast(op) || isDeadNormalizedU256Pack(op))
                     castsToDrop.push_back(op);
             });
             for (auto castOp : castsToDrop)
             {
-                if (castOp.getNumOperands() == 1 && castOp.getNumResults() == 1)
+                if (isSameTypeIdentityCast(castOp))
                     castOp.getResult(0).replaceAllUsesWith(castOp.getOperand(0));
+                castOp.erase();
+            }
+
+            // Typed carrier views sometimes survive until their only consumers
+            // bitcast them straight back to u256. This is a representational
+            // no-op, but only in that exact shape. If the typed value feeds any
+            // real operation, leave the cast in place so the residual scans fail
+            // instead of silently forwarding it.
+            SmallVector<mlir::UnrealizedConversionCastOp, 16> carrierViewsToDrop;
+            module.walk([&](mlir::UnrealizedConversionCastOp op) {
+                if (op.getNumOperands() != 1 || op.getNumResults() != 1)
+                    return;
+                if (!llvm::isa<sir::U256Type>(op.getOperand(0).getType()) ||
+                    !isTypedU256CarrierView(op.getResult(0).getType()))
+                    return;
+                bool allUsersAreU256Bitcasts = !op.getResult(0).use_empty();
+                for (Operation *user : op.getResult(0).getUsers())
+                {
+                    auto bitcast = dyn_cast<sir::BitcastOp>(user);
+                    if (!bitcast || bitcast.getInput() != op.getResult(0) ||
+                        !llvm::isa<sir::U256Type>(bitcast.getResult().getType()))
+                    {
+                        allUsersAreU256Bitcasts = false;
+                        break;
+                    }
+                }
+                if (allUsersAreU256Bitcasts)
+                    carrierViewsToDrop.push_back(op);
+            });
+            for (auto castOp : carrierViewsToDrop)
+            {
+                SmallVector<sir::BitcastOp, 4> bitcasts;
+                for (Operation *user : castOp.getResult(0).getUsers())
+                    bitcasts.push_back(cast<sir::BitcastOp>(user));
+                for (auto bitcast : bitcasts)
+                {
+                    bitcast.getResult().replaceAllUsesWith(castOp.getOperand(0));
+                    bitcast.erase();
+                }
                 castOp.erase();
             }
 
@@ -2166,38 +2363,9 @@ public:
                 }
             }
 
-            // Verify no unrealized casts remain. Kinds that survive on
-            // purpose (e.g. carriers consumed by later phases) are excluded.
-            auto isPreservedMaterializationKind = [](mlir::UnrealizedConversionCastOp castOp) {
-                return ora::hasMaterializationKind(castOp, mat_kind::kNormalizedErrorUnion) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kNormalizedAdt) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kAdtHandleView) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kPtrView) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kAddressForward) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionJoin) ||
-                       ora::hasMaterializationKind(castOp, mat_kind::kWideErrorUnionSplit);
-            };
-            const bool debug = mlir::ora::isDebugEnabled();
-            bool leftoverUnrealized = false;
-            for (auto castOp : module.getOps<mlir::UnrealizedConversionCastOp>())
-            {
-                if (isPreservedMaterializationKind(castOp))
-                    continue;
-                leftoverUnrealized = true;
-                if (!debug)
-                    break;
-                llvm::errs() << "[OraToSIR] Phase4 post-scan: unrealized cast at "
-                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                             << " results=" << castOp.getNumResults() << "\n";
-            }
-            if (debug)
-                llvm::errs().flush();
-            if (leftoverUnrealized)
-            {
-                module.emitError("[OraToSIR] Phase4 post-scan: unrealized casts remain");
-                signalPassFailure();
-                return;
-            }
+            // Late tuple/aggregate rewrites can expose precise bridge casts.
+            // The explicit final residual cleanup below handles those, then
+            // verifyNoUnexpectedUnrealizedCasts enforces the fail-closed barrier.
 
             // Normalize malformed blocks before any final printing/validation so we
             // fail cleanly instead of reaching MLIR internals with invalid CFG.
@@ -2220,50 +2388,26 @@ public:
                 llvm::errs().flush();
             }
 
-            // Extra guard: detect any remaining unrealized casts by name.
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] Post-Phase4: name-scan start\n";
-                llvm::errs().flush();
-            }
-            int64_t unrealizedByName = 0;
-            module.walk([&](mlir::UnrealizedConversionCastOp castOp) {
-                if (isPreservedMaterializationKind(castOp))
-                    return;
-                ++unrealizedByName;
-                if (!debug)
-                    return;
-                llvm::errs() << "[OraToSIR] Phase4 name-scan: unrealized cast at "
-                             << castOp.getLoc() << " operands=" << castOp.getNumOperands()
-                             << " results=" << castOp.getNumResults();
-                if (castOp.getNumOperands() > 0)
-                    llvm::errs() << " in=" << castOp.getOperand(0).getType();
-                if (castOp.getNumResults() > 0)
-                    llvm::errs() << " out=" << castOp.getResult(0).getType();
-                llvm::errs() << "\n";
-            });
-            if (mlir::ora::isDebugEnabled())
-            {
-                llvm::errs() << "[OraToSIR] Post-Phase4: name-scan done (count=" << unrealizedByName << ")\n";
-                llvm::errs().flush();
-            }
-            if (unrealizedByName > 0)
-            {
-                module.emitError("[OraToSIR] Phase4 name-scan: unrealized casts remain");
-                signalPassFailure();
-                return;
-            }
         }
 
         {
-            RewritePatternSet finalErrorCleanup(ctx);
-            finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
-            finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
-            if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
+            bool hasFinalErrorOps = false;
+            module.walk([&](Operation *op)
+                        {
+                            if (isa<ora::ErrorIsErrorOp, ora::ErrorUnwrapOp>(op))
+                                hasFinalErrorOps = true;
+                        });
+            if (hasFinalErrorOps)
             {
-                module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
-                signalPassFailure();
-                return;
+                RewritePatternSet finalErrorCleanup(ctx);
+                finalErrorCleanup.add<NormalizeErrorIsErrorOp>(ctx);
+                finalErrorCleanup.add<NormalizeErrorUnwrapOp>(ctx);
+                if (failed(applyPatternsGreedily(module, std::move(finalErrorCleanup))))
+                {
+                    module.emitError("[OraToSIR] final cleanup: residual error-union normalization failed");
+                    signalPassFailure();
+                    return;
+                }
             }
 
             SmallVector<mlir::UnrealizedConversionCastOp, 8> deadNormalizedFinalCasts;
@@ -2335,11 +2479,26 @@ public:
                         });
             for (auto op : deadFinalCasts)
                 op.erase();
+
+            if (failed(verifyNoUnexpectedUnrealizedCasts(module)))
+            {
+                signalPassFailure();
+                return;
+            }
         }
 
-        if (!module->hasAttr(kPhase0SkipManualBitcastFoldAttr))
+        bool hasSurvivingMaterializationCasts = false;
+        module.walk([&](mlir::UnrealizedConversionCastOp)
+                    { hasSurvivingMaterializationCasts = true; });
+        if (!module->hasAttr(kPhase0SkipManualBitcastFoldAttr) &&
+            !hasSurvivingMaterializationCasts)
         {
             foldExplicitIntegerCarrierRoundTripBitcasts(module);
+        }
+        else if (mlir::ora::isDebugEnabled() && hasSurvivingMaterializationCasts)
+        {
+            llvm::errs() << "[OraToSIR] Phase0: skipped manual sir.bitcast fold with live materialization casts\n";
+            llvm::errs().flush();
         }
         else if (mlir::ora::isDebugEnabled())
         {

@@ -779,13 +779,16 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
 
-        const artifact_root = try runDebugArtifacts(
+        const artifact_root = runDebugArtifacts(
             allocator,
             file_path,
             parsed.output_dir,
             debug_mlir_options,
             compile_context.resolver_options,
-        );
+        ) catch |err| switch (err) {
+            error.ArtifactEmissionBlocked => std.process.exit(1),
+            else => return err,
+        };
         defer allocator.free(artifact_root);
 
         if (debug_options.no_tui) return;
@@ -943,6 +946,7 @@ pub fn main(init: std.process.Init) !void {
 
         build_result catch |err| switch (err) {
             error.VerificationFailed => std.process.exit(1),
+            error.ArtifactEmissionBlocked => std.process.exit(1),
             else => return err,
         };
         return;
@@ -971,6 +975,7 @@ pub fn main(init: std.process.Init) !void {
     if (emit_abi or emit_abi_solidity or emit_abi_extras) {
         runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
             error.MissingContract => std.process.exit(2),
+            error.ArtifactEmissionBlocked => std.process.exit(1),
             else => return err,
         };
     }
@@ -984,9 +989,15 @@ pub fn main(init: std.process.Init) !void {
             (emit_ast_format orelse "tree");
         try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled);
     } else if (emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report) {
-        try runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+        runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
+            error.ArtifactEmissionBlocked => std.process.exit(1),
+            else => return err,
+        };
     } else if (emit_mlir or emit_mlir_sir) {
-        try runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled);
+        runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
+            error.ArtifactEmissionBlocked => std.process.exit(1),
+            else => return err,
+        };
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -1042,6 +1053,139 @@ fn moveArtifactFileIfExists(
     try moveArtifactFile(allocator, root_dir, file_name, target_dir);
 }
 
+fn createArtifactStagingRoot(allocator: std.mem.Allocator, artifact_root: []const u8) ![]u8 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const random_source = std.Random.IoSource{ .io = io };
+    var attempt: usize = 0;
+    while (attempt < 8) : (attempt += 1) {
+        const staging_root = try std.fmt.allocPrint(allocator, "{s}/.ora-staging-{x}", .{
+            artifact_root,
+            random_source.interface().int(u64),
+        });
+        errdefer allocator.free(staging_root);
+
+        std.Io.Dir.cwd().access(io, staging_root, .{}) catch |err| switch (err) {
+            error.FileNotFound => {
+                try std.Io.Dir.cwd().createDirPath(io, staging_root);
+                return staging_root;
+            },
+            else => return err,
+        };
+
+        allocator.free(staging_root);
+    }
+    return error.ArtifactStagingCollision;
+}
+
+fn moveArtifactFilesWithSuffixesIfExists(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    suffixes: []const []const u8,
+    target_dir: []const u8,
+) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, root_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        var matched = false;
+        for (suffixes) |suffix| {
+            if (std.mem.endsWith(u8, entry.name, suffix)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) continue;
+        try moveArtifactFile(allocator, root_dir, entry.name, target_dir);
+    }
+}
+
+fn deleteArtifactFileIfExists(allocator: std.mem.Allocator, dir: []const u8, file_name: []const u8) !void {
+    const path = try std.fs.path.join(allocator, &[_][]const u8{ dir, file_name });
+    defer allocator.free(path);
+    std.Io.Dir.cwd().deleteFile(std.Io.Threaded.global_single_threaded.io(), path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
+fn deleteStemArtifactFilesWithSuffixesIfExists(
+    allocator: std.mem.Allocator,
+    dir_path: []const u8,
+    stem: []const u8,
+    suffixes: []const []const u8,
+) !void {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        for (suffixes) |suffix| {
+            if (!artifactNameMatchesStemSuffix(entry.name, stem, suffix)) continue;
+            try deleteArtifactFileIfExists(allocator, dir_path, entry.name);
+            break;
+        }
+    }
+}
+
+fn artifactNameMatchesStemSuffix(name: []const u8, stem: []const u8, suffix: []const u8) bool {
+    if (!std.mem.endsWith(u8, name, suffix)) return false;
+    if (name.len == stem.len + suffix.len and std.mem.startsWith(u8, name, stem)) return true;
+    return name.len > stem.len + suffix.len and
+        std.mem.startsWith(u8, name, stem) and
+        name[stem.len] == '.';
+}
+
+fn invalidateBuildArtifactOutputs(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    abi_dir: []const u8,
+    bin_dir: []const u8,
+    sir_dir: []const u8,
+    verify_dir: []const u8,
+    mlir_dir: []const u8,
+) !void {
+    const abi_suffixes = [_][]const u8{ ".abi.json", ".abi.sol.json", ".abi.extras.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, abi_dir, stem, &abi_suffixes);
+    const bin_suffixes = [_][]const u8{ ".hex", ".sourcemap.json", ".debug.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, bin_dir, stem, &bin_suffixes);
+    const sir_suffixes = [_][]const u8{".sir"};
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, sir_dir, stem, &sir_suffixes);
+    const verify_suffixes = [_][]const u8{ ".smt.report.md", ".smt.report.json", ".proof.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, verify_dir, stem, &verify_suffixes);
+    const mlir_suffixes = [_][]const u8{ ".ora.mlir", ".sir.mlir" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
+}
+
+fn promoteStagedAbiBundle(
+    allocator: std.mem.Allocator,
+    staging_abi_dir: []const u8,
+    abi_dir: []const u8,
+    stem: []const u8,
+) !void {
+    const abi_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.json", .{stem});
+    defer allocator.free(abi_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_json_file, abi_dir);
+
+    const abi_sol_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.sol.json", .{stem});
+    defer allocator.free(abi_sol_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_sol_json_file, abi_dir);
+
+    const abi_extras_json_file = try std.fmt.allocPrint(allocator, "{s}.abi.extras.json", .{stem});
+    defer allocator.free(abi_extras_json_file);
+    try moveArtifactFile(allocator, staging_abi_dir, abi_extras_json_file, abi_dir);
+}
+
 fn runBuildArtifacts(
     allocator: std.mem.Allocator,
     file_path: []const u8,
@@ -1089,10 +1233,22 @@ fn runBuildArtifacts(
     try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), verify_dir);
     try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), mlir_dir);
 
+    try invalidateBuildArtifactOutputs(allocator, stem, abi_dir, bin_dir, sir_dir, verify_dir, mlir_dir);
+
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+
+    const staging_abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, "abi" });
+    defer allocator.free(staging_abi_dir);
+
     try validateConfiguredInitArgs(allocator, file_path, resolver_options, base_options.chain_id, configured_init_args);
 
-    // ABI bundle
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
+    // Trusted artifacts are written to a compiler-owned staging root first. Only
+    // diagnostic SMT reports may be promoted on failure; deployable artifacts are
+    // promoted into the public layout after verification and backend emission
+    // both succeed.
+    try runAbiEmit(allocator, file_path, staging_abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     // SIR + bytecode + SMT report (verification is mandatory for build mode).
     var build_mlir_options = base_options;
@@ -1100,7 +1256,7 @@ fn runBuildArtifacts(
     build_mlir_options.emit_mlir_sir = true;
     build_mlir_options.emit_sir_text = true;
     build_mlir_options.emit_bytecode = true;
-    build_mlir_options.output_dir = artifact_root;
+    build_mlir_options.output_dir = staging_root;
     build_mlir_options.verify_z3 = true;
     build_mlir_options.emit_smt_report = true;
     build_mlir_options.persist_ora_mlir = true;
@@ -1115,38 +1271,40 @@ fn runBuildArtifacts(
 
     const smt_md_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.md", .{stem});
     defer allocator.free(smt_md_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, smt_md_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, smt_md_file, verify_dir);
 
     const smt_json_file = try std.fmt.allocPrint(allocator, "{s}.smt.report.json", .{stem});
     defer allocator.free(smt_json_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, smt_json_file, verify_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, smt_json_file, verify_dir);
 
     if (verification_failed) {
         return error.VerificationFailed;
     }
 
+    try promoteStagedAbiBundle(allocator, staging_abi_dir, abi_dir, stem);
+
     const ora_mlir_file = try std.fmt.allocPrint(allocator, "{s}.ora.mlir", .{stem});
     defer allocator.free(ora_mlir_file);
-    try moveArtifactFile(allocator, artifact_root, ora_mlir_file, mlir_dir);
+    try moveArtifactFile(allocator, staging_root, ora_mlir_file, mlir_dir);
 
     // Reorganize generated outputs under stable subfolders only after a successful
     // verification/build run. Verification failures intentionally stop before
     // OraToSIR and bytecode emission, so these artifacts do not exist yet.
     const sir_file = try std.fmt.allocPrint(allocator, "{s}.sir", .{stem});
     defer allocator.free(sir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_file, sir_dir);
+    try moveArtifactFile(allocator, staging_root, sir_file, sir_dir);
 
     const hex_file = try std.fmt.allocPrint(allocator, "{s}.hex", .{stem});
     defer allocator.free(hex_file);
-    try moveArtifactFile(allocator, artifact_root, hex_file, bin_dir);
+    try moveArtifactFile(allocator, staging_root, hex_file, bin_dir);
 
     const source_map_file = try std.fmt.allocPrint(allocator, "{s}.sourcemap.json", .{stem});
     defer allocator.free(source_map_file);
-    try moveArtifactFileIfExists(allocator, artifact_root, source_map_file, bin_dir);
+    try moveArtifactFileIfExists(allocator, staging_root, source_map_file, bin_dir);
 
     const sir_mlir_file = try std.fmt.allocPrint(allocator, "{s}.sir.mlir", .{stem});
     defer allocator.free(sir_mlir_file);
-    try moveArtifactFile(allocator, artifact_root, sir_mlir_file, mlir_dir);
+    try moveArtifactFile(allocator, staging_root, sir_mlir_file, mlir_dir);
 
     try printBuildArtifactSummary(allocator, stdout, artifact_root, stem, bin_dir, sir_dir, verify_dir, mlir_dir);
     try stdout.flush();
@@ -1219,11 +1377,36 @@ fn runDebugArtifacts(
     defer allocator.free(abi_dir);
     try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), abi_dir);
 
-    try runAbiEmit(allocator, file_path, abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+
+    const staging_abi_dir = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, "abi" });
+    defer allocator.free(staging_abi_dir);
+
+    const debug_suffixes = [_][]const u8{
+        ".hex",
+        ".sir",
+        ".sourcemap.json",
+        ".debug.json",
+        ".proof.json",
+        ".smt.report.md",
+        ".smt.report.json",
+        ".sir.dot",
+        ".ora.dot",
+    };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, artifact_root, stem, &debug_suffixes);
+    const abi_suffixes = [_][]const u8{ ".abi.json", ".abi.sol.json", ".abi.extras.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, abi_dir, stem, &abi_suffixes);
+
+    try runAbiEmit(allocator, file_path, staging_abi_dir, true, true, true, resolver_options, base_options.chain_id, base_options.metrics, base_options.debug_enabled, true);
 
     var debug_mlir_options = base_options;
-    debug_mlir_options.output_dir = artifact_root;
+    debug_mlir_options.output_dir = staging_root;
     try runMlirEmitAdvanced(allocator, file_path, debug_mlir_options, resolver_options, debug_mlir_options.debug_enabled);
+
+    try promoteStagedAbiBundle(allocator, staging_abi_dir, abi_dir, stem);
+    try moveArtifactFilesWithSuffixesIfExists(allocator, staging_root, &debug_suffixes, artifact_root);
 
     try stdout.print("Debugger artifacts saved to {s}\n", .{artifact_root});
     try stdout.flush();
@@ -2387,52 +2570,88 @@ fn exitOnCompilerErrors(
     std.process.exit(1);
 }
 
-fn rejectIfNotEmittable(
+fn writeCompilationErrorsText(
     writer: anytype,
-    sources: ?*const compiler.source.SourceStore,
-    lowering: *const compiler.hir.LoweringResult,
+    db: *compiler.db.CompilerDb,
+    module_id: compiler.source.ModuleId,
     debug_enabled: bool,
 ) !void {
-    try exitOnCompilerErrors(writer, sources, &lowering.diagnostics, debug_enabled);
-    try writeDetectOnlyTypeFallbacks(writer, sources, lowering, debug_enabled);
-    if (lowering.isEmittable()) return;
+    const root_module = db.sources.module(module_id);
+    const package = db.sources.package(root_module.package_id);
 
-    try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
-    if (lowering.type_fallback_count != 0) {
-        try writer.print("  type fallbacks: {d}\n", .{lowering.type_fallback_count});
-    }
-    if (lowering.placeholder_count != 0) {
-        try writer.print("  placeholders: {d}\n", .{lowering.placeholder_count});
-    }
-    if (lowering.default_value_count != 0) {
-        try writer.print("  default values: {d}\n", .{lowering.default_value_count});
-    }
-    try writer.flush();
-    std.process.exit(1);
-}
+    for (package.modules.items) |current_module_id| {
+        const module = db.sources.module(current_module_id);
 
-fn rejectIfExecutableFallbacksSurvive(
-    writer: anytype,
-    lowering: *const compiler.hir.LoweringResult,
-) !void {
-    if (compiler.hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
-        try writer.print(
-            "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
-            .{ violation.op_name, violation.reason },
-        );
-        try writer.flush();
-        std.process.exit(1);
+        const syntax_diags = try db.syntaxDiagnostics(module.file_id);
+        if (compilerDiagnosticsHasErrors(syntax_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, syntax_diags, debug_enabled);
+        }
+
+        const ast_diags = try db.astDiagnostics(module.file_id);
+        if (compilerDiagnosticsHasErrors(ast_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, ast_diags, debug_enabled);
+        }
+
+        const resolution_diags = try db.resolutionDiagnostics(current_module_id);
+        if (compilerDiagnosticsHasErrors(resolution_diags)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, resolution_diags, debug_enabled);
+        }
+
+        const module_typecheck = try db.moduleTypeCheck(current_module_id);
+        if (compilerDiagnosticsHasErrors(&module_typecheck.diagnostics)) {
+            try writeCompilerDiagnosticsText(writer, &db.sources, &module_typecheck.diagnostics, debug_enabled);
+        }
     }
 }
 
-fn exitIfCompilationNotArtifactEmittable(
+fn rejectIfArtifactEmissionBlocked(
     writer: anytype,
-    compilation: *const compiler.driver.Compilation,
+    compilation: *compiler.driver.Compilation,
+    decision: compiler.driver.ArtifactEmissionDecision,
+    debug_enabled: bool,
 ) !void {
-    if (compilation.isArtifactEmittable()) return;
-    try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+    switch (decision) {
+        .allowed => return,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {
+                try writeCompilationErrorsText(writer, &compilation.db, compilation.root_module_id, debug_enabled);
+                try writer.print("Compiler error: compilation is not emittable; refusing to emit artifacts\n", .{});
+            },
+            .hir_diagnostics => {
+                const lowering = compilation.db.lowerToHir(compilation.root_module_id) catch |err| {
+                    try writer.print("Compiler error: HIR lowering failed while explaining artifact barrier: {s}\n", .{@errorName(err)});
+                    try writer.flush();
+                    return err;
+                };
+                try writeCompilerDiagnosticsText(writer, &compilation.db.sources, &lowering.diagnostics, debug_enabled);
+                try writer.print("Compiler error: HIR lowering produced diagnostics; refusing to emit artifacts\n", .{});
+            },
+            .hir_executable_fallbacks => |counts| {
+                const lowering = compilation.db.lowerToHir(compilation.root_module_id) catch null;
+                if (lowering) |hir_result| {
+                    try writeDetectOnlyTypeFallbacks(writer, &compilation.db.sources, hir_result, debug_enabled);
+                }
+                try writer.print("Compiler error: HIR lowering produced non-emittable fallback state; refusing to emit artifacts\n", .{});
+                if (counts.type_fallback_count != 0) {
+                    try writer.print("  type fallbacks: {d}\n", .{counts.type_fallback_count});
+                }
+                if (counts.placeholder_count != 0) {
+                    try writer.print("  placeholders: {d}\n", .{counts.placeholder_count});
+                }
+                if (counts.default_value_count != 0) {
+                    try writer.print("  default values: {d}\n", .{counts.default_value_count});
+                }
+            },
+            .structural_executable_fallback => |violation| {
+                try writer.print(
+                    "Compiler error: HIR contains executable fallback '{s}' ({s}); refusing to emit artifacts\n",
+                    .{ violation.op_name, violation.reason },
+                );
+            },
+        },
+    }
     try writer.flush();
-    std.process.exit(1);
+    return error.ArtifactEmissionBlocked;
 }
 
 fn writeDetectOnlyTypeFallbacks(
@@ -4014,11 +4233,12 @@ fn runCompilerMlirEmit(
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-
-    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
-    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
+    const lowering = switch (artifact_decision) {
+        .allowed => |hir_result| hir_result,
+        .blocked => unreachable,
+    };
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
@@ -4212,11 +4432,12 @@ fn runMlirEmitAdvanced(
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-
-    const lowering = try compilation.db.lowerToHir(compilation.root_module_id);
-    try rejectIfNotEmittable(stdout, &compilation.db.sources, lowering, debug_enabled);
-    try rejectIfExecutableFallbacksSurvive(stdout, lowering);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
+    const lowering = switch (artifact_decision) {
+        .allowed => |hir_result| hir_result,
+        .blocked => unreachable,
+    };
     const final_module = lowering.module.raw_module;
     const ctx = lowering.context;
     const cfg_mode_is_ora = if (mlir_options.emit_cfg_mode) |mode| std.ascii.eqlIgnoreCase(mode, "ora") else false;
@@ -4426,7 +4647,8 @@ fn runMlirEmitAdvanced(
 
         if (mlir_str_sir.data == null or mlir_str_sir.length == 0) {
             try stdout.print("Failed to print SIR MLIR\n", .{});
-            return;
+            try stdout.flush();
+            return error.SirMlirPrintFailed;
         }
 
         const mlir_content_sir = mlir_str_sir.data[0..mlir_str_sir.length];
@@ -4854,8 +5076,8 @@ fn runAbiEmit(
     };
     defer compilation.deinit();
 
-    _ = try exitOnCompilationErrors(stdout, &compilation.db, compilation.root_module_id, debug_enabled);
-    try exitIfCompilationNotArtifactEmittable(stdout, &compilation);
+    const artifact_decision = try compilation.artifactEmissionDecision();
+    try rejectIfArtifactEmissionBlocked(stdout, &compilation, artifact_decision, debug_enabled);
 
     var contract_abi = lib.abi.generateCompilerAbi(allocator, &compilation) catch |err| switch (err) {
         error.MissingContract => {
@@ -5058,7 +5280,7 @@ fn runSinoraBytecode(
         if (trimmed.len > 0) try stdout.print("  {s}\n", .{trimmed});
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
         try stdout.flush();
-        std.process.exit(1);
+        return error.SinoraBytecodeEmissionFailed;
     }
     return run_result.stdout;
 }
@@ -5130,7 +5352,7 @@ fn emitBytecodeFromSirText(
         try stdout.print("\nError: Sinora produced empty bytecode\n", .{});
         try stdout.print("SIR input saved to: {s}\n", .{sir_file_path});
         try stdout.flush();
-        std.process.exit(1);
+        return error.SinoraEmptyBytecode;
     }
     if (!suppress_log) {
         try stdout.print("Sinora bytecode emitted ({d} bytes)\n", .{hexByteLength(sinora_bytecode)});
