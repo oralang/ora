@@ -106,6 +106,93 @@ def DeclEnv.NoDuplicateNames (Γ : DeclEnv) : Prop :=
 def DeclEnvWF (Γ : DeclEnv) : Prop :=
   DeclEnv.NoDuplicateNames Γ ∧ ∀ n d, (n, d) ∈ Γ → DeclWF Γ d
 
+/-! `DeclEnvWF` projections
+
+    These are deliberately small. They make the contract of `DeclEnvWF`
+    reusable by later typing/projection layers without each proof having to
+    destruct the environment invariant by hand.
+-/
+
+theorem DeclEnvWF.noDuplicateNames {Γ : DeclEnv} (hΓ : DeclEnvWF Γ) :
+    DeclEnv.NoDuplicateNames Γ :=
+  hΓ.1
+
+theorem DeclEnvWF.decl_wf {Γ : DeclEnv} {n : Name} {d : Decl}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, d) ∈ Γ) : DeclWF Γ d :=
+  hΓ.2 n d hDecl
+
+theorem DeclEnvWF.struct_field_wf {Γ : DeclEnv} {n : Name} {fs : List FieldDecl}
+    {f : FieldDecl} (hΓ : DeclEnvWF Γ) (hDecl : (n, .struct_ fs) ∈ Γ)
+    (hf : f ∈ fs) : WF Γ f.ty :=
+  hΓ.decl_wf hDecl f hf
+
+theorem DeclEnvWF.enum_variant_wf {Γ : DeclEnv} {n : Name}
+    {vs : List EnumVariantDecl} {v : EnumVariantDecl}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, .enum_ vs) ∈ Γ) (hv : v ∈ vs) :
+    EnumVariantDeclWF Γ v :=
+  hΓ.decl_wf hDecl v hv
+
+theorem DeclEnvWF.bitfield_field_wf {Γ : DeclEnv} {n : Name}
+    {fs : List BitfieldFieldDecl} {f : BitfieldFieldDecl}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, .bitfield fs) ∈ Γ) (hf : f ∈ fs) :
+    WF Γ f.ty :=
+  hΓ.decl_wf hDecl f hf
+
+theorem DeclEnvWF.resource_carrier_wf {Γ : DeclEnv} {n : Name} {c : Ty}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, .resource c) ∈ Γ) : WF Γ c :=
+  hΓ.decl_wf hDecl
+
+theorem DeclEnv.lookup_of_mem_nodup {Γ : DeclEnv} {n : Name} {d : Decl}
+    (hNoDup : DeclEnv.NoDuplicateNames Γ) (hMem : (n, d) ∈ Γ) :
+    Γ.lookup n = some d := by
+  induction Γ with
+  | nil =>
+      cases hMem
+  | cons hd tail ih =>
+      cases hMem
+      case head =>
+          simp [DeclEnv.lookup]
+      case tail hTail =>
+          have hNoDupParts : hd.1 ∉ tail.map Prod.fst ∧ (tail.map Prod.fst).Nodup := by
+            simpa [DeclEnv.NoDuplicateNames] using hNoDup
+          have hTailNoDup : DeclEnv.NoDuplicateNames tail := hNoDupParts.2
+          have hNameInTail : n ∈ tail.map Prod.fst := by
+            simpa using List.mem_map_of_mem Prod.fst hTail
+          have hHeadNe : hd.1 ≠ n := by
+            intro hEq
+            exact hNoDupParts.1 (by simpa [hEq] using hNameInTail)
+          have hLookupTail := ih hTailNoDup hTail
+          simpa [DeclEnv.lookup, List.lookup, hHeadNe] using hLookupTail
+
+theorem DeclEnvWF.lookup_decl {Γ : DeclEnv} {n : Name} {d : Decl}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, d) ∈ Γ) : Γ.lookup n = some d :=
+  DeclEnv.lookup_of_mem_nodup hΓ.noDuplicateNames hDecl
+
+theorem DeclEnvWF.declared_struct_resolves {Γ : DeclEnv} {n : Name}
+    {fs : List FieldDecl} (hΓ : DeclEnvWF Γ) (hDecl : (n, .struct_ fs) ∈ Γ) :
+    Γ.resolvesNominal (.struct_ n) :=
+  ⟨fs, by simp [DeclEnv.structFields?, hΓ.lookup_decl hDecl]⟩
+
+theorem DeclEnvWF.declared_enum_resolves {Γ : DeclEnv} {n : Name}
+    {vs : List EnumVariantDecl} (hΓ : DeclEnvWF Γ) (hDecl : (n, .enum_ vs) ∈ Γ) :
+    Γ.resolvesNominal (.enum_ n) :=
+  ⟨vs, by simp [DeclEnv.enumVariants?, hΓ.lookup_decl hDecl]⟩
+
+theorem DeclEnvWF.declared_bitfield_resolves {Γ : DeclEnv} {n : Name}
+    {fs : List BitfieldFieldDecl} (hΓ : DeclEnvWF Γ) (hDecl : (n, .bitfield fs) ∈ Γ) :
+    Γ.resolvesNominal (.bitfield n) :=
+  ⟨fs, by simp [DeclEnv.bitfieldFields?, hΓ.lookup_decl hDecl]⟩
+
+theorem DeclEnvWF.declared_contract_resolves {Γ : DeclEnv} {n : Name}
+    {ms : List Name} (hΓ : DeclEnvWF Γ) (hDecl : (n, .contract ms) ∈ Γ) :
+    Γ.resolvesNominal (.contract n) :=
+  ⟨ms, by simp [DeclEnv.contractMembers?, hΓ.lookup_decl hDecl]⟩
+
+theorem DeclEnvWF.declared_resource_resolves {Γ : DeclEnv} {n : Name} {c : Ty}
+    (hΓ : DeclEnvWF Γ) (hDecl : (n, .resource c) ∈ Γ) :
+    Γ.resolvesNominal (.resourceDomain n c) := by
+  simp [DeclEnv.resolvesNominal, DeclEnv.resourceCarrier?, hΓ.lookup_decl hDecl]
+
 /-! ## 2. Containment predicates (mirror `typeContains*`)
 
     Faithful recursive mirrors of the compiler's containment checks. -/
@@ -294,12 +381,33 @@ theorem DeclEnvWF.dangling_field_not_wf :
   intro h
   have hDecl : DeclWF danglingFieldEnv (.struct_ [⟨"x", .struct_ "Missing"⟩]) :=
     h.2 "Bad" (.struct_ [⟨"x", .struct_ "Missing"⟩]) (by simp [danglingFieldEnv])
-  have hField : WF danglingFieldEnv (.struct_ "Missing") := by
-    exact hDecl ⟨"x", .struct_ "Missing"⟩ (by simp [FieldDeclWF])
+  have hField : WF danglingFieldEnv (.struct_ "Missing") :=
+    hDecl ⟨"x", .struct_ "Missing"⟩ (by simp [FieldDeclWF])
   cases hField with
   | struct_ hRes =>
       obtain ⟨_, hLookup⟩ := hRes
       simp [DeclEnv.structFields?, DeclEnv.lookup, danglingFieldEnv] at hLookup
+
+def danglingEnumPayloadEnv : DeclEnv :=
+  [("Bad", .enum_ [⟨"Oops", .positional [.struct_ "Missing"], none⟩])]
+
+theorem DeclEnvWF.dangling_enum_payload_not_wf :
+    ¬ DeclEnvWF danglingEnumPayloadEnv := by
+  intro h
+  have hDecl : DeclWF danglingEnumPayloadEnv
+      (.enum_ [⟨"Oops", .positional [.struct_ "Missing"], none⟩]) :=
+    h.2 "Bad" (.enum_ [⟨"Oops", .positional [.struct_ "Missing"], none⟩])
+      (by simp [danglingEnumPayloadEnv])
+  have hVariant : EnumVariantDeclWF danglingEnumPayloadEnv
+      ⟨"Oops", .positional [.struct_ "Missing"], none⟩ :=
+    hDecl ⟨"Oops", .positional [.struct_ "Missing"], none⟩ (by simp)
+  change ∀ t ∈ [.struct_ "Missing"], WF danglingEnumPayloadEnv t at hVariant
+  have hMissing : WF danglingEnumPayloadEnv (.struct_ "Missing") :=
+    hVariant (.struct_ "Missing") (by simp)
+  cases hMissing with
+  | struct_ hRes =>
+      obtain ⟨_, hLookup⟩ := hRes
+      simp [DeclEnv.structFields?, DeclEnv.lookup, danglingEnumPayloadEnv] at hLookup
 
 def danglingResourceCarrierEnv : DeclEnv :=
   [("Token", .resource (.struct_ "Missing"))]

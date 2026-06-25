@@ -57,3 +57,5 @@ __pycache__/
 examples-projects/
 
 .mcp.json
+
+evm-semantics

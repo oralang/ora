@@ -15,6 +15,7 @@ import Ora.Types.Ty
 import Ora.Types.WF
 import Ora.Types.Refinement
 import Ora.Types.RefinementValue
+import Ora.Types.RefinementBridge
 import Ora.Types.Decl
 import Ora.Types.Internal
 import Ora.Types.TypeEq
