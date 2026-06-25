@@ -4,7 +4,8 @@ GENERATED — DATA ONLY.  Do NOT edit by hand and do NOT add any `theorem`,
 `import` to this file. It contains only `def … := <literal>` facts emitted from
 the compiler. The TRUSTED checks live in `Ora/Sync.lean`.
 
-Regenerate with `scripts/check-formal-sync.sh`. Source: src/types/builtin.zig,
+Regenerate with `scripts/check-formal-sync.sh`. Source:
+src/formal/emit_compiler_snapshot.zig, src/types/builtin.zig,
 src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig.
 -/
 

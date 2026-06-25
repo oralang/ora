@@ -14,6 +14,14 @@ import Ora.Types.Prim
 import Ora.Types.Ty
 import Ora.Types.WF
 import Ora.Types.Refinement
+import Ora.Types.RefinementValue
+import Ora.Types.Decl
+import Ora.Types.Internal
+import Ora.Types.TypeEq
+import Ora.Types.Assignable
 import Ora.Spec.Facts
 import Ora.Generated.CompilerSnapshot
 import Ora.Sync
+import Ora.Spec.DeclEnvFacts
+import Ora.Generated.DeclEnvSnapshot
+import Ora.SyncDeclEnv

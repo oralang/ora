@@ -1,15 +1,17 @@
 //! Emits `formal/Ora/Generated/CompilerSnapshot.lean` — the DATA-ONLY facts the
 //! Lean spec checks itself against (see `formal/Ora/Sync.lean`).
 //!
-//! Run: `zig run src/types/emit_formal_snapshot.zig > formal/Ora/Generated/CompilerSnapshot.lean`
-//! (wrapped by `scripts/check-formal-sync.sh`). Co-located with the pure type
-//! modules so it imports them same-dir (Zig 0.16 forbids `../` module escapes).
+//! Wrapped by `scripts/check-formal-sync.sh`. The emitter is rooted under
+//! `src/formal/` and imports compiler facts through `src/formal.zig`, so formal
+//! generators stay organized without using parent-directory module escapes.
 
 const std = @import("std");
-const builtin = @import("builtin.zig");
-const semantic = @import("semantic.zig");
-const region_assign = @import("region_assign.zig");
-const refinements = @import("ora_refinements");
+const formal = @import("ora_formal");
+
+const builtin = formal.builtin;
+const refinements = formal.refinement_registry;
+const region_assign = formal.region_assign;
+const semantic = formal.semantic;
 
 const header =
     \\/-
@@ -18,7 +20,8 @@ const header =
     \\`import` to this file. It contains only `def … := <literal>` facts emitted from
     \\the compiler. The TRUSTED checks live in `Ora/Sync.lean`.
     \\
-    \\Regenerate with `scripts/check-formal-sync.sh`. Source: src/types/builtin.zig,
+    \\Regenerate with `scripts/check-formal-sync.sh`. Source:
+    \\src/formal/emit_compiler_snapshot.zig, src/types/builtin.zig,
     \\src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig.
     \\-/
     \\

@@ -3,7 +3,7 @@
 # check-formal-sync — proves the compiler's type-universe facts conform to the
 # Lean spec (formal/). Three gates:
 #
-#   1. REGENERATE  the data-only snapshot from the compiler (src/types/*).
+#   1. REGENERATE  the data-only snapshot from the compiler (`src/formal/*`).
 #   2. DATA-ONLY LINT  the snapshot — it must contain ONLY `def … := <literal>`
 #      facts (no theorem/axiom/sorry/instance/import/…). This is the trust
 #      boundary: the untrusted compiler emits DATA; the trusted checks live in
@@ -21,15 +21,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.elan/bin:$PATH"
 
-EMITTER="src/types/emit_formal_snapshot.zig"
+EMITTER="src/formal/emit_compiler_snapshot.zig"
 SNAPSHOT="formal/Ora/Generated/CompilerSnapshot.lean"
 
 echo "==> [1/3] regenerating $SNAPSHOT from the compiler"
 zig run \
   --cache-dir "$ROOT/.zig-cache/formal-sync" \
   --global-cache-dir "$ROOT/.zig-cache/formal-sync-global" \
-  --dep ora_refinements \
+  --dep ora_formal \
   -Mroot="$EMITTER" \
+  --dep ora_types \
+  --dep ora_refinements \
+  -Mora_formal=src/formal.zig \
+  --dep ora_refinements \
+  -Mora_types=src/types/root.zig \
   -Mora_refinements=src/refinements/root.zig \
   > "$SNAPSHOT"
 
@@ -53,5 +58,14 @@ if ! git diff --quiet -- "$SNAPSHOT"; then
   exit 1
 fi
 ( cd formal && lake build )
+
+# Lawfulness tier (opt-in). `Ora/Types/TypeEqLawful.lean` is OFF the default build
+# (its proofs unfold the mutual `Ty.beq` and are expensive, ~40s), so it can rot
+# silently. Build it in CI or on demand so changes to `Ty.beq` can't break it
+# unnoticed. Local runs stay fast; set CHECK_FORMAL_LAWFUL=1 (or run in CI) to opt in.
+if [ "${CI:-}" = "true" ] || [ "${CHECK_FORMAL_LAWFUL:-}" = "1" ]; then
+  echo "==> [lawful] lake build Ora.Types.TypeEqLawful (expensive; opt-in)"
+  ( cd formal && lake build Ora.Types.TypeEqLawful )
+fi
 
 echo "==> check-formal-sync OK"
