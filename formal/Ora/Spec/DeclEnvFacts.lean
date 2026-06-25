@@ -31,6 +31,8 @@ def Decl.compilerKind : Decl → String
 def curatedDeclEnv : DeclEnv :=
   [ ("Point", .struct_ [⟨"x", .prim u256⟩, ⟨"y", .prim u256⟩]),
     ("Color", .enum_ [⟨"Red", .none, none⟩, ⟨"Green", .none, none⟩, ⟨"Blue", .none, none⟩]),
+    ("Flags", .bitfield [⟨"a", .prim .bool, none, none⟩]),
+    ("Vault", .contract ["balance", "owner"]),
     ("Token", .resource (.prim u256)) ]
 
 /-- (declaration name, expected compiler `TypeKind` tag), in the curated order. -/

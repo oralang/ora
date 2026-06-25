@@ -13,6 +13,8 @@ namespace Ora.Generated
 def compilerDeclKinds : List (String × String) :=
   [("Point", "struct_"),
    ("Color", "enum_"),
+   ("Flags", "bitfield"),
+   ("Vault", "contract"),
    ("Token", "resource_domain")]
 
 end Ora.Generated

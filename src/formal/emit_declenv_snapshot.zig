@@ -45,6 +45,8 @@ pub fn main(init: std.process.Init) !void {
     const rows = [_]Row{
         .{ .name = "Point", .ty = .{ .struct_ = .{ .name = "Point" } } },
         .{ .name = "Color", .ty = .{ .enum_ = .{ .name = "Color" } } },
+        .{ .name = "Flags", .ty = .{ .bitfield = .{ .name = "Flags" } } },
+        .{ .name = "Vault", .ty = .{ .contract = .{ .name = "Vault" } } },
         .{ .name = "Token", .ty = .{ .resource_domain = .{ .name = "Token", .carrier_type = &u256_ty } } },
     };
 

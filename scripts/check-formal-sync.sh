@@ -68,4 +68,12 @@ if [ "${CI:-}" = "true" ] || [ "${CHECK_FORMAL_LAWFUL:-}" = "1" ]; then
   ( cd formal && lake build Ora.Types.TypeEqLawful )
 fi
 
+# Declaration-environment sync. Cheap, but its own gate (separate snapshot +
+# emitter). Run it in CI (or CHECK_FORMAL_DECLENV=1) so the nominal-kind snapshot
+# is regenerated and drift-checked alongside the type-universe gate.
+if [ "${CI:-}" = "true" ] || [ "${CHECK_FORMAL_DECLENV:-}" = "1" ]; then
+  echo "==> [declenv] scripts/check-formal-declenv-sync.sh"
+  "$ROOT/scripts/check-formal-declenv-sync.sh"
+fi
+
 echo "==> check-formal-sync OK"
