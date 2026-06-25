@@ -1,0 +1,1 @@
+expect_error = "comptime assignment value is not statically known during HIR lowering"

@@ -1536,6 +1536,28 @@ test "compiler artifact policy blocks explicit emit and debug artifact bypasses"
     try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
         ORA_BINARY_REL,
         "emit",
+        "--emit=mlir:ora",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.ora.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=mlir:sir",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.sir.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
         "--emit=smt-report",
         "--verify",
         "-o",

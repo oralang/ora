@@ -20,6 +20,10 @@ const std = @import("std");
 const runner = @import("runner.zig");
 const types = @import("types.zig");
 
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
+}
+
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -27,7 +31,7 @@ pub fn main() !void {
 
     std.Io.Dir.cwd().access(std.Io.Threaded.global_single_threaded.io(), types.ORA_BINARY_REL, .{}) catch {
         std.debug.print("metrics-snapshot: ora binary not found; run 'zig build' first\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     };
 
     const dir = types.CONFORMANCE_DIR_REL;

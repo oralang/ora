@@ -1,0 +1,11 @@
+contract ComptimeWhileRuntimeCondition {
+    pub fn run(input: u256) -> u256 {
+        var total: u256 = 0;
+        comptime {
+            while (input > 0) {
+                total = total + 1;
+            }
+        }
+        return total;
+    }
+}

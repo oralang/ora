@@ -1503,6 +1503,15 @@ pub fn build(b: *std.Build) void {
     check_no_hir_op_null_fallbacks_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
     test_step.dependOn(&no_hir_op_null_fallbacks_cmd.step);
 
+    // zig build check-no-scattered-process-exit
+    const no_scattered_process_exit_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-no-scattered-process-exit.sh",
+    });
+    const check_no_scattered_process_exit_step = b.step("check-no-scattered-process-exit", "Run process-exit boundary static checks");
+    check_no_scattered_process_exit_step.dependOn(&no_scattered_process_exit_cmd.step);
+    test_step.dependOn(&no_scattered_process_exit_cmd.step);
+
     // zig build check-query-view-ownership
     const query_view_ownership_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",

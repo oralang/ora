@@ -78,6 +78,11 @@ prepare_dirs() {
   rm -rf "$OUT_DIR"
   mkdir -p "$OUT_DIR/logs"
   cp "$ORA_FILE" "$OUT_DIR/fmt_input.ora"
+  cat >"$OUT_DIR/invalid.ora" <<'ORA'
+pub fn broken( -> u256 {
+    return 1;
+}
+ORA
 }
 
 declare -a TEST_NAMES=()
@@ -109,8 +114,11 @@ build_test_matrix() {
   add_test "emit mlir ora" 0 '"$ORA_BIN" emit --emit=mlir:ora "$ORA_FILE"'
   add_test "emit mlir sir" 0 '"$ORA_BIN" emit --emit=mlir:sir "$ORA_FILE"'
   add_test "emit mlir both" 0 '"$ORA_BIN" emit --emit=mlir:both "$ORA_FILE"'
+  add_test "emit mlir ora output dir" 0 '"$ORA_BIN" emit --emit=mlir:ora -o "$OUT_DIR/mlir_ora" "$ORA_FILE" && test -f "$OUT_DIR/mlir_ora/counter.ora.mlir" && test -z "$(find "$OUT_DIR/mlir_ora" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
+  add_test "emit mlir sir output dir" 0 '"$ORA_BIN" emit --emit=mlir:sir -o "$OUT_DIR/mlir_sir" "$ORA_FILE" && test -f "$OUT_DIR/mlir_sir/counter.sir.mlir" && test -z "$(find "$OUT_DIR/mlir_sir" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
+  add_test "emit mlir both output dir" 0 '"$ORA_BIN" emit --emit=mlir:both -o "$OUT_DIR/mlir_both" "$ORA_FILE" && test -f "$OUT_DIR/mlir_both/counter.ora.mlir" && test -f "$OUT_DIR/mlir_both/counter.sir.mlir" && test -z "$(find "$OUT_DIR/mlir_both" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
   add_test "emit sir text" 0 '"$ORA_BIN" emit --emit=sir-text "$ORA_FILE"'
-  add_test "emit bytecode file" 0 '"$ORA_BIN" emit --emit=bytecode -o "$OUT_DIR/counter.hex" "$ORA_FILE"'
+  add_test "emit bytecode file" 0 '"$ORA_BIN" emit --emit=bytecode --out-file "$OUT_DIR/counter.hex" "$ORA_FILE"'
 
   add_test "emit cfg default(ora)" 0 '"$ORA_BIN" emit --emit=cfg "$ORA_FILE" > "$OUT_DIR/cfg_default.dot"'
   add_test "emit cfg ora" 0 '"$ORA_BIN" emit --emit=cfg:ora "$ORA_FILE" > "$OUT_DIR/cfg_ora.dot"'
@@ -139,7 +147,6 @@ build_test_matrix() {
 
   add_test "custom pass pipeline" 0 '"$ORA_BIN" emit --emit=mlir:ora --mlir-pass-pipeline "builtin.module(canonicalize,cse)" --mlir-debug=verify-each,timing,crash-reproducer:"$OUT_DIR"/reproducer.mlir,print-op-on-diagnostic "$ORA_FILE"'
 
-  add_test "analyze state" 0 '"$ORA_BIN" --analyze-state "$ORA_FILE"'
   add_test "metrics report" 0 '"$ORA_BIN" emit --metrics --emit=mlir:ora "$ORA_FILE"'
 
   add_test "fmt write" 0 '"$ORA_BIN" fmt "$OUT_DIR/fmt_input.ora"'
@@ -150,6 +157,10 @@ build_test_matrix() {
 
   add_test "guard: timing requires pipeline" nonzero '"$ORA_BIN" emit --mlir-debug=timing "$ORA_FILE"'
   add_test "guard: print-ir-pass requires print-ir" nonzero '"$ORA_BIN" emit --mlir-debug=print-ir-pass:canonicalize "$ORA_FILE"'
+  add_test "guard: removed analyze-state flag" nonzero '"$ORA_BIN" --analyze-state "$ORA_FILE"'
+  add_test "guard: direct emit failure invalidates stale dir output" 0 'mkdir -p "$OUT_DIR/stale_emit" && printf stale > "$OUT_DIR/stale_emit/invalid.abi.json"; "$ORA_BIN" emit --emit=abi -o "$OUT_DIR/stale_emit" "$OUT_DIR/invalid.ora"; status=$?; test "$status" -ne 0 && test ! -e "$OUT_DIR/stale_emit/invalid.abi.json" && test -z "$(find "$OUT_DIR/stale_emit" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
+  add_test "guard: direct mlir failure invalidates stale dir output" 0 'mkdir -p "$OUT_DIR/stale_mlir" && printf stale > "$OUT_DIR/stale_mlir/invalid.ora.mlir"; "$ORA_BIN" emit --emit=mlir:ora -o "$OUT_DIR/stale_mlir" "$OUT_DIR/invalid.ora"; status=$?; test "$status" -ne 0 && test ! -e "$OUT_DIR/stale_mlir/invalid.ora.mlir" && test -z "$(find "$OUT_DIR/stale_mlir" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
+  add_test "guard: direct emit failure invalidates stale out-file" 0 'printf stale > "$OUT_DIR/stale.hex"; printf stale > "$OUT_DIR/stale.sourcemap.json"; "$ORA_BIN" emit --emit=bytecode --out-file "$OUT_DIR/stale.hex" "$OUT_DIR/invalid.ora"; status=$?; test "$status" -ne 0 && test ! -e "$OUT_DIR/stale.hex" && test ! -e "$OUT_DIR/stale.sourcemap.json" && test -z "$(find "$OUT_DIR" -maxdepth 1 -name ".ora-staging-*" -print -quit)"'
 }
 
 slugify() {

@@ -759,6 +759,28 @@
       ]
     },
     {
+      "id": "comptime.required_fail_closed",
+      "area": "comptime",
+      "behavior": "required comptime expressions and statement-position comptime blocks reject runtime-dependent, valueless, or unsupported bodies",
+      "negative_specs": [
+        "tests/negative/comptime_runtime_assignment.ora",
+        "tests/negative/comptime_missing_value.ora",
+        "tests/negative/comptime_local_missing_initializer.ora",
+        "tests/negative/comptime_statement_runtime_expr.ora",
+        "tests/negative/comptime_division_by_zero.ora",
+        "tests/negative/comptime_modulo_by_zero.ora",
+        "tests/negative/comptime_invalid_shift_amount.ora",
+        "tests/negative/comptime_exponent_budget.ora",
+        "tests/negative/comptime_compound_division_by_zero.ora",
+        "tests/negative/comptime_statement_return.ora",
+        "tests/negative/comptime_if_runtime_condition.ora",
+        "tests/negative/comptime_while_runtime_condition.ora",
+        "tests/negative/comptime_for_runtime_bound.ora",
+        "tests/negative/comptime_break_without_loop.ora",
+        "tests/negative/comptime_continue_without_loop.ora"
+      ]
+    },
+    {
       "id": "enums.storage_roundtrip",
       "area": "adt_enums",
       "behavior": "Enum stored, re-read, compared; ordinal raw-slot parity",

@@ -1,0 +1,1 @@
+expect_error = "break inside statement-position comptime block does not target a comptime loop"

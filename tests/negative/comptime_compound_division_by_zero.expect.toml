@@ -1,0 +1,1 @@
+expect_error = "comptime division by zero"

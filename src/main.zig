@@ -98,6 +98,29 @@ const CompileContext = struct {
     chain_id: u64,
 };
 
+const BuildFileContext = struct {
+    include_roots: ?[]const []const u8 = null,
+    resolver_options: import_graph.ResolverOptions = .{},
+    init_args: ?[]project_config.InitArg = null,
+    output_dir: ?[]u8 = null,
+    chain_id: u64,
+
+    fn deinit(self: *BuildFileContext, allocator: std.mem.Allocator) void {
+        if (self.include_roots) |include_roots| {
+            freeResolvedIncludeRoots(allocator, include_roots);
+            self.include_roots = null;
+        }
+        if (self.init_args) |init_args| {
+            freeCombinedInitArgs(allocator, init_args);
+            self.init_args = null;
+        }
+        if (self.output_dir) |output_dir| {
+            allocator.free(output_dir);
+            self.output_dir = null;
+        }
+    }
+};
+
 fn compileOptionsForChain(chain_id: u64) compiler.compile_options.CompileOptions {
     return compileOptionsForChainWithMetrics(chain_id, null);
 }
@@ -116,6 +139,10 @@ fn rawArgsRequestMetrics(args: std.process.Args, allocator: std.mem.Allocator) !
         }
     }
     return false;
+}
+
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
 }
 
 fn collectProcessArgs(allocator: std.mem.Allocator, args: std.process.Args) ![]const []const u8 {
@@ -495,17 +522,17 @@ pub fn main(init: std.process.Init) !void {
         if (args.len > 3) {
             std.debug.print("error: init accepts at most one optional <path>\n", .{});
             try printUsage(io);
-            std.process.exit(2);
+            exitCli(2);
         }
         const target_dir = if (args.len == 3) args[2] else ".";
         runInitCommand(io, target_dir) catch |err| switch (err) {
             error.InitTargetNotEmpty => {
                 std.debug.print("error: init target '{s}' is not empty\n", .{target_dir});
-                std.process.exit(2);
+                exitCli(2);
             },
             error.InitTargetIsFile => {
                 std.debug.print("error: init target '{s}' is a file, expected directory\n", .{target_dir});
-                std.process.exit(2);
+                exitCli(2);
             },
             else => return err,
         };
@@ -537,7 +564,7 @@ pub fn main(init: std.process.Init) !void {
         debug_cli = parseDebugCliOptions(allocator, args_to_parse) catch |err| {
             std.debug.print("error: invalid debug arguments: {s}\n", .{@errorName(err)});
             try printUsage(io);
-            std.process.exit(2);
+            exitCli(2);
         };
         try parse_args.appendSlice(allocator, debug_cli.?.filtered_args.items);
     } else {
@@ -547,7 +574,7 @@ pub fn main(init: std.process.Init) !void {
     var parsed = cli_args.parseArgs(parse_args.items) catch |err| {
         std.debug.print("error: invalid arguments: {s}\n", .{@errorName(err)});
         try printUsage(io);
-        std.process.exit(2);
+        exitCli(2);
     };
 
     if (subcommand == .Fmt) {
@@ -628,14 +655,23 @@ pub fn main(init: std.process.Init) !void {
     if (fmt) {
         if (output_dir != null or output_file != null or hasEmitFlags(parsed)) {
             std.debug.print("error: fmt mode accepts only fmt options and an input path.\n", .{});
-            std.process.exit(2);
+            exitCli(2);
         }
         if (input_file == null) {
             std.debug.print("error: fmt requires an input file or directory\n", .{});
             try printUsage(io);
-            std.process.exit(2);
+            exitCli(2);
         }
-        try runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width);
+        runFmt(allocator, input_file.?, fmt_check, fmt_diff, fmt_stdout, fmt_width) catch |err| switch (err) {
+            error.FormatCheckFailed,
+            error.FormatInputAccessFailed,
+            error.FormatInputReadFailed,
+            => exitCli(1),
+            error.InvalidFmtStdoutDirectory,
+            error.FormatterFailed,
+            => exitCli(2),
+            else => return err,
+        };
         return;
     }
 
@@ -649,49 +685,54 @@ pub fn main(init: std.process.Init) !void {
     };
     if (command_kind == .Build and emit_flags_requested) {
         std.debug.print("error: build mode does not accept emit selectors. Use 'ora emit --emit=<list> ...' for debug outputs.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (command_kind != .Fmt and hasFmtFlags(parsed)) {
         std.debug.print("error: formatter options require 'ora fmt'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (output_dir) |dir| {
         if (bytecodeFileExtension(dir)) {
             std.debug.print("error: '-o/--out-dir' expects a directory; use '--out-file' for '{s}'.\n", .{dir});
-            std.process.exit(2);
+            exitCli(2);
         }
     }
 
     if (output_file != null and command_kind != .Emit) {
         std.debug.print("error: --out-file is only valid with 'ora emit --emit=bytecode'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (output_file != null and (!parsed.emit_bytecode or emitOutputCount(parsed) != 1)) {
         std.debug.print("error: --out-file requires exactly '--emit=bytecode'.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
+    }
+
+    if (output_file != null and output_dir != null) {
+        std.debug.print("error: --out-file cannot be combined with '-o/--out-dir'.\n", .{});
+        exitCli(2);
     }
 
     if (command_kind == .Build and !verify_z3) {
         std.debug.print("error: build mode requires SMT verification; '--no-verify' is not supported.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (command_kind == .Debug and parsed.input_file == null) {
         std.debug.print("error: debug requires an input file.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if ((mlir_verify_each_pass or mlir_pass_timing) and mlir_pass_pipeline == null) {
         std.debug.print("error: MLIR debug options verify-each and timing require --mlir-pass-pipeline.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (mlir_print_ir_pass != null and mlir_print_ir == null) {
         std.debug.print("error: MLIR debug option print-ir-pass requires print-ir:<mode>.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     if (command_kind == .Emit) {
@@ -744,7 +785,12 @@ pub fn main(init: std.process.Init) !void {
     if (command_kind == .Debug) {
         const debug_options = debug_cli.?;
         const file_path = parsed.input_file.?;
-        const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+        const compile_context = discoverCompileContextForFile(allocator, file_path, chain_ids) catch |err| switch (err) {
+            error.ProjectConfigLoadFailed,
+            error.ProjectTargetMatchFailed,
+            error.ProjectIncludeRootsFailed,
+            => exitCli(2),
+        };
         defer if (compile_context.include_roots) |include_roots| {
             freeResolvedIncludeRoots(allocator, include_roots);
         };
@@ -786,154 +832,66 @@ pub fn main(init: std.process.Init) !void {
             debug_mlir_options,
             compile_context.resolver_options,
         ) catch |err| switch (err) {
-            error.ArtifactEmissionBlocked => std.process.exit(1),
+            error.CompilerCompileFailed, error.ArtifactEmissionBlocked => exitCli(1),
+            error.InvalidGeneratedMlir => exitCli(2),
             else => return err,
         };
         defer allocator.free(artifact_root);
 
         if (debug_options.no_tui) return;
 
-        {
-            try launchDebuggerTui(
-                allocator,
-                file_path,
-                artifact_root,
-                debug_options.init_signature,
-                debug_options.init_arg_values.items,
-                debug_options.init_calldata_hex,
-                debug_options.signature,
-                debug_options.arg_values.items,
-                debug_options.calldata_hex,
-                debug_options.gas_limit,
-                debug_options.max_steps,
-                debug_options.deploy_step_cap,
-                debug_options.artifact_max_bytes,
-            );
-        }
+        const debugger_exit_code = try launchDebuggerTui(
+            allocator,
+            file_path,
+            artifact_root,
+            debug_options.init_signature,
+            debug_options.init_arg_values.items,
+            debug_options.init_calldata_hex,
+            debug_options.signature,
+            debug_options.arg_values.items,
+            debug_options.calldata_hex,
+            debug_options.gas_limit,
+            debug_options.max_steps,
+            debug_options.deploy_step_cap,
+            debug_options.artifact_max_bytes,
+        );
+        if (debugger_exit_code != 0) exitCli(debugger_exit_code);
         return;
     }
 
     if (command_kind == .Build) {
-        var matched_include_roots: ?[]const []const u8 = null;
-        defer if (matched_include_roots) |include_roots| {
-            freeResolvedIncludeRoots(allocator, include_roots);
-        };
-        var matched_init_args: ?[]project_config.InitArg = null;
-        defer if (matched_init_args) |init_args| {
-            freeCombinedInitArgs(allocator, init_args);
-        };
-        var matched_output_dir: ?[]u8 = null;
-        defer if (matched_output_dir) |out_dir| {
-            allocator.free(out_dir);
-        };
-
-        var build_resolver_options: import_graph.ResolverOptions = .{};
-        var build_output_dir: ?[]const u8 = output_dir;
-        var build_chain_id = mlir_options.chain_id;
+        var build_file_context: ?BuildFileContext = null;
+        defer if (build_file_context) |*context| context.deinit(allocator);
         if (input_file) |build_file_path| {
-            const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
-            const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
-                std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
-                std.process.exit(2);
+            build_file_context = resolveBuildFileContext(
+                allocator,
+                build_file_path,
+                output_dir,
+                mlir_options.chain_id,
+                chain_ids,
+            ) catch |err| switch (err) {
+                error.ProjectConfigLoadFailed,
+                error.ProjectTargetMatchFailed,
+                error.ProjectIncludeRootsFailed,
+                error.ProjectOutputDirResolveFailed,
+                => exitCli(2),
+                else => return err,
             };
-
-            if (loaded_opt) |loaded_value| {
-                var loaded = loaded_value;
-                defer loaded.deinit(allocator);
-
-                matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
-
-                const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
-                    std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
-                    std.process.exit(2);
-                };
-
-                const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
-                build_chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
-
-                if (target_idx_opt) |target_idx| {
-                    const target = loaded.config.targets[target_idx];
-                    if (matched_init_args) |init_args| {
-                        freeCombinedInitArgs(allocator, init_args);
-                        matched_init_args = null;
-                    }
-                    if (target.kind == .contract) {
-                        matched_init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args);
-                    } else {
-                        matched_init_args = try allocator.alloc(project_config.InitArg, 0);
-                    }
-                    matched_include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
-                        std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
-                        std.process.exit(2);
-                    };
-                    build_resolver_options.include_roots = matched_include_roots.?;
-
-                    if (build_output_dir == null) {
-                        if (target.output_dir) |target_out| {
-                            matched_output_dir = project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target_out) catch |err| {
-                                std.debug.print("error: failed to resolve target output_dir for '{s}': {s}\n", .{ target.name, @errorName(err) });
-                                std.process.exit(2);
-                            };
-                        } else {
-                            const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
-                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
-                                    std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
-                                    std.process.exit(2);
-                                }
-                            else
-                                project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
-                                    std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
-                                    std.process.exit(2);
-                                };
-                            defer allocator.free(base_output);
-
-                            if (loaded.config.targets.len > 1) {
-                                matched_output_dir = std.fs.path.join(allocator, &.{ base_output, target.name }) catch {
-                                    std.debug.print("error: failed to allocate target output path\n", .{});
-                                    std.process.exit(2);
-                                };
-                            } else {
-                                matched_output_dir = allocator.dupe(u8, base_output) catch {
-                                    std.debug.print("error: failed to allocate target output path\n", .{});
-                                    std.process.exit(2);
-                                };
-                            }
-                        }
-                        build_output_dir = matched_output_dir.?;
-                    }
-                } else if (build_output_dir == null) {
-                    const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
-                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
-                            std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
-                            std.process.exit(2);
-                        }
-                    else
-                        project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
-                            std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
-                            std.process.exit(2);
-                        };
-                    defer allocator.free(base_output);
-
-                    matched_output_dir = std.fs.path.join(allocator, &.{ base_output, std.fs.path.stem(build_file_path) }) catch {
-                        std.debug.print("error: failed to allocate default project output path\n", .{});
-                        std.process.exit(2);
-                    };
-                    build_output_dir = matched_output_dir.?;
-                }
-            }
         }
 
         var build_mlir_options = mlir_options;
-        build_mlir_options.chain_id = build_chain_id;
+        if (build_file_context) |context| {
+            build_mlir_options.chain_id = context.chain_id;
+        }
 
         const build_result = if (input_file) |build_file_path|
             runBuildArtifacts(
                 allocator,
                 build_file_path,
-                build_output_dir,
+                if (build_file_context) |context| context.output_dir orelse output_dir else output_dir,
                 build_mlir_options,
-                build_resolver_options,
-                if (matched_init_args) |init_args| init_args else @as([]const project_config.InitArg, &.{}),
+                if (build_file_context) |context| context.resolver_options else @as(import_graph.ResolverOptions, .{}),
+                if (build_file_context) |context| context.init_args orelse @as([]const project_config.InitArg, &.{}) else @as([]const project_config.InitArg, &.{}),
             )
         else
             runBuildFromDiscoveredConfig(allocator, output_dir, mlir_options, chain_ids);
@@ -945,8 +903,13 @@ pub fn main(init: std.process.Init) !void {
         try stderr_build.flush();
 
         build_result catch |err| switch (err) {
-            error.VerificationFailed => std.process.exit(1),
-            error.ArtifactEmissionBlocked => std.process.exit(1),
+            error.CompilerCompileFailed, error.VerificationFailed => exitCli(1),
+            error.ArtifactEmissionBlocked => exitCli(1),
+            error.InvalidGeneratedMlir,
+            error.InvalidBuildOutputDirectory,
+            error.ProjectConfigLoadFailed,
+            error.MissingProjectConfig,
+            => exitCli(2),
             else => return err,
         };
         return;
@@ -959,23 +922,65 @@ pub fn main(init: std.process.Init) !void {
 
     const file_path = input_file.?;
 
-    const compile_context = try discoverCompileContextForFile(allocator, file_path, chain_ids);
+    const compile_context = discoverCompileContextForFile(allocator, file_path, chain_ids) catch |err| switch (err) {
+        error.ProjectConfigLoadFailed,
+        error.ProjectTargetMatchFailed,
+        error.ProjectIncludeRootsFailed,
+        => exitCli(2),
+    };
     defer if (compile_context.include_roots) |include_roots| {
         freeResolvedIncludeRoots(allocator, include_roots);
     };
 
+    const direct_emit_stages_output_dir = output_dir != null and
+        (emit_abi or emit_abi_solidity or emit_abi_extras or emit_mlir or emit_mlir_sir or emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report);
+    const direct_emit_stages_output_file = output_file != null and emit_bytecode;
+    var direct_emit_staging_root: ?[]u8 = null;
+    var direct_emit_staged_output_file: ?[]u8 = null;
+    defer if (direct_emit_staged_output_file) |path| allocator.free(path);
+    defer discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+    const emit_output_dir = if (direct_emit_stages_output_dir) blk: {
+        try invalidateDirectEmitOutputs(allocator, std.fs.path.stem(file_path), output_dir.?);
+        direct_emit_staging_root = try createArtifactStagingRoot(allocator, output_dir.?);
+        break :blk direct_emit_staging_root.?;
+    } else output_dir;
+    const emit_output_file = if (direct_emit_stages_output_file) blk: {
+        const final_file = output_file.?;
+        try invalidateDirectEmitOutputFile(allocator, final_file);
+        const output_file_dir = std.fs.path.dirname(final_file) orelse ".";
+        direct_emit_staging_root = try createArtifactStagingRoot(allocator, output_file_dir);
+        direct_emit_staged_output_file = try std.fs.path.join(allocator, &[_][]const u8{
+            direct_emit_staging_root.?,
+            std.fs.path.basename(final_file),
+        });
+        break :blk direct_emit_staged_output_file.?;
+    } else output_file;
+
     if (!emit_tokens and !emit_ast and !emit_typed_ast and !emit_mlir and !emit_mlir_sir and !emit_sir_text and !emit_bytecode and !emit_cfg and !emit_smt_report and !emit_abi and !emit_abi_solidity and !emit_abi_extras) {
         std.debug.print("error: emit requires an explicit --emit=<list> mode.\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     var emit_mlir_options = mlir_options;
     emit_mlir_options.chain_id = compile_context.chain_id;
+    emit_mlir_options.output_dir = emit_output_dir;
+    emit_mlir_options.output_file = emit_output_file;
+    if (direct_emit_staging_root != null) {
+        emit_mlir_options.suppress_artifact_logs = true;
+    }
 
     if (emit_abi or emit_abi_solidity or emit_abi_extras) {
-        runAbiEmit(allocator, file_path, output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
-            error.MissingContract => std.process.exit(2),
-            error.ArtifactEmissionBlocked => std.process.exit(1),
+        runAbiEmit(allocator, file_path, emit_output_dir, emit_abi, emit_abi_solidity, emit_abi_extras, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled, false) catch |err| switch (err) {
+            error.CompilerCompileFailed,
+            error.ArtifactEmissionBlocked,
+            => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.MissingContract => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
             else => return err,
         };
     }
@@ -987,17 +992,62 @@ pub fn main(init: std.process.Init) !void {
             (emit_typed_ast_format orelse "tree")
         else
             (emit_ast_format orelse "tree");
-        try runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled);
+        runCompilerAstEmit(allocator, file_path, format, emit_typed_ast, compile_context.resolver_options, emit_mlir_options.chain_id, &metrics, debug_enabled) catch |err| switch (err) {
+            error.CompilerCompileFailed,
+            error.CompilationDiagnosticsFailed,
+            => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.InvalidAstFormat => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
+            else => return err,
+        };
     } else if (emit_cfg or emit_sir_text or emit_bytecode or emit_smt_report) {
         runMlirEmitAdvanced(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
-            error.ArtifactEmissionBlocked => std.process.exit(1),
+            error.CompilerCompileFailed, error.ArtifactEmissionBlocked => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.InvalidGeneratedMlir => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
             else => return err,
         };
     } else if (emit_mlir or emit_mlir_sir) {
         runCompilerMlirEmit(allocator, file_path, emit_mlir_options, compile_context.resolver_options, debug_enabled) catch |err| switch (err) {
-            error.ArtifactEmissionBlocked => std.process.exit(1),
+            error.CompilerCompileFailed, error.OraToSirConversionFailed, error.MlirPrintFailed, error.ArtifactEmissionBlocked => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(1);
+            },
+            error.InvalidGeneratedMlir => {
+                discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
+                exitCli(2);
+            },
             else => return err,
         };
+    }
+
+    if (direct_emit_staging_root) |staging_root| {
+        const final_dir = if (direct_emit_stages_output_file)
+            (std.fs.path.dirname(output_file.?) orelse ".")
+        else
+            output_dir.?;
+        const moved = try moveAllArtifactFiles(allocator, staging_root, final_dir);
+        if (moved != 0) {
+            var stdout_buffer: [1024]u8 = undefined;
+            var stdout_writer = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buffer);
+            const stdout = &stdout_writer.interface;
+            if (direct_emit_stages_output_file) {
+                try stdout.print("Bytecode saved to {s}\n", .{output_file.?});
+            } else {
+                try stdout.print("Artifacts saved to {s}\n", .{output_dir.?});
+            }
+            try stdout.flush();
+        }
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -1077,6 +1127,14 @@ fn createArtifactStagingRoot(allocator: std.mem.Allocator, artifact_root: []cons
     return error.ArtifactStagingCollision;
 }
 
+fn discardArtifactStagingRoot(allocator: std.mem.Allocator, staging_root: *?[]u8) void {
+    if (staging_root.*) |root| {
+        std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), root) catch {};
+        allocator.free(root);
+        staging_root.* = null;
+    }
+}
+
 fn moveArtifactFilesWithSuffixesIfExists(
     allocator: std.mem.Allocator,
     root_dir: []const u8,
@@ -1103,6 +1161,28 @@ fn moveArtifactFilesWithSuffixesIfExists(
         if (!matched) continue;
         try moveArtifactFile(allocator, root_dir, entry.name, target_dir);
     }
+}
+
+fn moveAllArtifactFiles(
+    allocator: std.mem.Allocator,
+    root_dir: []const u8,
+    target_dir: []const u8,
+) !usize {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var dir = std.Io.Dir.cwd().openDir(io, root_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var moved: usize = 0;
+    var iter = dir.iterate();
+    while (try iter.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        try moveArtifactFile(allocator, root_dir, entry.name, target_dir);
+        moved += 1;
+    }
+    return moved;
 }
 
 fn deleteArtifactFileIfExists(allocator: std.mem.Allocator, dir: []const u8, file_name: []const u8) !void {
@@ -1167,6 +1247,46 @@ fn invalidateBuildArtifactOutputs(
     try deleteStemArtifactFilesWithSuffixesIfExists(allocator, mlir_dir, stem, &mlir_suffixes);
 }
 
+fn invalidateDirectEmitOutputs(
+    allocator: std.mem.Allocator,
+    stem: []const u8,
+    output_dir: []const u8,
+) !void {
+    const direct_emit_suffixes = [_][]const u8{
+        ".abi.json",
+        ".abi.sol.json",
+        ".abi.extras.json",
+        ".hex",
+        ".sourcemap.json",
+        ".debug.json",
+        ".proof.json",
+        ".sir",
+        ".smt.report.md",
+        ".smt.report.json",
+        ".ora.dot",
+        ".sir.dot",
+        ".sir.pre-opt.dot",
+        ".sir.post-opt.dot",
+        ".ora.mlir",
+        ".sir.mlir",
+        ".mlir",
+    };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, stem, &direct_emit_suffixes);
+}
+
+fn invalidateDirectEmitOutputFile(
+    allocator: std.mem.Allocator,
+    output_file: []const u8,
+) !void {
+    const output_dir = std.fs.path.dirname(output_file) orelse ".";
+    const output_name = std.fs.path.basename(output_file);
+    try deleteArtifactFileIfExists(allocator, output_dir, output_name);
+
+    const output_stem = std.fs.path.stem(output_name);
+    const sidecar_suffixes = [_][]const u8{ ".sourcemap.json", ".debug.json" };
+    try deleteStemArtifactFilesWithSuffixesIfExists(allocator, output_dir, output_stem, &sidecar_suffixes);
+}
+
 fn promoteStagedAbiBundle(
     allocator: std.mem.Allocator,
     staging_abi_dir: []const u8,
@@ -1208,7 +1328,8 @@ fn runBuildArtifacts(
         std.mem.endsWith(u8, artifact_root, ".bin"))
     {
         try stdout.print("error: build mode expects '-o' to be a directory, got '{s}'\n", .{artifact_root});
-        std.process.exit(2);
+        try stdout.flush();
+        return error.InvalidBuildOutputDirectory;
     }
 
     // Never delete a user-supplied output root. Build writes its known artifact
@@ -1386,6 +1507,7 @@ fn runDebugArtifacts(
 
     const debug_suffixes = [_][]const u8{
         ".hex",
+        ".deploy.hex",
         ".sir",
         ".sourcemap.json",
         ".debug.json",
@@ -1513,7 +1635,7 @@ fn launchDebuggerTui(
     max_steps: ?[]const u8,
     deploy_step_cap: ?[]const u8,
     artifact_max_bytes: ?[]const u8,
-) !void {
+) !u8 {
     const repo_root = try findOraRepoRoot(allocator);
     defer allocator.free(repo_root);
 
@@ -1601,10 +1723,10 @@ fn launchDebuggerTui(
         .stderr = .inherit,
     });
     const term = try child.wait(io);
-    switch (term) {
-        .exited => |code| if (code != 0) std.process.exit(@intCast(code)),
-        else => std.process.exit(1),
-    }
+    return switch (term) {
+        .exited => |code| @intCast(code),
+        else => 1,
+    };
 }
 
 fn prepareDebuggerDeployHex(
@@ -1655,8 +1777,11 @@ fn prepareDebuggerDeployHex(
 
     const deploy_hex_name = try std.fmt.allocPrint(allocator, "{s}.deploy.hex", .{stem});
     defer allocator.free(deploy_hex_name);
-    const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
-    defer allocator.free(deploy_hex_path_rel);
+    const staging_root = try createArtifactStagingRoot(allocator, artifact_root);
+    defer allocator.free(staging_root);
+    defer std.Io.Dir.cwd().deleteTree(std.Io.Threaded.global_single_threaded.io(), staging_root) catch {};
+    const staged_deploy_hex_path = try std.fs.path.join(allocator, &[_][]const u8{ staging_root, deploy_hex_name });
+    defer allocator.free(staged_deploy_hex_path);
 
     var hex_out = std.Io.Writer.Allocating.init(allocator);
     defer hex_out.deinit();
@@ -1665,10 +1790,14 @@ fn prepareDebuggerDeployHex(
         try out.print("{X:0>2}", .{byte});
     }
     try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
-        .sub_path = deploy_hex_path_rel,
+        .sub_path = staged_deploy_hex_path,
         .data = hex_out.written(),
     });
 
+    try moveArtifactFile(allocator, staging_root, deploy_hex_name, artifact_root);
+
+    const deploy_hex_path_rel = try std.fs.path.join(allocator, &[_][]const u8{ artifact_root, deploy_hex_name });
+    defer allocator.free(deploy_hex_path_rel);
     return try absolutePathAlloc(allocator, deploy_hex_path_rel);
 }
 
@@ -1825,6 +1954,97 @@ fn freeCombinedInitArgs(allocator: std.mem.Allocator, init_args: []project_confi
         allocator.free(arg.value);
     }
     allocator.free(init_args);
+}
+
+fn resolveBuildFileContext(
+    allocator: std.mem.Allocator,
+    build_file_path: []const u8,
+    cli_output_dir: ?[]const u8,
+    base_chain_id: u64,
+    chain_ids: ChainIdSelection,
+) !BuildFileContext {
+    var context = BuildFileContext{ .chain_id = base_chain_id };
+    errdefer context.deinit(allocator);
+
+    const start_dir = std.fs.path.dirname(build_file_path) orelse ".";
+    const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
+        std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
+        return error.ProjectConfigLoadFailed;
+    };
+    if (loaded_opt == null) return context;
+
+    var loaded = loaded_opt.?;
+    defer loaded.deinit(allocator);
+
+    context.init_args = try combineInitArgSlices(allocator, loaded.config.compiler_init_args, &.{});
+
+    const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, build_file_path) catch |err| {
+        std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
+        return error.ProjectTargetMatchFailed;
+    };
+
+    const target_chain_id = if (target_idx_opt) |target_idx| loaded.config.targets[target_idx].chain_id else null;
+    context.chain_id = chain_ids.resolve(loaded.config.compiler_chain_id, target_chain_id);
+
+    if (target_idx_opt) |target_idx| {
+        const target = loaded.config.targets[target_idx];
+        if (context.init_args) |init_args| {
+            freeCombinedInitArgs(allocator, init_args);
+            context.init_args = null;
+        }
+        context.init_args = if (target.kind == .contract)
+            try combineInitArgSlices(allocator, loaded.config.compiler_init_args, target.init_args)
+        else
+            try allocator.alloc(project_config.InitArg, 0);
+
+        context.include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
+            std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
+            return error.ProjectIncludeRootsFailed;
+        };
+        context.resolver_options.include_roots = context.include_roots.?;
+
+        if (cli_output_dir == null) {
+            if (target.output_dir) |target_out| {
+                context.output_dir = project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, target_out) catch |err| {
+                    std.debug.print("error: failed to resolve target output_dir for '{s}': {s}\n", .{ target.name, @errorName(err) });
+                    return error.ProjectOutputDirResolveFailed;
+                };
+            } else {
+                const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+                    project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                        std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                        return error.ProjectOutputDirResolveFailed;
+                    }
+                else
+                    project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                        std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                        return error.ProjectOutputDirResolveFailed;
+                    };
+                defer allocator.free(base_output);
+
+                context.output_dir = if (loaded.config.targets.len > 1)
+                    try std.fs.path.join(allocator, &.{ base_output, target.name })
+                else
+                    try allocator.dupe(u8, base_output);
+            }
+        }
+    } else if (cli_output_dir == null) {
+        const base_output = if (loaded.config.compiler_output_dir) |compiler_out|
+            project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, compiler_out) catch |err| {
+                std.debug.print("error: failed to resolve compiler.output_dir: {s}\n", .{@errorName(err)});
+                return error.ProjectOutputDirResolveFailed;
+            }
+        else
+            project_config.resolvePathFromConfigDir(allocator, loaded.config_dir, "artifacts") catch |err| {
+                std.debug.print("error: failed to resolve default project output_dir: {s}\n", .{@errorName(err)});
+                return error.ProjectOutputDirResolveFailed;
+            };
+        defer allocator.free(base_output);
+
+        context.output_dir = try std.fs.path.join(allocator, &.{ base_output, std.fs.path.stem(build_file_path) });
+    }
+
+    return context;
 }
 
 fn isHexDigit(ch: u8) bool {
@@ -1997,12 +2217,12 @@ fn runBuildFromDiscoveredConfig(
     const loaded_opt = project_config.loadDiscovered(allocator) catch |err| {
         try stdout.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(2);
+        return error.ProjectConfigLoadFailed;
     };
     if (loaded_opt == null) {
         try stdout.print("error: build mode without <file.ora> requires ora.toml with [[targets]]\n", .{});
         try stdout.flush();
-        std.process.exit(2);
+        return error.MissingProjectConfig;
     }
 
     var loaded = loaded_opt.?;
@@ -2071,7 +2291,7 @@ fn discoverCompileContextForFile(
     const start_dir = std.fs.path.dirname(file_path) orelse ".";
     const loaded_opt = project_config.loadDiscoveredFromStartDir(allocator, start_dir) catch |err| {
         std.debug.print("error: failed to load ora.toml: {s}\n", .{@errorName(err)});
-        std.process.exit(2);
+        return error.ProjectConfigLoadFailed;
     };
 
     if (loaded_opt == null) {
@@ -2087,14 +2307,14 @@ fn discoverCompileContextForFile(
 
     const target_idx_opt = project_config.findMatchingTargetIndex(allocator, &loaded, file_path) catch |err| {
         std.debug.print("error: failed to match target in ora.toml: {s}\n", .{@errorName(err)});
-        std.process.exit(2);
+        return error.ProjectTargetMatchFailed;
     };
 
     if (target_idx_opt) |target_idx| {
         const target = loaded.config.targets[target_idx];
         const include_roots = resolveIncludeRootsForTarget(allocator, loaded.config_dir, target.include_paths) catch |err| {
             std.debug.print("error: failed to resolve include_paths for target '{s}': {s}\n", .{ target.name, @errorName(err) });
-            std.process.exit(2);
+            return error.ProjectIncludeRootsFailed;
         };
         return .{
             .include_roots = include_roots,
@@ -2517,7 +2737,7 @@ fn verifyMlirModule(stdout: anytype, module: @import("mlir_c_api").c.MlirModule,
     if (mlir_c.mlirOperationVerify(module_op)) return;
     try stdout.print("error: internal compiler error: generated {s} is invalid\n", .{stage});
     try stdout.flush();
-    std.process.exit(2);
+    return error.InvalidGeneratedMlir;
 }
 
 fn writeCompilerDiagnosticSecondaryLabels(
@@ -2567,7 +2787,7 @@ fn exitOnCompilerErrors(
     if (!compilerDiagnosticsHasErrors(diagnostics_list)) return;
     try writeCompilerDiagnosticsText(writer, sources, diagnostics_list, debug_enabled);
     try writer.flush();
-    std.process.exit(1);
+    return error.CompilationDiagnosticsFailed;
 }
 
 fn writeCompilationErrorsText(
@@ -4188,7 +4408,7 @@ fn runCompilerAstEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
@@ -4202,7 +4422,7 @@ fn runCompilerAstEmit(
         error.InvalidArgument => {
             try stdout.print("error: unsupported AST format '{s}' (use 'tree' or 'json')\n", .{format});
             try stdout.flush();
-            std.process.exit(2);
+            return error.InvalidAstFormat;
         },
         else => return err,
     };
@@ -4229,7 +4449,7 @@ fn runCompilerMlirEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
@@ -4242,15 +4462,50 @@ fn runCompilerMlirEmit(
     if (mlir_options.validate_mlir) {
         try verifyMlirModule(stdout, lowering.module.raw_module, "Ora MLIR");
     }
+    if (mlir_options.emit_mlir) {
+        try emitMlirModuleText(
+            allocator,
+            stdout,
+            lowering.module.raw_module,
+            file_path,
+            mlir_options.output_dir,
+            ".ora.mlir",
+            "Ora MLIR",
+            mlir_options.suppress_artifact_logs,
+        );
+    }
     if (mlir_options.emit_mlir_sir) {
         if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module, mlir_options.debug_info)) {
             try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
-            std.process.exit(1);
+            return error.OraToSirConversionFailed;
         }
+        try emitMlirModuleText(
+            allocator,
+            stdout,
+            lowering.module.raw_module,
+            file_path,
+            mlir_options.output_dir,
+            ".sir.mlir",
+            "SIR MLIR",
+            mlir_options.suppress_artifact_logs,
+        );
     }
+    try stdout.flush();
+}
 
-    const module_op = c.oraModuleGetOperation(lowering.module.raw_module);
+fn emitMlirModuleText(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    module: @import("mlir_c_api").c.MlirModule,
+    file_path: []const u8,
+    output_dir: ?[]const u8,
+    suffix: []const u8,
+    label: []const u8,
+    suppress_log: bool,
+) !void {
+    const c = @import("mlir_c_api").c;
+    const module_op = c.oraModuleGetOperation(module);
     const text_ref = c.oraOperationPrintToString(module_op);
     defer if (text_ref.data != null) {
         const mlir_c = @import("mlir_c_api");
@@ -4260,10 +4515,24 @@ fn runCompilerMlirEmit(
     if (text_ref.data == null or text_ref.length == 0) {
         try stdout.print("Compiler error: failed to print MLIR module\n", .{});
         try stdout.flush();
-        std.process.exit(1);
+        return error.MlirPrintFailed;
     }
-    try stdout.print("{s}", .{text_ref.data[0..text_ref.length]});
-    try stdout.flush();
+    const content = text_ref.data[0..text_ref.length];
+    if (output_dir) |dir| {
+        try std.Io.Dir.cwd().createDirPath(std.Io.Threaded.global_single_threaded.io(), dir);
+        const basename = std.fs.path.stem(file_path);
+        const filename = try std.mem.concat(allocator, u8, &[_][]const u8{ basename, suffix });
+        defer allocator.free(filename);
+        const output_file = try std.fs.path.join(allocator, &[_][]const u8{ dir, filename });
+        defer allocator.free(output_file);
+        try std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{
+            .sub_path = output_file,
+            .data = content,
+        });
+        if (!suppress_log) try stdout.print("{s} saved to {s}\n", .{ label, output_file });
+    } else {
+        try stdout.print("{s}", .{content});
+    }
 }
 
 fn runCompilerTokenEmit(
@@ -4428,7 +4697,7 @@ fn runMlirEmitAdvanced(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
@@ -4522,6 +4791,10 @@ fn runMlirEmitAdvanced(
         pending_smt_report = try verifier.buildSmtReport(final_module, file_path, null);
     }
 
+    if (verification_failed) {
+        return error.VerificationFailed;
+    }
+
     // Write the FV proof sidecar before the canonicalize / cleanup
     // passes scrub proven guards from the MLIR module. The TUI's
     // `fv` overlay reads `<stem>.proof.json` to mark proved-safe
@@ -4532,15 +4805,9 @@ fn runMlirEmitAdvanced(
         if (vr.proven_guard_positions.items.len > 0) {
             if (mlir_options.output_dir) |out_dir| {
                 const stem = std.fs.path.stem(file_path);
-                writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items) catch |err| {
-                    try stdout.print("Warning: could not write proof sidecar: {s}\n", .{@errorName(err)});
-                };
+                try writeProofSidecar(allocator, out_dir, stem, vr.proven_guard_positions.items);
             }
         }
-    }
-
-    if (verification_failed) {
-        return error.VerificationFailed;
     }
 
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or needs_sir_conversion)) {
@@ -4927,7 +5194,7 @@ fn formatSingleFile(
     // Read source file
     const source = std.Io.Dir.cwd().readFileAlloc(std.Io.Threaded.global_single_threaded.io(), file_path, allocator, .unlimited) catch |err| {
         std.debug.print("error: cannot read file '{s}': {s}\n", .{ file_path, @errorName(err) });
-        std.process.exit(1);
+        return error.FormatInputReadFailed;
     };
     defer allocator.free(source);
 
@@ -4937,7 +5204,7 @@ fn formatSingleFile(
 
     const formatted = formatter.format() catch |err| {
         std.debug.print("error: failed to format {s}: {}\n", .{ file_path, err });
-        std.process.exit(2);
+        return error.FormatterFailed;
     };
     defer allocator.free(formatted);
 
@@ -5021,26 +5288,26 @@ fn runFmt(allocator: std.mem.Allocator, file_path: []const u8, check: bool, diff
         error.NotDir => null,
         else => {
             std.debug.print("error: cannot access '{s}': {s}\n", .{ file_path, @errorName(err) });
-            std.process.exit(1);
+            return error.FormatInputAccessFailed;
         },
     };
     if (dir_probe) |*dir| {
         dir.close(io);
         if (stdout) {
             std.debug.print("error: --stdout does not support directory inputs\n", .{});
-            std.process.exit(2);
+            return error.InvalidFmtStdoutDirectory;
         }
 
         var found_mismatch = false;
         try formatDirectoryRecursive(allocator, file_path, check, diff, options, &found_mismatch);
         if (found_mismatch) {
-            std.process.exit(1);
+            return error.FormatCheckFailed;
         }
         return;
     }
 
     if (try formatSingleFile(allocator, file_path, check, diff, stdout, options)) {
-        std.process.exit(1);
+        return error.FormatCheckFailed;
     }
 }
 
@@ -5072,7 +5339,7 @@ fn runAbiEmit(
     }) catch |err| {
         try stdout.print("Compiler error: {s}\n", .{@errorName(err)});
         try stdout.flush();
-        std.process.exit(1);
+        return error.CompilerCompileFailed;
     };
     defer compilation.deinit();
 
@@ -5393,7 +5660,7 @@ fn emitBytecodeFromSirText(
         try mergeSourceMaps(allocator, db, root_module_id, sir_locations_json.?, sir_line_map_json, sir_debug_info_json, sinora_srcmap_path.?, bytecode_output_path.?, stdout, suppress_log);
     }
     if (sir_debug_info_json != null and bytecode_output_path != null) {
-        try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout);
+        try writeDebugInfoSidecar(allocator, db, root_module_id, sources, sir_debug_info_json.?, source_scopes, bytecode_output_path.?, stdout, suppress_log);
     }
 }
 
@@ -5416,8 +5683,9 @@ fn mergeSourceMaps(
         allocator,
         std.Io.Limit.limited(16 * 1024 * 1024),
     ) catch |err| {
-        try stdout.print("Warning: could not read backend source map: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not read backend source map: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer allocator.free(backend_json);
 
@@ -5429,8 +5697,9 @@ fn mergeSourceMaps(
     const backend_parsed = std.json.parseFromSlice(BackendMap, allocator, backend_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse backend source map: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse backend source map: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer backend_parsed.deinit();
 
@@ -5452,8 +5721,9 @@ fn mergeSourceMaps(
     const sir_locs = std.json.parseFromSlice([]const LocEntry, allocator, sir_locations_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse SIR locations: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse SIR locations: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer sir_locs.deinit();
 
@@ -5464,8 +5734,9 @@ fn mergeSourceMaps(
         const sir_lines = std.json.parseFromSlice([]const SirLineEntry, allocator, json, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            try stdout.print("Warning: could not parse SIR line map: {}\n", .{err});
-            return;
+            try stdout.print("Error: could not parse SIR line map: {}\n", .{err});
+            try stdout.flush();
+            return err;
         };
         defer sir_lines.deinit();
         for (sir_lines.value) |line_entry| {
@@ -5511,8 +5782,9 @@ fn mergeSourceMaps(
         const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, json, .{
             .ignore_unknown_fields = true,
         }) catch |err| {
-            try stdout.print("Warning: could not parse SIR debug info for source-map provenance: {}\n", .{err});
-            return;
+            try stdout.print("Error: could not parse SIR debug info for source-map provenance: {}\n", .{err});
+            try stdout.flush();
+            return err;
         };
         defer parsed_debug.deinit();
         for (parsed_debug.value.ops) |op| {
@@ -5885,6 +6157,7 @@ fn writeDebugInfoSidecar(
     source_scopes: ?DebugSourceScopeBundle,
     bytecode_output_path: []const u8,
     stdout: anytype,
+    suppress_log: bool,
 ) !void {
     const DebugOp = struct {
         idx: u32,
@@ -5927,8 +6200,9 @@ fn writeDebugInfoSidecar(
     const parsed_debug = std.json.parseFromSlice(DebugInfoParse, allocator, sir_debug_info_json, .{
         .ignore_unknown_fields = true,
     }) catch |err| {
-        try stdout.print("Warning: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
-        return;
+        try stdout.print("Error: could not parse debug sidecar for visibility enrichment: {}\n", .{err});
+        try stdout.flush();
+        return err;
     };
     defer parsed_debug.deinit();
 
@@ -6211,7 +6485,7 @@ fn writeDebugInfoSidecar(
         .data = out.written(),
     });
 
-    try stdout.print("Debug info saved to {s}\n", .{debug_path});
+    if (!suppress_log) try stdout.print("Debug info saved to {s}\n", .{debug_path});
 }
 
 test "build config init_args: validates init parameters" {

@@ -463,7 +463,7 @@ const ConstEvaluator = struct {
             },
             .Result => null,
             .Unary => |unary| try evalUnary(self.allocator, unary.op, try self.evalExprImpl(unary.operand, use_cache)),
-            .Binary => |binary| try evalBinary(self.allocator, binary.op, try self.evalExprImpl(binary.lhs, use_cache), try self.evalExprImpl(binary.rhs, use_cache)),
+            .Binary => |binary| try self.evalBinaryExpr(binary, use_cache),
             .Call => |call| blk: {
                 if (try self.evalCallCtValue(call, use_cache)) |ct_value| {
                     break :blk try ctValueToConstValue(self.allocator, &self.env.heap, ct_value);
@@ -523,6 +523,109 @@ const ConstEvaluator = struct {
         };
         if (use_cache) self.values[expr_id.index()] = value;
         return value;
+    }
+
+    fn evalBinaryExpr(self: *ConstEvaluator, binary: ast.BinaryExpr, comptime use_cache: bool) anyerror!?ConstValue {
+        const lhs = try self.evalExprImpl(binary.lhs, use_cache);
+        const rhs = try self.evalExprImpl(binary.rhs, use_cache);
+        if (self.rejectInvalidBinaryComptime(binary.op, lhs, rhs, binary.range)) return null;
+        return try evalBinary(self.allocator, binary.op, lhs, rhs);
+    }
+
+    fn evalBinaryValue(
+        self: *ConstEvaluator,
+        op: ast.BinaryOp,
+        lhs: ?ConstValue,
+        rhs: ?ConstValue,
+        range: source.TextRange,
+    ) anyerror!?ConstValue {
+        if (self.rejectInvalidBinaryComptime(op, lhs, rhs, range)) return null;
+        return try evalBinary(self.allocator, op, lhs, rhs);
+    }
+
+    fn rejectInvalidBinaryComptime(
+        self: *ConstEvaluator,
+        op: ast.BinaryOp,
+        lhs: ?ConstValue,
+        rhs: ?ConstValue,
+        range: source.TextRange,
+    ) bool {
+        const left = lhs orelse return false;
+        const right = rhs orelse return false;
+        const left_integer = switch (left) {
+            .integer => true,
+            else => false,
+        };
+        const right_integer = switch (right) {
+            .integer => |integer| integer,
+            else => return false,
+        };
+        if (!left_integer) return false;
+
+        switch (op) {
+            .div, .mod => {
+                if (right_integer.eqlZero()) {
+                    self.recordRequiredBinaryError(
+                        .division_by_zero,
+                        range,
+                        "comptime division by zero",
+                        "division and modulo by zero are invalid in required comptime evaluation",
+                    );
+                    return true;
+                }
+            },
+            .shl, .wrapping_shl, .shr, .wrapping_shr => {
+                if (bridge.positiveShiftAmount(right_integer) == null) {
+                    self.recordRequiredBinaryError(
+                        .invalid_cast,
+                        range,
+                        "invalid comptime shift amount",
+                        "shift amount must be non-negative and fit in usize",
+                    );
+                    return true;
+                }
+            },
+            .pow, .wrapping_pow => {
+                const amount = bridge.positiveShiftAmount(right_integer) orelse {
+                    self.recordRequiredBinaryError(
+                        .invalid_cast,
+                        range,
+                        "invalid comptime exponent",
+                        "exponent must be non-negative and fit in usize",
+                    );
+                    return true;
+                };
+                const amount_u64: u64 = @intCast(amount);
+                if (amount_u64 > self.env.config.max_loop_iterations or
+                    amount_u64 > LimitCheck.init(self.env.config, &self.env.stats).remainingSteps())
+                {
+                    self.recordRequiredBinaryError(
+                        .step_limit,
+                        range,
+                        "comptime exponentiation exceeds evaluation step budget",
+                        "exponent exceeds the configured comptime evaluation budget",
+                    );
+                    return true;
+                }
+            },
+            else => {},
+        }
+        return false;
+    }
+
+    fn recordRequiredBinaryError(
+        self: *ConstEvaluator,
+        kind: error_mod.CtErrorKind,
+        range: source.TextRange,
+        message: []const u8,
+        reason: []const u8,
+    ) void {
+        self.recordCtError(error_mod.CtError.withReason(
+            kind,
+            self.sourceSpan(range),
+            message,
+            reason,
+        ));
     }
 
     fn evalExprCtValue(self: *ConstEvaluator, expr_id: ast.ExprId) anyerror!?CtValue {
@@ -4038,7 +4141,7 @@ const ConstEvaluator = struct {
                 }
                 const rhs = rhs_const orelse (try ctValueToConstValue(self.allocator, &self.env.heap, rhs_ct)) orelse return null;
                 const op = compoundAssignBinaryOp(assign.op) orelse return null;
-                const value = (try evalBinary(self.allocator, op, try self.readBoundName(name.name), rhs)) orelse return null;
+                const value = (try self.evalBinaryValue(op, try self.readBoundName(name.name), rhs, assign.range)) orelse return null;
                 const ct_value = (try self.constValueToCtValue(value)) orelse return null;
                 try self.env.set(name.name, ct_value);
                 return value;
@@ -4077,7 +4180,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4092,7 +4195,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current = (try ctValueToConstValue(self.allocator, &self.env.heap, elems[idx])) orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4112,7 +4215,7 @@ const ConstEvaluator = struct {
                             else => blk_op: {
                                 const current_value = current orelse break :blk_op null;
                                 const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                                const computed = (try evalBinary(self.allocator, op, current_value, rhs)) orelse break :blk_op null;
+                                const computed = (try self.evalBinaryValue(op, current_value, rhs, assign.range)) orelse break :blk_op null;
                                 break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                             },
                         } orelse return null;
@@ -4148,7 +4251,7 @@ const ConstEvaluator = struct {
                         const rhs = rhs_const orelse break :blk_op null;
                         const current = (try ctValueToConstValue(self.allocator, &self.env.heap, current_field)) orelse break :blk_op null;
                         const op = compoundAssignBinaryOp(assign.op) orelse break :blk_op null;
-                        const computed = (try evalBinary(self.allocator, op, current, rhs)) orelse break :blk_op null;
+                        const computed = (try self.evalBinaryValue(op, current, rhs, assign.range)) orelse break :blk_op null;
                         break :blk_op (try constToCtValue(computed)) orelse break :blk_op null;
                     },
                 } orelse return null;
