@@ -12,6 +12,7 @@ member spellings) layer on later over the same curated matrix.
 -/
 
 import Ora.Types.Decl
+import Ora.Types.Projection
 
 namespace Ora.Spec
 
@@ -33,10 +34,23 @@ def curatedDeclEnv : DeclEnv :=
     ("Color", .enum_ [⟨"Red", .none, none⟩, ⟨"Green", .none, none⟩, ⟨"Blue", .none, none⟩]),
     ("Flags", .bitfield [⟨"a", .prim .bool, none, none⟩]),
     ("Vault", .contract ["balance", "owner"]),
-    ("Token", .resource (.prim u256)) ]
+    -- resources exercising all three carrier-spelling paths: primitive, bytesN,
+    -- and a composite (whose spelling is honestly `none`, discriminated by kind).
+    ("Token", .resource (.prim u256)),
+    ("Digest", .resource (.prim (.fixedBytes ⟨32, by decide, by decide⟩))),
+    ("Buffer", .resource (.slice (.prim u256))) ]
 
 /-- (declaration name, expected compiler `TypeKind` tag), in the curated order. -/
 def expectedDeclKinds : List (String × String) :=
   curatedDeclEnv.map (fun p => (p.1, Decl.compilerKind p.2))
+
+/-- (resource name, carrier compiler-kind, carrier spelling?) for each curated
+    resource — projected via `Ty.compilerKind` / `Ty.spelling?`. The spelling is a
+    genuine `Option` (`none` for composites); the kind is the universal check. -/
+def expectedResourceCarriers : List (String × String × Option String) :=
+  curatedDeclEnv.filterMap fun p =>
+    match p.2 with
+    | .resource c => some (p.1, Ty.compilerKind c, Ty.spelling? c)
+    | _           => none
 
 end Ora.Spec

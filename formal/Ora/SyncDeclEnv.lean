@@ -17,4 +17,9 @@ open Ora.Spec Ora.Generated
 /-- The Lean `Decl` kinds map onto the compiler's nominal `TypeKind` tags. -/
 theorem declkinds_match : compilerDeclKinds = expectedDeclKinds := by decide
 
+/-- Each curated resource's carrier kind + spelling, as the compiler reads them
+    off `carrier_type`, match the spec's `Ty.compilerKind` / `Ty.spelling?`. -/
+theorem resource_carriers_match :
+    compilerResourceCarriers = expectedResourceCarriers := by decide
+
 end Ora.Sync

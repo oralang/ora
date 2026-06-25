@@ -19,6 +19,7 @@ import Ora.Types.Decl
 import Ora.Types.Internal
 import Ora.Types.TypeEq
 import Ora.Types.Assignable
+import Ora.Types.Projection
 import Ora.Spec.Facts
 import Ora.Generated.CompilerSnapshot
 import Ora.Sync

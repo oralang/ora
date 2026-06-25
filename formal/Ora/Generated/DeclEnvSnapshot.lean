@@ -15,6 +15,13 @@ def compilerDeclKinds : List (String × String) :=
    ("Color", "enum_"),
    ("Flags", "bitfield"),
    ("Vault", "contract"),
-   ("Token", "resource_domain")]
+   ("Token", "resource_domain"),
+   ("Digest", "resource_domain"),
+   ("Buffer", "resource_domain")]
+
+def compilerResourceCarriers : List (String × String × Option String) :=
+  [("Token", "integer", some "u256"),
+   ("Digest", "fixed_bytes", some "bytes32"),
+   ("Buffer", "slice", none)]
 
 end Ora.Generated
