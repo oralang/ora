@@ -51,6 +51,9 @@ def mapAddressU16 : Ty := .map addressTy u16Ty
 def minOne : Ty := .refinement "MinValue" u256Ty [.integer "1"]
 def minHundred : Ty := .refinement "MinValue" u256Ty [.integer "100"]
 
+def euTwo : Ty := .errorUnion u256Ty [pointTy, otherPointTy]
+def euOne : Ty := .errorUnion u256Ty [pointTy]
+
 def fnFoo : Ty := .function (some "foo") [u8Ty] [boolTy]
 def fnBar : Ty := .function (some "bar") [u8Ty] [boolTy]
 
@@ -102,7 +105,11 @@ def assignableCases : List TypeRelationCase :=
     { label := "resource_domain_same_identity", lhsName := "resource TokenUnit<u8>", rhsName := "resource TokenUnit<u8>", lhs := tokenResourceU8, rhs := tokenResourceU8 },
     { label := "resource_domain_widening_rejected", lhsName := "resource TokenUnit<u16>", rhsName := "resource TokenUnit<u8>", lhs := tokenResourceU16, rhs := tokenResourceU8 },
     { label := "resource_place_same_identity", lhsName := "Resource<TokenUnit<u8>>", rhsName := "Resource<TokenUnit<u8>>", lhs := tokenPlaceU8, rhs := tokenPlaceU8 },
-    { label := "resource_place_widening_rejected", lhsName := "Resource<TokenUnit<u16>>", rhsName := "Resource<TokenUnit<u8>>", lhs := tokenPlaceU16, rhs := tokenPlaceU8 } ]
+    { label := "resource_place_widening_rejected", lhsName := "Resource<TokenUnit<u16>>", rhsName := "Resource<TokenUnit<u8>>", lhs := tokenPlaceU16, rhs := tokenPlaceU8 },
+    { label := "refinement_minvalue_widen", lhsName := "MinValue<u256,1>", rhsName := "MinValue<u256,100>", lhs := minOne, rhs := minHundred },
+    { label := "refinement_minvalue_narrow_rejected", lhsName := "MinValue<u256,100>", rhsName := "MinValue<u256,1>", lhs := minHundred, rhs := minOne },
+    { label := "error_union_subset", lhsName := "u256!{Point,OtherPoint}", rhsName := "u256!{Point}", lhs := euTwo, rhs := euOne },
+    { label := "error_union_superset_rejected", lhsName := "u256!{Point}", rhsName := "u256!{Point,OtherPoint}", lhs := euOne, rhs := euTwo } ]
 
 def storageU256Local : Located := { ty := u256Ty, region := .storage, provenance := .local }
 def storageU256StorageProvenance : Located := { ty := u256Ty, region := .storage, provenance := .storage }

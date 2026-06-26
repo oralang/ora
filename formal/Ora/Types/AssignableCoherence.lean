@@ -7,22 +7,20 @@ preorder. This file relates the two and pins down exactly where they diverge.
   * `Ty.assignable_of_beq` / `Ty.mutual_assignable_of_beq` — equality implies (mutual)
     assignability: `beq ⊆ assignable`.
 
-The inclusion is STRICT, and the gap has exactly two sources:
+The inclusion is STRICT. Where they diverge:
 
   1. INTEGER WIDENING. `assignable` accepts `u8 ↦ u256` (not symmetric) where `beq`
      does not. But `IntTy.assignable_antisymm` shows widening is *antisymmetric*:
      mutual widening forces equality, so it never conflates two distinct int types.
 
-  2. REFINEMENT BOUNDS. `Ty.assignable`'s refinement arm only checks name + base —
-     it IGNORES the bound args (the deferred "name + base only" modeling). So
-     `MinValue<_,1>` and `MinValue<_,100>` are mutually assignable yet unequal. Hence
-     `assignable` is NOT antisymmetric, and mutual assignability does NOT imply `beq`
-     (`Ty.assignable_not_antisymm`, `Ty.beq_not_of_mutual_assignable`).
+  2. REFINEMENT BOUNDS. `assignable` does proper interval-containment subtyping
+     (`MinValue<1> ↦ MinValue<100>` one-way) — directional, but bound-aware (no longer
+     "ignored"). Mutual refinement assignability forces equal bounds.
 
-So the SOLE obstruction to "`beq a b ↔ assignable a b ∧ assignable b a`" is the
-ignored refinement bounds — exactly the gap the bounds-aware subtyping in
-`RefinementSubtype` closes. Wiring that into `Ty.assignable` would make mutual
-assignability coincide with equality (modulo bound-literal text representation).
+  3. ERROR-SET ORDER. `assignable` compares error sets by SUBSET; `beq` is positional.
+     So an error union and its reordering are mutually assignable yet `beq`-distinct —
+     which is why `assignable` is NOT antisymmetric and mutual assignability does NOT
+     imply `beq` (`Ty.assignable_not_antisymm`, `Ty.beq_not_of_mutual_assignable`).
 -/
 
 import Ora.Types.AssignableLawful
@@ -57,35 +55,35 @@ theorem IntTy.assignable_antisymm {e a : IntTy}
     | exact Bool.noConfusion h2
     | (rename_i we wa; cases we <;> cases wa <;> simp_all [IntTy.assignable, IntTy.bits])
 
-/-! ## Divergence (2): refinement bounds — `assignable` ignores them -/
+/-! ## Divergence (2): refinement bound-subtyping — directional, but bound-aware -/
 
-example :
-    Ty.assignable (.refinement "MinValue" (.prim u256) [.integer "1"])
-                  (.refinement "MinValue" (.prim u256) [.integer "100"]) = true := rfl
-example :
-    Ty.assignable (.refinement "MinValue" (.prim u256) [.integer "100"])
-                  (.refinement "MinValue" (.prim u256) [.integer "1"]) = true := rfl
-example :
-    Ty.beq (.refinement "MinValue" (.prim u256) [.integer "1"])
-           (.refinement "MinValue" (.prim u256) [.integer "100"]) = false := rfl
+-- tighter ↦ looser is accepted; the reverse is rejected (no longer "ignored")
+example : Ty.assignable (.refinement "MinValue" (.prim u256) [.integer "1"])
+                        (.refinement "MinValue" (.prim u256) [.integer "100"]) = true := by decide
+example : Ty.assignable (.refinement "MinValue" (.prim u256) [.integer "100"])
+                        (.refinement "MinValue" (.prim u256) [.integer "1"]) = false := by decide
 
-/-- `Ty.assignable` is NOT antisymmetric — mutual assignability does not imply
-    equality. The sole obstruction is the ignored refinement bounds (witnessed by
-    `MinValue<_,1>` vs `MinValue<_,100>`); the bounds-aware subtyping in
-    `RefinementSubtype` is what distinguishes them. -/
+/-! ## Divergence (3): error-set ORDER — `assignable` is subset, `beq` is positional -/
+
+private def euA : Ty := .errorUnion (.prim u256) [.enum_ "E1", .enum_ "E2"]
+private def euB : Ty := .errorUnion (.prim u256) [.enum_ "E2", .enum_ "E1"]
+
+-- same error SET, different order: mutually assignable, yet `beq`-distinct
+example : Ty.assignable euA euB = true := by decide
+example : Ty.assignable euB euA = true := by decide
+example : Ty.beq euA euB = false := by decide
+
+/-- `Ty.assignable` is NOT antisymmetric — mutual assignability does not imply equality.
+    Witness: an error union and its reordering (subset both ways, but not equal). -/
 theorem Ty.assignable_not_antisymm :
     ¬ ∀ a b : Ty, Ty.assignable a b = true → Ty.assignable b a = true → a = b := by
   intro h
-  have key := h (.refinement "MinValue" (.prim u256) [.integer "1"])
-                (.refinement "MinValue" (.prim u256) [.integer "100"]) rfl rfl
-  exact absurd key (by decide)
+  exact absurd (h euA euB (by decide) (by decide)) (by decide)
 
 /-- Equivalently: mutual assignability does NOT imply `beq`. -/
 theorem Ty.beq_not_of_mutual_assignable :
     ¬ ∀ a b : Ty, Ty.assignable a b = true → Ty.assignable b a = true → Ty.beq a b = true := by
   intro h
-  have key := h (.refinement "MinValue" (.prim u256) [.integer "1"])
-                (.refinement "MinValue" (.prim u256) [.integer "100"]) rfl rfl
-  exact Bool.noConfusion key
+  exact Bool.noConfusion (h euA euB (by decide) (by decide))
 
 end Ora.Types

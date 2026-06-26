@@ -46,7 +46,11 @@ def compilerTypesAssignableRows : List (String × String × String × Bool) :=
    ("resource_domain_same_identity", "resource TokenUnit<u8>", "resource TokenUnit<u8>", true),
    ("resource_domain_widening_rejected", "resource TokenUnit<u16>", "resource TokenUnit<u8>", false),
    ("resource_place_same_identity", "Resource<TokenUnit<u8>>", "Resource<TokenUnit<u8>>", true),
-   ("resource_place_widening_rejected", "Resource<TokenUnit<u16>>", "Resource<TokenUnit<u8>>", false)]
+   ("resource_place_widening_rejected", "Resource<TokenUnit<u16>>", "Resource<TokenUnit<u8>>", false),
+   ("refinement_minvalue_widen", "MinValue<u256,1>", "MinValue<u256,100>", true),
+   ("refinement_minvalue_narrow_rejected", "MinValue<u256,100>", "MinValue<u256,1>", false),
+   ("error_union_subset", "u256!{Point,OtherPoint}", "u256!{Point}", true),
+   ("error_union_superset_rejected", "u256!{Point}", "u256!{Point,OtherPoint}", false)]
 
 def compilerLocatedTypeEqlRows : List (String × String × String × Bool) :=
   [("same_type_region_provenance", "u256@storage/local", "u256@storage/local", true),

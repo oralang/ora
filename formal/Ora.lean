@@ -25,9 +25,7 @@ import Ora.Types.AssignableLawful
 import Ora.Types.LocatedLawful
 import Ora.Types.LocatedProjection
 import Ora.Types.AssignableCoherence
-import Ora.Types.ErrorUnionSubtype
 import Ora.Types.RefinementTie
-import Ora.Types.RefinementSubtype
 import Ora.Types.Projection
 import Ora.Spec.Facts
 import Ora.Generated.CompilerSnapshot

@@ -137,10 +137,15 @@ pub fn main(init: std.process.Init) !void {
     const map_address_u8: Type = .{ .map = .{ .key_type = &address_ty, .value_type = &u8_ty } };
     const map_address_u16: Type = .{ .map = .{ .key_type = &address_ty, .value_type = &u16_ty } };
 
-    const min_one_args = [_]formal.RefinementArg{.{ .Integer = .{ .text = "1" } }};
-    const min_hundred_args = [_]formal.RefinementArg{.{ .Integer = .{ .text = "100" } }};
+    const min_one_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "1" } } };
+    const min_hundred_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "100" } } };
     const min_one: Type = .{ .refinement = .{ .name = "MinValue", .base_type = &u256_ty, .args = min_one_args[0..] } };
     const min_hundred: Type = .{ .refinement = .{ .name = "MinValue", .base_type = &u256_ty, .args = min_hundred_args[0..] } };
+
+    const eu_errs_two = [_]Type{ point_ty, other_point_ty };
+    const eu_errs_one = [_]Type{point_ty};
+    const eu_two: Type = .{ .error_union = .{ .payload_type = &u256_ty, .error_types = eu_errs_two[0..] } };
+    const eu_one: Type = .{ .error_union = .{ .payload_type = &u256_ty, .error_types = eu_errs_one[0..] } };
 
     const fn_foo_params = [_]Type{u8_ty};
     const fn_foo_returns = [_]Type{bool_ty};
@@ -186,6 +191,10 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "resource_domain_widening_rejected", .lhs_name = "resource TokenUnit<u16>", .rhs_name = "resource TokenUnit<u8>", .lhs = token_resource_carrier_u16, .rhs = token_resource_carrier_u8 },
         .{ .label = "resource_place_same_identity", .lhs_name = "Resource<TokenUnit<u8>>", .rhs_name = "Resource<TokenUnit<u8>>", .lhs = token_place_u8, .rhs = token_place_u8 },
         .{ .label = "resource_place_widening_rejected", .lhs_name = "Resource<TokenUnit<u16>>", .rhs_name = "Resource<TokenUnit<u8>>", .lhs = token_place_u16, .rhs = token_place_u8 },
+        .{ .label = "refinement_minvalue_widen", .lhs_name = "MinValue<u256,1>", .rhs_name = "MinValue<u256,100>", .lhs = min_one, .rhs = min_hundred },
+        .{ .label = "refinement_minvalue_narrow_rejected", .lhs_name = "MinValue<u256,100>", .rhs_name = "MinValue<u256,1>", .lhs = min_hundred, .rhs = min_one },
+        .{ .label = "error_union_subset", .lhs_name = "u256!{Point,OtherPoint}", .rhs_name = "u256!{Point}", .lhs = eu_two, .rhs = eu_one },
+        .{ .label = "error_union_superset_rejected", .lhs_name = "u256!{Point}", .rhs_name = "u256!{Point,OtherPoint}", .lhs = eu_one, .rhs = eu_two },
     };
     try emitTypeRelationRows(out, "compilerTypesAssignableRows", assignable_cases[0..], .assignable);
 
