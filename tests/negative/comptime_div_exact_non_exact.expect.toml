@@ -1,0 +1,1 @@
+expect_error = "comptime exact division has nonzero remainder"

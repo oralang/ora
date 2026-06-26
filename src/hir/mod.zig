@@ -288,6 +288,7 @@ pub fn lowerModule(
         .module_query = module_query,
         .module_body = mlir.oraModuleGetBody(result.module.raw_module),
         .items = .empty,
+        .type_fallback_count = 0,
         .type_fallbacks = .empty,
         .placeholder_count = 0,
         .default_value_count = 0,
@@ -316,7 +317,7 @@ pub fn lowerModule(
 
     result.items = lowerer.items.items;
     result.type_fallbacks = lowerer.type_fallbacks.items;
-    result.type_fallback_count = result.type_fallbacks.len;
+    result.type_fallback_count = lowerer.type_fallback_count;
     result.placeholder_count = lowerer.placeholder_count;
     result.default_value_count = lowerer.default_value_count;
     return result;
@@ -371,6 +372,7 @@ const Lowerer = struct {
     module_query: ?compiler_query.HirView,
     module_body: mlir.MlirBlock,
     items: std.ArrayList(HirItemHandle),
+    type_fallback_count: usize,
     type_fallbacks: std.ArrayList(TypeFallbackRecord),
     placeholder_count: usize,
     default_value_count: usize,
@@ -1557,6 +1559,7 @@ const Lowerer = struct {
     }
 
     fn recordTypeFallback(self: *Lowerer, reason: TypeFallbackReason, range: source.TextRange) mlir.MlirType {
+        self.type_fallback_count += 1;
         self.type_fallbacks.append(self.allocator, .{
             .reason = reason,
             .location = .{

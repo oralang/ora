@@ -2825,7 +2825,15 @@ const ConstEvaluator = struct {
             return switch (lhs.?) {
                 .integer => |a| switch (rhs.?) {
                     .integer => |b| blk: {
-                        if (b.eqlZero()) break :blk null;
+                        if (b.eqlZero()) {
+                            self.recordRequiredBinaryError(
+                                .division_by_zero,
+                                builtin.range,
+                                "comptime division by zero",
+                                "division builtin divisor must be nonzero in required comptime evaluation",
+                            );
+                            break :blk null;
+                        }
                         var quotient = try std.math.big.int.Managed.init(self.allocator);
                         var remainder = try std.math.big.int.Managed.init(self.allocator);
                         if (std.mem.eql(u8, builtin.name, "divFloor")) {
@@ -2838,6 +2846,12 @@ const ConstEvaluator = struct {
                                     try quotient.addScalar(&quotient, 1);
                                 }
                             } else if (std.mem.eql(u8, builtin.name, "divExact") and !remainder.eqlZero()) {
+                                self.recordRequiredBinaryError(
+                                    .invalid_cast,
+                                    builtin.range,
+                                    "comptime exact division has nonzero remainder",
+                                    "@divExact requires an exactly divisible numerator and denominator in required comptime evaluation",
+                                );
                                 break :blk null;
                             }
                         }

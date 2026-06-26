@@ -1459,6 +1459,14 @@ pub fn build(b: *std.Build) void {
     const check_refinement_registry_sync_step = b.step("check-refinement-registry-sync", "Run refinement registry/docs sync checks");
     check_refinement_registry_sync_step.dependOn(&refinement_registry_sync_cmd.step);
 
+    // zig build check-formal-sync
+    const formal_sync_cmd = b.addSystemCommand(&[_][]const u8{
+        "bash",
+        "scripts/check-formal-sync.sh",
+    });
+    const check_formal_sync_step = b.step("check-formal-sync", "Regenerate formal snapshots and run Lean verification checks");
+    check_formal_sync_step.dependOn(&formal_sync_cmd.step);
+
     // zig build check-lock-guarding
     const lock_guarding_cmd = b.addSystemCommand(&[_][]const u8{
         "sh",
@@ -1650,6 +1658,9 @@ pub fn build(b: *std.Build) void {
     gate_step.dependOn(check_resource_mutation_tripwires_step);
     gate_step.dependOn(check_mlir_ora_step);
     gate_step.dependOn(check_negative_corpus_step);
+    gate_step.dependOn(check_no_width_defaults_step);
+    gate_step.dependOn(check_no_hir_op_null_fallbacks_step);
+    gate_step.dependOn(check_no_scattered_process_exit_step);
     gate_step.dependOn(check_findings_ledger_step);
     gate_step.dependOn(check_verifier_mutations_step);
     gate_step.dependOn(check_smt_modifies_corpus_step);

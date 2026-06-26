@@ -1611,6 +1611,57 @@ test "compiler artifact policy blocks explicit emit and debug artifact bypasses"
     });
 }
 
+test "compiler writes SMT diagnostic report when verification fails" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn bump(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode,smt-report",
+        "--verify",
+        "-o",
+        out_path,
+        root_path,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Verification failed") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "Verification failed"));
+
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.md", .{});
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.json", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.proof.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.hex", .{}));
+}
+
 test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,

@@ -937,6 +937,7 @@ pub fn main(init: std.process.Init) !void {
     const direct_emit_stages_output_file = output_file != null and emit_bytecode;
     var direct_emit_staging_root: ?[]u8 = null;
     var direct_emit_staged_output_file: ?[]u8 = null;
+    var direct_emit_verification_failed = false;
     defer if (direct_emit_staged_output_file) |path| allocator.free(path);
     defer discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
     const emit_output_dir = if (direct_emit_stages_output_dir) blk: {
@@ -1011,6 +1012,7 @@ pub fn main(init: std.process.Init) !void {
                 discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
                 exitCli(1);
             },
+            error.VerificationFailed => direct_emit_verification_failed = true,
             error.InvalidGeneratedMlir => {
                 discardArtifactStagingRoot(allocator, &direct_emit_staging_root);
                 exitCli(2);
@@ -1048,6 +1050,9 @@ pub fn main(init: std.process.Init) !void {
             }
             try stdout.flush();
         }
+    }
+    if (direct_emit_verification_failed) {
+        exitCli(1);
     }
 
     // print metrics report (no-op when --metrics is not passed)
@@ -4792,6 +4797,12 @@ fn runMlirEmitAdvanced(
     }
 
     if (verification_failed) {
+        if (pending_smt_report) |*report| {
+            try writeSmtReportArtifacts(allocator, file_path, mlir_options.output_dir, report.*, stdout, mlir_options.suppress_artifact_logs);
+            report.deinit(mlir_allocator);
+            pending_smt_report = null;
+        }
+        try stdout.flush();
         return error.VerificationFailed;
     }
 
