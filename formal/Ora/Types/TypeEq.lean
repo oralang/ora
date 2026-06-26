@@ -9,11 +9,11 @@ compiler's `typeEql`, and it gives `Located` the `locatedTypeEql` it was missing
 Refinement equality compares name + base + ARGS (so `MinValue<_,1> ≠
 MinValue<_,100>`).
 
-Lawfulness: reflexivity (`Ty.beq t t = true`) IS proven, in
-`Ora/Types/TypeEqLawful.lean` — kept out of the default build because the proof
-unfolds the mutual `Ty.beq` and is intentionally expensive for now (~+40s); it
-should be optimized before the formal gate grows much larger. STILL REMAINING:
-the other direction `beq ↔ =`, i.e. a real `DecidableEq Ty`.
+`DecidableEq Ty` IS available — but earned, not derived: `Ora/Types/TypeEqLawful.lean`
+proves `Ty.beq` reflexive AND `beq ↔ =` and hands back a real `DecidableEq Ty`.
+Those proofs induct via `Ty.recAux` and unfold `Ty.beq` through the cheap
+per-constructor `@[simp]` `rfl`-lemmas below — so the lawfulness tier builds in
+~1.5s and is part of the default `Ora` build (no isolation).
 -/
 
 import Ora.Types.Ty
@@ -67,6 +67,47 @@ def beqFields : List (Name × Ty) → List (Name × Ty) → Bool
 end
 
 instance : BEq Ty := ⟨Ty.beq⟩
+
+/-! ## Per-constructor unfolding lemmas
+
+`Ty.beq` is a `mutual` recursion over the nested `Ty`; forcing its auto-generated
+equation lemma (`simp [Ty.beq]` / `Ty.beq.eq_1`) is pathologically expensive to
+realize (`whnf` blowup). But reducing `Ty.beq` on a KNOWN constructor pair is one
+cheap step — each equation below holds by `rfl`. Marked `@[simp]` so proofs unfold
+`Ty.beq` through these (cheap) instead of through the def (expensive). -/
+
+@[simp] theorem beq_prim (p q) : Ty.beq (.prim p) (.prim q) = primBeq p q := rfl
+@[simp] theorem beq_tuple (a b) : Ty.beq (.tuple a) (.tuple b) = beqList a b := rfl
+@[simp] theorem beq_anon (a b) : Ty.beq (.anonStruct a) (.anonStruct b) = beqFields a b := rfl
+@[simp] theorem beq_arrayS (e a n m) :
+    Ty.beq (.array e (some n)) (.array a (some m)) = (n == m && Ty.beq e a) := rfl
+@[simp] theorem beq_arrayN (e a) : Ty.beq (.array e none) (.array a none) = Ty.beq e a := rfl
+@[simp] theorem beq_slice (e a) : Ty.beq (.slice e) (.slice a) = Ty.beq e a := rfl
+@[simp] theorem beq_map (ke ve ka va) :
+    Ty.beq (.map ke ve) (.map ka va) = (Ty.beq ke ka && Ty.beq ve va) := rfl
+@[simp] theorem beq_eu (pe ee pa ea) :
+    Ty.beq (.errorUnion pe ee) (.errorUnion pa ea) = (Ty.beq pe pa && beqList ee ea) := rfl
+@[simp] theorem beq_refine (n be ae m ba aa) :
+    Ty.beq (.refinement n be ae) (.refinement m ba aa) = (n == m && Ty.beq be ba && ae == aa) := rfl
+@[simp] theorem beq_function (ne pse rse na psa rsa) :
+    Ty.beq (.function ne pse rse) (.function na psa rsa)
+      = (ne == na && beqList pse psa && beqList rse rsa) := rfl
+@[simp] theorem beq_rdom (n c m d) :
+    Ty.beq (.resourceDomain n c) (.resourceDomain m d) = (n == m && Ty.beq c d) := rfl
+@[simp] theorem beq_rplace (e a) : Ty.beq (.resourcePlace e) (.resourcePlace a) = Ty.beq e a := rfl
+@[simp] theorem beq_struct (n m) : Ty.beq (.struct_ n) (.struct_ m) = (n == m) := rfl
+@[simp] theorem beq_enum (n m) : Ty.beq (.enum_ n) (.enum_ m) = (n == m) := rfl
+@[simp] theorem beq_bitfield (n m) : Ty.beq (.bitfield n) (.bitfield m) = (n == m) := rfl
+@[simp] theorem beq_contract (n m) : Ty.beq (.contract n) (.contract m) = (n == m) := rfl
+@[simp] theorem beq_extproxy (n m) : Ty.beq (.externalProxy n) (.externalProxy m) = (n == m) := rfl
+@[simp] theorem beqList_nil : beqList [] [] = true := rfl
+@[simp] theorem beqList_nil_cons (y ys) : beqList [] (y :: ys) = false := rfl
+@[simp] theorem beqList_cons_nil (x xs) : beqList (x :: xs) [] = false := rfl
+@[simp] theorem beqList_cons (x xs y ys) :
+    beqList (x :: xs) (y :: ys) = (Ty.beq x y && beqList xs ys) := rfl
+@[simp] theorem beqFields_nil : beqFields [] [] = true := rfl
+@[simp] theorem beqFields_cons (x xs y ys) :
+    beqFields (x :: xs) (y :: ys) = (x.1 == y.1 && Ty.beq x.2 y.2 && beqFields xs ys) := rfl
 
 /-- Structural equality of located types — `typeEql` ∧ same region ∧ same
     provenance. Mirrors the compiler's `locatedTypeEql` (`region.zig:18`). -/

@@ -19,7 +19,15 @@ import Ora.Types.RefinementBridge
 import Ora.Types.Decl
 import Ora.Types.Internal
 import Ora.Types.TypeEq
+import Ora.Types.TypeEqLawful
 import Ora.Types.Assignable
+import Ora.Types.AssignableLawful
+import Ora.Types.LocatedLawful
+import Ora.Types.LocatedProjection
+import Ora.Types.AssignableCoherence
+import Ora.Types.ErrorUnionSubtype
+import Ora.Types.RefinementTie
+import Ora.Types.RefinementSubtype
 import Ora.Types.Projection
 import Ora.Spec.Facts
 import Ora.Generated.CompilerSnapshot
@@ -27,3 +35,6 @@ import Ora.Sync
 import Ora.Spec.DeclEnvFacts
 import Ora.Generated.DeclEnvSnapshot
 import Ora.SyncDeclEnv
+import Ora.Spec.TypeRelations
+import Ora.Generated.CompilerTypeRelations
+import Ora.TypeRelationsSync

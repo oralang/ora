@@ -128,6 +128,57 @@ inductive Ty where
   -- those instances will be added manually (or via mathlib) once a comparison /
   -- display need arises. Same open decision as `PrimTy`.
 
+/-! ## Structural induction principle
+
+Because `Ty` recurses *through* `List Ty` (`tuple`, `function`, `errorUnion`) and
+`List (Name × Ty)` (`anonStruct`), it is a NESTED inductive: the auto-generated
+`Ty.rec` exposes those children through three separate companion motives
+(`motive_2 : List Ty → _`, `motive_3 : List (Name × Ty) → _`, `motive_4 : Name ×
+Ty → _`). That is why a bare `induction t` is rejected ("multiple motives") and
+why proofs over `Ty` were forced to hand-supply motives.
+
+`Ty.recAux` discharges that obligation ONCE: it pins the companion motives to the
+element-wise predicate (`∀ t ∈ ts, motive t`) so every downstream proof sees a
+single `motive : Ty → Prop` and gets an ordinary element-wise induction
+hypothesis for each aggregate. Use it via `induction t using Ty.recAux`. -/
+
+/-- Structural induction for `Ty`. Each aggregate constructor hands you an
+    induction hypothesis for *every element* of its child list.
+
+    `motive` is `Prop`-valued: this is a proof principle, not a data recursor —
+    the element-wise IH cases on `List.Mem`, which lives in `Prop`. -/
+@[elab_as_elim]
+def Ty.recAux {motive : Ty → Prop}
+    (prim : ∀ p, motive (.prim p))
+    (tuple : ∀ ts, (∀ t ∈ ts, motive t) → motive (.tuple ts))
+    (anonStruct : ∀ fs, (∀ f ∈ fs, motive f.2) → motive (.anonStruct fs))
+    (array : ∀ e n, motive e → motive (.array e n))
+    (slice : ∀ e, motive e → motive (.slice e))
+    (map : ∀ k v, motive k → motive v → motive (.map k v))
+    (errorUnion : ∀ p es, motive p → (∀ e ∈ es, motive e) → motive (.errorUnion p es))
+    (refinement : ∀ n b as, motive b → motive (.refinement n b as))
+    (struct_ : ∀ n, motive (.struct_ n)) (enum_ : ∀ n, motive (.enum_ n))
+    (bitfield : ∀ n, motive (.bitfield n)) (contract : ∀ n, motive (.contract n))
+    (function : ∀ n ps rs, (∀ t ∈ ps, motive t) → (∀ t ∈ rs, motive t) →
+      motive (.function n ps rs))
+    (resourceDomain : ∀ n c, motive c → motive (.resourceDomain n c))
+    (resourcePlace : ∀ e, motive e → motive (.resourcePlace e))
+    (externalProxy : ∀ n, motive (.externalProxy n))
+    (storageSlot : motive .storageSlot) (storageRange : motive .storageRange)
+    (t : Ty) : motive t :=
+  Ty.rec (motive_1 := motive)
+    (motive_2 := fun ts => ∀ t ∈ ts, motive t)
+    (motive_3 := fun fs => ∀ f ∈ fs, motive f.2)
+    (motive_4 := fun f => motive f.2)
+    prim tuple anonStruct array slice map errorUnion refinement
+    struct_ enum_ bitfield contract function resourceDomain resourcePlace
+    externalProxy storageSlot storageRange
+    (fun _ h => nomatch h)
+    (fun _ _ ih iht t hm => by cases hm with | head => exact ih | tail _ h => exact iht _ h)
+    (fun _ h => nomatch h)
+    (fun _ _ ih iht f hm => by cases hm with | head => exact ih | tail _ h => exact iht _ h)
+    (fun _ _ ih => ih) t
+
 /-! ## Located types — σ ::= τ @ ρ -/
 
 /--

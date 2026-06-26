@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #
-# check-formal-sync — proves the compiler's type-universe facts conform to the
+# check-formal-sync — proves the compiler-emitted formal facts conform to the
 # Lean spec (formal/). Three gates:
 #
-#   1. REGENERATE  the data-only snapshot from the compiler (`src/formal/*`).
-#   2. DATA-ONLY LINT  the snapshot — it must contain ONLY `def … := <literal>`
+#   1. REGENERATE  all data-only snapshots from the compiler (`src/formal/*`):
+#      type universe, curated declaration environment, and type-relation rows.
+#   2. DATA-ONLY LINT  every snapshot — each must contain ONLY `def … := <literal>`
 #      facts (no theorem/axiom/sorry/instance/import/…). This is the trust
 #      boundary: the untrusted compiler emits DATA; the trusted checks live in
-#      formal/Ora/Sync.lean and do all the proving.
-#   3. DRIFT + PROOF: fail if the committed snapshot is stale (git diff), then
-#      `lake build` — the kernel `decide` checks that compiler facts == spec.
+#      formal/Ora/*.lean and do all the proving.
+#   3. DRIFT + PROOF: fail if any committed snapshot is stale (git diff), then
+#      `lake build` — the kernel checks that compiler facts == spec.
 #
 # Local: run it, and if step 3 reports drift, review + commit the new snapshot.
 # CI: a non-empty git diff means "compiler changed but snapshot not regenerated".
@@ -21,59 +22,81 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$HOME/.elan/bin:$PATH"
 
-EMITTER="src/formal/emit_compiler_snapshot.zig"
-SNAPSHOT="formal/Ora/Generated/CompilerSnapshot.lean"
+run_emitter() {
+  local label="$1"
+  local emitter="$2"
+  local snapshot="$3"
 
-echo "==> [1/3] regenerating $SNAPSHOT from the compiler"
-zig run \
-  --cache-dir "$ROOT/.zig-cache/formal-sync" \
-  --global-cache-dir "$ROOT/.zig-cache/formal-sync-global" \
-  --dep ora_formal \
-  -Mroot="$EMITTER" \
-  --dep ora_types \
-  --dep ora_refinements \
-  -Mora_formal=src/formal.zig \
-  --dep ora_refinements \
-  -Mora_types=src/types/root.zig \
-  -Mora_refinements=src/refinements/root.zig \
-  > "$SNAPSHOT"
+  echo "  - $label -> $snapshot"
+  zig run \
+    --cache-dir "$ROOT/.zig-cache/formal-sync" \
+    --global-cache-dir "$ROOT/.zig-cache/formal-sync-global" \
+    --dep ora_formal \
+    -Mroot="$emitter" \
+    --dep ora_types \
+    --dep ora_refinements \
+    -Mora_formal=src/formal.zig \
+    --dep ora_refinements \
+    -Mora_types=src/types/root.zig \
+    -Mora_refinements=src/refinements/root.zig \
+    > "$snapshot"
+}
+
+lint_snapshot() {
+  local snapshot="$1"
+
+  # Strip the /- … -/ header comment, then reject any non-data construct.
+  violations="$(sed '\#^/-#,\#^-/#d' "$snapshot" \
+    | grep -nE '\b(theorem|lemma|example|axiom|sorry|instance|macro|syntax|deriving|native_decide)\b|^[[:space:]]*import|@\[' \
+    || true)"
+  if [ -n "$violations" ]; then
+    echo "  DATA-ONLY LINT FAILED in $snapshot — generated snapshots must contain only data:" >&2
+    echo "$violations" >&2
+    exit 1
+  fi
+}
+
+check_drift() {
+  local snapshot="$1"
+
+  if ! git diff --quiet -- "$snapshot"; then
+    echo "  SNAPSHOT DRIFT — $snapshot is stale vs the compiler:" >&2
+    git --no-pager diff -- "$snapshot" >&2
+    echo "  (review the diff; if intended, commit the regenerated snapshot)" >&2
+    exit 1
+  fi
+}
+
+SNAPSHOTS=(
+  "formal/Ora/Generated/CompilerSnapshot.lean"
+  "formal/Ora/Generated/DeclEnvSnapshot.lean"
+  "formal/Ora/Generated/CompilerTypeRelations.lean"
+)
+
+echo "==> [1/3] regenerating formal snapshots from the compiler"
+run_emitter "compiler universe" "src/formal/emit_compiler_snapshot.zig" "${SNAPSHOTS[0]}"
+run_emitter "declaration environment" "src/formal/emit_declenv_snapshot.zig" "${SNAPSHOTS[1]}"
+run_emitter "type relations" "src/formal/emit_type_relations_snapshot.zig" "${SNAPSHOTS[2]}"
 
 echo "==> [2/3] data-only lint"
-# Strip the /- … -/ header comment, then reject any non-data construct.
-violations="$(sed '\#^/-#,\#^-/#d' "$SNAPSHOT" \
-  | grep -nE '\b(theorem|lemma|example|axiom|sorry|instance|macro|syntax|deriving|native_decide)\b|^[[:space:]]*import|@\[' \
-  || true)"
-if [ -n "$violations" ]; then
-  echo "  DATA-ONLY LINT FAILED — the snapshot must contain only data:" >&2
-  echo "$violations" >&2
-  exit 1
-fi
+for snapshot in "${SNAPSHOTS[@]}"; do
+  lint_snapshot "$snapshot"
+done
 echo "  ok (data only)"
 
 echo "==> [3/3] drift check + lake build"
-if ! git diff --quiet -- "$SNAPSHOT"; then
-  echo "  SNAPSHOT DRIFT — the committed snapshot is stale vs the compiler:" >&2
-  git --no-pager diff -- "$SNAPSHOT" >&2
-  echo "  (review the diff; if intended, commit the regenerated snapshot)" >&2
-  exit 1
-fi
+for snapshot in "${SNAPSHOTS[@]}"; do
+  check_drift "$snapshot"
+done
 ( cd formal && lake build )
 
-# Lawfulness tier (opt-in). `Ora/Types/TypeEqLawful.lean` is OFF the default build
-# (its proofs unfold the mutual `Ty.beq` and are expensive, ~40s), so it can rot
-# silently. Build it in CI or on demand so changes to `Ty.beq` can't break it
-# unnoticed. Local runs stay fast; set CHECK_FORMAL_LAWFUL=1 (or run in CI) to opt in.
-if [ "${CI:-}" = "true" ] || [ "${CHECK_FORMAL_LAWFUL:-}" = "1" ]; then
-  echo "==> [lawful] lake build Ora.Types.TypeEqLawful (expensive; opt-in)"
-  ( cd formal && lake build Ora.Types.TypeEqLawful )
-fi
-
-# Declaration-environment sync. Cheap, but its own gate (separate snapshot +
-# emitter). Run it in CI (or CHECK_FORMAL_DECLENV=1) so the nominal-kind snapshot
-# is regenerated and drift-checked alongside the type-universe gate.
-if [ "${CI:-}" = "true" ] || [ "${CHECK_FORMAL_DECLENV:-}" = "1" ]; then
-  echo "==> [declenv] scripts/check-formal-declenv-sync.sh"
-  "$ROOT/scripts/check-formal-declenv-sync.sh"
-fi
+# NOTE: the lawfulness tiers — `Ora/Types/TypeEqLawful.lean` (`Ty.beq`: reflexivity,
+# `beq ↔ =`, `DecidableEq Ty`) and `Ora/Types/AssignableLawful.lean` (`Ty.assignable`
+# is a preorder: reflexive + transitive) — used to be isolated opt-ins here because
+# their proofs cost tens of seconds. They were restructured to induct via `Ty.recAux`
+# and unfold `Ty.beq`/`Ty.assignable` through cheap per-constructor `@[simp]`
+# `rfl`-lemmas (no `maxHeartbeats` bump), so each now builds in ~1.5s and both are
+# imported by the `Ora` root — the `lake build` above already compiles and
+# drift-checks them. No special-casing.
 
 echo "==> check-formal-sync OK"

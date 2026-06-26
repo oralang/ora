@@ -99,6 +99,62 @@ def assignableFields : List (Name × Ty) → List (Name × Ty) → Bool
   | _, _ => false
 end
 
+/-! ## Per-constructor unfolding lemmas
+
+As with `Ty.beq` (see `TypeEq.lean`), `Ty.assignable` is a `mutual` recursion over
+the nested `Ty`; forcing its auto-generated equation lemma (`simp [Ty.assignable]`)
+is the expensive `whnf` path. Reducing on a KNOWN constructor pair is one cheap
+`rfl` step — each equation below holds by `rfl`. Marked `@[simp]` so the lawfulness
+proofs (`AssignableLawful.lean`) unfold through these instead of through the def. -/
+
+@[simp] theorem asg_int (e a) :
+    Ty.assignable (.prim (.int e)) (.prim (.int a)) = e.assignable a := rfl
+@[simp] theorem asg_bool : Ty.assignable (.prim .bool) (.prim .bool) = true := rfl
+@[simp] theorem asg_addr : Ty.assignable (.prim .address) (.prim .address) = true := rfl
+@[simp] theorem asg_str : Ty.assignable (.prim .string) (.prim .string) = true := rfl
+@[simp] theorem asg_bytes : Ty.assignable (.prim .bytes) (.prim .bytes) = true := rfl
+@[simp] theorem asg_void : Ty.assignable (.prim .void) (.prim .void) = true := rfl
+@[simp] theorem asg_fbytes (m n) :
+    Ty.assignable (.prim (.fixedBytes m)) (.prim (.fixedBytes n)) = (m.n == n.n) := rfl
+@[simp] theorem asg_tuple (a b) : Ty.assignable (.tuple a) (.tuple b) = assignableList a b := rfl
+@[simp] theorem asg_anon (a b) :
+    Ty.assignable (.anonStruct a) (.anonStruct b) = assignableFields a b := rfl
+@[simp] theorem asg_arrayS (e a n m) :
+    Ty.assignable (.array e (some n)) (.array a (some m)) = (n == m && Ty.assignable e a) := rfl
+@[simp] theorem asg_arrayN (e a) :
+    Ty.assignable (.array e none) (.array a none) = Ty.assignable e a := rfl
+@[simp] theorem asg_slice (e a) : Ty.assignable (.slice e) (.slice a) = Ty.assignable e a := rfl
+@[simp] theorem asg_map (ke ve ka va) :
+    Ty.assignable (.map ke ve) (.map ka va) = (Ty.assignable ke ka && Ty.assignable ve va) := rfl
+@[simp] theorem asg_eu (pe ee pa ea) :
+    Ty.assignable (.errorUnion pe ee) (.errorUnion pa ea)
+      = (Ty.assignable pe pa && assignableList ee ea) := rfl
+@[simp] theorem asg_refine (n be ae m ba aa) :
+    Ty.assignable (.refinement n be ae) (.refinement m ba aa)
+      = (n == m && Ty.assignable be ba) := rfl
+@[simp] theorem asg_struct (n m) : Ty.assignable (.struct_ n) (.struct_ m) = (n == m) := rfl
+@[simp] theorem asg_enum (n m) : Ty.assignable (.enum_ n) (.enum_ m) = (n == m) := rfl
+@[simp] theorem asg_bitfield (n m) : Ty.assignable (.bitfield n) (.bitfield m) = (n == m) := rfl
+@[simp] theorem asg_contract (n m) : Ty.assignable (.contract n) (.contract m) = (n == m) := rfl
+@[simp] theorem asg_extproxy (n m) :
+    Ty.assignable (.externalProxy n) (.externalProxy m) = (n == m) := rfl
+@[simp] theorem asg_function (ne pse rse na psa rsa) :
+    Ty.assignable (.function ne pse rse) (.function na psa rsa)
+      = (ne == na && beqList pse psa && beqList rse rsa) := rfl
+@[simp] theorem asg_rdom (n c m d) :
+    Ty.assignable (.resourceDomain n c) (.resourceDomain m d) = (n == m && Ty.beq c d) := rfl
+@[simp] theorem asg_rplace (e a) :
+    Ty.assignable (.resourcePlace e) (.resourcePlace a) = Ty.beq e a := rfl
+@[simp] theorem asgList_nil : assignableList [] [] = true := rfl
+@[simp] theorem asgList_nil_cons (y ys) : assignableList [] (y :: ys) = false := rfl
+@[simp] theorem asgList_cons_nil (x xs) : assignableList (x :: xs) [] = false := rfl
+@[simp] theorem asgList_cons (x xs y ys) :
+    assignableList (x :: xs) (y :: ys) = (Ty.assignable x y && assignableList xs ys) := rfl
+@[simp] theorem asgFields_nil : assignableFields [] [] = true := rfl
+@[simp] theorem asgFields_cons (x xs y ys) :
+    assignableFields (x :: xs) (y :: ys)
+      = (x.1 == y.1 && Ty.assignable x.2 y.2 && assignableFields xs ys) := rfl
+
 /-! ## Internal assignability (adds the `never` ⊥ rules) -/
 
 /-- `InternalTy.assignable expected actual` — extends `Ty.assignable` with the
