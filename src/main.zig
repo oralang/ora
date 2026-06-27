@@ -55,6 +55,7 @@ const MlirOptions = struct {
     mlir_print_ir_pass: ?[]const u8 = null,
     mlir_crash_reproducer: ?[]const u8 = null,
     mlir_print_op_on_diagnostic: bool = false,
+    mlir_run_sir_framework_canonicalizer: bool = false,
     cpp_lowering_stub: bool = false,
     persist_ora_mlir: bool = false,
     persist_sir_mlir: bool = false,
@@ -179,6 +180,59 @@ const Subcommand = enum {
     Debug,
     Fmt,
 };
+
+fn hasMlirPipelineDebugOptions(options: cli_args.CliOptions) bool {
+    return options.mlir_pass_pipeline != null or
+        options.mlir_verify_each_pass or
+        options.mlir_pass_timing or
+        options.mlir_print_ir != null or
+        options.mlir_print_ir_pass != null or
+        options.mlir_crash_reproducer != null or
+        options.mlir_print_op_on_diagnostic;
+}
+
+fn mlirPassStatisticsTotalWork(stats: @import("mlir_c_api").c.OraMlirPassStatisticsC) u64 {
+    return stats.ora_functions_canonicalized +
+        stats.ora_functions_cse_processed +
+        stats.ora_storage_reads_reused +
+        stats.ora_calls_inlined +
+        stats.ora_source_inline_failures +
+        stats.sir_constants_deduplicated +
+        stats.sir_unused_allocas_removed +
+        stats.sir_unused_loads_removed +
+        stats.sir_unused_pure_ops_removed +
+        stats.sir_framework_functions_processed +
+        stats.ora_symbols_dced;
+}
+
+fn recordMlirPassStatistics(metrics: *Metrics, stats: @import("mlir_c_api").c.OraMlirPassStatisticsC) void {
+    metrics.addCounter("mlir.func-canon", stats.ora_functions_canonicalized);
+    metrics.addCounter("mlir.func-cse", stats.ora_functions_cse_processed);
+    metrics.addCounter("mlir.sload-cse", stats.ora_storage_reads_reused);
+    metrics.addCounter("mlir.inline", stats.ora_calls_inlined);
+    metrics.addCounter("mlir.inline-fail", stats.ora_source_inline_failures);
+    metrics.addCounter("mlir.sir-const-dedup", stats.sir_constants_deduplicated);
+    metrics.addCounter("mlir.sir-rm-alloca", stats.sir_unused_allocas_removed);
+    metrics.addCounter("mlir.sir-rm-load", stats.sir_unused_loads_removed);
+    metrics.addCounter("mlir.sir-rm-pure", stats.sir_unused_pure_ops_removed);
+    metrics.addCounter("mlir.sir-fw-funcs", stats.sir_framework_functions_processed);
+    metrics.addCounter("mlir.symbol-dce", stats.ora_symbols_dced);
+}
+
+fn setMlirModuleBoolAttr(ctx: @import("mlir_c_api").c.MlirContext, module: @import("mlir_c_api").c.MlirModule, name: []const u8) void {
+    const c = @import("mlir_c_api").c;
+    const attr = c.oraBoolAttrCreate(ctx, true);
+    c.oraOperationSetAttributeByName(
+        c.oraModuleGetOperation(module),
+        c.oraStringRefCreate(name.ptr, name.len),
+        attr,
+    );
+}
+
+fn enableSirFrameworkCanonicalizerIfRequested(ctx: @import("mlir_c_api").c.MlirContext, module: @import("mlir_c_api").c.MlirModule, options: MlirOptions) void {
+    if (!options.mlir_run_sir_framework_canonicalizer) return;
+    setMlirModuleBoolAttr(ctx, module, "ora.phase0.run_sir_framework_canonicalizer");
+}
 
 const DebugCliOptions = struct {
     filtered_args: std.ArrayList([]const u8),
@@ -624,6 +678,7 @@ pub fn main(init: std.process.Init) !void {
     const mlir_print_ir_pass: ?[]const u8 = parsed.mlir_print_ir_pass;
     const mlir_crash_reproducer: ?[]const u8 = parsed.mlir_crash_reproducer;
     const mlir_print_op_on_diagnostic: bool = parsed.mlir_print_op_on_diagnostic;
+    const mlir_run_sir_framework_canonicalizer: bool = parsed.mlir_run_sir_framework_canonicalizer;
     const cpp_lowering_stub: bool = parsed.cpp_lowering_stub;
     var debug_enabled: bool = parsed.debug;
     const debug_info: bool = parsed.debug_info;
@@ -725,13 +780,9 @@ pub fn main(init: std.process.Init) !void {
         exitCli(2);
     }
 
-    if ((mlir_verify_each_pass or mlir_pass_timing) and mlir_pass_pipeline == null) {
-        std.debug.print("error: MLIR debug options verify-each and timing require --mlir-pass-pipeline.\n", .{});
-        exitCli(2);
-    }
-
-    if (mlir_print_ir_pass != null and mlir_print_ir == null) {
-        std.debug.print("error: MLIR debug option print-ir-pass requires print-ir:<mode>.\n", .{});
+    if (hasMlirPipelineDebugOptions(parsed)) {
+        std.debug.print("error: MLIR pass/debug options other than statistics are reserved until Ora's built-in MLIR debug plumbing is wired.\n", .{});
+        std.debug.print("hint: use --mlir-debug=statistics for supported MLIR pass statistics today.\n", .{});
         exitCli(2);
     }
 
@@ -775,6 +826,7 @@ pub fn main(init: std.process.Init) !void {
         .mlir_print_ir_pass = mlir_print_ir_pass,
         .mlir_crash_reproducer = mlir_crash_reproducer,
         .mlir_print_op_on_diagnostic = mlir_print_op_on_diagnostic,
+        .mlir_run_sir_framework_canonicalizer = mlir_run_sir_framework_canonicalizer,
         .cpp_lowering_stub = cpp_lowering_stub,
         .persist_ora_mlir = false,
         .persist_sir_mlir = false,
@@ -2377,8 +2429,9 @@ fn printUsage(io: std.Io) !void {
     try stdout.print("  --no-validate-mlir     - Disable automatic MLIR validation (not recommended)\n", .{});
     try stdout.print("  --no-canonicalize      - Skip Ora MLIR canonicalization pass\n", .{});
     try stdout.print("  --cpp-lowering-stub    - Use experimental C++ lowering stub (contract+func)\n", .{});
-    try stdout.print("  --mlir-pass-pipeline <pipeline> - Run custom MLIR pass pipeline on Ora MLIR\n", .{});
-    try stdout.print("  --mlir-debug=<list>    - Comma list: verify-each, timing, statistics, print-ir:<mode>, print-ir-pass:<name>, crash-reproducer:<path>, print-op-on-diagnostic\n", .{});
+    try stdout.print("  --mlir-pass-pipeline <pipeline> - Reserved until MLIR pass debug plumbing is wired\n", .{});
+    try stdout.print("  --mlir-debug=<list>    - MLIR diagnostics: statistics (other pass debug options reserved)\n", .{});
+    try stdout.print("  --mlir-run-sir-framework-canonicalizer - Compatibility flag; SIR framework canonicalizer/DCE now runs by default\n", .{});
     try stdout.print("\nAnalysis Options:\n", .{});
     try stdout.print("  --verify               - Run Z3 verification on MLIR annotations (default)\n", .{});
     try stdout.print("  --verify=basic|full    - Verification mode (default: full)\n", .{});
@@ -4480,11 +4533,17 @@ fn runCompilerMlirEmit(
         );
     }
     if (mlir_options.emit_mlir_sir) {
-        if (!c.oraConvertToSIR(lowering.context, lowering.module.raw_module, mlir_options.debug_info)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
+        enableSirFrameworkCanonicalizerIfRequested(lowering.context, lowering.module.raw_module, mlir_options);
+        m.begin("ora-to-sir");
+        if (!c.oraConvertToSIRWithStatisticsOut(lowering.context, lowering.module.raw_module, mlir_options.debug_info, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("Compiler error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             return error.OraToSirConversionFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
         try emitMlirModuleText(
             allocator,
             stdout,
@@ -4822,12 +4881,16 @@ fn runMlirEmitAdvanced(
     }
 
     if (mlir_options.canonicalize and (mlir_options.emit_mlir or needs_sir_conversion)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
         m.begin("canonicalization");
-        if (!c.oraCanonicalizeOraMLIR(ctx, final_module)) {
+        if (!c.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, final_module, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("❌ Ora MLIR canonicalization failed\n", .{});
             try stdout.flush();
             return error.OraMlirCanonicalizationFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
     }
 
     if (mlir_options.emit_mlir or mlir_options.persist_ora_mlir) {
@@ -4905,11 +4968,17 @@ fn runMlirEmitAdvanced(
     }
 
     if (needs_sir_conversion) {
-        if (!c.oraConvertToSIR(ctx, final_module, mlir_options.debug_info)) {
+        var mlir_pass_stats: c.OraMlirPassStatisticsC = std.mem.zeroes(c.OraMlirPassStatisticsC);
+        enableSirFrameworkCanonicalizerIfRequested(ctx, final_module, mlir_options);
+        m.begin("ora-to-sir");
+        if (!c.oraConvertToSIRWithStatisticsOut(ctx, final_module, mlir_options.debug_info, mlir_options.mlir_pass_statistics, &mlir_pass_stats)) {
+            m.cancel();
             try stdout.print("Error: Ora to SIR conversion failed\n", .{});
             try stdout.flush();
             return error.OraToSirConversionFailed;
         }
+        m.endWith(mlirPassStatisticsTotalWork(mlir_pass_stats));
+        recordMlirPassStatistics(m, mlir_pass_stats);
     }
 
     const explicit_sir_mlir_output = mlir_options.emit_mlir_sir and !mlir_options.emit_sir_text and !mlir_options.emit_bytecode;

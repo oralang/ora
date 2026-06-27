@@ -34,19 +34,17 @@
 // CHECK-NEXT:     %4 = sir.and %3 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:16)))
 // CHECK-NEXT:     %5 = sir.bitcast %4 : !sir.u256 : i1 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:16)))
 // CHECK-NEXT:     %6 = sir.bitcast %5 : i1 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
-// CHECK-NEXT:     %7 = sir.iszero %6 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
-// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2(%0, %2 : !sir.ptr<1>, i256), ^bb3(%0, %2 : !sir.ptr<1>, i256) loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
-// CHECK-NEXT:   ^bb2(%9: !sir.ptr<1> loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9))), %10: !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))):  // pred: ^bb1
-// CHECK-NEXT:     %11 = sir.mul %10 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
-// CHECK-NEXT:     %12 = sir.add %c0 : !sir.u256, %11 : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
-// CHECK-NEXT:     %offset0 = sir.mul %12 : !sir.u256, %elem_size : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
-// CHECK-NEXT:     %elem0_ptr = sir.addptr %9 : !sir.ptr<1>, %offset0 : !sir.u256 : !sir.ptr<1> loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
-// CHECK-NEXT:     sir.store %elem0_ptr : !sir.ptr<1>, %10 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13)))
-// CHECK-NEXT:     %13 = sir.add %10 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":42:13)))
-// CHECK-NEXT:     %14 = sir.bitcast %13 : !sir.u256 : i256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":42:13)))
-// CHECK-NEXT:     sir.br ^bb1(%9, %14 : !sir.ptr<1>, i256) loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
-// CHECK-NEXT:   ^bb3(%15: !sir.ptr<1> loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9))), %16: !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))):  // pred: ^bb1
+// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb2(%0, %2 : !sir.ptr<1>, i256), ^bb3(%0, %2 : !sir.ptr<1>, i256) loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
+// CHECK-NEXT:   ^bb2(%7: !sir.ptr<1> loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9))), %8: !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))):  // pred: ^bb1
+// CHECK-NEXT:     %9 = sir.mul %8 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
+// CHECK-NEXT:     %10 = sir.add %c0 : !sir.u256, %9 : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
+// CHECK-NEXT:     %offset0 = sir.mul %10 : !sir.u256, %elem_size : !sir.u256 : !sir.u256 loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
+// CHECK-NEXT:     %elem0_ptr = sir.addptr %7 : !sir.ptr<1>, %offset0 : !sir.u256 : !sir.ptr<1> loc("elem0"("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13))))
+// CHECK-NEXT:     sir.store %elem0_ptr : !sir.ptr<1>, %8 : !sir.u256 loc("ora.stmt.13"("ora.origin_stmt.13"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":41:13)))
+// CHECK-NEXT:     %11 = sir.add %8 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":42:13)))
+// CHECK-NEXT:     %12 = sir.bitcast %11 : !sir.u256 : i256 loc("ora.stmt.14"("ora.origin_stmt.14"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":42:13)))
+// CHECK-NEXT:     sir.br ^bb1(%7, %12 : !sir.ptr<1>, i256) loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))
+// CHECK-NEXT:   ^bb3(%13: !sir.ptr<1> loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9))), %14: !sir.u256 loc("ora.stmt.15"("ora.origin_stmt.15"("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":40:9)))):  // pred: ^bb1
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":37:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/regions/effects/memory_write_effect.ora":37:5)
 // CHECK-NEXT:   func.func @testMemoryCompoundAssign() attributes {ora.selector = "0xaf696650", ora.visibility = "pub"} {

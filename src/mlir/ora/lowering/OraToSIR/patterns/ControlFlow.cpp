@@ -20,6 +20,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Casting.h"
@@ -4709,6 +4710,50 @@ static LogicalResult emitSwitchDispatch(
     return success();
 }
 
+static LogicalResult emitStructuredExactSwitchDispatch(
+    ConversionPatternRewriter &rewriter,
+    Location loc,
+    const SwitchCasePlan &plan,
+    Block *parentBlock,
+    Value selector,
+    ArrayRef<Block *> caseBlocks,
+    Block *defaultBlock)
+{
+    if (plan.caseIdxs.empty())
+        return failure();
+
+    SmallVector<int64_t, 8> caseValues;
+    SmallVector<Block *, 8> caseDests;
+    DenseSet<int64_t> seenValues;
+    for (int64_t caseIdx : plan.caseIdxs)
+    {
+        int64_t kind = 0;
+        if (plan.caseKinds && caseIdx < static_cast<int64_t>(plan.caseKinds.size()))
+            kind = plan.caseKinds[caseIdx];
+        if (kind != 0)
+            return failure();
+        if (!plan.caseValues || caseIdx >= static_cast<int64_t>(plan.caseValues.size()))
+            return failure();
+        if (!caseBlocks[caseIdx])
+            return failure();
+
+        const int64_t value = plan.caseValues[caseIdx];
+        if (!seenValues.insert(value).second)
+            return failure();
+        caseValues.push_back(value);
+        caseDests.push_back(caseBlocks[caseIdx]);
+    }
+
+    rewriter.setInsertionPointToEnd(parentBlock);
+    rewriter.create<sir::SwitchOp>(
+        loc,
+        selector,
+        rewriter.getI64ArrayAttr(caseValues),
+        defaultBlock,
+        caseDests);
+    return success();
+}
+
 static LogicalResult appendSwitchConvertedOperands(
     ConversionPatternRewriter &rewriter,
     Location loc,
@@ -4896,9 +4941,13 @@ static LogicalResult lowerSwitchWithoutResults(
         rewriter.setInsertionPointToEnd(parentBlock);
     }
 
-    if (failed(emitSwitchDispatch(
-            rewriter, loc, plan, parentRegion, afterBlock, parentBlock, selector, caseBlocks, defaultBlock)))
-        return failure();
+    if (failed(emitStructuredExactSwitchDispatch(
+            rewriter, loc, plan, parentBlock, selector, caseBlocks, defaultBlock)))
+    {
+        if (failed(emitSwitchDispatch(
+                rewriter, loc, plan, parentRegion, afterBlock, parentBlock, selector, caseBlocks, defaultBlock)))
+            return failure();
+    }
 
     rewriter.eraseOp(op);
     return success();

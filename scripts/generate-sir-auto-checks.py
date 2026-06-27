@@ -33,7 +33,11 @@ def extract_sir_output(stdout: str) -> str:
 
 
 def filecheck_exact_line(line: str) -> str:
-    return line.replace(REPO.as_posix(), "{{.*}}")
+    line = line.replace(REPO.as_posix(), "{{.*}}")
+    # SIR switch case lists can contain literal double brackets such as
+    # [[0, 1]]. FileCheck treats that shape as a variable capture/use, so escape
+    # only the double-bracket delimiter and keep other arrays readable.
+    return line.replace("[[", "{{\\[\\[}}").replace("]]", "{{\\]\\]}}")
 
 
 def build_full_snapshot_check(rel: str, sir: str) -> str:

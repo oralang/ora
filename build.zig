@@ -659,6 +659,42 @@ pub fn build(b: *std.Build) void {
     const metrics_snapshot_install = b.addInstallArtifact(metrics_snapshot_exe, .{});
     const metrics_snapshot_step = b.step("metrics-snapshot", "Build the gas + bytecode-size metrics harness");
     metrics_snapshot_step.dependOn(&metrics_snapshot_install.step);
+    const check_conformance_bytecode_size_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/metrics-check.py",
+        "--check-size",
+        "--report-dir",
+        "zig-out/metrics/conformance-size",
+    });
+    check_conformance_bytecode_size_cmd.step.dependOn(b.getInstallStep());
+    check_conformance_bytecode_size_cmd.step.dependOn(&metrics_snapshot_install.step);
+    const check_conformance_bytecode_size_step = b.step("check-conformance-bytecode-size", "Check conformance bytecode-size metrics against the deterministic baseline");
+    check_conformance_bytecode_size_step.dependOn(&check_conformance_bytecode_size_cmd.step);
+    const check_metrics_report_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/check-metrics-report.sh",
+    });
+    const check_metrics_report_step = b.step("check-metrics-report", "Check metrics report and size-gate script behavior");
+    check_metrics_report_step.dependOn(&check_metrics_report_cmd.step);
+    test_step.dependOn(&check_metrics_report_cmd.step);
+    const sir_framework_spike_cmd = b.addSystemCommand(&[_][]const u8{
+        "sh",
+        "scripts/run-sir-framework-canonicalizer-spike.sh",
+    });
+    sir_framework_spike_cmd.step.dependOn(b.getInstallStep());
+    const sir_framework_spike_step = b.step("sir-framework-canonicalizer-spike", "Run the default SIR framework canonicalizer over the Ora example corpus");
+    sir_framework_spike_step.dependOn(&sir_framework_spike_cmd.step);
+    const sir_framework_metrics_cmd = b.addSystemCommand(&[_][]const u8{
+        "python3",
+        "scripts/metrics-check.py",
+        "--diff",
+        "--report-dir",
+        "zig-out/metrics/sir-framework-canonicalizer-size",
+    });
+    sir_framework_metrics_cmd.step.dependOn(b.getInstallStep());
+    sir_framework_metrics_cmd.step.dependOn(&metrics_snapshot_install.step);
+    const sir_framework_metrics_step = b.step("sir-framework-canonicalizer-metrics", "Write size/gas report for the default SIR framework canonicalizer pipeline");
+    sir_framework_metrics_step.dependOn(&sir_framework_metrics_cmd.step);
 
     // Compiler frontend metrics harness — prints deterministic compile-time
     // allocation/work-count metrics for package-mode Ora examples.

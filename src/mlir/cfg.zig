@@ -159,7 +159,7 @@ pub fn generateFunctionCFGs(
     return graphs.toOwnedSlice(allocator);
 }
 
-/// Generate SIR CFG snapshots before and after the opt-in MLIR framework
+/// Generate SIR CFG snapshots before and after the default MLIR framework
 /// canonicalizer. This is a viewer/debugging helper: it lowers cloned modules
 /// and never mutates the input module.
 ///
@@ -177,10 +177,10 @@ pub fn generateSirOptimizationDiff(
     const after_module = try cloneModuleFromText(ctx, module);
     defer c.oraModuleDestroy(after_module);
 
+    setModuleBoolAttr(ctx, before_module, "ora.phase0.skip_sir_framework_canonicalizer");
     if (!c.oraConvertToSIR(ctx, before_module, debug_info))
         return error.CFGGenerationFailed;
 
-    setModuleBoolAttr(ctx, after_module, "ora.phase0.run_sir_framework_canonicalizer");
     if (!c.oraConvertToSIR(ctx, after_module, debug_info))
         return error.CFGGenerationFailed;
 

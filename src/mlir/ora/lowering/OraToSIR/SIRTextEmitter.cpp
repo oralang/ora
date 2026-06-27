@@ -388,13 +388,35 @@ namespace
         }
     }
 
-    void emitOperandList(raw_ostream &os, NameTable &names, OperandRange operands)
+    std::string operandTextForUse(NameTable &names, Value v, Operation &useOp)
+    {
+        Value peeled = v;
+        while (auto *def = peeled.getDefiningOp())
+        {
+            auto bitcast = dyn_cast<sir::BitcastOp>(def);
+            if (!bitcast || bitcast->getNumOperands() != 1)
+                break;
+            peeled = bitcast.getOperand();
+        }
+
+        if (auto cst = peeled.getDefiningOp<sir::ConstOp>())
+        {
+            if (auto intAttr = dyn_cast<IntegerAttr>(cst.getValueAttr()))
+            {
+                if (cst->getBlock() != useOp.getBlock() || !cst->isBeforeInBlock(&useOp))
+                    return formatInt(intAttr.getValue());
+            }
+        }
+        return names.nameFor(v);
+    }
+
+    void emitOperandList(raw_ostream &os, NameTable &names, OperandRange operands, Operation &useOp)
     {
         for (size_t i = 0; i < operands.size(); ++i)
         {
             if (i)
                 os << " ";
-            os << names.nameFor(operands[i]);
+            os << operandTextForUse(names, operands[i], useOp);
         }
     }
 
@@ -409,7 +431,7 @@ namespace
         }
         if (auto br = dyn_cast<sir::CondBrOp>(term))
         {
-            os << "=> " << names.nameFor(br.getCond()) << " ? @"
+            os << "=> " << operandTextForUse(names, br.getCond(), term) << " ? @"
                << names.blockNames[br.getTrueDest()] << " : @"
                << names.blockNames[br.getFalseDest()];
             return;
@@ -417,7 +439,7 @@ namespace
         if (auto sw = dyn_cast<sir::SwitchOp>(term))
         {
             const bool isSelectorSwitch = sw->hasAttr("sir.selector_switch");
-            os << "switch " << names.nameFor(sw.getSelector()) << " {\n";
+            os << "switch " << operandTextForUse(names, sw.getSelector(), term) << " {\n";
             auto caseVals = sw.getCaseValues();
             auto caseDests = sw.getCaseDests();
             for (size_t i = 0; i < caseVals.size(); ++i)
@@ -439,7 +461,8 @@ namespace
         }
         if (auto ret = dyn_cast<sir::ReturnOp>(term))
         {
-            os << "return " << names.nameFor(ret.getPtr()) << " " << names.nameFor(ret.getLen());
+            os << "return " << operandTextForUse(names, ret.getPtr(), term) << " "
+               << operandTextForUse(names, ret.getLen(), term);
             return;
         }
         if (isa<sir::StopOp>(term))
@@ -449,7 +472,8 @@ namespace
         }
         if (auto rev = dyn_cast<sir::RevertOp>(term))
         {
-            os << "revert " << names.nameFor(rev.getPtr()) << " " << names.nameFor(rev.getLen());
+            os << "revert " << operandTextForUse(names, rev.getPtr(), term) << " "
+               << operandTextForUse(names, rev.getLen(), term);
             return;
         }
         if (isa<sir::InvalidOp>(term))
@@ -459,7 +483,7 @@ namespace
         }
         if (auto sd = dyn_cast<sir::SelfDestructOp>(term))
         {
-            os << "selfdestruct " << names.nameFor(sd.getBeneficiary());
+            os << "selfdestruct " << operandTextForUse(names, sd.getBeneficiary(), term);
             return;
         }
         if (isa<sir::IRetOp>(term))
@@ -527,9 +551,9 @@ namespace
         {
             const char *ind = "        ";
             std::string result = names.nameFor(sel.getRes());
-            std::string condN = names.nameFor(sel.getCond());
-            std::string trueN = names.nameFor(sel.getTrueValue());
-            std::string falseN = names.nameFor(sel.getFalseValue());
+            std::string condN = operandTextForUse(names, sel.getCond(), op);
+            std::string trueN = operandTextForUse(names, sel.getTrueValue(), op);
+            std::string falseN = operandTextForUse(names, sel.getFalseValue(), op);
             std::string mask = names.allocateName("sel_mask");
             std::string t = names.allocateName("sel_t");
             std::string inv = names.allocateName("sel_inv");
@@ -612,12 +636,13 @@ namespace
         }
         if (auto load8 = dyn_cast<sir::Load8Op>(op))
         {
-            os << " " << names.nameFor(load8.getPtr());
+            os << " " << operandTextForUse(names, load8.getPtr(), op);
             return;
         }
         if (auto store8 = dyn_cast<sir::Store8Op>(op))
         {
-            os << " " << names.nameFor(store8.getPtr()) << " " << names.nameFor(store8.getVal());
+            os << " " << operandTextForUse(names, store8.getPtr(), op) << " "
+               << operandTextForUse(names, store8.getVal(), op);
             return;
         }
         // NOTE: ErrorDeclOp is handled by early-return above (line ~310).
@@ -627,7 +652,7 @@ namespace
             if (!ic.getArgs().empty())
             {
                 os << " ";
-                emitValueList(os, names, ic.getArgs());
+                emitOperandList(os, names, ic.getArgs(), op);
             }
             return;
         }
@@ -658,7 +683,7 @@ namespace
         if (!op.getOperands().empty())
         {
             os << " ";
-            emitOperandList(os, names, op.getOperands());
+            emitOperandList(os, names, op.getOperands(), op);
         }
     }
 

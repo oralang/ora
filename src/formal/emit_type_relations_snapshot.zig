@@ -141,6 +141,29 @@ pub fn main(init: std.process.Init) !void {
     const min_hundred_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "100" } } };
     const min_one: Type = .{ .refinement = .{ .name = "MinValue", .base_type = &u256_ty, .args = min_one_args[0..] } };
     const min_hundred: Type = .{ .refinement = .{ .name = "MinValue", .base_type = &u256_ty, .args = min_hundred_args[0..] } };
+    const min_one_u8_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "1" } } };
+    const min_one_u8: Type = .{ .refinement = .{ .name = "MinValue", .base_type = &u8_ty, .args = min_one_u8_args[0..] } };
+
+    const max_50_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "50" } } };
+    const max_100_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "100" } } };
+    const max_50: Type = .{ .refinement = .{ .name = "MaxValue", .base_type = &u256_ty, .args = max_50_args[0..] } };
+    const max_100: Type = .{ .refinement = .{ .name = "MaxValue", .base_type = &u256_ty, .args = max_100_args[0..] } };
+    const ir_10_20_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "10" } }, .{ .Integer = .{ .text = "20" } } };
+    const ir_12_18_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "12" } }, .{ .Integer = .{ .text = "18" } } };
+    const ir_5_25_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "5" } }, .{ .Integer = .{ .text = "25" } } };
+    const ir_10_20: Type = .{ .refinement = .{ .name = "InRange", .base_type = &u256_ty, .args = ir_10_20_args[0..] } };
+    const ir_12_18: Type = .{ .refinement = .{ .name = "InRange", .base_type = &u256_ty, .args = ir_12_18_args[0..] } };
+    const ir_5_25: Type = .{ .refinement = .{ .name = "InRange", .base_type = &u256_ty, .args = ir_5_25_args[0..] } };
+    const marker_only_args = [_]formal.RefinementArg{.Type};
+    const nonzero_ty: Type = .{ .refinement = .{ .name = "NonZero", .base_type = &u256_ty, .args = marker_only_args[0..] } };
+    const basispoints_ty: Type = .{ .refinement = .{ .name = "BasisPoints", .base_type = &u256_ty, .args = marker_only_args[0..] } };
+    const nza_ty: Type = .{ .refinement = .{ .name = "NonZeroAddress", .base_type = &address_ty, .args = marker_only_args[0..] } };
+    const ref5_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "5" } } };
+    const ref6_args = [_]formal.RefinementArg{ .Type, .{ .Integer = .{ .text = "6" } } };
+    const exact_5: Type = .{ .refinement = .{ .name = "Exact", .base_type = &u256_ty, .args = ref5_args[0..] } };
+    const exact_6: Type = .{ .refinement = .{ .name = "Exact", .base_type = &u256_ty, .args = ref6_args[0..] } };
+    const scaled_5: Type = .{ .refinement = .{ .name = "Scaled", .base_type = &u256_ty, .args = ref5_args[0..] } };
+    const scaled_6: Type = .{ .refinement = .{ .name = "Scaled", .base_type = &u256_ty, .args = ref6_args[0..] } };
 
     const eu_errs_two = [_]Type{ point_ty, other_point_ty };
     const eu_errs_one = [_]Type{point_ty};
@@ -193,8 +216,25 @@ pub fn main(init: std.process.Init) !void {
         .{ .label = "resource_place_widening_rejected", .lhs_name = "Resource<TokenUnit<u16>>", .rhs_name = "Resource<TokenUnit<u8>>", .lhs = token_place_u16, .rhs = token_place_u8 },
         .{ .label = "refinement_minvalue_widen", .lhs_name = "MinValue<u256,1>", .rhs_name = "MinValue<u256,100>", .lhs = min_one, .rhs = min_hundred },
         .{ .label = "refinement_minvalue_narrow_rejected", .lhs_name = "MinValue<u256,100>", .rhs_name = "MinValue<u256,1>", .lhs = min_hundred, .rhs = min_one },
+        .{ .label = "refinement_minvalue_equal", .lhs_name = "MinValue<u256,1>", .rhs_name = "MinValue<u256,1>", .lhs = min_one, .rhs = min_one },
+        .{ .label = "refinement_minvalue_base_mismatch", .lhs_name = "MinValue<u256,1>", .rhs_name = "MinValue<u8,1>", .lhs = min_one, .rhs = min_one_u8 },
         .{ .label = "error_union_subset", .lhs_name = "u256!{Point,OtherPoint}", .rhs_name = "u256!{Point}", .lhs = eu_two, .rhs = eu_one },
         .{ .label = "error_union_superset_rejected", .lhs_name = "u256!{Point}", .rhs_name = "u256!{Point,OtherPoint}", .lhs = eu_one, .rhs = eu_two },
+        .{ .label = "maxvalue_widen", .lhs_name = "MaxValue<u256,100>", .rhs_name = "MaxValue<u256,50>", .lhs = max_100, .rhs = max_50 },
+        .{ .label = "maxvalue_narrow_rejected", .lhs_name = "MaxValue<u256,50>", .rhs_name = "MaxValue<u256,100>", .lhs = max_50, .rhs = max_100 },
+        .{ .label = "maxvalue_equal", .lhs_name = "MaxValue<u256,100>", .rhs_name = "MaxValue<u256,100>", .lhs = max_100, .rhs = max_100 },
+        .{ .label = "inrange_contained", .lhs_name = "InRange<u256,10,20>", .rhs_name = "InRange<u256,12,18>", .lhs = ir_10_20, .rhs = ir_12_18 },
+        .{ .label = "inrange_wider_rejected", .lhs_name = "InRange<u256,10,20>", .rhs_name = "InRange<u256,5,25>", .lhs = ir_10_20, .rhs = ir_5_25 },
+        .{ .label = "inrange_equal", .lhs_name = "InRange<u256,10,20>", .rhs_name = "InRange<u256,10,20>", .lhs = ir_10_20, .rhs = ir_10_20 },
+        .{ .label = "nonzero_self", .lhs_name = "NonZero<u256>", .rhs_name = "NonZero<u256>", .lhs = nonzero_ty, .rhs = nonzero_ty },
+        .{ .label = "basispoints_self", .lhs_name = "BasisPoints<u256>", .rhs_name = "BasisPoints<u256>", .lhs = basispoints_ty, .rhs = basispoints_ty },
+        .{ .label = "nonzeroaddress_self", .lhs_name = "NonZeroAddress<address>", .rhs_name = "NonZeroAddress<address>", .lhs = nza_ty, .rhs = nza_ty },
+        .{ .label = "exact_equal", .lhs_name = "Exact<u256,5>", .rhs_name = "Exact<u256,5>", .lhs = exact_5, .rhs = exact_5 },
+        .{ .label = "exact_differ_rejected", .lhs_name = "Exact<u256,5>", .rhs_name = "Exact<u256,6>", .lhs = exact_5, .rhs = exact_6 },
+        .{ .label = "scaled_equal", .lhs_name = "Scaled<u256,5>", .rhs_name = "Scaled<u256,5>", .lhs = scaled_5, .rhs = scaled_5 },
+        .{ .label = "scaled_differ_rejected", .lhs_name = "Scaled<u256,5>", .rhs_name = "Scaled<u256,6>", .lhs = scaled_5, .rhs = scaled_6 },
+        .{ .label = "cross_minvalue_accepts_inrange", .lhs_name = "MinValue<u256,1>", .rhs_name = "InRange<u256,10,20>", .lhs = min_one, .rhs = ir_10_20 },
+        .{ .label = "cross_inrange_rejects_minvalue", .lhs_name = "InRange<u256,10,20>", .rhs_name = "MinValue<u256,1>", .lhs = ir_10_20, .rhs = min_one },
     };
     try emitTypeRelationRows(out, "compilerTypesAssignableRows", assignable_cases[0..], .assignable);
 

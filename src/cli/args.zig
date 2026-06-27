@@ -42,6 +42,7 @@ pub const CliOptions = struct {
     mlir_print_ir_pass: ?[]const u8 = null,
     mlir_crash_reproducer: ?[]const u8 = null,
     mlir_print_op_on_diagnostic: bool = false,
+    mlir_run_sir_framework_canonicalizer: bool = false,
     debug: bool = false,
     debug_info: bool = false,
     mlir_opt_level: ?[]const u8 = null,
@@ -176,6 +177,7 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
     var seen_keep_proved_checks = false;
     var seen_mlir_debug = false;
     var seen_mlir_pass_pipeline = false;
+    var seen_mlir_run_sir_framework_canonicalizer = false;
     var seen_debug = false;
     var seen_debug_info = false;
     var seen_opt_level = false;
@@ -283,6 +285,10 @@ pub fn parseArgs(args: []const []const u8) ParseError!CliOptions {
         } else if (std.mem.startsWith(u8, arg, "--mlir-pass-pipeline=")) {
             try claim(&seen_mlir_pass_pipeline);
             opts.mlir_pass_pipeline = arg["--mlir-pass-pipeline=".len..];
+            i += 1;
+        } else if (std.mem.eql(u8, arg, "--mlir-run-sir-framework-canonicalizer")) {
+            try claim(&seen_mlir_run_sir_framework_canonicalizer);
+            opts.mlir_run_sir_framework_canonicalizer = true;
             i += 1;
         } else if (std.mem.eql(u8, arg, "--debug")) {
             try claim(&seen_debug);

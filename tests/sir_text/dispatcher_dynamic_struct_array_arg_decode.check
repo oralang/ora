@@ -42,7 +42,7 @@
 
 // CHECK-LABEL:     bb11 {
 // CHECK: calldataload
-// CHECK: eq {{v[0-9]+}} [[TUPLE_HEAD_BYTES]]
+// CHECK: eq {{v[0-9]+}} 0x60
 // CHECK: => {{.*}} ? @bb12 : @abi_decode_revert_11
 
 // CHECK-LABEL:     bb16

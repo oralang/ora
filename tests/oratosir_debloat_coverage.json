@@ -502,9 +502,9 @@
       "sir_goldens": [
         "tests/mlir_sir/resource_signed_negative_balance.check#[[NEG_AMOUNT:%[0-9]+]] = sir.slt %arg0 : !sir.u256, %c0",
         "tests/mlir_sir/resource_signed_negative_balance.check#sir.sstore %c0",
-        "tests/sir_text/resource_signed_negative_balance.check#[[NEG_AMOUNT:v[0-9]+]] = slt v0 c0",
-        "tests/sir_text/resource_signed_negative_balance.check#sstore c0 [[SRC_AFTER]]",
-        "tests/sir_text/resource_signed_negative_balance.check#sstore slot_settled [[DST_AFTER]]"
+        "tests/sir_text/resource_signed_negative_balance.check#[[NEG_AMOUNT:v[0-9]+]] = slt v0 0x0",
+        "tests/sir_text/resource_signed_negative_balance.check#sstore 0x0 [[SRC_AFTER]]",
+        "tests/sir_text/resource_signed_negative_balance.check#sstore 0x1 [[DST_AFTER]]"
       ]
     },
     {
@@ -525,7 +525,7 @@
         "tests/mlir_sir/resource_transient_immediate.check#func.func @issue",
         "tests/mlir_sir/resource_transient_immediate.check#sir.tstore %slot_scratch",
         "tests/sir_text/resource_transient_immediate.check#fn issue:",
-        "tests/sir_text/resource_transient_immediate.check#tstore slot_scratch [[AFTER]]",
+        "tests/sir_text/resource_transient_immediate.check#tstore 0x0 [[AFTER]]",
         "tests/sir_text/resource_transient_immediate.check#fn retire:"
       ]
     },

@@ -23,7 +23,7 @@
 // CHECK: [[PAIR_BASE:v[0-9]+]] = icall @dataSlot v0
 // CHECK: [[PAIR_FIRST:v[0-9]+]] = add [[PAIR_BASE]] [[PAIR_ZERO]]
 // CHECK: sstore [[PAIR_FIRST]] v1
-// CHECK: [[PAIR_SECOND:v[0-9]+]] = add [[PAIR_BASE]] [[PAIR_ONE]]
+// CHECK: [[PAIR_SECOND:v[0-9]+]] = add [[PAIR_BASE]] 0x1
 // CHECK: sstore [[PAIR_SECOND]] v2
 
 // CHECK-LABEL: fn write_other:
@@ -39,6 +39,6 @@
 // CHECK: [[CLEAR_BASE:v[0-9]+]] = icall @dataSlot v0
 // CHECK: [[CLEAR_MAX:v[0-9]+]] = add [[CLEAR_BASE]] [[CLEAR_ONE]]
 // CHECK: [[CLEAR_WRAP:v[0-9]+]] = lt [[CLEAR_MAX]] [[CLEAR_BASE]]
-// CHECK: [[CLEAR_IN_RANGE:v[0-9]+]] = lt {{v[0-9]+}} [[CLEAR_COUNT]]
+// CHECK: [[CLEAR_IN_RANGE:v[0-9]+]] = lt {{v[0-9]+}} 0x2
 // CHECK: [[CLEAR_SLOT:v[0-9]+]] = add [[CLEAR_BASE]] {{v[0-9]+}}
-// CHECK: sstore [[CLEAR_SLOT]] [[CLEAR_ZERO]]
+// CHECK: sstore [[CLEAR_SLOT]] 0x0

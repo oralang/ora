@@ -15,13 +15,44 @@
 //!
 //! Deterministic (lib/evm OSAKA, fixed block context + caller). Outcomes are
 //! still asserted, so this only measures a green corpus.
+//!
+//! Experimental optimization reports can add compiler flags with
+//! ORA_METRICS_COMPILER_ARGS. The value is split on ASCII whitespace and is only
+//! meant for simple temporary compiler flags used by local optimization slices.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const runner = @import("runner.zig");
 const types = @import("types.zig");
 
 fn exitCli(code: u8) noreturn {
     std.process.exit(code);
+}
+
+fn freeStringList(allocator: std.mem.Allocator, values: []const []const u8) void {
+    for (values) |value| allocator.free(value);
+    allocator.free(values);
+}
+
+fn collectCompilerArgs(allocator: std.mem.Allocator) ![][]const u8 {
+    var args: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (args.items) |arg| allocator.free(arg);
+        args.deinit(allocator);
+    }
+
+    try args.append(allocator, try allocator.dupe(u8, "--no-verify"));
+
+    if (builtin.link_libc) {
+        const raw = std.c.getenv("ORA_METRICS_COMPILER_ARGS") orelse return args.toOwnedSlice(allocator);
+        const value = std.mem.span(raw);
+        var tokens = std.mem.tokenizeAny(u8, value, " \t\r\n");
+        while (tokens.next()) |token| {
+            try args.append(allocator, try allocator.dupe(u8, token));
+        }
+    }
+
+    return args.toOwnedSlice(allocator);
 }
 
 pub fn main() !void {
@@ -37,6 +68,8 @@ pub fn main() !void {
     const dir = types.CONFORMANCE_DIR_REL;
     const specs = try runner.collectSpecNames(allocator, dir);
     defer runner.freeStringList(allocator, specs);
+    const compiler_args = try collectCompilerArgs(allocator);
+    defer freeStringList(allocator, compiler_args);
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(std.Io.Threaded.global_single_threaded.io(), &stdout_buf);
@@ -58,7 +91,7 @@ pub fn main() !void {
         }
         const sink = runner.MetricSink{ .allocator = allocator, .list = &list };
 
-        runner.runConformanceSpecMetrics(allocator, source_path, spec_path, sink) catch |err| {
+        runner.runConformanceSpecMetricsWithExtraArgs(allocator, source_path, spec_path, sink, compiler_args) catch |err| {
             std.debug.print("metrics-snapshot: spec failed (skipped): {s}: {s}\n", .{ spec_path, @errorName(err) });
             continue;
         };

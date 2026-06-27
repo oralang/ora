@@ -12,12 +12,10 @@
 // CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
-// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %10 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
-// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
+// CHECK-NEXT:     %8 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:33)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":9:5)
@@ -31,12 +29,10 @@
 // CHECK-NEXT:     %5 = sir.and %4 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %6 = sir.bitcast %5 : !sir.u256 : i1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : i1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
-// CHECK-NEXT:     %8 = sir.iszero %7 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
-// CHECK-NEXT:     sir.cond_br %9 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
+// CHECK-NEXT:     sir.cond_br %7 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %10 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
-// CHECK-NEXT:     sir.revert %10 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
+// CHECK-NEXT:     %8 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
+// CHECK-NEXT:     sir.revert %8 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:33)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":15:5)
@@ -54,12 +50,10 @@
 // CHECK-NEXT:     %9 = sir.and %8 : !sir.u256, %1 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %10 = sir.bitcast %9 : !sir.u256 : i1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":1:1)
 // CHECK-NEXT:     %11 = sir.bitcast %10 : i1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
-// CHECK-NEXT:     %12 = sir.iszero %11 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
-// CHECK-NEXT:     %13 = sir.iszero %12 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
-// CHECK-NEXT:     sir.cond_br %13 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
+// CHECK-NEXT:     sir.cond_br %11 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %14 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
-// CHECK-NEXT:     sir.revert %14 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
+// CHECK-NEXT:     %12 = sir.bitcast %0 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
+// CHECK-NEXT:     sir.revert %12 : !sir.ptr<1>, %0 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:32)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":21:5)
@@ -73,12 +67,10 @@
 // CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : !sir.u256 : i1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
 // CHECK-NEXT:     %8 = sir.bitcast %7 : i1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
-// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
-// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %11 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
-// CHECK-NEXT:     sir.revert %11 : !sir.ptr<1>, %1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
+// CHECK-NEXT:     %9 = sir.bitcast %1 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
+// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:39)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.iret  loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:5)
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_type_checking.ora":27:5)

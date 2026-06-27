@@ -2178,11 +2178,23 @@ static Value deriveMapElementSlot(
     Value key,
     Value mapSlot,
     Type u256Type,
-    Type ptrType)
+    Type ptrType,
+    MapHashCache *mapHashCache = nullptr,
+    Operation *funcOp = nullptr,
+    Operation *anchor = nullptr)
 {
     Value keyU256 = key;
     if (!llvm::isa<sir::U256Type>(keyU256.getType()))
         keyU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, keyU256);
+
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        if (Value cached = lookupCachedMapHash(*mapHashCache, cacheFunc, anchor, mapSlot, keyU256))
+            return cached;
+    }
 
     Value size64 = constU256(rewriter, loc, 64);
     Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
@@ -2192,7 +2204,15 @@ static Value deriveMapElementSlot(
     Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
     rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
 
-    return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        storeCachedMapHash(*mapHashCache, cacheFunc, mapSlot, keyU256, hash);
+    }
+    return hash;
 }
 
 static llvm::StringRef getGlobalNameFromMapOperand(mlir::Value mapOperand, mlir::Operation *currentOp);
@@ -2408,6 +2428,7 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
     OperandRange originalPlace,
     ValueRange convertedPlace,
     Type carrierType,
+    MapHashCache *mapHashCache,
     ConversionPatternRewriter &rewriter)
 {
     if (originalPlace.size() != convertedPlace.size() || originalPlace.empty())
@@ -2447,7 +2468,16 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
         if (failed(materializedKey))
             return failure();
 
-        slot = deriveMapElementSlot(loc, rewriter, *materializedKey, slot, u256Type, ptrType);
+        slot = deriveMapElementSlot(
+            loc,
+            rewriter,
+            *materializedKey,
+            slot,
+            u256Type,
+            ptrType,
+            mapHashCache,
+            op->getParentOfType<func::FuncOp>(),
+            op);
         if (!root->name.empty() && i == 1)
         {
             if (auto hashOp = slot.getDefiningOp())
@@ -2487,6 +2517,7 @@ static LogicalResult lowerResourceCreateOrDestroy(
     Value amount,
     Type carrierType,
     bool isCreate,
+    MapHashCache *mapHashCache,
     ConversionPatternRewriter &rewriter)
 {
     if (!isSupportedResourceCarrier(carrierType))
@@ -2501,7 +2532,7 @@ static LogicalResult lowerResourceCreateOrDestroy(
     if (!amountU256)
         return failure();
 
-    FailureOr<ResourcePlaceSlot> slot = deriveResourcePlaceSlot(op, originalPlace, convertedPlace, carrierType, rewriter);
+    FailureOr<ResourcePlaceSlot> slot = deriveResourcePlaceSlot(op, originalPlace, convertedPlace, carrierType, mapHashCache, rewriter);
     if (failed(slot))
         return failure();
 
@@ -2552,6 +2583,7 @@ LogicalResult ConvertResourceCreateOp::matchAndRewrite(
         adaptor.getAmount(),
         op.getCarrierType(),
         /*isCreate=*/true,
+        mapHashCache,
         rewriter);
 }
 
@@ -2567,6 +2599,7 @@ LogicalResult ConvertResourceDestroyOp::matchAndRewrite(
         adaptor.getAmount(),
         op.getCarrierType(),
         /*isCreate=*/false,
+        mapHashCache,
         rewriter);
 }
 
@@ -2658,11 +2691,11 @@ LogicalResult ConvertResourceMoveOp::matchAndRewrite(
     if (!amountU256)
         return failure();
 
-    FailureOr<ResourcePlaceSlot> sourceSlot = deriveResourcePlaceSlot(op.getOperation(), op.getSourcePlace(), adaptor.getSourcePlace(), op.getCarrierType(), rewriter);
+    FailureOr<ResourcePlaceSlot> sourceSlot = deriveResourcePlaceSlot(op.getOperation(), op.getSourcePlace(), adaptor.getSourcePlace(), op.getCarrierType(), mapHashCache, rewriter);
     if (failed(sourceSlot))
         return failure();
 
-    FailureOr<ResourcePlaceSlot> destinationSlot = deriveResourcePlaceSlot(op.getOperation(), op.getDestinationPlace(), adaptor.getDestinationPlace(), op.getCarrierType(), rewriter);
+    FailureOr<ResourcePlaceSlot> destinationSlot = deriveResourcePlaceSlot(op.getOperation(), op.getDestinationPlace(), adaptor.getDestinationPlace(), op.getCarrierType(), mapHashCache, rewriter);
     if (failed(destinationSlot))
         return failure();
 

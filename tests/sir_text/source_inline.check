@@ -7,12 +7,7 @@
 // CHECK-NOT: icall @writeSaved
 // CHECK-NOT: icall @normalize
 // CHECK: iret
-
-// CHECK-LABEL: fn writeSaved:
-// CHECK: slot_saved = const 0x0
-// CHECK: sstore slot_saved
-// CHECK-NOT: icall @normalize
-// CHECK: iret
+// CHECK-NOT: fn writeSaved:
 
 // CHECK-LABEL: fn echo:
 // CHECK-NOT: icall @normalize

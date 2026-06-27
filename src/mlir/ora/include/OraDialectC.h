@@ -18,6 +18,21 @@ extern "C"
 {
 #endif
 
+    typedef struct OraMlirPassStatisticsC
+    {
+        uint64_t ora_functions_canonicalized;
+        uint64_t ora_functions_cse_processed;
+        uint64_t ora_storage_reads_reused;
+        uint64_t ora_calls_inlined;
+        uint64_t ora_source_inline_failures;
+        uint64_t sir_constants_deduplicated;
+        uint64_t sir_unused_allocas_removed;
+        uint64_t sir_unused_loads_removed;
+        uint64_t sir_unused_pure_ops_removed;
+        uint64_t sir_framework_functions_processed;
+        uint64_t ora_symbols_dced;
+    } OraMlirPassStatisticsC;
+
     //===----------------------------------------------------------------------===//
     // Core MLIR helpers (C++ API shims)
     //===----------------------------------------------------------------------===//
@@ -1881,6 +1896,22 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module);
 
+    /// Run canonicalization on Ora MLIR and optionally dump MLIR pass statistics.
+    /// Keeps the legacy oraCanonicalizeOraMLIR entry point source-compatible.
+    MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIRWithStatistics(
+        MlirContext ctx,
+        MlirModule module,
+        bool enableStatistics);
+
+    /// Run canonicalization and copy deterministic Ora-owned pass statistics
+    /// into `outStatistics` when it is non-null. `printStatistics` controls
+    /// diagnostic stderr output and is independent from collection.
+    MLIR_CAPI_EXPORTED bool oraCanonicalizeOraMLIRWithStatisticsOut(
+        MlirContext ctx,
+        MlirModule module,
+        bool printStatistics,
+        OraMlirPassStatisticsC *outStatistics);
+
     //===----------------------------------------------------------------------===//
     // Ora to SIR Conversion
     //===----------------------------------------------------------------------===//
@@ -1892,6 +1923,25 @@ MLIR_CAPI_EXPORTED MlirOperation oraBreakOpCreate(
         MlirContext ctx,
         MlirModule module,
         bool debugInfo);
+
+    /// Convert Ora dialect operations to SIR dialect and optionally dump MLIR pass statistics.
+    /// Keeps the legacy oraConvertToSIR entry point source-compatible.
+    MLIR_CAPI_EXPORTED bool oraConvertToSIRWithStatistics(
+        MlirContext ctx,
+        MlirModule module,
+        bool debugInfo,
+        bool enableStatistics);
+
+    /// Convert Ora dialect operations to SIR dialect and copy deterministic
+    /// Ora-owned pass statistics into `outStatistics` when it is non-null.
+    /// `printStatistics` controls diagnostic stderr output and is independent
+    /// from collection.
+    MLIR_CAPI_EXPORTED bool oraConvertToSIRWithStatisticsOut(
+        MlirContext ctx,
+        MlirModule module,
+        bool debugInfo,
+        bool printStatistics,
+        OraMlirPassStatisticsC *outStatistics);
 
     //===----------------------------------------------------------------------===//
     // SIR Text Legalizer / Emitter

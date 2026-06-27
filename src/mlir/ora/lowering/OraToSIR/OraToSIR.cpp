@@ -54,6 +54,89 @@ using namespace ora;
 namespace euh = mlir::ora::error_union_helpers;
 using mlir::ora::lowering::constU256;
 
+namespace mlir
+{
+    namespace ora
+    {
+        namespace
+        {
+            thread_local OraMlirPassStatistics *activeOraMlirPassStatistics = nullptr;
+
+            static void printOraMlirPassStatisticLine(llvm::raw_ostream &os, llvm::StringRef name, uint64_t value)
+            {
+                os << "  " << name << " = " << value << "\n";
+            }
+        }
+
+        void setActiveOraMlirPassStatistics(OraMlirPassStatistics *statistics)
+        {
+            activeOraMlirPassStatistics = statistics;
+        }
+
+        void recordOraMlirPassStatistic(OraMlirPassStatistic statistic, uint64_t amount)
+        {
+            if (!activeOraMlirPassStatistics || amount == 0)
+                return;
+
+            switch (statistic)
+            {
+            case OraMlirPassStatistic::OraFunctionsCanonicalized:
+                activeOraMlirPassStatistics->oraFunctionsCanonicalized += amount;
+                return;
+            case OraMlirPassStatistic::OraFunctionsCSEProcessed:
+                activeOraMlirPassStatistics->oraFunctionsCSEProcessed += amount;
+                return;
+            case OraMlirPassStatistic::OraStorageReadsReused:
+                activeOraMlirPassStatistics->oraStorageReadsReused += amount;
+                return;
+            case OraMlirPassStatistic::OraCallsInlined:
+                activeOraMlirPassStatistics->oraCallsInlined += amount;
+                return;
+            case OraMlirPassStatistic::OraSourceInlineFailures:
+                activeOraMlirPassStatistics->oraSourceInlineFailures += amount;
+                return;
+            case OraMlirPassStatistic::SirConstantsDeduplicated:
+                activeOraMlirPassStatistics->sirConstantsDeduplicated += amount;
+                return;
+            case OraMlirPassStatistic::SirUnusedAllocasRemoved:
+                activeOraMlirPassStatistics->sirUnusedAllocasRemoved += amount;
+                return;
+            case OraMlirPassStatistic::SirUnusedLoadsRemoved:
+                activeOraMlirPassStatistics->sirUnusedLoadsRemoved += amount;
+                return;
+            case OraMlirPassStatistic::SirUnusedPureOpsRemoved:
+                activeOraMlirPassStatistics->sirUnusedPureOpsRemoved += amount;
+                return;
+            case OraMlirPassStatistic::SirFrameworkFunctionsProcessed:
+                activeOraMlirPassStatistics->sirFrameworkFunctionsProcessed += amount;
+                return;
+            case OraMlirPassStatistic::OraSymbolsDCEd:
+                activeOraMlirPassStatistics->oraSymbolsDCEd += amount;
+                return;
+            }
+        }
+
+        void printOraMlirPassStatistics(const OraMlirPassStatistics &statistics, llvm::raw_ostream &os, const char *pipelineName)
+        {
+            os << "===-------------------------------------------------------------------------===\n";
+            os << "                  ... Ora MLIR pass statistics: " << pipelineName << " ...\n";
+            os << "===-------------------------------------------------------------------------===\n";
+            printOraMlirPassStatisticLine(os, "ora-function-canonicalize.functions-processed", statistics.oraFunctionsCanonicalized);
+            printOraMlirPassStatisticLine(os, "ora-function-cse.functions-processed", statistics.oraFunctionsCSEProcessed);
+            printOraMlirPassStatisticLine(os, "ora-storage-read-cse.storage-reads-reused", statistics.oraStorageReadsReused);
+            printOraMlirPassStatisticLine(os, "ora-inline.calls-inlined", statistics.oraCallsInlined);
+            printOraMlirPassStatisticLine(os, "ora-inline.source-inline-failures", statistics.oraSourceInlineFailures);
+            printOraMlirPassStatisticLine(os, "sir-optimize.constants-deduplicated", statistics.sirConstantsDeduplicated);
+            printOraMlirPassStatisticLine(os, "sir-cleanup.unused-allocas-removed", statistics.sirUnusedAllocasRemoved);
+            printOraMlirPassStatisticLine(os, "sir-cleanup.unused-loads-removed", statistics.sirUnusedLoadsRemoved);
+            printOraMlirPassStatisticLine(os, "sir-cleanup.unused-pure-ops-removed", statistics.sirUnusedPureOpsRemoved);
+            printOraMlirPassStatisticLine(os, "sir-framework-canonicalize.functions-processed", statistics.sirFrameworkFunctionsProcessed);
+            printOraMlirPassStatisticLine(os, "ora-symbol-dce.symbols-removed", statistics.oraSymbolsDCEd);
+            os << "\n";
+        }
+    } // namespace ora
+} // namespace mlir
+
 namespace
 {
     constexpr llvm::StringLiteral kPhase0SkipManualBitcastFoldAttr =
@@ -1134,9 +1217,10 @@ static void preserveEnumDiscriminants(ModuleOp module, MLIRContext *ctx)
         module->setAttr("sir.enum_values", DictionaryAttr::get(ctx, enumEntries));
 }
 
-// Thin deterministic fallback: MLIR CSE currently perturbs SIR constant
-// placement broadly enough to make goldens noisy. Keep this scoped to constants
-// until the SIR handoff can accept framework CSE churn deliberately.
+// Thin deterministic fallback for passes that have not yet moved to framework
+// constant CSE. The SIR text handoff now accepts cross-block constants via
+// inline numeric operands, so new SIR canonicalization should prefer MLIR CSE
+// and keep this helper as a local cleanup/backstop only.
 static Attribute getSIRConstDedupKey(MLIRContext *ctx, sir::ConstOp constOp)
 {
     Attribute value = constOp.getValueAttr();
@@ -1148,9 +1232,9 @@ static Attribute getSIRConstDedupKey(MLIRContext *ctx, sir::ConstOp constOp)
     return IntegerAttr::get(u256Type, intAttr.getValue().zextOrTrunc(256));
 }
 
-static bool deduplicateConstantsPerBlock(ModuleOp module)
+static uint64_t deduplicateConstantsPerBlock(ModuleOp module)
 {
-    bool changed = false;
+    uint64_t deduplicated = 0;
     module.walk([&](Block *block)
                 {
         DenseMap<Attribute, Value> consts;
@@ -1165,17 +1249,17 @@ static bool deduplicateConstantsPerBlock(ModuleOp module)
             {
                 constOp.replaceAllUsesWith(it->second);
                 constOp.erase();
-                changed = true;
+                ++deduplicated;
                 continue;
             }
             consts.insert({key, constOp.getResult()});
         } });
-    return changed;
+    return deduplicated;
 }
 
 // Deterministic release-path framework slice: run only the SIR op
 // canonicalizers whose output is already accepted in production goldens.
-// Full SIR canonicalization stays opt-in for the Phase 0 probe.
+// Broader framework canonicalization/DCE runs later as default SIR hygiene.
 template <typename... OpTys>
 static LogicalResult applySelectedSIRCanonicalizationPatterns(ModuleOp module, bool &changed)
 {
@@ -1192,7 +1276,7 @@ static LogicalResult applySelectedSIRCanonicalizationPatterns(ModuleOp module, b
         return success();
 
     GreedyRewriteConfig config;
-    config.enableConstantCSE(false);
+    config.enableConstantCSE(true);
     config.enableFolding(true);
     config.setMaxIterations(1);
     config.setStrictness(GreedyRewriteStrictness::ExistingOps);
@@ -1214,7 +1298,6 @@ static LogicalResult canonicalizeSIRConstantWordOps(ModuleOp module)
                 module, passChanged)))
             return failure();
         changed |= passChanged;
-        deduplicateConstantsPerBlock(module);
     }
 
     return success();
@@ -1240,6 +1323,8 @@ public:
                     {
                         DBG("SIRCleanupPass: removing unused alloca");
                         allocaOp->erase();
+                        ++unusedAllocasRemoved;
+                        recordOraMlirPassStatistic(OraMlirPassStatistic::SirUnusedAllocasRemoved);
                         changed = true;
                     } });
 
@@ -1249,10 +1334,15 @@ public:
                 {
                     DBG("SIRCleanupPass: removing unused load");
                     loadOp->erase();
+                    ++unusedLoadsRemoved;
+                    recordOraMlirPassStatistic(OraMlirPassStatistic::SirUnusedLoadsRemoved);
                     changed = true;
                 } });
 
-            changed |= deduplicateConstantsPerBlock(module);
+            const uint64_t dedupedConstants = deduplicateConstantsPerBlock(module);
+            constantsDeduplicated += dedupedConstants;
+            recordOraMlirPassStatistic(OraMlirPassStatistic::SirConstantsDeduplicated, dedupedConstants);
+            changed |= dedupedConstants != 0;
 
             module.walk([&](Operation *op)
                         {
@@ -1274,11 +1364,19 @@ public:
                 }
 
                 op->erase();
+                ++unusedPureOpsRemoved;
+                recordOraMlirPassStatistic(OraMlirPassStatistic::SirUnusedPureOpsRemoved);
                 changed = true; });
         }
 
         DBG("SIRCleanupPass: cleanup completed");
     }
+
+private:
+    Pass::Statistic unusedAllocasRemoved{this, "unused-allocas-removed", "Unused memref allocas removed"};
+    Pass::Statistic unusedLoadsRemoved{this, "unused-loads-removed", "Unused memref loads removed"};
+    Pass::Statistic unusedPureOpsRemoved{this, "unused-pure-ops-removed", "Unused pure operations removed"};
+    Pass::Statistic constantsDeduplicated{this, "constants-deduplicated", "Duplicate SIR constants removed"};
 };
 
 namespace
@@ -1378,9 +1476,9 @@ public:
         patterns.add<ConvertStorageRangeEraseOp>(typeConverter, ctx);
         patterns.add<ConvertTLoadOp>(typeConverter, ctx);
         patterns.add<ConvertTStoreOp>(typeConverter, ctx);
-        patterns.add<ConvertResourceCreateOp>(typeConverter, ctx);
-        patterns.add<ConvertResourceDestroyOp>(typeConverter, ctx);
-        patterns.add<ConvertResourceMoveOp>(typeConverter, ctx);
+        patterns.add<ConvertResourceCreateOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
+        patterns.add<ConvertResourceDestroyOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
+        patterns.add<ConvertResourceMoveOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
         patterns.add<ConvertMapGetOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
         patterns.add<ConvertMapStoreOp>(typeConverter, ctx, mapHashCache, PatternBenefit(5));
         patterns.add<ConvertTensorInsertOp>(typeConverter, ctx);
@@ -2629,14 +2727,12 @@ namespace mlir
             {
                 ModuleOp module = getOperation();
 
-                deduplicateConstantsPerBlock(module);
                 if (failed(canonicalizeSIRConstantWordOps(module)))
                 {
                     module.emitError("[SIROptimizationPass] SIR constant word canonicalization failed");
                     signalPassFailure();
                     return;
                 }
-                deduplicateConstantsPerBlock(module);
             }
 
             StringRef getArgument() const override { return "sir-optimize"; }
@@ -2655,10 +2751,57 @@ namespace mlir
             funcPM.addPass(mlir::createCanonicalizerPass(config));
         }
 
+        namespace
+        {
+            constexpr llvm::StringLiteral kOraVisibilityAttr = "ora.visibility";
+            constexpr llvm::StringLiteral kOraInitAttr = "ora.init";
+            constexpr llvm::StringLiteral kOraSymbolRootAttr = "ora.symbol_root";
+            constexpr llvm::StringLiteral kOraDebugRootAttr = "ora.debug_root";
+            constexpr llvm::StringLiteral kOraSymbolDCEBeforeAttr = "ora.symbol_dce.before_functions";
+            constexpr llvm::StringLiteral kOraSymbolDCETempVisibilityAttr = "ora.symbol_dce.temp_visibility";
+
+            static uint64_t countNestedFunctionOps(ModuleOp module)
+            {
+                uint64_t count = 0;
+                module.walk([&](mlir::func::FuncOp) {
+                    ++count;
+                });
+                return count;
+            }
+
+            static bool boolLikeAttrIsTrue(Operation *op, llvm::StringRef name)
+            {
+                if (auto attr = op->getAttrOfType<BoolAttr>(name))
+                    return attr.getValue();
+                return op->getAttrOfType<UnitAttr>(name) != nullptr;
+            }
+
+            static bool isOraSymbolRoot(func::FuncOp func)
+            {
+                Operation *op = func.getOperation();
+                if (boolLikeAttrIsTrue(op, kOraInitAttr) ||
+                    boolLikeAttrIsTrue(op, kOraSymbolRootAttr) ||
+                    boolLikeAttrIsTrue(op, kOraDebugRootAttr))
+                    return true;
+
+                // Be conservative for handwritten/debug MLIR. Only functions
+                // Ora explicitly marks private are eligible for SymbolDCE.
+                auto visibility = op->getAttrOfType<StringAttr>(kOraVisibilityAttr);
+                if (!visibility)
+                    return true;
+                return visibility.getValue() != "private";
+            }
+        } // namespace
+
         template <typename DerivedT>
         class FunctionPipelineModulePass : public PassWrapper<DerivedT, OperationPass<ModuleOp>>
         {
         protected:
+            static uint64_t countNestedFunctions(ModuleOp module)
+            {
+                return countNestedFunctionOps(module);
+            }
+
             LogicalResult runNestedFunctionPipeline(
                 ModuleOp module,
                 StringRef errorMessage,
@@ -2682,14 +2825,91 @@ namespace mlir
             }
         };
 
-        // Opt-in Phase 0 probe that lets MLIR canonicalization and DCE exercise
-        // SIR dialect hooks after conversion without changing the normal
-        // production pipeline.
+        class OraSymbolVisibilityPass : public PassWrapper<OraSymbolVisibilityPass, OperationPass<ModuleOp>>
+        {
+        public:
+            void runOnOperation() override
+            {
+                ModuleOp module = getOperation();
+                MLIRContext *context = module.getContext();
+                module->setAttr(
+                    kOraSymbolDCEBeforeAttr,
+                    IntegerAttr::get(mlir::IntegerType::get(context, 64), countNestedFunctionOps(module)));
+
+                module.walk([&](func::FuncOp func)
+                            {
+                    Operation *op = func.getOperation();
+                    if (op->hasAttr(SymbolTable::getVisibilityAttrName()))
+                        return;
+
+                    SymbolTable::setSymbolVisibility(
+                        op,
+                        isOraSymbolRoot(func)
+                            ? SymbolTable::Visibility::Public
+                            : SymbolTable::Visibility::Private);
+                    op->setAttr(kOraSymbolDCETempVisibilityAttr, UnitAttr::get(context)); });
+            }
+
+            StringRef getArgument() const override { return "ora-symbol-visibility"; }
+            StringRef getDescription() const override { return "Map Ora function/root metadata to temporary MLIR symbol visibility"; }
+        };
+
+        std::unique_ptr<Pass> createOraSymbolVisibilityPass()
+        {
+            return std::make_unique<OraSymbolVisibilityPass>();
+        }
+
+        class OraSymbolDCECleanupPass : public PassWrapper<OraSymbolDCECleanupPass, OperationPass<ModuleOp>>
+        {
+        public:
+            void runOnOperation() override
+            {
+                ModuleOp module = getOperation();
+                uint64_t before = 0;
+                if (auto attr = module->getAttrOfType<IntegerAttr>(kOraSymbolDCEBeforeAttr))
+                    before = attr.getValue().getZExtValue();
+
+                const uint64_t after = countNestedFunctionOps(module);
+                if (before > after)
+                {
+                    const uint64_t removed = before - after;
+                    symbolsRemoved += removed;
+                    recordOraMlirPassStatistic(OraMlirPassStatistic::OraSymbolsDCEd, removed);
+                }
+
+                module->removeAttr(kOraSymbolDCEBeforeAttr);
+                module.walk([&](func::FuncOp func)
+                            {
+                    Operation *op = func.getOperation();
+                    if (!op->hasAttr(kOraSymbolDCETempVisibilityAttr))
+                        return;
+                    op->removeAttr(SymbolTable::getVisibilityAttrName());
+                    op->removeAttr(kOraSymbolDCETempVisibilityAttr); });
+            }
+
+            StringRef getArgument() const override { return "ora-symbol-dce-cleanup"; }
+            StringRef getDescription() const override { return "Record framework SymbolDCE results and remove temporary Ora visibility metadata"; }
+
+        private:
+            Pass::Statistic symbolsRemoved{this, "symbols-removed", "Ora functions removed by framework SymbolDCE"};
+        };
+
+        std::unique_ptr<Pass> createOraSymbolDCECleanupPass()
+        {
+            return std::make_unique<OraSymbolDCECleanupPass>();
+        }
+
+        // Default post-conversion framework hygiene. This lets MLIR
+        // canonicalization and DCE exercise SIR dialect hooks without
+        // reintroducing the old broad bespoke peephole batch.
         class SIRFrameworkCanonicalizerPass : public FunctionPipelineModulePass<SIRFrameworkCanonicalizerPass>
         {
         public:
             void runOnOperation() override
             {
+                const uint64_t functionCount = countNestedFunctions(getOperation());
+                functionsProcessed += functionCount;
+                recordOraMlirPassStatistic(OraMlirPassStatistic::SirFrameworkFunctionsProcessed, functionCount);
                 if (failed(runNestedFunctionPipeline(
                         getOperation(),
                         "[SIRFrameworkCanonicalizer] canonicalization failed",
@@ -2700,6 +2920,9 @@ namespace mlir
                         })))
                     signalPassFailure();
             }
+
+        private:
+            Pass::Statistic functionsProcessed{this, "functions-processed", "Nested functions processed by the SIR framework canonicalizer"};
         };
 
         std::unique_ptr<Pass> createSIRFrameworkCanonicalizerPass()
@@ -2757,6 +2980,8 @@ namespace mlir
                         if (inlineCall(callOp, funcOp))
                         {
                             changed = true;
+                            ++callsInlined;
+                            recordOraMlirPassStatistic(OraMlirPassStatistic::OraCallsInlined);
                             DBG("    Successfully inlined: " << funcOp.getName());
                         }
                         else
@@ -2788,6 +3013,8 @@ namespace mlir
                     callOp.emitError("failed to inline function marked 'inline'")
                         << ": unsupported source-inline shape in '" << funcOp.getName()
                         << "' (" << describeUnsupportedInlineShape(funcOp) << ")";
+                    ++sourceInlineFailures;
+                    recordOraMlirPassStatistic(OraMlirPassStatistic::OraSourceInlineFailures);
                     hasFailedSourceInline = true; });
 
                 if (hasFailedSourceInline)
@@ -3085,6 +3312,9 @@ namespace mlir
                 callOp.erase();
                 return true;
             }
+
+            Pass::Statistic callsInlined{this, "calls-inlined", "Function calls inlined"};
+            Pass::Statistic sourceInlineFailures{this, "source-inline-failures", "Required source-inline calls left unexpanded"};
         };
 
         std::unique_ptr<Pass> createOraInliningPass()
@@ -3101,6 +3331,9 @@ namespace mlir
         public:
             void runOnOperation() override
             {
+                const uint64_t functionCount = countNestedFunctions(getOperation());
+                functionsProcessed += functionCount;
+                recordOraMlirPassStatistic(OraMlirPassStatistic::OraFunctionsCanonicalized, functionCount);
                 if (failed(runNestedFunctionPipeline(
                         getOperation(),
                         "[OraFunctionCanonicalizer] canonicalization failed",
@@ -3113,6 +3346,9 @@ namespace mlir
 
             StringRef getArgument() const override { return "ora-function-canonicalize"; }
             StringRef getDescription() const override { return "Run canonicalization on nested Ora MLIR functions"; }
+
+        private:
+            Pass::Statistic functionsProcessed{this, "functions-processed", "Nested functions processed by the Ora canonicalization pipeline"};
         };
 
         std::unique_ptr<Pass> createOraFunctionCanonicalizerPass()
@@ -3129,6 +3365,9 @@ namespace mlir
         public:
             void runOnOperation() override
             {
+                const uint64_t functionCount = countNestedFunctions(getOperation());
+                functionsProcessed += functionCount;
+                recordOraMlirPassStatistic(OraMlirPassStatistic::OraFunctionsCSEProcessed, functionCount);
                 if (failed(runNestedFunctionPipeline(
                         getOperation(),
                         "[OraFunctionCSE] CSE failed",
@@ -3141,6 +3380,9 @@ namespace mlir
 
             StringRef getArgument() const override { return "ora-function-cse"; }
             StringRef getDescription() const override { return "Run MLIR CSE on nested Ora MLIR functions"; }
+
+        private:
+            Pass::Statistic functionsProcessed{this, "functions-processed", "Nested functions processed by the Ora CSE pipeline"};
         };
 
         std::unique_ptr<Pass> createOraFunctionCSEPass()
@@ -3211,6 +3453,8 @@ namespace mlir
                                     {
                                         loadOp.getResult().replaceAllUsesWith(existing->second);
                                         loadOp.erase();
+                                        ++storageReadsReused;
+                                        recordOraMlirPassStatistic(OraMlirPassStatistic::OraStorageReadsReused);
                                         continue;
                                     }
 
@@ -3232,6 +3476,9 @@ namespace mlir
 
             StringRef getArgument() const override { return "ora-storage-read-cse"; }
             StringRef getDescription() const override { return "Reuse repeated Ora storage loads inside safe block-local regions"; }
+
+        private:
+            Pass::Statistic storageReadsReused{this, "storage-reads-reused", "Repeated Ora storage reads replaced with prior loads"};
         };
 
         std::unique_ptr<Pass> createOraStorageReadCSEPass()

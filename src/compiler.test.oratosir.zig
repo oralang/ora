@@ -588,6 +588,63 @@ test "compiler expands source inline helpers with structured non-returning regio
     try expectNoResidualOraRuntimeOps(rendered);
 }
 
+test "OraToSIR fails closed when source inline call survives inlining" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @helper(%arg0: !ora.int<256, false>) -> !ora.int<256, false> attributes {ora.inline = true, ora.source_inline = true, ora.visibility = "private"} {
+        \\      cf.br ^next(%arg0 : !ora.int<256, false>)
+        \\    ^next(%value: !ora.int<256, false>):
+        \\      return %value : !ora.int<256, false>
+        \\    }
+        \\    func.func @run(%arg0: !ora.int<256, false>) -> !ora.int<256, false> attributes {ora.visibility = "pub"} {
+        \\      %0 = func.call @helper(%arg0) : (!ora.int<256, false>) -> !ora.int<256, false>
+        \\      return %0 : !ora.int<256, false>
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(!mlir.oraConvertToSIR(ctx, module, false));
+}
+
+test "Ora inline without source guarantee does not fail closed" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @helper(%arg0: !ora.int<256, false>) -> !ora.int<256, false> attributes {ora.inline = true, ora.visibility = "private"} {
+        \\      cf.br ^next(%arg0 : !ora.int<256, false>)
+        \\    ^next(%value: !ora.int<256, false>):
+        \\      return %value : !ora.int<256, false>
+        \\    }
+        \\    func.func @run(%arg0: !ora.int<256, false>) -> !ora.int<256, false> attributes {ora.visibility = "pub"} {
+        \\      %0 = func.call @helper(%arg0) : (!ora.int<256, false>) -> !ora.int<256, false>
+        \\      return %0 : !ora.int<256, false>
+        \\    }
+        \\  }
+        \\}
+    ;
+
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+    try testing.expectEqual(@as(u64, 0), stats.ora_source_inline_failures);
+}
+
 fn functionSlice(sir_text: []const u8, function_name: []const u8) ![]const u8 {
     const header = try std.fmt.allocPrint(testing.allocator, "fn {s}:", .{function_name});
     defer testing.allocator.free(header);
@@ -1710,6 +1767,314 @@ test "Phase0 framework canonicalizer folds SIR branch peepholes" {
         try testing.expectEqual(@as(usize, 1), std.mem.count(u8, br_to_br, "sir.br"));
         try testing.expect(std.mem.containsAtLeast(u8, br_to_br, 1, "sir.iret"));
     }
+}
+
+test "SIR framework canonicalizer runs by default" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  func.func @same_dest(%arg0: !sir.u256) {
+        \\    sir.cond_br %arg0 : !sir.u256, ^bb1, ^bb1
+        \\  ^bb1:
+        \\    sir.iret
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+    try testing.expect(mlir.oraConvertToSIR(ctx, module, false));
+
+    const module_text_ref = mlir.oraOperationPrintToString(mlir.oraModuleGetOperation(module));
+    defer if (module_text_ref.data != null) mlir.oraStringRefFree(module_text_ref);
+    const rendered = module_text_ref.data[0..module_text_ref.length];
+
+    const same_dest = try oraFunctionSlice(rendered, "same_dest");
+    try testing.expect(!std.mem.containsAtLeast(u8, same_dest, 1, "sir.cond_br"));
+    try testing.expect(std.mem.containsAtLeast(u8, same_dest, 1, "sir.br ^bb1"));
+}
+
+test "Ora canonicalization runs framework SymbolDCE with Ora root visibility" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @public_entry() attributes {ora.visibility = "pub"} {
+        \\      func.call @live_private() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @init() attributes {ora.init = true, ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @debug_probe() attributes {ora.debug_root = true, ora.visibility = "private"} {
+        \\      func.call @debug_live() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @dispatcher_root() attributes {ora.symbol_root = true, ora.visibility = "private"} {
+        \\      func.call @dispatcher_live() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @plain_unannotated() {
+        \\      return
+        \\    }
+        \\    func.func @live_private() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @debug_live() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @dispatcher_live() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @dead_private() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+    try testing.expectEqual(@as(u64, 1), stats.ora_symbols_dced);
+
+    const rendered = try printModuleTextForTest(module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @public_entry"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @init"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @debug_probe"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @dispatcher_root"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @plain_unannotated"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @live_private"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @debug_live"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @dispatcher_live"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @dead_private"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sym_visibility"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "ora.symbol_dce.temp_visibility"));
+}
+
+test "Ora SymbolDCE removes private call islands unreachable from roots" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @entry() attributes {ora.visibility = "pub"} {
+        \\      func.call @live_a() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @live_a() attributes {ora.visibility = "private"} {
+        \\      func.call @live_b() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @live_b() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @dead_a() attributes {ora.visibility = "private"} {
+        \\      func.call @dead_b() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @dead_b() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+    try testing.expectEqual(@as(u64, 2), stats.ora_symbols_dced);
+
+    const rendered = try printModuleTextForTest(module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @entry"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @live_a"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @live_b"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @dead_a"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @dead_b"));
+}
+
+test "Ora SymbolDCE preserves dotted imported private helpers reachable from roots" {
+    const ctx = createOraMlirContext();
+    defer mlir.oraContextDestroy(ctx);
+
+    const text =
+        \\module {
+        \\  ora.contract @C {
+        \\    func.func @entry() attributes {ora.visibility = "pub"} {
+        \\      func.call @dep.required() : () -> ()
+        \\      return
+        \\    }
+        \\    func.func @dep.required() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\    func.func @dep.dead() attributes {ora.visibility = "private"} {
+        \\      return
+        \\    }
+        \\  }
+        \\}
+    ;
+    const module = try parseOraModule(ctx, text);
+    defer mlir.oraModuleDestroy(module);
+
+    try testing.expect(mlir.mlirOperationVerify(mlir.oraModuleGetOperation(module)));
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(ctx, module, false, &stats));
+    try testing.expectEqual(@as(u64, 1), stats.ora_symbols_dced);
+
+    const rendered = try printModuleTextForTest(module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @entry"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @dep.required"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @dep.dead"));
+}
+
+test "compiler source MLIR SymbolDCE keeps public root and prunes generated private helpers" {
+    const source_text =
+        \\contract SymbolDceSource {
+        \\    pub fn entry() -> u256 {
+        \\        return live();
+        \\    }
+        \\
+        \\    fn live() -> u256 {
+        \\        return 7;
+        \\    }
+        \\
+        \\    fn dead() -> u256 {
+        \\        return 9;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(hir_result.context, hir_result.module.raw_module, false, &stats));
+    try testing.expectEqual(@as(u64, 2), stats.ora_symbols_dced);
+
+    const rendered = try printModuleTextForTest(hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "func.func @entry"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @live"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "func.func @dead"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.selector"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "ora.visibility = \"pub\""));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "sym_visibility"));
+}
+
+test "compiler source SymbolDCE preserves dispatcher public roots" {
+    const source_text =
+        \\contract DispatcherRoots {
+        \\    pub fn first() -> u256 {
+        \\        return 1;
+        \\    }
+        \\
+        \\    pub fn second(value: u256) -> u256 {
+        \\        return value;
+        \\    }
+        \\
+        \\    fn dead() -> u256 {
+        \\        return 9;
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+
+    var stats: mlir.OraMlirPassStatisticsC = std.mem.zeroes(mlir.OraMlirPassStatisticsC);
+    try testing.expect(mlir.oraCanonicalizeOraMLIRWithStatisticsOut(hir_result.context, hir_result.module.raw_module, false, &stats));
+    try testing.expectEqual(@as(u64, 1), stats.ora_symbols_dced);
+
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+    try testing.expect(mlir.oraBuildSIRDispatcher(hir_result.context, hir_result.module.raw_module));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn main:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn first:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "fn second:"));
+    try testing.expect(std.mem.containsAtLeast(u8, rendered, 1, "switch"));
+    try testing.expect(!std.mem.containsAtLeast(u8, rendered, 1, "fn dead:"));
+}
+
+test "OraToSIR lowers exact no-result switch statements to structured sir.switch" {
+    const source_text =
+        \\pub fn classify(tag: u256) -> u256 {
+        \\    switch (tag) {
+        \\        0 => { return 10; }
+        \\        1 => { return 20; }
+        \\        2 => { return 30; }
+        \\        else => { return 99; }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const classify_fn = try functionSlice(rendered, "classify");
+
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, "switch "));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, "0x0 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, "0x1 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, "0x2 =>"));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, "default =>"));
+    try testing.expect(!std.mem.containsAtLeast(u8, classify_fn, 1, " = eq "));
+}
+
+test "OraToSIR keeps range switch statements on condition-chain fallback" {
+    const source_text =
+        \\pub fn classify_range(tag: u256) -> u256 {
+        \\    switch (tag) {
+        \\        0...9 => { return 1; }
+        \\        else => { return 2; }
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+    const classify_fn = try functionSlice(rendered, "classify_range");
+
+    try testing.expect(!std.mem.containsAtLeast(u8, classify_fn, 1, "switch "));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, " = lt "));
+    try testing.expect(std.mem.containsAtLeast(u8, classify_fn, 1, " = gt "));
 }
 
 test "Phase3 release SIR optimization materializes framework folds" {
@@ -6411,7 +6776,7 @@ test "compiler storage layout manifest matches SIR slot usage" {
     try expectOrderedNeedles(read_fn, &.{
         "slot_history",
         "mul",
-        "add slot_history",
+        "add 0x4",
         "sload",
     });
 }
@@ -6543,6 +6908,36 @@ test "OraToSIR lowers signed resource guards with signed comparisons" {
     try testing.expect(std.mem.containsAtLeast(u8, settle, 1, "sgt"));
 }
 
+test "OraToSIR reuses resource map place hash for self move" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract ResourcePlaceCse {
+        \\    storage var balances: map<address, Resource<TokenUnit>>;
+        \\
+        \\    pub fn self_move(owner: address, amount: TokenUnit)
+        \\        modifies balances[owner]
+        \\        requires balances[owner] >= amount
+        \\    {
+        \\        @move(balances[owner], balances[owner], amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const self_move = try functionSlice(rendered, "self_move");
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, self_move, "keccak256"));
+    try testing.expect(!std.mem.containsAtLeast(u8, self_move, 1, "sstore"));
+}
+
 test "OraToSIR lowers lock and guard to matching transient key shapes" {
     const source_text =
         \\contract GuardedWrites {
@@ -6594,7 +6989,7 @@ test "OraToSIR lowers lock and guard to matching transient key shapes" {
         lock_prefix,
         "tload",
         "revert",
-        "sstore slot_total",
+        "sstore 0x0",
     });
 
     const touch_history = try functionSlice(rendered, "touch_history");

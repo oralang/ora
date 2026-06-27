@@ -233,6 +233,16 @@ pub fn runConformanceSpecMetrics(allocator: std.mem.Allocator, source_path: []co
     return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, &.{"--no-verify"});
 }
 
+pub fn runConformanceSpecMetricsWithExtraArgs(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    spec_path: []const u8,
+    metrics: MetricSink,
+    extra_args: []const []const u8,
+) !void {
+    return runConformanceSpecImpl(allocator, source_path, spec_path, metrics, extra_args);
+}
+
 fn runConformanceSpecImpl(
     allocator: std.mem.Allocator,
     source_path: []const u8,
