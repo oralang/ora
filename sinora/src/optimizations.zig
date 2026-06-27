@@ -102,6 +102,21 @@ pub fn switchPeephole(allocator: std.mem.Allocator, source: ir.Program) Optimize
     return rewriteProgram(allocator, source, switchPeepholeBlock);
 }
 
+pub fn shortCircuitBranchThreading(allocator: std.mem.Allocator, source: ir.Program) OptimizeError!ir.Program {
+    var result = ir.Program.init(allocator);
+    errdefer result.deinit();
+    const arena = result.allocator();
+
+    const functions = try arena.alloc(ir.Function, source.functions.len);
+    for (source.functions, functions) |function, *out_function| {
+        out_function.* = try threadShortCircuitFunction(arena, allocator, function);
+    }
+
+    result.functions = functions;
+    result.data_segments = try cloneDataSegments(arena, source.data_segments);
+    return result;
+}
+
 pub fn sccp(allocator: std.mem.Allocator, source: ir.Program) OptimizeError!ir.Program {
     var state = SccpState.init(allocator);
     defer state.deinit();
@@ -962,6 +977,181 @@ fn switchPeepholeBlock(arena: std.mem.Allocator, block: ir.Block) OptimizeError!
     return out;
 }
 
+const BranchTargetSlot = enum { non_zero, zero };
+
+const BranchThreadRewrite = struct {
+    terminator: ir.Terminator,
+    drop_outputs: bool = false,
+};
+
+const BranchThreadPlan = struct {
+    source_name: []const u8,
+    source_terminator: ir.Terminator,
+    condition_name: []const u8,
+    condition_terminator: ir.Terminator,
+};
+
+fn threadShortCircuitFunction(arena: std.mem.Allocator, scratch: std.mem.Allocator, function: ir.Function) OptimizeError!ir.Function {
+    var constants = try collectFunctionConstants(scratch, function);
+    defer constants.deinit();
+
+    var rewrites = std.StringHashMap(BranchThreadRewrite).init(scratch);
+    defer rewrites.deinit();
+
+    for (function.blocks) |block| {
+        const plan = matchShortCircuitThread(function, block, &constants) orelse continue;
+        if (rewrites.contains(plan.source_name) or rewrites.contains(plan.condition_name)) continue;
+        try rewrites.put(plan.source_name, .{ .terminator = plan.source_terminator });
+        try rewrites.put(plan.condition_name, .{
+            .terminator = plan.condition_terminator,
+            .drop_outputs = true,
+        });
+    }
+
+    const blocks = try arena.alloc(ir.Block, function.blocks.len);
+    for (function.blocks, blocks) |block, *out_block| {
+        const rewrite = rewrites.get(block.name);
+        out_block.* = .{
+            .name = try arena.dupe(u8, block.name),
+            .inputs = try cloneStringSlice(arena, block.inputs),
+            .outputs = if (rewrite != null and rewrite.?.drop_outputs)
+                &.{}
+            else
+                try cloneStringSlice(arena, block.outputs),
+            .instructions = try cloneInstructions(arena, block.instructions),
+            .terminator = if (rewrite) |entry| try cloneTerminator(arena, entry.terminator) else try cloneTerminator(arena, block.terminator),
+            .line = block.line,
+        };
+    }
+
+    return .{
+        .name = try arena.dupe(u8, function.name),
+        .blocks = blocks,
+        .line = function.line,
+    };
+}
+
+fn collectFunctionConstants(allocator: std.mem.Allocator, function: ir.Function) OptimizeError!std.StringHashMap(u256) {
+    var constants = std.StringHashMap(u256).init(allocator);
+    errdefer constants.deinit();
+    for (function.blocks) |block| {
+        for (block.instructions) |instruction| {
+            const value = constInstructionValue(instruction) orelse continue;
+            try constants.put(instruction.results[0], value);
+        }
+    }
+    return constants;
+}
+
+fn matchShortCircuitThread(
+    function: ir.Function,
+    block: ir.Block,
+    constants: *const std.StringHashMap(u256),
+) ?BranchThreadPlan {
+    const branch = switch (block.terminator) {
+        .branch => |branch| branch,
+        else => return null,
+    };
+    if (block.outputs.len != 0) return null;
+
+    if (matchShortCircuitShape(
+        function,
+        block.name,
+        branch,
+        .non_zero,
+        .zero,
+        false,
+        constants,
+    )) |plan| return plan;
+
+    return matchShortCircuitShape(
+        function,
+        block.name,
+        branch,
+        .zero,
+        .non_zero,
+        true,
+        constants,
+    );
+}
+
+fn matchShortCircuitShape(
+    function: ir.Function,
+    source_name: []const u8,
+    source_branch: @TypeOf(@as(ir.Terminator, .{ .branch = undefined }).branch),
+    condition_slot: BranchTargetSlot,
+    constant_slot: BranchTargetSlot,
+    constant_is_true: bool,
+    constants: *const std.StringHashMap(u256),
+) ?BranchThreadPlan {
+    const condition_name = branchTarget(source_branch, condition_slot);
+    const constant_name = branchTarget(source_branch, constant_slot);
+    const condition_block = findBlockByName(function, condition_name) orelse return null;
+    const constant_block = findBlockByName(function, constant_name) orelse return null;
+    if (condition_block.inputs.len != 0 or constant_block.inputs.len != 0) return null;
+    if (condition_block.outputs.len != 1 or constant_block.outputs.len != 1) return null;
+    if (constant_block.instructions.len != 0) return null;
+
+    const condition_join = jumpTarget(condition_block.terminator) orelse return null;
+    const constant_join = jumpTarget(constant_block.terminator) orelse return null;
+    if (!std.mem.eql(u8, condition_join, constant_join)) return null;
+
+    if (constantBoolValue(constant_block.outputs[0], constants) != constant_is_true) return null;
+
+    const join = findBlockByName(function, condition_join) orelse return null;
+    if (join.inputs.len != 1 or join.outputs.len != 0 or join.instructions.len != 0) return null;
+    const join_branch = switch (join.terminator) {
+        .branch => |branch| branch,
+        else => return null,
+    };
+    if (!std.mem.eql(u8, join_branch.condition, join.inputs[0])) return null;
+
+    const source_terminator = switch (condition_slot) {
+        .non_zero => ir.Terminator{ .branch = .{
+            .condition = source_branch.condition,
+            .non_zero_target = condition_name,
+            .zero_target = join_branch.zero_target,
+        } },
+        .zero => ir.Terminator{ .branch = .{
+            .condition = source_branch.condition,
+            .non_zero_target = join_branch.non_zero_target,
+            .zero_target = condition_name,
+        } },
+    };
+    const condition_terminator = ir.Terminator{ .branch = .{
+        .condition = condition_block.outputs[0],
+        .non_zero_target = join_branch.non_zero_target,
+        .zero_target = join_branch.zero_target,
+    } };
+
+    return .{
+        .source_name = source_name,
+        .source_terminator = source_terminator,
+        .condition_name = condition_name,
+        .condition_terminator = condition_terminator,
+    };
+}
+
+fn branchTarget(branch: @TypeOf(@as(ir.Terminator, .{ .branch = undefined }).branch), slot: BranchTargetSlot) []const u8 {
+    return switch (slot) {
+        .non_zero => branch.non_zero_target,
+        .zero => branch.zero_target,
+    };
+}
+
+fn jumpTarget(terminator: ir.Terminator) ?[]const u8 {
+    return switch (terminator) {
+        .jump => |target| target,
+        else => null,
+    };
+}
+
+fn constantBoolValue(name: []const u8, constants: *const std.StringHashMap(u256)) ?bool {
+    if (parseU256Literal(name)) |literal| return literal != 0;
+    const value = constants.get(name) orelse return null;
+    return value != 0;
+}
+
 fn constInstructionValue(instruction: ir.Instruction) ?u256 {
     if (instruction.results.len != 1 or instruction.operands.len != 1) return null;
     if (!std.mem.eql(u8, instruction.mnemonic, "const") and !std.mem.eql(u8, instruction.mnemonic, "large_const")) return null;
@@ -1460,6 +1650,142 @@ test "switch peephole lowers one zero case with default into branch" {
     try std.testing.expectEqualStrings("sel", branch.condition);
     try std.testing.expectEqualStrings("other", branch.non_zero_target);
     try std.testing.expectEqualStrings("zero", branch.zero_target);
+}
+
+test "short-circuit branch threading rewrites and materialization" {
+    const diagnostics = @import("diagnostics.zig");
+    const parser = @import("parser.zig");
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator,
+        \\fn main:
+        \\    entry {
+        \\        zero = const 0
+        \\        lhs = calldataload zero
+        \\        rhs = calldataload 32
+        \\        => lhs ? @rhs_block : @false_block
+        \\    }
+        \\    rhs_block -> rhs {
+        \\        => @join
+        \\    }
+        \\    false_block -> zero {
+        \\        => @join
+        \\    }
+        \\    join value {
+        \\        => value ? @then : @else
+        \\    }
+        \\    then {
+        \\        stop
+        \\    }
+        \\    else {
+        \\        invalid
+        \\    }
+    , &bag);
+    defer program.deinit();
+
+    var optimized = try shortCircuitBranchThreading(std.testing.allocator, program);
+    defer optimized.deinit();
+
+    const entry_branch = optimized.functions[0].blocks[0].terminator.branch;
+    try std.testing.expectEqualStrings("rhs_block", entry_branch.non_zero_target);
+    try std.testing.expectEqualStrings("else", entry_branch.zero_target);
+
+    const rhs_block = optimized.functions[0].blocks[1];
+    try std.testing.expectEqual(@as(usize, 0), rhs_block.outputs.len);
+    const rhs_branch = rhs_block.terminator.branch;
+    try std.testing.expectEqualStrings("rhs", rhs_branch.condition);
+    try std.testing.expectEqualStrings("then", rhs_branch.non_zero_target);
+    try std.testing.expectEqualStrings("else", rhs_branch.zero_target);
+}
+
+test "short-circuit branch threading rewrites or materialization" {
+    const diagnostics = @import("diagnostics.zig");
+    const parser = @import("parser.zig");
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator,
+        \\fn main:
+        \\    entry {
+        \\        one = const 1
+        \\        lhs = calldataload 0
+        \\        rhs = calldataload 32
+        \\        => lhs ? @true_block : @rhs_block
+        \\    }
+        \\    true_block -> one {
+        \\        => @join
+        \\    }
+        \\    rhs_block -> rhs {
+        \\        => @join
+        \\    }
+        \\    join value {
+        \\        => value ? @then : @else
+        \\    }
+        \\    then {
+        \\        stop
+        \\    }
+        \\    else {
+        \\        invalid
+        \\    }
+    , &bag);
+    defer program.deinit();
+
+    var optimized = try shortCircuitBranchThreading(std.testing.allocator, program);
+    defer optimized.deinit();
+
+    const entry_branch = optimized.functions[0].blocks[0].terminator.branch;
+    try std.testing.expectEqualStrings("then", entry_branch.non_zero_target);
+    try std.testing.expectEqualStrings("rhs_block", entry_branch.zero_target);
+
+    const rhs_block = optimized.functions[0].blocks[2];
+    try std.testing.expectEqual(@as(usize, 0), rhs_block.outputs.len);
+    const rhs_branch = rhs_block.terminator.branch;
+    try std.testing.expectEqualStrings("rhs", rhs_branch.condition);
+    try std.testing.expectEqualStrings("then", rhs_branch.non_zero_target);
+    try std.testing.expectEqualStrings("else", rhs_branch.zero_target);
+}
+
+test "short-circuit branch threading preserves effectful constant arm" {
+    const diagnostics = @import("diagnostics.zig");
+    const parser = @import("parser.zig");
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator,
+        \\fn main:
+        \\    entry {
+        \\        zero = const 0
+        \\        lhs = calldataload zero
+        \\        rhs = calldataload 32
+        \\        => lhs ? @rhs_block : @false_block
+        \\    }
+        \\    rhs_block -> rhs {
+        \\        => @join
+        \\    }
+        \\    false_block -> zero {
+        \\        sstore zero zero
+        \\        => @join
+        \\    }
+        \\    join value {
+        \\        => value ? @then : @else
+        \\    }
+        \\    then {
+        \\        stop
+        \\    }
+        \\    else {
+        \\        invalid
+        \\    }
+    , &bag);
+    defer program.deinit();
+
+    var optimized = try shortCircuitBranchThreading(std.testing.allocator, program);
+    defer optimized.deinit();
+
+    const entry_branch = optimized.functions[0].blocks[0].terminator.branch;
+    try std.testing.expectEqualStrings("rhs_block", entry_branch.non_zero_target);
+    try std.testing.expectEqualStrings("false_block", entry_branch.zero_target);
+    try std.testing.expectEqualStrings("join", optimized.functions[0].blocks[1].terminator.jump);
 }
 
 test "defragment removes noops unreachable blocks functions and data" {

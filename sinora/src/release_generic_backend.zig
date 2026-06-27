@@ -53,6 +53,11 @@ fn prepareReleaseProgram(allocator: std.mem.Allocator, program: ir.Program) !Pre
     var commoned = try optimizations.literalCommoning(allocator, program);
     errdefer commoned.deinit();
 
+    var threaded = try optimizations.shortCircuitBranchThreading(allocator, commoned);
+    errdefer threaded.deinit();
+    commoned.deinit();
+    commoned = threaded;
+
     var normalized = try release_critical_edges.split(allocator, commoned);
     errdefer normalized.deinit();
 
