@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HARNESS="${ORA_BACKEND_METRICS_HARNESS:-$ROOT/zig-out/bin/metrics-snapshot}"
+DISPATCHER_METRICS="${ORA_BACKEND_DISPATCHER_METRICS:-$ROOT/scripts/sinora-dispatcher-metrics.py}"
 SNAPSHOT_ROOT="${ORA_BACKEND_METRICS_DIR:-$ROOT/tests/conformance/backend_metrics}"
 RUNS_DIR="$SNAPSHOT_ROOT/runs"
 RUN_ID=""
@@ -14,6 +15,7 @@ usage() {
 usage: scripts/backend-metrics-compare.sh [--run-id ID] [--out-dir DIR] [--no-build] [variant...]
 
 Runs the conformance gas/bytecode metrics harness once per snapshot label and
+writes Sinora dispatcher-shape metrics from sinora/fixtures/dispatcher_metrics.
 writes a non-overwriting snapshot under:
 
   tests/conformance/backend_metrics/runs/<run-id>/
@@ -24,6 +26,7 @@ Environment:
   ORA_BACKEND_METRICS_DIR      override snapshot root
   ORA_BACKEND_METRICS_RUN_ID   override generated run id
   ORA_BACKEND_METRICS_HARNESS  override metrics harness executable
+  ORA_BACKEND_DISPATCHER_METRICS override dispatcher metrics script
 USAGE
 }
 
@@ -65,9 +68,13 @@ if ((${#VARIANTS[@]} == 0)); then
 fi
 
 if ((BUILD_HARNESS)); then
-  (cd "$ROOT" && zig build metrics-snapshot >/dev/null)
+  (cd "$ROOT" && zig build metrics-snapshot sinora >/dev/null)
 elif [[ ! -x "$HARNESS" ]]; then
   echo "backend-metrics-compare: missing $HARNESS; run 'zig build metrics-snapshot'" >&2
+  exit 2
+fi
+if [[ ! -f "$DISPATCHER_METRICS" ]]; then
+  echo "backend-metrics-compare: missing dispatcher metrics script: $DISPATCHER_METRICS" >&2
   exit 2
 fi
 
@@ -112,6 +119,7 @@ for variant in "${VARIANTS[@]}"; do
   esac
   echo "backend-metrics-compare: running $variant"
   "$HARNESS" > "$RUN_DIR/$variant.tsv"
+  python3 "$DISPATCHER_METRICS" >> "$RUN_DIR/$variant.tsv"
 done
 
 python3 - "$RUN_DIR" "${VARIANTS[@]}" <<'PY'
@@ -136,6 +144,10 @@ def load(path: Path) -> dict[str, int]:
 
 
 def category(key: str) -> str:
+    if key.startswith("dispatcher_metrics::"):
+        # Heterogeneous planner rows: the category total is a compact drift
+        # checksum, while changed.tsv keeps each metric key readable.
+        return "dispatcher_metrics"
     if key.endswith("::__bytecode_bytes"):
         return "bytecode_bytes"
     if "::__deploy_gas" in key:
@@ -176,7 +188,7 @@ for base in variants:
             "removed": len(removed),
             "categories": {},
         }
-        for cat in ("bytecode_bytes", "deploy_gas", "runtime_gas"):
+        for cat in ("bytecode_bytes", "deploy_gas", "runtime_gas", "dispatcher_metrics"):
             keys = [key for key in common if category(key) == cat]
             base_total = sum(base_values[key] for key in keys)
             candidate_total = sum(candidate_values[key] for key in keys)

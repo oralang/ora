@@ -1,0 +1,15 @@
+{
+  "comparisons": [],
+  "totals": {
+    "sinora": {
+      "bytecode_bytes": 134854,
+      "deploy_gas": 26842718,
+      "dispatcher_metrics": 88136,
+      "metrics": 924,
+      "runtime_gas": 7411729
+    }
+  },
+  "variants": [
+    "sinora"
+  ]
+}
