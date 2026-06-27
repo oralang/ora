@@ -51,6 +51,19 @@ def mapAddressU16 : Ty := .map addressTy u16Ty
 def minOne : Ty := .refinement "MinValue" u256Ty [.integer "1"]
 def minHundred : Ty := .refinement "MinValue" u256Ty [.integer "100"]
 
+def minOneU8 : Ty := .refinement "MinValue" (.prim u8) [.integer "1"]
+def maxFifty : Ty := .refinement "MaxValue" u256Ty [.integer "50"]
+def maxHundred : Ty := .refinement "MaxValue" u256Ty [.integer "100"]
+def ir1020 : Ty := .refinement "InRange" u256Ty [.integer "10", .integer "20"]
+def ir1218 : Ty := .refinement "InRange" u256Ty [.integer "12", .integer "18"]
+def ir525 : Ty := .refinement "InRange" u256Ty [.integer "5", .integer "25"]
+def nonZeroTy : Ty := .refinement "NonZero" u256Ty [.typeMarker]
+def basisPointsTy : Ty := .refinement "BasisPoints" u256Ty [.typeMarker]
+def nzaTy : Ty := .refinement "NonZeroAddress" addressTy [.typeMarker]
+def exactFive : Ty := .refinement "Exact" u256Ty [.integer "5"]
+def exactSix : Ty := .refinement "Exact" u256Ty [.integer "6"]
+def scaledFive : Ty := .refinement "Scaled" u256Ty [.integer "5"]
+def scaledSix : Ty := .refinement "Scaled" u256Ty [.integer "6"]
 def euTwo : Ty := .errorUnion u256Ty [pointTy, otherPointTy]
 def euOne : Ty := .errorUnion u256Ty [pointTy]
 
@@ -108,8 +121,25 @@ def assignableCases : List TypeRelationCase :=
     { label := "resource_place_widening_rejected", lhsName := "Resource<TokenUnit<u16>>", rhsName := "Resource<TokenUnit<u8>>", lhs := tokenPlaceU16, rhs := tokenPlaceU8 },
     { label := "refinement_minvalue_widen", lhsName := "MinValue<u256,1>", rhsName := "MinValue<u256,100>", lhs := minOne, rhs := minHundred },
     { label := "refinement_minvalue_narrow_rejected", lhsName := "MinValue<u256,100>", rhsName := "MinValue<u256,1>", lhs := minHundred, rhs := minOne },
+    { label := "refinement_minvalue_equal", lhsName := "MinValue<u256,1>", rhsName := "MinValue<u256,1>", lhs := minOne, rhs := minOne },
+    { label := "refinement_minvalue_base_mismatch", lhsName := "MinValue<u256,1>", rhsName := "MinValue<u8,1>", lhs := minOne, rhs := minOneU8 },
     { label := "error_union_subset", lhsName := "u256!{Point,OtherPoint}", rhsName := "u256!{Point}", lhs := euTwo, rhs := euOne },
-    { label := "error_union_superset_rejected", lhsName := "u256!{Point}", rhsName := "u256!{Point,OtherPoint}", lhs := euOne, rhs := euTwo } ]
+    { label := "error_union_superset_rejected", lhsName := "u256!{Point}", rhsName := "u256!{Point,OtherPoint}", lhs := euOne, rhs := euTwo },
+    { label := "maxvalue_widen", lhsName := "MaxValue<u256,100>", rhsName := "MaxValue<u256,50>", lhs := maxHundred, rhs := maxFifty },
+    { label := "maxvalue_narrow_rejected", lhsName := "MaxValue<u256,50>", rhsName := "MaxValue<u256,100>", lhs := maxFifty, rhs := maxHundred },
+    { label := "maxvalue_equal", lhsName := "MaxValue<u256,100>", rhsName := "MaxValue<u256,100>", lhs := maxHundred, rhs := maxHundred },
+    { label := "inrange_contained", lhsName := "InRange<u256,10,20>", rhsName := "InRange<u256,12,18>", lhs := ir1020, rhs := ir1218 },
+    { label := "inrange_wider_rejected", lhsName := "InRange<u256,10,20>", rhsName := "InRange<u256,5,25>", lhs := ir1020, rhs := ir525 },
+    { label := "inrange_equal", lhsName := "InRange<u256,10,20>", rhsName := "InRange<u256,10,20>", lhs := ir1020, rhs := ir1020 },
+    { label := "nonzero_self", lhsName := "NonZero<u256>", rhsName := "NonZero<u256>", lhs := nonZeroTy, rhs := nonZeroTy },
+    { label := "basispoints_self", lhsName := "BasisPoints<u256>", rhsName := "BasisPoints<u256>", lhs := basisPointsTy, rhs := basisPointsTy },
+    { label := "nonzeroaddress_self", lhsName := "NonZeroAddress<address>", rhsName := "NonZeroAddress<address>", lhs := nzaTy, rhs := nzaTy },
+    { label := "exact_equal", lhsName := "Exact<u256,5>", rhsName := "Exact<u256,5>", lhs := exactFive, rhs := exactFive },
+    { label := "exact_differ_rejected", lhsName := "Exact<u256,5>", rhsName := "Exact<u256,6>", lhs := exactFive, rhs := exactSix },
+    { label := "scaled_equal", lhsName := "Scaled<u256,5>", rhsName := "Scaled<u256,5>", lhs := scaledFive, rhs := scaledFive },
+    { label := "scaled_differ_rejected", lhsName := "Scaled<u256,5>", rhsName := "Scaled<u256,6>", lhs := scaledFive, rhs := scaledSix },
+    { label := "cross_minvalue_accepts_inrange", lhsName := "MinValue<u256,1>", rhsName := "InRange<u256,10,20>", lhs := minOne, rhs := ir1020 },
+    { label := "cross_inrange_rejects_minvalue", lhsName := "InRange<u256,10,20>", rhsName := "MinValue<u256,1>", lhs := ir1020, rhs := minOne } ]
 
 def storageU256Local : Located := { ty := u256Ty, region := .storage, provenance := .local }
 def storageU256StorageProvenance : Located := { ty := u256Ty, region := .storage, provenance := .storage }

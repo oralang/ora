@@ -49,8 +49,25 @@ def compilerTypesAssignableRows : List (String × String × String × Bool) :=
    ("resource_place_widening_rejected", "Resource<TokenUnit<u16>>", "Resource<TokenUnit<u8>>", false),
    ("refinement_minvalue_widen", "MinValue<u256,1>", "MinValue<u256,100>", true),
    ("refinement_minvalue_narrow_rejected", "MinValue<u256,100>", "MinValue<u256,1>", false),
+   ("refinement_minvalue_equal", "MinValue<u256,1>", "MinValue<u256,1>", true),
+   ("refinement_minvalue_base_mismatch", "MinValue<u256,1>", "MinValue<u8,1>", false),
    ("error_union_subset", "u256!{Point,OtherPoint}", "u256!{Point}", true),
-   ("error_union_superset_rejected", "u256!{Point}", "u256!{Point,OtherPoint}", false)]
+   ("error_union_superset_rejected", "u256!{Point}", "u256!{Point,OtherPoint}", false),
+   ("maxvalue_widen", "MaxValue<u256,100>", "MaxValue<u256,50>", true),
+   ("maxvalue_narrow_rejected", "MaxValue<u256,50>", "MaxValue<u256,100>", false),
+   ("maxvalue_equal", "MaxValue<u256,100>", "MaxValue<u256,100>", true),
+   ("inrange_contained", "InRange<u256,10,20>", "InRange<u256,12,18>", true),
+   ("inrange_wider_rejected", "InRange<u256,10,20>", "InRange<u256,5,25>", false),
+   ("inrange_equal", "InRange<u256,10,20>", "InRange<u256,10,20>", true),
+   ("nonzero_self", "NonZero<u256>", "NonZero<u256>", true),
+   ("basispoints_self", "BasisPoints<u256>", "BasisPoints<u256>", true),
+   ("nonzeroaddress_self", "NonZeroAddress<address>", "NonZeroAddress<address>", true),
+   ("exact_equal", "Exact<u256,5>", "Exact<u256,5>", true),
+   ("exact_differ_rejected", "Exact<u256,5>", "Exact<u256,6>", false),
+   ("scaled_equal", "Scaled<u256,5>", "Scaled<u256,5>", true),
+   ("scaled_differ_rejected", "Scaled<u256,5>", "Scaled<u256,6>", false),
+   ("cross_minvalue_accepts_inrange", "MinValue<u256,1>", "InRange<u256,10,20>", true),
+   ("cross_inrange_rejects_minvalue", "InRange<u256,10,20>", "MinValue<u256,1>", false)]
 
 def compilerLocatedTypeEqlRows : List (String × String × String × Bool) :=
   [("same_type_region_provenance", "u256@storage/local", "u256@storage/local", true),

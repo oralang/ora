@@ -15,6 +15,7 @@ import Ora.Types.Ty
 import Ora.Types.WF
 import Ora.Types.Refinement
 import Ora.Types.RefinementValue
+import Ora.Types.RefinementSubsumption
 import Ora.Types.RefinementBridge
 import Ora.Types.Decl
 import Ora.Types.Internal
@@ -23,6 +24,8 @@ import Ora.Types.TypeEqLawful
 import Ora.Types.Assignable
 import Ora.Types.AssignableLawful
 import Ora.Types.LocatedLawful
+import Ora.Types.RefinementLocated
+import Ora.Types.Typing
 import Ora.Types.LocatedProjection
 import Ora.Types.AssignableCoherence
 import Ora.Types.RefinementTie
@@ -36,3 +39,4 @@ import Ora.SyncDeclEnv
 import Ora.Spec.TypeRelations
 import Ora.Generated.CompilerTypeRelations
 import Ora.TypeRelationsSync
+import Ora.Dispatcher
