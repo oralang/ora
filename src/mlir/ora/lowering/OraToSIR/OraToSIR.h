@@ -9,10 +9,53 @@
 
 #include "mlir/Pass/Pass.h"
 
+#include <cstdint>
+
+namespace llvm
+{
+    class raw_ostream;
+}
+
 namespace mlir
 {
     namespace ora
     {
+        struct OraMlirPassStatistics
+        {
+            uint64_t oraFunctionsCanonicalized = 0;
+            uint64_t oraFunctionsCSEProcessed = 0;
+            uint64_t oraStorageReadsReused = 0;
+            uint64_t oraCallsInlined = 0;
+            uint64_t oraSourceInlineFailures = 0;
+            uint64_t sirConstantsDeduplicated = 0;
+            uint64_t sirUnusedAllocasRemoved = 0;
+            uint64_t sirUnusedLoadsRemoved = 0;
+            uint64_t sirUnusedPureOpsRemoved = 0;
+            uint64_t sirFrameworkFunctionsProcessed = 0;
+            uint64_t oraSymbolsDCEd = 0;
+        };
+
+        enum class OraMlirPassStatistic
+        {
+            OraFunctionsCanonicalized,
+            OraFunctionsCSEProcessed,
+            OraStorageReadsReused,
+            OraCallsInlined,
+            OraSourceInlineFailures,
+            SirConstantsDeduplicated,
+            SirUnusedAllocasRemoved,
+            SirUnusedLoadsRemoved,
+            SirUnusedPureOpsRemoved,
+            SirFrameworkFunctionsProcessed,
+            OraSymbolsDCEd,
+        };
+
+        /// Install a per-thread statistics sink used by Ora-owned passes. This is
+        /// independent of LLVM's optional statistics build flag so
+        /// --mlir-debug=statistics remains useful in the default Ora toolchain.
+        void setActiveOraMlirPassStatistics(OraMlirPassStatistics *statistics);
+        void recordOraMlirPassStatistic(OraMlirPassStatistic statistic, uint64_t amount = 1);
+        void printOraMlirPassStatistics(const OraMlirPassStatistics &statistics, llvm::raw_ostream &os, const char *pipelineName);
 
         /// Create a pass to convert Ora dialect operations to SIR dialect
         std::unique_ptr<Pass> createOraToSIRPass();
@@ -32,6 +75,13 @@ namespace mlir
 
         /// Create a pass to inline functions marked with ora.inline attribute
         std::unique_ptr<Pass> createOraInliningPass();
+
+        /// Create Ora-owned wrappers around framework SymbolDCE. The visibility
+        /// pass translates Ora function/root metadata into temporary MLIR symbol
+        /// visibility, and the cleanup pass removes that temporary metadata
+        /// after the framework pass runs while recording deterministic counts.
+        std::unique_ptr<Pass> createOraSymbolVisibilityPass();
+        std::unique_ptr<Pass> createOraSymbolDCECleanupPass();
 
         /// Create a pass to run canonicalization on nested Ora MLIR functions
         std::unique_ptr<Pass> createOraFunctionCanonicalizerPass();

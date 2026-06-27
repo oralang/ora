@@ -28,16 +28,14 @@
 // CHECK-NEXT:     %6 = sir.and %5 : !sir.u256, %0 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)
 // CHECK-NEXT:     %7 = sir.bitcast %6 : !sir.u256 : i1 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":1:1)
 // CHECK-NEXT:     %8 = sir.bitcast %7 : i1 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
-// CHECK-NEXT:     %9 = sir.iszero %8 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
-// CHECK-NEXT:     %10 = sir.iszero %9 : !sir.u256 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
-// CHECK-NEXT:     sir.cond_br %10 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
+// CHECK-NEXT:     sir.cond_br %8 : !sir.u256, ^bb2, ^bb1 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
-// CHECK-NEXT:     %11 = sir.bitcast %2 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
-// CHECK-NEXT:     sir.revert %11 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
+// CHECK-NEXT:     %9 = sir.bitcast %2 : !sir.u256 : !sir.ptr<1> loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
+// CHECK-NEXT:     sir.revert %9 : !sir.ptr<1>, %2 : !sir.u256 loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:23)
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
-// CHECK-NEXT:     %12 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
-// CHECK-NEXT:     sir.store %12 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
-// CHECK-NEXT:     sir.return %12 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
+// CHECK-NEXT:     %10 = sir.malloc %1 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
+// CHECK-NEXT:     sir.store %10 : !sir.ptr<1>, %arg0 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
+// CHECK-NEXT:     sir.return %10 : !sir.ptr<1>, %1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":42:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":41:5)
 // CHECK-NEXT:   func.func @testFunctionSubtyping() attributes {ora.selector = "0x0ab11ad8", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c300 = sir.const 300 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/type-system/refinements/refinement_subtyping.ora":47:43)))

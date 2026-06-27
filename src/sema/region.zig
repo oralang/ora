@@ -26,8 +26,8 @@ pub fn isAssignable(from: LocatedType, to: LocatedType) bool {
 
 /// Region implicit-coercion rule. Delegates to the pure single source of truth
 /// in `src/types/region_assign.zig`, which the Lean spec emitter
-/// (`tools`/`emit_formal_snapshot.zig`) also consumes — so the type checker and
-/// the formal spec can never disagree on this relation.
+/// (`src/formal/emit_compiler_snapshot.zig`) also consumes — so the type checker
+/// and the formal spec can never disagree on this relation.
 pub fn regionAssignable(from: Region, to: Region) bool {
     return region_assign.regionAssignable(from, to);
 }

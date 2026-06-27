@@ -53,19 +53,20 @@ namespace Ora.Types
 abbrev Name := String
 
 /--
-Argument to a registry-backed refinement type.
+Argument to a registry-backed refinement type. Mirrors
+`semantic.zig:RefinementArg = union { Type, Integer: { text } }`.
 
-Mirrors `semantic.zig:RefinementArg = union { Type, Integer: { text } }`.
-NOTE: the compiler's `.Type` arm is payload-less — its precise meaning (a
-type-parameter slot?) is worth confirming; modeled here as a nullary `type`.
+`typeMarker` is the compiler's payload-less `.Type` arm: a marker that this
+argument POSITION is a type — the concrete type lives in the refinement's
+`base_type`, not in the arg (confirmed at `type_descriptors.zig:453`). `integer`
+is `.Integer{text}`, the textual constant of an integer argument (the `100` in
+`MinValue<u256, 100>`). Equality follows `refinementArgEql` (`:474`): same
+variant, and same text for integers — hence `DecidableEq`.
 -/
 inductive RefinementArg where
-  /-- The compiler's payload-less `.Type` arm. Named `typeMarker` (not `type`)
-      because it does NOT carry a type — its precise meaning (a type-parameter
-      slot?) still needs confirming against the compiler's usage. -/
   | typeMarker
   | integer : String → RefinementArg
-  deriving Repr
+  deriving Repr, DecidableEq
 
 /--
 The Ora type universe.
@@ -105,9 +106,10 @@ inductive Ty where
   /-- `contract` — nominal contract type. -/
   | contract : Name → Ty
   -- callable
-  /-- `function` — value-level function: parameter types ⇒ return types (Ora
-      functions may return multiple values). -/
-  | function : List Ty → List Ty → Ty
+  /-- `function` — value-level function: optional name, parameter types ⇒ return
+      types (Ora functions may return multiple values). The optional name is
+      part of compiler `typeEql`, so it is part of the model. -/
+  | function : Option Name → List Ty → List Ty → Ty
   -- resource / linear
   /-- `resource_domain` — a linear resource domain over a carrier type. -/
   | resourceDomain : Name → Ty → Ty
@@ -126,21 +128,81 @@ inductive Ty where
   -- those instances will be added manually (or via mathlib) once a comparison /
   -- display need arises. Same open decision as `PrimTy`.
 
+/-! ## Structural induction principle
+
+Because `Ty` recurses *through* `List Ty` (`tuple`, `function`, `errorUnion`) and
+`List (Name × Ty)` (`anonStruct`), it is a NESTED inductive: the auto-generated
+`Ty.rec` exposes those children through three separate companion motives
+(`motive_2 : List Ty → _`, `motive_3 : List (Name × Ty) → _`, `motive_4 : Name ×
+Ty → _`). That is why a bare `induction t` is rejected ("multiple motives") and
+why proofs over `Ty` were forced to hand-supply motives.
+
+`Ty.recAux` discharges that obligation ONCE: it pins the companion motives to the
+element-wise predicate (`∀ t ∈ ts, motive t`) so every downstream proof sees a
+single `motive : Ty → Prop` and gets an ordinary element-wise induction
+hypothesis for each aggregate. Use it via `induction t using Ty.recAux`. -/
+
+/-- Structural induction for `Ty`. Each aggregate constructor hands you an
+    induction hypothesis for *every element* of its child list.
+
+    `motive` is `Prop`-valued: this is a proof principle, not a data recursor —
+    the element-wise IH cases on `List.Mem`, which lives in `Prop`. -/
+@[elab_as_elim]
+def Ty.recAux {motive : Ty → Prop}
+    (prim : ∀ p, motive (.prim p))
+    (tuple : ∀ ts, (∀ t ∈ ts, motive t) → motive (.tuple ts))
+    (anonStruct : ∀ fs, (∀ f ∈ fs, motive f.2) → motive (.anonStruct fs))
+    (array : ∀ e n, motive e → motive (.array e n))
+    (slice : ∀ e, motive e → motive (.slice e))
+    (map : ∀ k v, motive k → motive v → motive (.map k v))
+    (errorUnion : ∀ p es, motive p → (∀ e ∈ es, motive e) → motive (.errorUnion p es))
+    (refinement : ∀ n b as, motive b → motive (.refinement n b as))
+    (struct_ : ∀ n, motive (.struct_ n)) (enum_ : ∀ n, motive (.enum_ n))
+    (bitfield : ∀ n, motive (.bitfield n)) (contract : ∀ n, motive (.contract n))
+    (function : ∀ n ps rs, (∀ t ∈ ps, motive t) → (∀ t ∈ rs, motive t) →
+      motive (.function n ps rs))
+    (resourceDomain : ∀ n c, motive c → motive (.resourceDomain n c))
+    (resourcePlace : ∀ e, motive e → motive (.resourcePlace e))
+    (externalProxy : ∀ n, motive (.externalProxy n))
+    (storageSlot : motive .storageSlot) (storageRange : motive .storageRange)
+    (t : Ty) : motive t :=
+  Ty.rec (motive_1 := motive)
+    (motive_2 := fun ts => ∀ t ∈ ts, motive t)
+    (motive_3 := fun fs => ∀ f ∈ fs, motive f.2)
+    (motive_4 := fun f => motive f.2)
+    prim tuple anonStruct array slice map errorUnion refinement
+    struct_ enum_ bitfield contract function resourceDomain resourcePlace
+    externalProxy storageSlot storageRange
+    (fun _ h => nomatch h)
+    (fun _ _ ih iht t hm => by cases hm with | head => exact ih | tail _ h => exact iht _ h)
+    (fun _ h => nomatch h)
+    (fun _ _ ih iht f hm => by cases hm with | head => exact ih | tail _ h => exact iht _ h)
+    (fun _ _ ih => ih) t
+
 /-! ## Located types — σ ::= τ @ ρ -/
 
 /--
-A located type packages a type with the region it lives in.
+A located type: a type, the region it lives in, and its provenance (where the
+value came from — a SEPARATE axis from region). Mirrors the compiler's
+`LocatedType` (`semantic.zig:468`); `provenance` defaults to `.local`.
 
-`σ ::= τ @ ρ`  (`docs/formal-specs/ora-2.md` §4.4). Mutability `µ` and effects
-`ϵ` join this in a later layer.
+`σ ::= τ @ ρ` (`docs/formal-specs/ora-2.md` §4.4). Mutability `µ` (on bindings)
+and effects `ϵ` (on functions) are NOT part of σ — they live in other layers.
 -/
 structure Located where
-  ty     : Ty
-  region : Region
+  ty         : Ty
+  region     : Region
+  provenance : Provenance := .local
 
-/-- Embed a primitive at the default (stack) region. -/
-def Located.ofPrimAtStack (p : PrimTy) : Located :=
-  { ty := .prim p, region := .stack }
+/-- An unlocated type: default region (`stack` ≡ compiler `.none`) and `local`
+    provenance. Mirrors `LocatedType.unlocated`. -/
+def Located.unlocated (t : Ty) : Located :=
+  { ty := t, region := .stack }
+
+/-- A type at a given region, with `local` provenance. Mirrors
+    `LocatedType.withRegion`. -/
+def Located.atRegion (t : Ty) (ρ : Region) : Located :=
+  { ty := t, region := ρ }
 
 /-! ## Composition sanity checks
 
@@ -160,7 +222,7 @@ example : Ty := .array (.prim (.fixedBytes ⟨32, by decide, by decide⟩)) (som
 example : Ty := .errorUnion (.prim u256) [.enum_ "ErrOverflow"]
 
 /-- `(u256, address) -> (bool)` — multi-arg, single-return function. -/
-example : Ty := .function [.prim u256, .prim .address] [.prim .bool]
+example : Ty := .function none [.prim u256, .prim .address] [.prim .bool]
 
 /-- `u256 @ storage` — a located type. -/
 example : Located := { ty := .prim u256, region := .storage }

@@ -119,21 +119,22 @@ def expected_failure_for(file_path, emit_mode):
     return "fail" in stem_lower
 
 
-def compiler_command(compiler_path, emit_mode, file_path):
+def compiler_command(compiler_path, emit_mode, file_path, extra_args=None):
+    extra_args = extra_args or []
     if emit_mode == "build":
-        return [compiler_path, str(file_path)]
+        return [compiler_path, *extra_args, str(file_path)]
     if emit_mode in ("ora", "mlir"):
-        return [compiler_path, "--verify", "--emit=mlir:ora", str(file_path)]
+        return [compiler_path, "--verify", "--emit=mlir:ora", *extra_args, str(file_path)]
     if emit_mode == "sir":
-        return [compiler_path, "--verify", "--emit=mlir:sir", str(file_path)]
+        return [compiler_path, "--verify", "--emit=mlir:sir", *extra_args, str(file_path)]
     if emit_mode == "sir-text":
-        return [compiler_path, "--emit=sir-text", str(file_path)]
+        return [compiler_path, "--emit=sir-text", *extra_args, str(file_path)]
     if emit_mode == "bytecode":
-        return [compiler_path, "--emit=bytecode", str(file_path)]
+        return [compiler_path, "--emit=bytecode", *extra_args, str(file_path)]
     if emit_mode == "abi":
-        return [compiler_path, "--emit=abi", str(file_path)]
+        return [compiler_path, "--emit=abi", *extra_args, str(file_path)]
     if emit_mode == "abi-extras":
-        return [compiler_path, "--emit=abi:extras", str(file_path)]
+        return [compiler_path, "--emit=abi:extras", *extra_args, str(file_path)]
     raise ValueError(f"unsupported emit mode: {emit_mode}")
 
 
@@ -178,10 +179,10 @@ def validate_bytecode_backend_outputs(stdout, stderr):
     }, None
 
 
-def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40):
+def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report_type_fallbacks=False, emit_mode="build", max_error_lines=40, compiler_args=None, expected_fail_by_name=True):
     """Test a single .ora file and return results."""
     normalized_path = str(Path(file_path))
-    expected_failure = expected_failure_for(normalized_path, emit_mode)
+    expected_failure = expected_fail_by_name and expected_failure_for(normalized_path, emit_mode)
     try:
         source_text = Path(file_path).read_text()
     except OSError:
@@ -200,7 +201,7 @@ def test_file(file_path, compiler_path="./zig-out/bin/ora", timeout_s=30, report
 
     try:
         result = subprocess.run(
-            compiler_command(compiler_path, emit_mode, file_path),
+            compiler_command(compiler_path, emit_mode, file_path, compiler_args),
             capture_output=True,
             timeout=timeout_s,
             env=env,
@@ -604,6 +605,9 @@ Examples:
   # Test SIR emission through the same sweeper
   python3 scripts/test_ora_features.py --emit sir --subdir corpus
 
+  # Test an experimental compiler path. Use equals syntax for dash-prefixed args.
+  python3 scripts/test_ora_features.py --emit sir --compiler-arg=--no-canonicalize --subdir corpus
+
   # Test one file and print exactly what the script captured
   python3 scripts/test_ora_features.py --file ora-example/apps/erc20_bitfield_comptime_generics.ora
 
@@ -640,6 +644,10 @@ Examples:
                        help="Max stderr/stdout lines retained per failure")
     parser.add_argument("--fallback-report",
                        help="Write a HIR type-fallback worklist and enable ORA_REPORT_TYPE_FALLBACKS for compiler runs")
+    parser.add_argument("--compiler-arg", action="append", default=[],
+                       help="Extra compiler argument appended before the input file (repeatable; use --compiler-arg=--flag for dash-prefixed values)")
+    parser.add_argument("--all-expected-pass", action="store_true",
+                       help="Treat every tested file as expected-success regardless of its filename")
     parser.add_argument("paths", nargs="*",
                        help="Optional .ora files or directories to test instead of --base-dir")
     
@@ -654,7 +662,7 @@ Examples:
         return
 
     if args.file:
-        result = test_file(args.file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
+        result = test_file(args.file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines, args.compiler_arg, not args.all_expected_pass)
         print(f"File: {result['file']}")
         print(f"Emit: {result['emit']}")
         print(f"Status: {result['status']}")
@@ -701,7 +709,7 @@ Examples:
     for i, file in enumerate(ora_files, 1):
         if not failures_only:
             print(f"[{i}/{len(ora_files)}] Testing {file}...", end=" ")
-        result = test_file(file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines)
+        result = test_file(file, args.compiler, args.timeout, args.fallback_report is not None, args.emit, args.max_error_lines, args.compiler_arg, not args.all_expected_pass)
         results.append(result)
         if not failures_only or result["status"].startswith("❌"):
             if failures_only:

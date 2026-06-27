@@ -1,0 +1,7 @@
+contract ComptimeDivExactNonExact {
+    pub fn run() -> u256 {
+        return comptime {
+            @divExact(5, 2);
+        };
+    }
+}

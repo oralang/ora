@@ -1,0 +1,8 @@
+contract ComptimeStatementRuntimeExpr {
+    pub fn run(input: u256) -> u256 {
+        comptime {
+            input;
+        }
+        return 1;
+    }
+}

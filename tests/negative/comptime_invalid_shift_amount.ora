@@ -1,0 +1,7 @@
+contract ComptimeInvalidShiftAmount {
+    pub fn run() -> u256 {
+        return comptime {
+            1 << -1;
+        };
+    }
+}

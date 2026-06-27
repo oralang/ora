@@ -50,13 +50,71 @@ pub const Compilation = struct {
     package_id: source.PackageId,
     root_module_id: source.ModuleId,
     artifact_blocked: bool = false,
+    artifact_block_reason: ?ArtifactEmissionBlockReason = null,
 
     pub fn deinit(self: *Compilation) void {
         self.db.deinit();
     }
 
     pub fn isArtifactEmittable(self: *const Compilation) bool {
-        return !self.artifact_blocked;
+        return !self.artifact_blocked and self.artifact_block_reason == null;
+    }
+
+    pub fn artifactEmissionDecision(self: *Compilation) !ArtifactEmissionDecision {
+        if (self.artifact_block_reason) |reason| return .{ .blocked = reason };
+        if (self.artifact_blocked) return .{ .blocked = .package_diagnostics };
+        const lowering = try self.db.lowerToHir(self.root_module_id);
+        return artifactEmissionDecisionForLowering(self, lowering);
+    }
+
+    pub fn artifactEmissionDecisionForLowering(
+        self: *const Compilation,
+        lowering: *const hir.LoweringResult,
+    ) ArtifactEmissionDecision {
+        if (self.artifact_blocked) {
+            return .{ .blocked = self.artifact_block_reason orelse .package_diagnostics };
+        }
+        if (diagnosticsHaveErrors(&lowering.diagnostics)) {
+            return .{ .blocked = .hir_diagnostics };
+        }
+        if (!lowering.isEmittable()) {
+            return .{ .blocked = .{
+                .hir_executable_fallbacks = .{
+                    .type_fallback_count = lowering.type_fallback_count,
+                    .placeholder_count = lowering.placeholder_count,
+                    .default_value_count = lowering.default_value_count,
+                },
+            } };
+        }
+        if (hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+            return .{ .blocked = .{ .structural_executable_fallback = violation } };
+        }
+        return .{ .allowed = lowering };
+    }
+};
+
+pub const HirFallbackCounts = struct {
+    type_fallback_count: usize,
+    placeholder_count: usize,
+    default_value_count: usize,
+};
+
+pub const ArtifactEmissionBlockReason = union(enum) {
+    package_diagnostics,
+    hir_diagnostics,
+    hir_executable_fallbacks: HirFallbackCounts,
+    structural_executable_fallback: hir.ExecutableFallbackViolation,
+};
+
+pub const ArtifactEmissionDecision = union(enum) {
+    allowed: *const hir.LoweringResult,
+    blocked: ArtifactEmissionBlockReason,
+
+    pub fn isAllowed(self: ArtifactEmissionDecision) bool {
+        return switch (self) {
+            .allowed => true,
+            .blocked => false,
+        };
     }
 };
 
@@ -105,6 +163,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, tree.tokens.len);
         compilerPhaseLog("module {s} syntax", .{module.name});
+        const syntax_diagnostics = try compilation.db.syntaxDiagnostics(module.file_id);
+        if (diagnosticsHaveErrors(syntax_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
     }
 
     for (package.modules.items) |module_id| {
@@ -117,6 +181,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, ast_file.expressions.len);
         compilerPhaseLog("module {s} ast", .{module.name});
+        const ast_diagnostics = try compilation.db.astDiagnostics(module.file_id);
+        if (diagnosticsHaveErrors(ast_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
     }
 
     compilerPhaseLog("module-graph begin", .{});
@@ -149,6 +219,12 @@ fn finishCompilation(compilation: *Compilation) !void {
         };
         endMetric(instrumentation, resolution.expr_bindings.len);
         compilerPhaseLog("module {s} resolve", .{module.name});
+        const resolution_diagnostics = try compilation.db.resolutionDiagnostics(module_id);
+        if (diagnosticsHaveErrors(resolution_diagnostics)) {
+            compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
+            return;
+        }
         beginMetric(instrumentation, "typecheck");
         const typecheck = compilation.db.moduleTypeCheck(module_id) catch |err| {
             cancelMetric(instrumentation);
@@ -158,6 +234,7 @@ fn finishCompilation(compilation: *Compilation) !void {
         compilerPhaseLog("module {s} typecheck", .{module.name});
         if (diagnosticsHaveErrors(&typecheck.diagnostics)) {
             compilation.artifact_blocked = true;
+            compilation.artifact_block_reason = .package_diagnostics;
             return;
         }
         beginMetric(instrumentation, "const-eval");
@@ -185,10 +262,21 @@ fn finishCompilation(compilation: *Compilation) !void {
     compilerPhaseLog("root lower-to-hir done", .{});
     if (diagnosticsHaveErrors(&lowering.diagnostics)) {
         compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .hir_diagnostics;
         return;
     }
-    if (!lowering.isEmittable() or hir.findExecutableFallback(lowering.module.raw_module) != null) {
+    if (!lowering.isEmittable()) {
         compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .{ .hir_executable_fallbacks = .{
+            .type_fallback_count = lowering.type_fallback_count,
+            .placeholder_count = lowering.placeholder_count,
+            .default_value_count = lowering.default_value_count,
+        } };
+        return;
+    }
+    if (hir.findExecutableFallback(lowering.module.raw_module)) |violation| {
+        compilation.artifact_blocked = true;
+        compilation.artifact_block_reason = .{ .structural_executable_fallback = violation };
         return;
     }
 }

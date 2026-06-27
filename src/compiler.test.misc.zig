@@ -3030,6 +3030,82 @@ test "compilePackageWithOptions records frontend metrics by phase" {
     try testing.expect(total_bytes_allocated > 0);
 }
 
+test "compilePackageWithOptions exposes central artifact emission decision" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "ok.ora",
+        .data =
+        \\contract OkArtifact {
+        \\    pub fn get() -> u256 {
+        \\        return 1;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "bad.ora",
+        .data =
+        \\error Failure;
+        \\
+        \\contract BadArtifact {
+        \\    pub fn run() -> u256 {
+        \\        var values: [Result<string, Failure>; 1] = [Err(Failure())];
+        \\        values[0] = Ok("abc");
+        \\        return 7;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "malformed.ora",
+        .data =
+        \\resource TokenUnit =;
+        \\
+        \\contract MissingCarrier {}
+        ,
+    });
+
+    const ok_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/ok.ora", .{tmp.sub_path});
+    defer testing.allocator.free(ok_path);
+    var ok_compilation = try compiler.compilePackage(testing.allocator, ok_path);
+    defer ok_compilation.deinit();
+    const ok_decision = try ok_compilation.artifactEmissionDecision();
+    switch (ok_decision) {
+        .allowed => {},
+        .blocked => return error.TestUnexpectedResult,
+    }
+
+    const bad_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/bad.ora", .{tmp.sub_path});
+    defer testing.allocator.free(bad_path);
+    var bad_compilation = try compiler.compilePackage(testing.allocator, bad_path);
+    defer bad_compilation.deinit();
+    try testing.expect(!bad_compilation.isArtifactEmittable());
+    const bad_decision = try bad_compilation.artifactEmissionDecision();
+    switch (bad_decision) {
+        .allowed => return error.TestUnexpectedResult,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {},
+            else => return error.TestUnexpectedResult,
+        },
+    }
+
+    const malformed_path = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}/malformed.ora", .{tmp.sub_path});
+    defer testing.allocator.free(malformed_path);
+    var malformed_compilation = try compiler.compilePackage(testing.allocator, malformed_path);
+    defer malformed_compilation.deinit();
+    try testing.expect(!malformed_compilation.isArtifactEmittable());
+    const malformed_decision = try malformed_compilation.artifactEmissionDecision();
+    switch (malformed_decision) {
+        .allowed => return error.TestUnexpectedResult,
+        .blocked => |reason| switch (reason) {
+            .package_diagnostics => {},
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
 test "SMT degradation probes fail closed in sequential and parallel verification" {
     const probes = [_]struct {
         path: []const u8,

@@ -1,0 +1,46 @@
+fn init:
+    entry {
+        start = runtime_start_offset
+        len = runtime_length
+        ptr = malloc len
+        codecopy ptr start len
+        return ptr len
+    }
+
+fn main:
+    entry {
+        selector = const 0x0c
+        switch selector {
+        10 => @case_a
+        11 => @case_b
+        12 => @case_c
+        13 => @case_d
+        14 => @case_e
+        default => @fallback
+    }
+    }
+
+    case_a {
+        stop
+    }
+
+    case_b {
+        stop
+    }
+
+    case_c {
+        stop
+    }
+
+    case_d {
+        stop
+    }
+
+    case_e {
+        stop
+    }
+
+    fallback {
+        zero = const 0x0
+        revert zero zero
+    }

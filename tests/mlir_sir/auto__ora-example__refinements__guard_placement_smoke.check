@@ -30,17 +30,15 @@
 // CHECK-NEXT:     %2 = sir.and %1 : !sir.u256, %c1 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:13)))
 // CHECK-NEXT:     %3 = sir.bitcast %2 : !sir.u256 : i1 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:13)))
 // CHECK-NEXT:     %4 = sir.bitcast %3 : i1 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
-// CHECK-NEXT:     %5 = sir.iszero %4 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
-// CHECK-NEXT:     %6 = sir.iszero %5 : !sir.u256 : !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
-// CHECK-NEXT:     sir.cond_br %6 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
+// CHECK-NEXT:     sir.cond_br %4 : !sir.u256, ^bb1, ^bb2 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
 // CHECK-NEXT:   ^bb1:  // pred: ^bb0
 // CHECK-NEXT:     sir.br ^bb3(%c1 : !sir.u256) loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
 // CHECK-NEXT:   ^bb2:  // pred: ^bb0
 // CHECK-NEXT:     sir.br ^bb3(%c2 : !sir.u256) loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))
-// CHECK-NEXT:   ^bb3(%7: !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))):  // 2 preds: ^bb1, ^bb2
-// CHECK-NEXT:     %8 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
-// CHECK-NEXT:     sir.store %8 : !sir.ptr<1>, %7 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
-// CHECK-NEXT:     sir.return %8 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
+// CHECK-NEXT:   ^bb3(%5: !sir.u256 loc("ora.stmt.10"("ora.origin_stmt.10"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":25:9)))):  // 2 preds: ^bb1, ^bb2
+// CHECK-NEXT:     %6 = sir.malloc %0 : !sir.u256 : !sir.ptr<1> loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
+// CHECK-NEXT:     sir.store %6 : !sir.ptr<1>, %5 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
+// CHECK-NEXT:     sir.return %6 : !sir.ptr<1>, %0 : !sir.u256 loc("ora.stmt.11"("ora.origin_stmt.11"("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":30:9)))
 // CHECK-NEXT:   } loc("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":23:5)
 // CHECK-NEXT:   func.func @switch_assign_refinement(%arg0: !sir.u256 loc("{{.*}}/ora-example/refinements/guard_placement_smoke.ora":34:37)) -> !sir.u256 attributes {ora.abi_param_enum_counts = [0 : i256], ora.abi_param_refinements = [""], ora.abi_params = ["uint256"], ora.abi_return = "uint256", ora.abi_return_layout = "uint256", ora.abi_return_words = 1 : i256, ora.param_names = ["a"], ora.result_input_error_ids = [0 : i256], ora.result_input_modes = [""], ora.selector = "0x9539a4ab", ora.visibility = "pub"} {
 // CHECK-NEXT:     %c1 = sir.const 1 : !sir.u256 loc(unknown)

@@ -7346,7 +7346,9 @@ fn inferReportVerificationSuccess(
     if (!verify_state) return false;
     if (summary.vacuous != 0) return false;
     if (summary.vacuity_unknown != 0) return false;
-    if (verification_result) |vr| return vr.success;
+    if (verification_result) |vr| {
+        if (!vr.success) return false;
+    }
     return summary.failed_obligations == 0 and
         summary.inconsistent_bases == 0 and
         summary.unknown == 0;
@@ -12643,7 +12645,7 @@ test "report success is false without verification result when queries are unkno
     try testing.expect(!inferReportVerificationSuccess(summary, null, false, .Full, true, true));
 }
 
-test "report success follows verification result when present" {
+test "report success requires successful verification result when present" {
     var result = errors.VerificationResult.init(testing.allocator);
     defer result.deinit();
     result.success = false;
@@ -12653,6 +12655,25 @@ test "report success follows verification result when present" {
         .unknown = 0,
     };
     try testing.expect(!inferReportVerificationSuccess(summary, &result, false, .Full, true, true));
+}
+
+test "report success checks report counters even when verification result succeeded" {
+    var result = errors.VerificationResult.init(testing.allocator);
+    defer result.deinit();
+    result.success = true;
+
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .unknown = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .failed_obligations = 1,
+    }, &result, false, .Full, true, true));
+    try testing.expect(!inferReportVerificationSuccess(.{
+        .total_queries = 1,
+        .inconsistent_bases = 1,
+    }, &result, false, .Full, true, true));
 }
 
 test "report success is false when encoder degraded" {

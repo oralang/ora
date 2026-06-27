@@ -33,6 +33,7 @@
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
 #include "mlir/Pass/Pass.h"
+#include "mlir/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -7923,11 +7924,60 @@ static void oraConfigureVerifierForPassManager(PassManager &pm, const char *pipe
     }
 }
 
+static constexpr bool oraNativeMlirStatisticsEnabled()
+{
+#if LLVM_ENABLE_STATS
+    return true;
+#else
+    return false;
+#endif
+}
+
+class ScopedOraMlirPassStatistics
+{
+public:
+    explicit ScopedOraMlirPassStatistics(bool enabled) : enabled(enabled)
+    {
+        if (enabled)
+            setActiveOraMlirPassStatistics(&statistics);
+    }
+
+    ~ScopedOraMlirPassStatistics()
+    {
+        if (enabled)
+            setActiveOraMlirPassStatistics(nullptr);
+    }
+
+    const OraMlirPassStatistics &get() const { return statistics; }
+
+private:
+    bool enabled = false;
+    OraMlirPassStatistics statistics;
+};
+
+static void copyOraMlirPassStatistics(const mlir::ora::OraMlirPassStatistics &from, OraMlirPassStatisticsC *to)
+{
+    if (!to)
+        return;
+
+    to->ora_functions_canonicalized = from.oraFunctionsCanonicalized;
+    to->ora_functions_cse_processed = from.oraFunctionsCSEProcessed;
+    to->ora_storage_reads_reused = from.oraStorageReadsReused;
+    to->ora_calls_inlined = from.oraCallsInlined;
+    to->ora_source_inline_failures = from.oraSourceInlineFailures;
+    to->sir_constants_deduplicated = from.sirConstantsDeduplicated;
+    to->sir_unused_allocas_removed = from.sirUnusedAllocasRemoved;
+    to->sir_unused_loads_removed = from.sirUnusedLoadsRemoved;
+    to->sir_unused_pure_ops_removed = from.sirUnusedPureOpsRemoved;
+    to->sir_framework_functions_processed = from.sirFrameworkFunctionsProcessed;
+    to->ora_symbols_dced = from.oraSymbolsDCEd;
+}
+
 //===----------------------------------------------------------------------===//
 // Ora Canonicalization (before conversion)
 //===----------------------------------------------------------------------===//
 
-bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
+static bool oraCanonicalizeOraMLIRImpl(MlirContext ctx, MlirModule module, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
 {
     try
     {
@@ -7943,6 +7993,9 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // Create pass manager for builtin.module operations
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-canonicalize");
+        if (printStatistics && oraNativeMlirStatisticsEnabled())
+            pm.enableStatistics(PassDisplayMode::Pipeline);
+        ScopedOraMlirPassStatistics oraStatistics(printStatistics || outStatistics != nullptr);
 
         auto addOraFunctionOptimizationPipeline = [&]()
         {
@@ -7963,7 +8016,18 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
         // Ora emission / Ora->SIR conversion.
         addOraFunctionOptimizationPipeline();
 
+        // 4. Framework symbol DCE is safe only after Ora roots are translated
+        // into MLIR symbol visibility. Public ABI/init/debug roots stay public;
+        // explicit private helpers become removable if they are not referenced
+        // by a live root.
+        pm.addPass(mlir::ora::createOraSymbolVisibilityPass());
+        pm.addPass(mlir::createSymbolDCEPass());
+        pm.addPass(mlir::ora::createOraSymbolDCECleanupPass());
+
         LogicalResult result = pm.run(moduleOp);
+        copyOraMlirPassStatistics(oraStatistics.get(), outStatistics);
+        if (printStatistics)
+            printOraMlirPassStatistics(oraStatistics.get(), llvm::errs(), "ora-canonicalize");
 
         if (failed(result))
         {
@@ -7978,19 +8042,34 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
     }
 }
 
+bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
+{
+    return oraCanonicalizeOraMLIRImpl(ctx, module, false, nullptr);
+}
+
+bool oraCanonicalizeOraMLIRWithStatistics(MlirContext ctx, MlirModule module, bool enableStatistics)
+{
+    return oraCanonicalizeOraMLIRImpl(ctx, module, enableStatistics, nullptr);
+}
+
+bool oraCanonicalizeOraMLIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
+{
+    return oraCanonicalizeOraMLIRImpl(ctx, module, printStatistics, outStatistics);
+}
+
 //===----------------------------------------------------------------------===//
 // Ora to SIR Conversion
 //===----------------------------------------------------------------------===//
 
-bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
+static bool oraConvertToSIRImpl(MlirContext ctx, MlirModule module, bool debugInfo, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
 {
     try
     {
         MLIRContext *context = unwrap(ctx);
         ModuleOp moduleOp = unwrap(module);
         const bool hadDebugInfoAttr = moduleOp->hasAttr("ora.debug_info");
-        const bool enablePhase0SIRFrameworkCanonicalizer =
-            moduleOp->hasAttr("ora.phase0.run_sir_framework_canonicalizer");
+        const bool skipSIRFrameworkCanonicalizer =
+            moduleOp->hasAttr("ora.phase0.skip_sir_framework_canonicalizer");
         if (debugInfo && !hadDebugInfoAttr)
         {
             moduleOp->setAttr("ora.debug_info", UnitAttr::get(context));
@@ -8012,6 +8091,9 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         // This ensures nested passes can be added and executed
         PassManager pm(context, "builtin.module");
         oraConfigureVerifierForPassManager(pm, "ora-to-sir");
+        if (printStatistics && oraNativeMlirStatisticsEnabled())
+            pm.enableStatistics(PassDisplayMode::Pipeline);
+        ScopedOraMlirPassStatistics oraStatistics(printStatistics || outStatistics != nullptr);
 
         ORA_DEBUG_PREFIX("OraCAPI", "Created PassManager for builtin.module");
 
@@ -8030,12 +8112,14 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         pm.addPass(createSIROptimizationPass());
         // Cleanup removes dead pure ops after the deterministic hygiene pass.
         pm.addPass(createSIRCleanupPass());
-        if (enablePhase0SIRFrameworkCanonicalizer)
+        if (!skipSIRFrameworkCanonicalizer)
         {
-            // Phase 0 framework-first spike: let MLIR canonicalization exercise
-            // dialect folders on SIR after conversion. This is opt-in
-            // so normal builds remain byte-identical while the spike measures
-            // framework behavior against the existing manual cleanup baseline.
+            // Framework-first SIR hygiene is part of the normal pipeline.
+            // Branch, cast, and pure-value cleanup belong in MLIR
+            // canonicalizers and RemoveDeadValues instead of reviving the old
+            // broad bespoke peephole batch that was disabled after converted
+            // loop-CFG crashes. The internal skip attr exists only for debug
+            // viewers that need a before/after snapshot from cloned modules.
             pm.addPass(createSIRFrameworkCanonicalizerPass());
         }
 
@@ -8043,6 +8127,9 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
         ORA_DEBUG_PREFIX("OraCAPI", "Running OraToSIR pass...");
 
         LogicalResult result = pm.run(moduleOp);
+        copyOraMlirPassStatistics(oraStatistics.get(), outStatistics);
+        if (printStatistics)
+            printOraMlirPassStatistics(oraStatistics.get(), llvm::errs(), "ora-to-sir");
         if (debugInfo && !hadDebugInfoAttr)
             moduleOp->removeAttr("ora.debug_info");
 
@@ -8061,6 +8148,21 @@ bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
     {
         return false;
     }
+}
+
+bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
+{
+    return oraConvertToSIRImpl(ctx, module, debugInfo, false, nullptr);
+}
+
+bool oraConvertToSIRWithStatistics(MlirContext ctx, MlirModule module, bool debugInfo, bool enableStatistics)
+{
+    return oraConvertToSIRImpl(ctx, module, debugInfo, enableStatistics, nullptr);
+}
+
+bool oraConvertToSIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool debugInfo, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
+{
+    return oraConvertToSIRImpl(ctx, module, debugInfo, printStatistics, outStatistics);
 }
 
 //===----------------------------------------------------------------------===//

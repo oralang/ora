@@ -108,6 +108,11 @@ pub const Instruction = struct {
     mnemonic: []const u8,
     operands: []const []const u8,
     line: u32,
+    /// Parser-inserted operation that exists only to normalize text-format
+    /// inline numeric operands into regular SSA values. It must participate in
+    /// legality, scheduling, and codegen like any other operation, but it does
+    /// not correspond to an operation in the producer's source-location table.
+    synthetic: bool = false,
 };
 
 pub const SwitchCase = struct {

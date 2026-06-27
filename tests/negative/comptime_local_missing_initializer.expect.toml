@@ -1,0 +1,1 @@
+expect_error = "comptime local declaration requires a statically known initializer during HIR lowering"

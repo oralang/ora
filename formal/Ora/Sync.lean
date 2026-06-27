@@ -51,6 +51,26 @@ theorem typekinds_match : compilerTypeKinds = expectedTypeKinds := by decide
     an exclusion is a deliberate, checked change. -/
 theorem excluded_typekinds_are_real : ∀ k ∈ excludedTypeKinds, k ∈ expectedTypeKinds := by decide
 
+/-! ## Closed refinement registry — checked via self-describing per-property name lists -/
+
+theorem refinement_names_match :
+    compilerRefinementNames = expectedRefinementNames := by decide
+
+theorem runtime_guard_refinement_names_match :
+    compilerRuntimeGuardRefinementNames = expectedRuntimeGuardRefinementNames := by decide
+
+theorem compile_time_only_refinement_names_match :
+    compilerCompileTimeOnlyRefinementNames = expectedCompileTimeOnlyRefinementNames := by decide
+
+theorem native_mlir_refinement_names_match :
+    compilerNativeMlirRefinementNames = expectedNativeMlirRefinementNames := by decide
+
+theorem path_form_refinement_names_match :
+    compilerPathFormRefinementNames = expectedPathFormRefinementNames := by decide
+
+theorem bounds_backed_refinement_names_match :
+    compilerBoundsBackedRefinementNames = expectedBoundsBackedRefinementNames := by decide
+
 /-! ## 5. Regions + the assignability table match the formal spec -/
 
 theorem regions_match : compilerRegions = expectedRegions := by decide

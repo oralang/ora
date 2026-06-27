@@ -23,6 +23,7 @@ pub const PassError = error{
 pub const OptimizationPass = enum {
     sccp,
     copy_propagation,
+    literal_commoning,
     unused_operation_elimination,
     defragment,
     switch_peephole,
@@ -31,6 +32,7 @@ pub const OptimizationPass = enum {
         return switch (char) {
             's' => .sccp,
             'c' => .copy_propagation,
+            'p' => .literal_commoning,
             'u' => .unused_operation_elimination,
             'd' => .defragment,
             'l' => .switch_peephole,
@@ -43,6 +45,7 @@ pub const optimize_help =
     \\Optimization passes to run in order. Each character is a pass:
     \\  s = SCCP (constant propagation)
     \\  c = copy propagation
+    \\  p = literal commoning
     \\  u = unused operation elimination
     \\  d = defragment
     \\  l = switch peephole
@@ -114,6 +117,11 @@ pub const PassManager = struct {
         try runPass(CopyPropagationPass, &pass, self.allocator, self.program, &self.store);
     }
 
+    pub fn runLiteralCommoning(self: *PassManager) PassError!void {
+        var pass: LiteralCommoningPass = .{};
+        try runPass(LiteralCommoningPass, &pass, self.allocator, self.program, &self.store);
+    }
+
     pub fn runUnusedOperationElimination(self: *PassManager) PassError!void {
         var pass: UnusedOperationEliminationPass = .{};
         try runPass(UnusedOperationEliminationPass, &pass, self.allocator, self.program, &self.store);
@@ -133,6 +141,7 @@ pub const PassManager = struct {
         switch (pass) {
             .sccp => try self.runSccp(),
             .copy_propagation => try self.runCopyPropagation(),
+            .literal_commoning => try self.runLiteralCommoning(),
             .unused_operation_elimination => try self.runUnusedOperationElimination(),
             .defragment => try self.runDefragmenter(),
             .switch_peephole => try self.runSwitchPeephole(),
@@ -256,6 +265,26 @@ pub const CopyPropagationPass = struct {
         _ = self;
         _ = store;
         const optimized = try optimizations.copyPropagation(allocator, program.*);
+        program.deinit();
+        program.* = optimized;
+    }
+
+    pub fn preserves(self: @This()) analyses.AnalysesMask {
+        _ = self;
+        return analyses.AnalysesMask.empty();
+    }
+};
+
+pub const LiteralCommoningPass = struct {
+    pub fn run(
+        self: *@This(),
+        allocator: std.mem.Allocator,
+        program: *ir.Program,
+        store: *analyses.AnalysesStore,
+    ) PassError!void {
+        _ = self;
+        _ = store;
+        const optimized = try optimizations.literalCommoning(allocator, program.*);
         program.deinit();
         program.* = optimized;
     }
@@ -469,11 +498,12 @@ test "optimization passes replace the program and invalidate analyses" {
 test "optimization string parses and runs passes in order" {
     const parser = @import("parser.zig");
 
-    const parsed = try parseOptimizationString(std.testing.allocator, "scudl");
+    const parsed = try parseOptimizationString(std.testing.allocator, "scpudl");
     defer std.testing.allocator.free(parsed);
     try std.testing.expectEqualSlices(OptimizationPass, &.{
         .sccp,
         .copy_propagation,
+        .literal_commoning,
         .unused_operation_elimination,
         .defragment,
         .switch_peephole,

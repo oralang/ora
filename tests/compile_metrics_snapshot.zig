@@ -26,6 +26,10 @@ const default_measured_runs: usize = 5;
 const default_corpus_root = "ora-example";
 const expected_pass_exception = "ora-example/refinements/negative_tests/fail_refinement_bounds.ora";
 
+fn exitCli(code: u8) noreturn {
+    std.process.exit(code);
+}
+
 const RunResult = struct {
     phases: []metrics_mod.Phase,
     source_bytes: u64,
@@ -67,7 +71,7 @@ pub fn main(init: std.process.Init) !void {
     defer options.deinit(allocator);
     if (options.measured_runs == 0) {
         std.debug.print("compile-metrics: --runs must be at least 1\n", .{});
-        std.process.exit(2);
+        exitCli(2);
     }
 
     var paths: std.ArrayList([]const u8) = .empty;
@@ -157,7 +161,7 @@ fn parseOptions(allocator: std.mem.Allocator, args: []const []const u8) !Options
             options.time_output = arg["--time-output=".len..];
         } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try printUsage();
-            std.process.exit(0);
+            exitCli(0);
         } else if (std.mem.startsWith(u8, arg, "-")) {
             return error.UnknownArgument;
         } else {

@@ -1,0 +1,121 @@
+fn init:
+    entry {
+        start = runtime_start_offset
+        len = runtime_length
+        ptr = malloc len
+        codecopy ptr start len
+        return ptr len
+    }
+
+fn main:
+    entry {
+        selector = const 0x0f
+        switch selector {
+        0 => @case_0
+        1 => @case_1
+        2 => @case_2
+        3 => @case_3
+        4 => @case_4
+        5 => @case_5
+        6 => @case_6
+        7 => @case_7
+        8 => @case_8
+        9 => @case_9
+        10 => @case_10
+        11 => @case_11
+        12 => @case_12
+        13 => @case_13
+        14 => @case_14
+        15 => @case_15
+        16 => @case_16
+        17 => @case_17
+        18 => @case_18
+        19 => @case_19
+        default => @fallback
+    }
+    }
+
+    case_0 {
+        stop
+    }
+
+    case_1 {
+        stop
+    }
+
+    case_2 {
+        stop
+    }
+
+    case_3 {
+        stop
+    }
+
+    case_4 {
+        stop
+    }
+
+    case_5 {
+        stop
+    }
+
+    case_6 {
+        stop
+    }
+
+    case_7 {
+        stop
+    }
+
+    case_8 {
+        stop
+    }
+
+    case_9 {
+        stop
+    }
+
+    case_10 {
+        stop
+    }
+
+    case_11 {
+        stop
+    }
+
+    case_12 {
+        stop
+    }
+
+    case_13 {
+        stop
+    }
+
+    case_14 {
+        stop
+    }
+
+    case_15 {
+        stop
+    }
+
+    case_16 {
+        stop
+    }
+
+    case_17 {
+        stop
+    }
+
+    case_18 {
+        stop
+    }
+
+    case_19 {
+        stop
+    }
+
+    fallback {
+        zero = const 0x0
+        revert zero zero
+    }

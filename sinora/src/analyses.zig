@@ -1865,7 +1865,7 @@ test "def-use records value operands, control uses, and block outputs" {
 
     const a_uses = def_use.usesOf("a");
     try std.testing.expectEqual(@as(usize, 1), a_uses.len);
-    try expectOperationUse(a_uses[0], .{ .function = 0, .block = 0 }, 1);
+    try expectOperationUse(a_uses[0], .{ .function = 0, .block = 0 }, 2);
 
     const b_uses = def_use.usesOf("b");
     try std.testing.expectEqual(@as(usize, 3), b_uses.len);

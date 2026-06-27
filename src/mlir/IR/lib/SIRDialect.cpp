@@ -217,6 +217,11 @@ enum class UnaryConstFoldKind
     IsZero,
 };
 
+// SIR constant folds are backend-hygiene folds over already-lowered EVM word
+// operations. Source-level semantics, including checked arithmetic, refinement
+// reasoning, ADT projections, and typed integer narrowing, belong in the Ora
+// dialect canonicalizers before lowering. Keep this layer limited to
+// value-preserving simplifications that are valid for the SIR op itself.
 static llvm::APInt foldSIRBinaryAPInts(BinaryConstFoldKind kind,
                                        const llvm::APInt &lhs,
                                        const llvm::APInt &rhs)

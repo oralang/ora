@@ -310,34 +310,55 @@ namespace mlir
         class ConvertResourceCreateOp : public OpConversionPattern<ora::CreateOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertResourceCreateOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                    MapHashCache &mapHashCache,
+                                    PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
 
             LogicalResult matchAndRewrite(
                 ora::CreateOp op,
                 typename ora::CreateOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
         };
 
         class ConvertResourceDestroyOp : public OpConversionPattern<ora::DestroyOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertResourceDestroyOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                     MapHashCache &mapHashCache,
+                                     PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
 
             LogicalResult matchAndRewrite(
                 ora::DestroyOp op,
                 typename ora::DestroyOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
         };
 
         class ConvertResourceMoveOp : public OpConversionPattern<ora::MoveOp>
         {
         public:
-            using OpConversionPattern::OpConversionPattern;
+            ConvertResourceMoveOp(const TypeConverter &typeConverter, MLIRContext *context,
+                                  MapHashCache &mapHashCache,
+                                  PatternBenefit benefit = 1)
+                : OpConversionPattern(typeConverter, context, benefit),
+                  mapHashCache(&mapHashCache) {}
 
             LogicalResult matchAndRewrite(
                 ora::MoveOp op,
                 typename ora::MoveOp::Adaptor adaptor,
                 ConversionPatternRewriter &rewriter) const override;
+
+        private:
+            MapHashCache *mapHashCache;
         };
 
         class ConvertTensorExtractOp : public OpConversionPattern<mlir::tensor::ExtractOp>

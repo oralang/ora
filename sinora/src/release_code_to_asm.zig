@@ -12,6 +12,9 @@ const ops = @import("ops.zig");
 const parser = @import("parser.zig");
 const diagnostics = @import("diagnostics.zig");
 const release_schedule = @import("release_schedule.zig");
+const switch_routing = @import("switch_routing.zig");
+
+const jump_table_entry_width: u8 = 2;
 
 pub const CodeToAsmError = error{
     UnsupportedSir,
@@ -38,6 +41,7 @@ pub const MemoryLayout = struct {
     alloc_start: []const AllocAddress = &.{},
     static_alloc_start: []const StaticAllocAddress = &.{},
     switch_store: ?u32 = null,
+    switch_table_store: ?u32 = null,
     dyn_free_pointer: ?FreePointer = null,
 };
 
@@ -173,12 +177,14 @@ const SourceIndexBuilder = struct {
             var callees: std.ArrayList([]const u8) = .empty;
             defer callees.deinit(self.allocator);
             for (block.instructions, 0..) |instruction, instruction_index| {
-                try self.op_indices.append(self.allocator, .{
-                    .function_name = function_for_block.name,
-                    .block_name = block.name,
-                    .instruction_index = instruction_index,
-                    .idx = self.takeIndex(),
-                });
+                if (!instruction.synthetic) {
+                    try self.op_indices.append(self.allocator, .{
+                        .function_name = function_for_block.name,
+                        .block_name = block.name,
+                        .instruction_index = instruction_index,
+                        .idx = self.takeIndex(),
+                    });
+                }
                 if (std.mem.eql(u8, instruction.mnemonic, "icall")) {
                     if (instruction.operands.len != 0 and instruction.operands[0].len > 1 and instruction.operands[0][0] == '@') {
                         try callees.append(self.allocator, instruction.operands[0][1..]);
@@ -247,6 +253,16 @@ const PendingBlock = struct {
     block_name: []const u8,
 };
 
+const PendingJumpTable = struct {
+    // Raw table bytes must be emitted after executable blocks. EVM jumpdest
+    // analysis scans all code bytes and treats PUSH immediates as data; if a
+    // raw table sits before a real block, a table byte in the PUSH range can
+    // accidentally hide a later JUMPDEST.
+    label: evm_asm.Label,
+    targets: []evm_asm.Label,
+    entry_width: u8,
+};
+
 const VisitedBlock = struct {
     function_name: []const u8,
     block_name: []const u8,
@@ -285,6 +301,10 @@ pub fn emitFromEntry(
         .allow_initcode_introspection = true,
     });
     try emitter.emitUsedData(null);
+    try emitter.emitPendingJumpTables(.{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
     try emitter.markInitcodeEnd();
     return emitter.bytecode.toOwnedSlice();
 }
@@ -307,6 +327,10 @@ pub fn emitFromEntryWithSourceMap(
         .allow_initcode_introspection = true,
     });
     try emitter.emitUsedData(null);
+    try emitter.emitPendingJumpTables(.{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
     try emitter.markInitcodeEnd();
     return emitter.finishWithSourceMap();
 }
@@ -334,6 +358,10 @@ pub fn emitDeployment(
         .allow_initcode_introspection = true,
     });
     try emitter.emitUsedData(runtime_data.items);
+    try emitter.emitPendingJumpTables(.{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
 
     try emitter.markRuncodeStart();
     if (runtime_function_name) |runtime_name| {
@@ -344,6 +372,10 @@ pub fn emitDeployment(
             .allow_initcode_introspection = false,
         });
         try emitter.emitSelectedData(runtime_data.items);
+        try emitter.emitPendingJumpTables(.{
+            .reference_mode = .runcode_delta,
+            .allow_initcode_introspection = false,
+        });
     }
     try emitter.markInitcodeEnd();
     return emitter.bytecode.toOwnedSlice();
@@ -373,6 +405,10 @@ pub fn emitDeploymentWithSourceMap(
         .allow_initcode_introspection = true,
     });
     try emitter.emitUsedData(runtime_data.items);
+    try emitter.emitPendingJumpTables(.{
+        .reference_mode = .direct,
+        .allow_initcode_introspection = true,
+    });
 
     try emitter.markRuncodeStart();
     if (runtime_function_name) |runtime_name| {
@@ -383,6 +419,10 @@ pub fn emitDeploymentWithSourceMap(
             .allow_initcode_introspection = false,
         });
         try emitter.emitSelectedData(runtime_data.items);
+        try emitter.emitPendingJumpTables(.{
+            .reference_mode = .runcode_delta,
+            .allow_initcode_introspection = false,
+        });
     }
     try emitter.markInitcodeEnd();
     return emitter.finishWithSourceMap();
@@ -422,6 +462,7 @@ const GenericEmitter = struct {
     used_data: std.ArrayList(bool) = .empty,
     pending_blocks: std.ArrayList(PendingBlock) = .empty,
     visited_blocks: std.ArrayList(VisitedBlock) = .empty,
+    pending_jump_tables: std.ArrayList(PendingJumpTable) = .empty,
     operations: std.ArrayList(OperationEntry) = .empty,
     icall_return_marks: std.ArrayList(IcallReturnMark) = .empty,
     source_indices: ?*const SourceIndexMap = null,
@@ -447,6 +488,8 @@ const GenericEmitter = struct {
     }
 
     fn deinit(self: *GenericEmitter) void {
+        self.clearPendingJumpTables();
+        self.pending_jump_tables.deinit(self.allocator);
         self.source_map_marks.deinit(self.allocator);
         self.icall_return_marks.deinit(self.allocator);
         self.operations.deinit(self.allocator);
@@ -473,6 +516,7 @@ const GenericEmitter = struct {
         try self.source_map_marks.ensureTotalCapacity(self.allocator, stats.instructions + stats.terminators);
         try self.pending_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
         try self.visited_blocks.ensureTotalCapacity(self.allocator, @max(stats.blocks, 1));
+        try self.pending_jump_tables.ensureTotalCapacity(self.allocator, @max(stats.terminators, 1));
 
         self.runcode_start = try self.bytecode.newLabel();
         self.initcode_end = try self.bytecode.newLabel();
@@ -550,6 +594,7 @@ const GenericEmitter = struct {
         const entry = self.operations.items[op_id];
         const function = self.program.functions[entry.function_index];
         const block = function.blocks[entry.block_index];
+        if (block.instructions[entry.instruction_index].synthetic) return;
         const idx = source_indices.opIndex(function.name, block.name, entry.instruction_index) orelse return;
         try self.pushSourceMapMark(idx);
     }
@@ -820,20 +865,7 @@ const GenericEmitter = struct {
                 const switch_store = self.layout.switch_store orelse return CodeToAsmError.UnsupportedSir;
                 try self.bytecode.pushU32(switch_store);
                 try self.bytecode.pushOp(evm_asm.op.MSTORE);
-
-                for (switch_term.cases) |case| {
-                    try self.bytecode.pushU32(switch_store);
-                    try self.bytecode.pushOp(evm_asm.op.MLOAD);
-                    try self.bytecode.pushU256(parseU256(case.value) orelse return CodeToAsmError.UnsupportedSir);
-                    try self.bytecode.pushOp(evm_asm.op.EQ);
-                    try self.pushBlockLabel(function.name, case.target, context);
-                    try self.bytecode.pushOp(evm_asm.op.JUMPI);
-                }
-
-                if (switch_term.default_target.len != 0) {
-                    try self.pushBlockLabel(function.name, switch_term.default_target, context);
-                    try self.bytecode.pushOp(evm_asm.op.JUMP);
-                }
+                try self.emitSwitchRoute(function.name, switch_store, switch_term, context);
             },
             .iret => try self.bytecode.pushOp(evm_asm.op.JUMP),
             .return_ => try self.bytecode.pushOp(evm_asm.op.RETURN),
@@ -842,6 +874,212 @@ const GenericEmitter = struct {
             .invalid => try self.bytecode.pushOp(evm_asm.op.INVALID),
             .selfdestruct => try self.bytecode.pushOp(evm_asm.op.SELFDESTRUCT),
         }
+    }
+
+    fn emitSwitchRoute(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_store: u32,
+        switch_term: ir.SwitchTerminator,
+        context: EmitContext,
+    ) !void {
+        switch (switch_routing.choosePlan(switch_term)) {
+            .linear => try self.emitLinearSwitch(function_name, switch_store, switch_term, context),
+            .sparse => |plan| try self.emitSparseSwitch(function_name, switch_store, switch_term, plan, context),
+            .dense => |plan| try self.emitDenseSwitch(function_name, switch_store, switch_term, plan, context),
+        }
+    }
+
+    fn emitLinearSwitch(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_store: u32,
+        switch_term: ir.SwitchTerminator,
+        context: EmitContext,
+    ) !void {
+        for (switch_term.cases) |case| {
+            try self.emitExactCaseJump(function_name, switch_store, case, context);
+        }
+        try self.emitDefaultSwitchJump(function_name, switch_term, context);
+    }
+
+    fn emitSparseSwitch(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_store: u32,
+        switch_term: ir.SwitchTerminator,
+        plan: switch_routing.SparsePlan,
+        context: EmitContext,
+    ) !void {
+        const bucket_labels = try self.allocator.alloc(?evm_asm.Label, plan.bucket_count);
+        defer self.allocator.free(bucket_labels);
+        @memset(bucket_labels, null);
+
+        for (switch_term.cases) |case| {
+            const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
+            const bucket = switch_routing.bucketIndex(selector, plan.bucket_bits, plan.bucket_shift);
+            if (bucket_labels[bucket] == null) bucket_labels[bucket] = try self.bytecode.newLabel();
+        }
+
+        const table_label = try self.bytecode.newLabel();
+        const default_label = self.blockLabel(function_name, switch_term.default_target) orelse return CodeToAsmError.MissingLabel;
+        const table_store = self.layout.switch_table_store orelse return CodeToAsmError.UnsupportedSir;
+        try self.emitSparseBucketIndex(switch_store, plan);
+        try self.emitJumpTableDispatch(table_label, jump_table_entry_width, table_store, context);
+
+        const table_targets = try self.allocator.alloc(evm_asm.Label, plan.bucket_count);
+        errdefer self.allocator.free(table_targets);
+        for (bucket_labels, table_targets) |maybe_label, *target| {
+            target.* = maybe_label orelse default_label;
+        }
+        try self.queueJumpTable(table_label, table_targets, jump_table_entry_width);
+
+        for (bucket_labels, 0..) |maybe_label, bucket| {
+            const label = maybe_label orelse continue;
+            try self.bytecode.markJumpDest(label);
+            for (switch_term.cases) |case| {
+                const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
+                if (switch_routing.bucketIndex(selector, plan.bucket_bits, plan.bucket_shift) != bucket) continue;
+                try self.emitExactCaseJump(function_name, switch_store, case, context);
+            }
+            try self.emitDefaultSwitchJump(function_name, switch_term, context);
+        }
+    }
+
+    fn emitDenseSwitch(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_store: u32,
+        switch_term: ir.SwitchTerminator,
+        plan: switch_routing.DensePlan,
+        context: EmitContext,
+    ) !void {
+        const slot_labels = try self.allocator.alloc(?evm_asm.Label, plan.table_slots);
+        defer self.allocator.free(slot_labels);
+        @memset(slot_labels, null);
+
+        for (switch_term.cases) |case| {
+            const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
+            const slot = switch_routing.denseIndex(selector, plan);
+            if (slot >= slot_labels.len) return CodeToAsmError.UnsupportedSir;
+            if (slot_labels[slot] == null) slot_labels[slot] = try self.bytecode.newLabel();
+        }
+
+        for (slot_labels, 0..) |maybe_label, slot| {
+            const label = maybe_label orelse continue;
+            try self.emitDenseIndex(switch_store, plan);
+            try self.bytecode.pushU32(@intCast(slot));
+            try self.bytecode.pushOp(evm_asm.op.EQ);
+            try self.pushLabelRef(label, context);
+            try self.bytecode.pushOp(evm_asm.op.JUMPI);
+        }
+        try self.emitDefaultSwitchJump(function_name, switch_term, context);
+
+        for (slot_labels, 0..) |maybe_label, slot| {
+            const label = maybe_label orelse continue;
+            try self.bytecode.markJumpDest(label);
+            for (switch_term.cases) |case| {
+                const selector = switch_routing.parseU32Selector(case.value) orelse return CodeToAsmError.UnsupportedSir;
+                if (switch_routing.denseIndex(selector, plan) != slot) continue;
+                try self.emitExactCaseJump(function_name, switch_store, case, context);
+            }
+            try self.emitDefaultSwitchJump(function_name, switch_term, context);
+        }
+    }
+
+    fn emitExactCaseJump(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_store: u32,
+        case: ir.SwitchCase,
+        context: EmitContext,
+    ) !void {
+        try self.emitStoredSelector(switch_store);
+        try self.bytecode.pushU256(parseU256(case.value) orelse return CodeToAsmError.UnsupportedSir);
+        try self.bytecode.pushOp(evm_asm.op.EQ);
+        try self.pushBlockLabel(function_name, case.target, context);
+        try self.bytecode.pushOp(evm_asm.op.JUMPI);
+    }
+
+    fn emitDefaultSwitchJump(
+        self: *GenericEmitter,
+        function_name: []const u8,
+        switch_term: ir.SwitchTerminator,
+        context: EmitContext,
+    ) !void {
+        if (switch_term.default_target.len == 0) return;
+        try self.pushBlockLabel(function_name, switch_term.default_target, context);
+        try self.bytecode.pushOp(evm_asm.op.JUMP);
+    }
+
+    fn emitStoredSelector(self: *GenericEmitter, switch_store: u32) !void {
+        try self.bytecode.pushU32(switch_store);
+        try self.bytecode.pushOp(evm_asm.op.MLOAD);
+    }
+
+    fn emitSparseBucketIndex(
+        self: *GenericEmitter,
+        switch_store: u32,
+        plan: switch_routing.SparsePlan,
+    ) !void {
+        try self.emitStoredSelector(switch_store);
+        try self.emitBitWindowIndex(plan.bucket_bits, plan.bucket_shift);
+    }
+
+    fn emitDenseIndex(
+        self: *GenericEmitter,
+        switch_store: u32,
+        plan: switch_routing.DensePlan,
+    ) !void {
+        try self.emitStoredSelector(switch_store);
+        switch (plan.kind) {
+            .bit_window => try self.emitBitWindowIndex(plan.index_bits.?, plan.index_shift.?),
+            .range => {
+                const min_selector = plan.range_min.?;
+                if (min_selector != 0) {
+                    try self.bytecode.pushU32(min_selector);
+                    try self.bytecode.pushOp(evm_asm.op.SUB);
+                }
+            },
+        }
+    }
+
+    fn emitBitWindowIndex(self: *GenericEmitter, bits: u8, shift: u8) !void {
+        if (shift != 0) {
+            try self.bytecode.pushU32(shift);
+            try self.bytecode.pushOp(evm_asm.op.SHR);
+        }
+        const mask: u32 = (@as(u32, 1) << @as(u5, @intCast(bits))) - 1;
+        try self.bytecode.pushU32(mask);
+        try self.bytecode.pushOp(evm_asm.op.AND);
+    }
+
+    fn emitJumpTableDispatch(
+        self: *GenericEmitter,
+        table_label: evm_asm.Label,
+        entry_width: u8,
+        table_store: u32,
+        context: EmitContext,
+    ) !void {
+        std.debug.assert(entry_width > 0 and entry_width <= 4);
+
+        try self.bytecode.pushU32(0);
+        try self.bytecode.pushU32(table_store);
+        try self.bytecode.pushOp(evm_asm.op.MSTORE);
+
+        try self.bytecode.pushU32(entry_width);
+        try self.bytecode.pushOp(evm_asm.op.MUL);
+        try self.pushLabelRef(table_label, context);
+        try self.bytecode.pushOp(evm_asm.op.ADD);
+
+        try self.bytecode.pushU32(entry_width);
+        try self.bytecode.pushOp(evm_asm.op.SWAP1);
+        try self.bytecode.pushU32(table_store + 32 - entry_width);
+        try self.bytecode.pushOp(evm_asm.op.CODECOPY);
+
+        try self.bytecode.pushU32(table_store);
+        try self.bytecode.pushOp(evm_asm.op.MLOAD);
+        try self.bytecode.pushOp(evm_asm.op.JUMP);
     }
 
     fn enqueueSuccessors(self: *GenericEmitter, function: ir.Function, block: ir.Block) !void {
@@ -888,6 +1126,48 @@ const GenericEmitter = struct {
                 label,
             ),
         }
+    }
+
+    fn pushLabelData(self: *GenericEmitter, label: evm_asm.Label, context: EmitContext, width: u8) !void {
+        switch (context.reference_mode) {
+            .direct => try self.bytecode.pushLabelData(label, width),
+            .runcode_delta => try self.bytecode.pushLabelDeltaData(
+                self.runcode_start orelse return CodeToAsmError.MissingLabel,
+                label,
+                width,
+            ),
+        }
+    }
+
+    fn queueJumpTable(
+        self: *GenericEmitter,
+        label: evm_asm.Label,
+        targets: []evm_asm.Label,
+        entry_width: u8,
+    ) !void {
+        errdefer self.allocator.free(targets);
+        try self.pending_jump_tables.append(self.allocator, .{
+            .label = label,
+            .targets = targets,
+            .entry_width = entry_width,
+        });
+    }
+
+    fn emitPendingJumpTables(self: *GenericEmitter, context: EmitContext) !void {
+        for (self.pending_jump_tables.items) |table| {
+            try self.bytecode.mark(table.label);
+            for (table.targets) |target| {
+                try self.pushLabelData(target, context, table.entry_width);
+            }
+        }
+        self.clearPendingJumpTables();
+    }
+
+    fn clearPendingJumpTables(self: *GenericEmitter) void {
+        for (self.pending_jump_tables.items) |table| {
+            self.allocator.free(table.targets);
+        }
+        self.pending_jump_tables.clearRetainingCapacity();
     }
 
     fn emitUsedData(self: *GenericEmitter, exclude_data: ?[]const usize) !void {

@@ -2178,11 +2178,23 @@ static Value deriveMapElementSlot(
     Value key,
     Value mapSlot,
     Type u256Type,
-    Type ptrType)
+    Type ptrType,
+    MapHashCache *mapHashCache = nullptr,
+    Operation *funcOp = nullptr,
+    Operation *anchor = nullptr)
 {
     Value keyU256 = key;
     if (!llvm::isa<sir::U256Type>(keyU256.getType()))
         keyU256 = rewriter.create<sir::BitcastOp>(loc, u256Type, keyU256);
+
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        if (Value cached = lookupCachedMapHash(*mapHashCache, cacheFunc, anchor, mapSlot, keyU256))
+            return cached;
+    }
 
     Value size64 = constU256(rewriter, loc, 64);
     Value slotKey = rewriter.create<sir::MallocOp>(loc, ptrType, size64);
@@ -2192,7 +2204,15 @@ static Value deriveMapElementSlot(
     Value slotKeyPlus32 = rewriter.create<sir::AddPtrOp>(loc, ptrType, slotKey, offset32);
     rewriter.create<sir::StoreOp>(loc, slotKeyPlus32, mapSlot);
 
-    return rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    Value hash = rewriter.create<sir::KeccakOp>(loc, u256Type, slotKey, size64);
+    if (mapHashCache)
+    {
+        Operation *cacheFunc = funcOp;
+        if (!cacheFunc && anchor)
+            cacheFunc = anchor->getParentOfType<func::FuncOp>();
+        storeCachedMapHash(*mapHashCache, cacheFunc, mapSlot, keyU256, hash);
+    }
+    return hash;
 }
 
 static llvm::StringRef getGlobalNameFromMapOperand(mlir::Value mapOperand, mlir::Operation *currentOp);
@@ -2327,6 +2347,13 @@ static bool isSignedResourceCarrier(Operation *op, Type type)
     return isSignedResourceCarrier(type);
 }
 
+static bool resourceRuntimeChecksProved(Operation *op)
+{
+    if (auto attr = op->getAttrOfType<BoolAttr>("ora.resource_runtime_checks_proved"))
+        return attr.getValue();
+    return false;
+}
+
 static Block *emitResourceRevertUnless(Location loc, ConversionPatternRewriter &rewriter, Value condition)
 {
     Block *guardBlock = rewriter.getInsertionBlock();
@@ -2408,6 +2435,7 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
     OperandRange originalPlace,
     ValueRange convertedPlace,
     Type carrierType,
+    MapHashCache *mapHashCache,
     ConversionPatternRewriter &rewriter)
 {
     if (originalPlace.size() != convertedPlace.size() || originalPlace.empty())
@@ -2447,7 +2475,16 @@ static FailureOr<ResourcePlaceSlot> deriveResourcePlaceSlot(
         if (failed(materializedKey))
             return failure();
 
-        slot = deriveMapElementSlot(loc, rewriter, *materializedKey, slot, u256Type, ptrType);
+        slot = deriveMapElementSlot(
+            loc,
+            rewriter,
+            *materializedKey,
+            slot,
+            u256Type,
+            ptrType,
+            mapHashCache,
+            op->getParentOfType<func::FuncOp>(),
+            op);
         if (!root->name.empty() && i == 1)
         {
             if (auto hashOp = slot.getDefiningOp())
@@ -2487,6 +2524,7 @@ static LogicalResult lowerResourceCreateOrDestroy(
     Value amount,
     Type carrierType,
     bool isCreate,
+    MapHashCache *mapHashCache,
     ConversionPatternRewriter &rewriter)
 {
     if (!isSupportedResourceCarrier(carrierType))
@@ -2496,12 +2534,13 @@ static LogicalResult lowerResourceCreateOrDestroy(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     const bool isSigned = isSignedResourceCarrier(op, carrierType);
+    const bool skipRuntimeGuards = resourceRuntimeChecksProved(op);
 
     Value amountU256 = ensureU256(rewriter, loc, op, amount, "resource amount");
     if (!amountU256)
         return failure();
 
-    FailureOr<ResourcePlaceSlot> slot = deriveResourcePlaceSlot(op, originalPlace, convertedPlace, carrierType, rewriter);
+    FailureOr<ResourcePlaceSlot> slot = deriveResourcePlaceSlot(op, originalPlace, convertedPlace, carrierType, mapHashCache, rewriter);
     if (failed(slot))
         return failure();
 
@@ -2509,15 +2548,18 @@ static LogicalResult lowerResourceCreateOrDestroy(
     Value current = slot->transient
                         ? rewriter.create<sir::TLoadOp>(loc, u256Type, slot->slot).getResult()
                         : rewriter.create<sir::SLoadOp>(loc, u256Type, slot->slot).getResult();
-    if (isSigned)
+    if (isSigned && !skipRuntimeGuards)
         emitResourceSignedNonNegativeGuard(loc, rewriter, amountU256, u256Type);
     if (isCreate)
     {
         Value updated = rewriter.create<sir::AddOp>(loc, u256Type, current, amountU256);
-        if (isSigned)
-            emitResourceSignedAddGuard(loc, rewriter, updated, current, u256Type);
-        else
-            emitResourceUnsignedAddGuard(loc, rewriter, updated, current, u256Type);
+        if (!skipRuntimeGuards)
+        {
+            if (isSigned)
+                emitResourceSignedAddGuard(loc, rewriter, updated, current, u256Type);
+            else
+                emitResourceUnsignedAddGuard(loc, rewriter, updated, current, u256Type);
+        }
         if (slot->transient)
             rewriter.create<sir::TStoreOp>(loc, slot->slot, updated);
         else
@@ -2526,10 +2568,13 @@ static LogicalResult lowerResourceCreateOrDestroy(
     else
     {
         Value updated = rewriter.create<sir::SubOp>(loc, u256Type, current, amountU256);
-        if (isSigned)
-            emitResourceSignedSubGuard(loc, rewriter, updated, current, u256Type);
-        else
-            emitResourceUnsignedBalanceGuard(loc, rewriter, current, amountU256, u256Type);
+        if (!skipRuntimeGuards)
+        {
+            if (isSigned)
+                emitResourceSignedSubGuard(loc, rewriter, updated, current, u256Type);
+            else
+                emitResourceUnsignedBalanceGuard(loc, rewriter, current, amountU256, u256Type);
+        }
         if (slot->transient)
             rewriter.create<sir::TStoreOp>(loc, slot->slot, updated);
         else
@@ -2552,6 +2597,7 @@ LogicalResult ConvertResourceCreateOp::matchAndRewrite(
         adaptor.getAmount(),
         op.getCarrierType(),
         /*isCreate=*/true,
+        mapHashCache,
         rewriter);
 }
 
@@ -2567,6 +2613,7 @@ LogicalResult ConvertResourceDestroyOp::matchAndRewrite(
         adaptor.getAmount(),
         op.getCarrierType(),
         /*isCreate=*/false,
+        mapHashCache,
         rewriter);
 }
 
@@ -2577,8 +2624,16 @@ static void emitResourceMoveSamePlace(
     Value amount,
     Type u256Type,
     bool isSigned,
+    bool skipRuntimeGuards,
     Block *mergeBlock)
 {
+    if (skipRuntimeGuards)
+    {
+        if (mergeBlock)
+            rewriter.create<sir::BrOp>(loc, ValueRange{}, mergeBlock);
+        return;
+    }
+
     Value current = place.transient
                         ? rewriter.create<sir::TLoadOp>(loc, u256Type, place.slot).getResult()
                         : rewriter.create<sir::SLoadOp>(loc, u256Type, place.slot).getResult();
@@ -2604,6 +2659,7 @@ static void emitResourceMoveDistinctPlaces(
     Value amount,
     Type u256Type,
     bool isSigned,
+    bool skipRuntimeGuards,
     Block *mergeBlock)
 {
     Value sourceCurrent = sourcePlace.transient
@@ -2613,20 +2669,26 @@ static void emitResourceMoveDistinctPlaces(
                                    ? rewriter.create<sir::TLoadOp>(loc, u256Type, destinationPlace.slot).getResult()
                                    : rewriter.create<sir::SLoadOp>(loc, u256Type, destinationPlace.slot).getResult();
 
-    if (isSigned)
+    if (isSigned && !skipRuntimeGuards)
         emitResourceSignedNonNegativeGuard(loc, rewriter, amount, u256Type);
 
     Value sourceUpdated = rewriter.create<sir::SubOp>(loc, u256Type, sourceCurrent, amount);
-    if (isSigned)
-        emitResourceSignedSubGuard(loc, rewriter, sourceUpdated, sourceCurrent, u256Type);
-    else
-        emitResourceUnsignedBalanceGuard(loc, rewriter, sourceCurrent, amount, u256Type);
+    if (!skipRuntimeGuards)
+    {
+        if (isSigned)
+            emitResourceSignedSubGuard(loc, rewriter, sourceUpdated, sourceCurrent, u256Type);
+        else
+            emitResourceUnsignedBalanceGuard(loc, rewriter, sourceCurrent, amount, u256Type);
+    }
 
     Value destinationUpdated = rewriter.create<sir::AddOp>(loc, u256Type, destinationCurrent, amount);
-    if (isSigned)
-        emitResourceSignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
-    else
-        emitResourceUnsignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
+    if (!skipRuntimeGuards)
+    {
+        if (isSigned)
+            emitResourceSignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
+        else
+            emitResourceUnsignedAddGuard(loc, rewriter, destinationUpdated, destinationCurrent, u256Type);
+    }
 
     if (sourcePlace.transient)
         rewriter.create<sir::TStoreOp>(loc, sourcePlace.slot, sourceUpdated);
@@ -2653,23 +2715,24 @@ LogicalResult ConvertResourceMoveOp::matchAndRewrite(
     auto ctx = rewriter.getContext();
     auto u256Type = sir::U256Type::get(ctx);
     const bool isSigned = isSignedResourceCarrier(op.getOperation(), op.getCarrierType());
+    const bool skipRuntimeGuards = resourceRuntimeChecksProved(op.getOperation());
 
     Value amountU256 = ensureU256(rewriter, loc, op.getOperation(), adaptor.getAmount(), "resource amount");
     if (!amountU256)
         return failure();
 
-    FailureOr<ResourcePlaceSlot> sourceSlot = deriveResourcePlaceSlot(op.getOperation(), op.getSourcePlace(), adaptor.getSourcePlace(), op.getCarrierType(), rewriter);
+    FailureOr<ResourcePlaceSlot> sourceSlot = deriveResourcePlaceSlot(op.getOperation(), op.getSourcePlace(), adaptor.getSourcePlace(), op.getCarrierType(), mapHashCache, rewriter);
     if (failed(sourceSlot))
         return failure();
 
-    FailureOr<ResourcePlaceSlot> destinationSlot = deriveResourcePlaceSlot(op.getOperation(), op.getDestinationPlace(), adaptor.getDestinationPlace(), op.getCarrierType(), rewriter);
+    FailureOr<ResourcePlaceSlot> destinationSlot = deriveResourcePlaceSlot(op.getOperation(), op.getDestinationPlace(), adaptor.getDestinationPlace(), op.getCarrierType(), mapHashCache, rewriter);
     if (failed(destinationSlot))
         return failure();
 
     rewriter.setInsertionPoint(op);
     if (resourcePlacesHaveDistinctRoots(op.getSourcePlace(), op.getDestinationPlace()))
     {
-        emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, nullptr);
+        emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, nullptr);
         rewriter.eraseOp(op);
         return success();
     }
@@ -2685,10 +2748,10 @@ LogicalResult ConvertResourceMoveOp::matchAndRewrite(
     rewriter.create<sir::CondBrOp>(loc, sameSlot, ValueRange{}, ValueRange{}, sameBlock, distinctBlock);
 
     rewriter.setInsertionPointToStart(sameBlock);
-    emitResourceMoveSamePlace(loc, rewriter, *sourceSlot, amountU256, u256Type, isSigned, mergeBlock);
+    emitResourceMoveSamePlace(loc, rewriter, *sourceSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, mergeBlock);
 
     rewriter.setInsertionPointToStart(distinctBlock);
-    emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, mergeBlock);
+    emitResourceMoveDistinctPlaces(loc, rewriter, *sourceSlot, *destinationSlot, amountU256, u256Type, isSigned, skipRuntimeGuards, mergeBlock);
 
     rewriter.eraseOp(op);
     return success();

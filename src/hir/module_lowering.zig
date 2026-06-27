@@ -194,7 +194,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
 
         pub fn lowerInstantiatedBitfieldDecl(self: *Lowerer, instantiated: sema.InstantiatedBitfield, parent_block: mlir.MlirBlock) anyerror!void {
             const template_item = self.file.item(instantiated.template_item_id).Bitfield;
-            const op = try self.createNamedPlaceholderOp("ora.bitfield_decl", instantiated.mangled_name, template_item.range, mlir.oraNoneTypeCreate(self.context));
+            const op = try @This().createNamedDeclStubOp(self, "ora.bitfield_decl", instantiated.mangled_name, template_item.range, mlir.oraNoneTypeCreate(self.context));
             if (try self.bitfieldMetadataForType(.{ .bitfield = .{ .name = instantiated.mangled_name } })) |metadata| {
                 mlir.oraOperationSetAttributeByName(op, strRef("ora.bitfield"), mlir.oraStringAttrCreate(self.context, strRef(metadata.name)));
                 if (metadata.layout.len > 0) {
@@ -391,6 +391,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 .module_query = self.module_query,
                 .module_body = self.module_body,
                 .items = self.items,
+                .type_fallback_count = self.type_fallback_count,
                 .type_fallbacks = self.type_fallbacks,
                 .placeholder_count = self.placeholder_count,
                 .default_value_count = self.default_value_count,
@@ -441,6 +442,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                     try self.monomorphized_function_names.put(symbol_name, {});
                 }
                 self.items = imported_lowerer.items;
+                self.type_fallback_count = imported_lowerer.type_fallback_count;
                 self.type_fallbacks = imported_lowerer.type_fallbacks;
                 self.placeholder_count = imported_lowerer.placeholder_count;
                 self.default_value_count = imported_lowerer.default_value_count;
@@ -452,6 +454,7 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
                 try self.monomorphized_function_names.put(base_symbol_name, {});
             }
             self.items = imported_lowerer.items;
+            self.type_fallback_count = imported_lowerer.type_fallback_count;
             self.type_fallbacks = imported_lowerer.type_fallbacks;
             self.placeholder_count = imported_lowerer.placeholder_count;
             self.default_value_count = imported_lowerer.default_value_count;
@@ -1987,26 +1990,37 @@ pub fn mixin(Lowerer: type, ContractLowerer: type, FunctionLowerer: type, HirSym
             op_name: []const u8,
             parent_block: mlir.MlirBlock,
         ) anyerror!void {
-            const op = try self.createNamedPlaceholderOp(op_name, name, range, mlir.oraNoneTypeCreate(self.context));
+            const op = try @This().createNamedDeclStubOp(self, op_name, name, range, mlir.oraNoneTypeCreate(self.context));
             appendOp(parent_block, op);
             try self.appendItemHandle(item_id, kind, name, range, op);
         }
 
         pub fn createNamedPlaceholderOp(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType) anyerror!mlir.MlirOperation {
+            return @This().createNamedOpInternal(self, op_name, name, range, ty, true);
+        }
+
+        pub fn createNamedDeclStubOp(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType) anyerror!mlir.MlirOperation {
+            return @This().createNamedOpInternal(self, op_name, name, range, ty, false);
+        }
+
+        fn createNamedOpInternal(self: *Lowerer, op_name: []const u8, name: []const u8, range: source.TextRange, ty: mlir.MlirType, mark_executable_fallback: bool) anyerror!mlir.MlirOperation {
             const loc = self.location(range);
             var attrs: [2]mlir.MlirNamedAttribute = .{
                 namedStringAttr(self.context, "sym_name", name),
                 namedTypeAttr(self.context, "ora.type", ty),
             };
-            return self.createPlaceholderOp(op_name, loc, &attrs);
+            return @This().createPlaceholderOpInternal(self, op_name, loc, &attrs, mark_executable_fallback);
         }
 
         pub fn createPlaceholderOp(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute) anyerror!mlir.MlirOperation {
-            const mark_executable_fallback = std.mem.endsWith(u8, op_name, "_placeholder");
+            return @This().createPlaceholderOpInternal(self, op_name, loc, attrs, true);
+        }
+
+        fn createPlaceholderOpInternal(self: *Lowerer, op_name: []const u8, loc: mlir.MlirLocation, attrs: []const mlir.MlirNamedAttribute, mark_executable_fallback: bool) anyerror!mlir.MlirOperation {
             var marked_attrs: std.ArrayList(mlir.MlirNamedAttribute) = .empty;
             defer marked_attrs.deinit(self.allocator);
-            var final_attrs = attrs;
 
+            var final_attrs = attrs;
             if (mark_executable_fallback) {
                 self.recordPlaceholder();
                 try marked_attrs.appendSlice(self.allocator, attrs);

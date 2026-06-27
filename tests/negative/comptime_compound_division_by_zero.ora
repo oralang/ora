@@ -1,0 +1,9 @@
+contract ComptimeCompoundDivisionByZero {
+    pub fn run() -> u256 {
+        return comptime {
+            var value: u256 = 4;
+            value /= 0;
+            value;
+        };
+    }
+}

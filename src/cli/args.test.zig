@@ -118,6 +118,14 @@ test "mlir debug list parses together" {
     try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
 }
 
+test "mlir sir framework canonicalizer experiment parses explicitly" {
+    const args = [_][]const u8{ "--mlir-run-sir-framework-canonicalizer", "contract.ora" };
+    const parsed = try cli.parseArgs(&args);
+
+    try testing.expect(parsed.mlir_run_sir_framework_canonicalizer);
+    try testing.expectEqualStrings("contract.ora", parsed.input_file.?);
+}
+
 test "chain id parses as separate value and equals form" {
     const separate_args = [_][]const u8{ "--chain-id", "11155111", "contract.ora" };
     const separate = try cli.parseArgs(&separate_args);

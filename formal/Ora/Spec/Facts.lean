@@ -1,81 +1,295 @@
 /-
 Spec-side FACT INTERFACE for `check-formal-sync`.
 
-This file projects the trusted Lean spec (`Ora.Types.*`) into the SAME data
-shapes the compiler emits in `Ora/Generated/CompilerSnapshot.lean`, so that
-`Ora/Sync.lean` can prove — by `decide`, in the kernel — that the compiler's
-facts conform to the spec.
+This file projects the trusted Lean spec (`Ora.Types.*`) into typed facts that
+the generated compiler snapshot must match.
 
-Nothing here is "generated": it is hand-written, trusted Lean. The generated
-snapshot is DATA ONLY; all proving happens against these expected values.
+Important:
+We avoid proving only arrays of strings. Strings are allowed at the boundary
+for compiler spellings, but the sync layer should compare typed rows whenever
+possible.
+
+Trusted:
+  Ora.Types.*
+  Ora.Spec.Facts
+
+Generated:
+  Ora.Generated.CompilerSnapshot
+
+Goal:
+  prove generated data-only facts equal projections from expected typed facts.
 -/
 
 import Ora.Types.Prim
 import Ora.Types.Region
+import Ora.Types.Refinement
 
 namespace Ora.Spec
 
 open Ora.Types
 
-/-! ## Integer widths (bit counts), projected from the width enums -/
+/-! ## Integer widths -/
+
+structure UIntWidthFact where
+  width : UIntWidth
+  bits  : Nat
+  deriving Repr, DecidableEq
+
+structure SIntWidthFact where
+  width : SIntWidth
+  bits  : Nat
+  deriving Repr, DecidableEq
 
 def uintBits : UIntWidth → Nat
-  | .w8 => 8 | .w16 => 16 | .w32 => 32 | .w64 => 64 | .w128 => 128 | .w160 => 160 | .w256 => 256
+  | .w8 => 8
+  | .w16 => 16
+  | .w32 => 32
+  | .w64 => 64
+  | .w128 => 128
+  | .w160 => 160
+  | .w256 => 256
 
 def sintBits : SIntWidth → Nat
-  | .w8 => 8 | .w16 => 16 | .w32 => 32 | .w64 => 64 | .w128 => 128 | .w256 => 256
+  | .w8 => 8
+  | .w16 => 16
+  | .w32 => 32
+  | .w64 => 64
+  | .w128 => 128
+  | .w256 => 256
 
-def allUIntWidths : List UIntWidth := [.w8, .w16, .w32, .w64, .w128, .w160, .w256]
-def allSIntWidths : List SIntWidth := [.w8, .w16, .w32, .w64, .w128, .w256]
+def allUIntWidths : List UIntWidth :=
+  [.w8, .w16, .w32, .w64, .w128, .w160, .w256]
 
-/-- Unsigned widths the spec admits, as bit counts: `[8,16,32,64,128,160,256]`. -/
-def expectedUIntWidths : List Nat := allUIntWidths.map uintBits
+def allSIntWidths : List SIntWidth :=
+  [.w8, .w16, .w32, .w64, .w128, .w256]
 
-/-- Signed widths the spec admits, as bit counts: `[8,16,32,64,128,256]` (no 160). -/
-def expectedSIntWidths : List Nat := allSIntWidths.map sintBits
+def expectedUIntWidthFacts : List UIntWidthFact :=
+  allUIntWidths.map fun w =>
+    { width := w, bits := uintBits w }
 
-/-! ## Spellable scalar builtins (`BuiltinTypeId`), in the compiler's enum order -/
+def expectedSIntWidthFacts : List SIntWidthFact :=
+  allSIntWidths.map fun w =>
+    { width := w, bits := sintBits w }
+
+/-! ## Builtin primitive spellings -/
+
+/--
+A typed compiler spelling for a primitive type.
+
+This is still partly boundary-facing because compiler names are strings,
+but the semantic identity is `PrimTy`, not just the string.
+-/
+structure BuiltinTypeFact where
+  name : String
+  ty   : PrimTy
+  deriving Repr
+
+def expectedBuiltinTypeFacts : List BuiltinTypeFact :=
+  [ { name := "u8",      ty := u8 },
+    { name := "u16",     ty := u16 },
+    { name := "u32",     ty := u32 },
+    { name := "u64",     ty := u64 },
+    { name := "u128",    ty := u128 },
+    { name := "u160",    ty := u160 },
+    { name := "u256",    ty := u256 },
+
+    { name := "i8",      ty := i8 },
+    { name := "i16",     ty := i16 },
+    { name := "i32",     ty := i32 },
+    { name := "i64",     ty := i64 },
+    { name := "i128",    ty := i128 },
+    { name := "i256",    ty := i256 },
+
+    { name := "bool",    ty := .bool },
+    { name := "address", ty := .address },
+    { name := "string",  ty := .string },
+    { name := "bytes",   ty := .bytes },
+    { name := "void",    ty := .void } ]
+
+/-! ## Fixed bytes -/
+
+structure FixedBytesBoundsFact where
+  min : Nat
+  max : Nat
+  deriving Repr, DecidableEq
+
+def expectedFixedBytesBounds : FixedBytesBoundsFact :=
+  { min := 1, max := 32 }
+
+/-! ## TypeKind classification -/
+
+/--
+The compiler has more `TypeKind`s than the surface/core model admits.
+
+We classify each compiler TypeKind rather than only comparing its string name.
+-/
+inductive TypeKindStatus where
+  | modeled
+  | excluded
+  deriving Repr, DecidableEq
+
+def TypeKindStatus.isExcluded : TypeKindStatus → Bool
+  | .modeled => false
+  | .excluded => true
+
+structure TypeKindFact where
+  compilerName : String
+  status       : TypeKindStatus
+  deriving Repr, DecidableEq
+
+def expectedTypeKindFacts : List TypeKindFact :=
+  [ { compilerName := "unknown",          status := .excluded },
+    { compilerName := "never",            status := .excluded },
+    { compilerName := "void",             status := .modeled },
+    { compilerName := "bool",             status := .modeled },
+    { compilerName := "integer",          status := .modeled },
+    { compilerName := "comptime_integer", status := .excluded },
+    { compilerName := "string",           status := .modeled },
+    { compilerName := "address",          status := .modeled },
+    { compilerName := "bytes",            status := .modeled },
+    { compilerName := "fixed_bytes",      status := .modeled },
+    { compilerName := "storage_slot",     status := .modeled },
+    { compilerName := "storage_range",    status := .modeled },
+    { compilerName := "external_proxy",   status := .modeled },
+    { compilerName := "resource_domain",  status := .modeled },
+    { compilerName := "resource_place",   status := .modeled },
+    { compilerName := "named",            status := .excluded },
+    { compilerName := "function",         status := .modeled },
+    { compilerName := "contract",         status := .modeled },
+    { compilerName := "struct_",          status := .modeled },
+    { compilerName := "bitfield",         status := .modeled },
+    { compilerName := "enum_",            status := .modeled },
+    { compilerName := "tuple",            status := .modeled },
+    { compilerName := "anonymous_struct", status := .modeled },
+    { compilerName := "array",            status := .modeled },
+    { compilerName := "slice",            status := .modeled },
+    { compilerName := "map",              status := .modeled },
+    { compilerName := "error_union",      status := .modeled },
+    { compilerName := "refinement",       status := .modeled } ]
+
+/-! ## Refinement registry -/
+
+structure RefinementRegistryFact where
+  name              : RefinementName
+  compilerName      : String
+  hasRuntimeGuard   : Bool
+  compileTimeOnly   : Bool
+  hasNativeMlirType : Bool
+  pathForm          : Bool
+  boundsBacked      : Bool
+  deriving Repr, DecidableEq
+
+def refinementRegistryFact (r : RefinementName) : RefinementRegistryFact :=
+  let info := r.info
+  { name              := r,
+    compilerName      := r.compilerName,
+    hasRuntimeGuard   := info.hasRuntimeGuard,
+    compileTimeOnly   := info.compileTimeOnly,
+    hasNativeMlirType := info.hasNativeMlirType,
+    pathForm          := info.pathForm,
+    boundsBacked      := info.boundsBacked }
+
+def expectedRefinementRegistryFacts : List RefinementRegistryFact :=
+  allRefinementNames.map refinementRegistryFact
+
+/-! ## Regions -/
+
+/--
+Canonical compiler spelling for a region.
+
+`stack` corresponds to compiler `.none`.
+-/
+def Region.compilerName : Region → String
+  | .stack     => "none"
+  | .storage   => "storage"
+  | .memory    => "memory"
+  | .transient => "transient"
+  | .calldata  => "calldata"
+
+/--
+Compiler enum order.
+
+Keep this explicit because sync checks also protect ordering assumptions.
+-/
+def regionsInCompilerOrder : List Region :=
+  [.stack, .storage, .memory, .transient, .calldata]
+
+structure RegionFact where
+  region       : Region
+  compilerName : String
+  deriving Repr, DecidableEq
+
+structure RegionAssignabilityFact where
+  src        : Region
+  dst        : Region
+  assignable : Bool
+  deriving Repr, DecidableEq
+
+def expectedRegionFacts : List RegionFact :=
+  regionsInCompilerOrder.map fun r =>
+    { region := r, compilerName := Region.compilerName r }
+
+def expectedRegionAssignabilityFacts : List RegionAssignabilityFact :=
+  (regionsInCompilerOrder.map fun src =>
+    regionsInCompilerOrder.map fun dst =>
+      { src := src,
+        dst := dst,
+        assignable := src.assignableTo dst }).flatten
+
+/-! ## Data-only sync projections
+
+The generated compiler snapshot intentionally contains only primitive data
+(strings, numbers, booleans, tuples). The definitions below are the trusted
+typed facts above projected into that same wire shape for `Ora.Sync`.
+-/
+
+def expectedUIntWidths : List Nat :=
+  expectedUIntWidthFacts.map fun f => f.bits
+
+def expectedSIntWidths : List Nat :=
+  expectedSIntWidthFacts.map fun f => f.bits
 
 def expectedBuiltinTypeIds : List String :=
-  ["u8", "u16", "u32", "u64", "u128", "u160", "u256",
-   "i8", "i16", "i32", "i64", "i128", "i256",
-   "bool", "address", "string", "bytes", "void"]
+  expectedBuiltinTypeFacts.map fun f => f.name
 
-/-! ## Fixed-bytes bounds -/
+def expectedFixedBytesMin : Nat :=
+  expectedFixedBytesBounds.min
 
-def expectedFixedBytesMin : Nat := 1
-def expectedFixedBytesMax : Nat := 32
-
-/-! ## The 28 `TypeKind`s, in the compiler's enum order (modeled + excluded together) -/
+def expectedFixedBytesMax : Nat :=
+  expectedFixedBytesBounds.max
 
 def expectedTypeKinds : List String :=
-  ["unknown", "never", "void", "bool", "integer", "comptime_integer", "string", "address",
-   "bytes", "fixed_bytes", "storage_slot", "storage_range", "external_proxy",
-   "resource_domain", "resource_place", "named", "function", "contract", "struct_",
-   "bitfield", "enum_", "tuple", "anonymous_struct", "array", "slice", "map",
-   "error_union", "refinement"]
+  expectedTypeKindFacts.map fun f => f.compilerName
 
-/-- The 4 compiler-internal `TypeKind`s the SURFACE model excludes (see `Ty.lean`). -/
-def excludedTypeKinds : List String := ["unknown", "never", "named", "comptime_integer"]
+def excludedTypeKinds : List String :=
+  (expectedTypeKindFacts.filter fun f => f.status.isExcluded).map fun f => f.compilerName
 
-/-! ## Regions + the assignability table, derived from the canonical relation
+def expectedRefinementNames : List String :=
+  expectedRefinementRegistryFacts.map fun f => f.compilerName
 
-    `stack` is the compiler's `.none`; everything is emitted in the compiler's
-    spelling and enum order so the snapshot can be compared directly. The table
-    is DERIVED from `Region.assignableTo` (the canonical relation), so a drift in
-    that relation changes `expectedRegionTable` automatically. -/
+def refinementNamesWhere (p : RefinementRegistryFact → Bool) : List String :=
+  (expectedRefinementRegistryFacts.filter p).map fun f => f.compilerName
 
-def regionCompilerName : Region → String
-  | .stack => "none" | .storage => "storage" | .memory => "memory"
-  | .transient => "transient" | .calldata => "calldata"
+def expectedRuntimeGuardRefinementNames : List String :=
+  refinementNamesWhere fun f => f.hasRuntimeGuard
 
-def regionsInCompilerOrder : List Region := [.stack, .storage, .memory, .transient, .calldata]
+def expectedCompileTimeOnlyRefinementNames : List String :=
+  refinementNamesWhere fun f => f.compileTimeOnly
 
-def expectedRegions : List String := regionsInCompilerOrder.map regionCompilerName
+def expectedNativeMlirRefinementNames : List String :=
+  refinementNamesWhere fun f => f.hasNativeMlirType
+
+def expectedPathFormRefinementNames : List String :=
+  refinementNamesWhere fun f => f.pathForm
+
+def expectedBoundsBackedRefinementNames : List String :=
+  refinementNamesWhere fun f => f.boundsBacked
+
+def expectedRegions : List String :=
+  expectedRegionFacts.map fun f => f.compilerName
 
 def expectedRegionTable : List (String × String × Bool) :=
-  (regionsInCompilerOrder.map fun a =>
-    regionsInCompilerOrder.map fun b =>
-      (regionCompilerName a, regionCompilerName b, a.assignableTo b)).flatten
+  expectedRegionAssignabilityFacts.map fun f =>
+    (Region.compilerName f.src, Region.compilerName f.dst, f.assignable)
 
 end Ora.Spec

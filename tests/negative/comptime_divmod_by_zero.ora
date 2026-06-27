@@ -1,0 +1,8 @@
+contract ComptimeDivmodByZero {
+    pub fn run() -> u256 {
+        return comptime {
+            let pair = @divmod(4, 0);
+            pair[0];
+        };
+    }
+}

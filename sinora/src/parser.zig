@@ -12,6 +12,7 @@ const std = @import("std");
 
 const diagnostics = @import("diagnostics.zig");
 const ir = @import("ir.zig");
+const ops = @import("ops.zig");
 
 pub const ParseError = error{
     ParseFailed,
@@ -455,11 +456,214 @@ fn finishBlock(arena: std.mem.Allocator, blocks: *std.ArrayList(ir.Block), block
 }
 
 fn finishFunction(arena: std.mem.Allocator, functions: *std.ArrayList(ir.Function), function: *FunctionBuilder) !void {
+    const blocks = try function.blocks.toOwnedSlice(arena);
+    const normalized_blocks = try normalizeInlineNumericValueOperands(arena, blocks);
     try functions.append(arena, .{
         .name = function.name,
-        .blocks = try function.blocks.toOwnedSlice(arena),
+        .blocks = normalized_blocks,
         .line = function.line,
     });
+}
+
+fn normalizeInlineNumericValueOperands(arena: std.mem.Allocator, blocks: []const ir.Block) ![]const ir.Block {
+    var used_names = std.StringHashMap(void).init(arena);
+    for (blocks) |block| {
+        for (block.inputs) |name| try used_names.put(name, {});
+        for (block.instructions) |instruction| {
+            for (instruction.results) |name| try used_names.put(name, {});
+        }
+    }
+
+    var synthetic_counter: usize = 0;
+    const normalized = try arena.alloc(ir.Block, blocks.len);
+    for (blocks, normalized) |block, *out_block| {
+        var instructions: std.ArrayList(ir.Instruction) = .empty;
+        try instructions.ensureTotalCapacity(arena, block.instructions.len);
+
+        for (block.instructions) |instruction| {
+            try appendInstructionWithNormalizedNumericOperands(
+                arena,
+                &instructions,
+                &used_names,
+                &synthetic_counter,
+                instruction,
+            );
+        }
+
+        const terminator = try normalizeTerminatorNumericOperands(
+            arena,
+            &instructions,
+            &used_names,
+            &synthetic_counter,
+            block.terminator,
+            block.line,
+        );
+
+        out_block.* = .{
+            .name = block.name,
+            .inputs = block.inputs,
+            .outputs = block.outputs,
+            .instructions = try instructions.toOwnedSlice(arena),
+            .terminator = terminator,
+            .line = block.line,
+        };
+    }
+    return normalized;
+}
+
+fn appendInstructionWithNormalizedNumericOperands(
+    arena: std.mem.Allocator,
+    instructions: *std.ArrayList(ir.Instruction),
+    used_names: *std.StringHashMap(void),
+    synthetic_counter: *usize,
+    instruction: ir.Instruction,
+) !void {
+    const spec = ops.lookup(instruction.mnemonic) orelse {
+        try instructions.append(arena, instruction);
+        return;
+    };
+
+    var needs_rewrite = false;
+    for (instruction.operands, 0..) |operand, index| {
+        if (operandIsInlineNumericValue(spec, index, operand)) {
+            needs_rewrite = true;
+            break;
+        }
+    }
+    if (!needs_rewrite) {
+        try instructions.append(arena, instruction);
+        return;
+    }
+
+    const operands = try arena.alloc([]const u8, instruction.operands.len);
+    @memcpy(operands, instruction.operands);
+    for (operands, 0..) |*operand, index| {
+        if (operandIsInlineNumericValue(spec, index, operand.*)) {
+            operand.* = try appendSyntheticConst(arena, instructions, used_names, synthetic_counter, operand.*, instruction.line);
+        }
+    }
+
+    try instructions.append(arena, .{
+        .results = instruction.results,
+        .mnemonic = instruction.mnemonic,
+        .operands = operands,
+        .line = instruction.line,
+    });
+}
+
+fn operandIsInlineNumericValue(spec: ops.Spec, index: usize, operand: []const u8) bool {
+    if (!isNumericLiteral(operand)) return false;
+    return switch (spec) {
+        .fixed => |fixed| index < fixed.inputs,
+        .memory_load => |memory| index < memory.inputs,
+        .memory_store => |memory| index < memory.inputs,
+        .internal_call => index != 0,
+    };
+}
+
+fn normalizeTerminatorNumericOperands(
+    arena: std.mem.Allocator,
+    instructions: *std.ArrayList(ir.Instruction),
+    used_names: *std.StringHashMap(void),
+    synthetic_counter: *usize,
+    terminator: ir.Terminator,
+    line: u32,
+) !ir.Terminator {
+    return switch (terminator) {
+        .branch => |branch| .{ .branch = .{
+            .condition = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, branch.condition, line),
+            .non_zero_target = branch.non_zero_target,
+            .zero_target = branch.zero_target,
+        } },
+        .switch_ => |switch_term| .{ .switch_ = .{
+            .selector = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, switch_term.selector, line),
+            .cases = switch_term.cases,
+            .default_target = switch_term.default_target,
+        } },
+        .return_ => |ret| .{ .return_ = .{
+            .ptr = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, ret.ptr, line),
+            .len = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, ret.len, line),
+        } },
+        .revert => |rev| .{ .revert = .{
+            .ptr = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, rev.ptr, line),
+            .len = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, rev.len, line),
+        } },
+        .selfdestruct => |beneficiary| .{
+            .selfdestruct = try normalizeTerminatorValueOperand(arena, instructions, used_names, synthetic_counter, beneficiary, line),
+        },
+        .jump, .stop, .invalid, .iret => terminator,
+    };
+}
+
+fn normalizeTerminatorValueOperand(
+    arena: std.mem.Allocator,
+    instructions: *std.ArrayList(ir.Instruction),
+    used_names: *std.StringHashMap(void),
+    synthetic_counter: *usize,
+    operand: []const u8,
+    line: u32,
+) ![]const u8 {
+    if (!isNumericLiteral(operand)) return operand;
+    return appendSyntheticConst(arena, instructions, used_names, synthetic_counter, operand, line);
+}
+
+fn appendSyntheticConst(
+    arena: std.mem.Allocator,
+    instructions: *std.ArrayList(ir.Instruction),
+    used_names: *std.StringHashMap(void),
+    synthetic_counter: *usize,
+    literal: []const u8,
+    line: u32,
+) ![]const u8 {
+    const name = try nextSyntheticConstName(arena, used_names, synthetic_counter);
+    try instructions.append(arena, .{
+        .results = try singleToken(arena, name),
+        .mnemonic = try arena.dupe(u8, "const"),
+        .operands = try singleToken(arena, literal),
+        .line = line,
+        .synthetic = true,
+    });
+    return name;
+}
+
+fn nextSyntheticConstName(arena: std.mem.Allocator, used_names: *std.StringHashMap(void), synthetic_counter: *usize) ![]const u8 {
+    while (true) {
+        const name = try std.fmt.allocPrint(arena, "__sinora_inline_const_{d}", .{synthetic_counter.*});
+        synthetic_counter.* += 1;
+        const entry = try used_names.getOrPut(name);
+        if (!entry.found_existing) return name;
+    }
+}
+
+fn singleToken(arena: std.mem.Allocator, token: []const u8) ![]const []const u8 {
+    const tokens = try arena.alloc([]const u8, 1);
+    tokens[0] = token;
+    return tokens;
+}
+
+fn isNumericLiteral(text: []const u8) bool {
+    if (isHexLiteral(text)) return true;
+    const unsigned = stripOptionalMinus(text);
+    if (unsigned.len == 0) return false;
+    for (unsigned) |ch| {
+        if (!std.ascii.isDigit(ch)) return false;
+    }
+    return true;
+}
+
+fn isHexLiteral(text: []const u8) bool {
+    const unsigned = stripOptionalMinus(text);
+    if (unsigned.len <= 2) return false;
+    if (unsigned[0] != '0' or (unsigned[1] != 'x' and unsigned[1] != 'X')) return false;
+    for (unsigned[2..]) |ch| {
+        if (!std.ascii.isHex(ch)) return false;
+    }
+    return true;
+}
+
+fn stripOptionalMinus(text: []const u8) []const u8 {
+    if (text.len > 1 and text[0] == '-') return text[1..];
+    return text;
 }
 
 test "parse smoke SIR" {
@@ -516,4 +720,117 @@ test "parse data segments" {
     try std.testing.expectEqualSlices(u8, &.{ 0x11, 0x22, 0x33, 0x44 }, program.data_segments[0].bytes);
     try std.testing.expectEqualStrings("0", program.data_segments[1].name);
     try std.testing.expectEqual(@as(usize, 0), program.data_segments[1].bytes.len);
+}
+
+test "parse normalizes inline numeric instruction operands into synthetic consts" {
+    const source =
+        \\fn main:
+        \\    entry {
+        \\        z = add 3 3
+        \\        stop
+        \\    }
+    ;
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parse(std.testing.allocator, source, &bag);
+    defer program.deinit();
+
+    const instructions = program.functions[0].blocks[0].instructions;
+    try std.testing.expectEqual(@as(usize, 3), instructions.len);
+    try std.testing.expectEqualStrings("const", instructions[0].mnemonic);
+    try std.testing.expectEqualStrings("3", instructions[0].operands[0]);
+    try std.testing.expectEqualStrings("const", instructions[1].mnemonic);
+    try std.testing.expectEqualStrings("3", instructions[1].operands[0]);
+    try std.testing.expect(!std.mem.eql(u8, instructions[0].results[0], instructions[1].results[0]));
+    try std.testing.expectEqualStrings("add", instructions[2].mnemonic);
+    try std.testing.expectEqualStrings(instructions[0].results[0], instructions[2].operands[0]);
+    try std.testing.expectEqualStrings(instructions[1].results[0], instructions[2].operands[1]);
+}
+
+test "parse keeps numeric metadata operands unchanged" {
+    const source =
+        \\fn main:
+        \\    entry {
+        \\        x = const 3
+        \\        p = salloc 32
+        \\        off = data_offset .blob
+        \\        stop
+        \\    }
+        \\
+        \\data blob 0x
+    ;
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parse(std.testing.allocator, source, &bag);
+    defer program.deinit();
+
+    const instructions = program.functions[0].blocks[0].instructions;
+    try std.testing.expectEqual(@as(usize, 3), instructions.len);
+    try std.testing.expectEqualStrings("const", instructions[0].mnemonic);
+    try std.testing.expectEqualStrings("3", instructions[0].operands[0]);
+    try std.testing.expectEqualStrings("salloc", instructions[1].mnemonic);
+    try std.testing.expectEqualStrings("32", instructions[1].operands[0]);
+    try std.testing.expectEqualStrings("data_offset", instructions[2].mnemonic);
+    try std.testing.expectEqualStrings(".blob", instructions[2].operands[0]);
+}
+
+test "parse normalizes inline numeric terminator operands" {
+    const source =
+        \\fn main:
+        \\    entry {
+        \\        return 0 0
+        \\    }
+    ;
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parse(std.testing.allocator, source, &bag);
+    defer program.deinit();
+
+    const block = program.functions[0].blocks[0];
+    try std.testing.expectEqual(@as(usize, 2), block.instructions.len);
+    try std.testing.expectEqualStrings("const", block.instructions[0].mnemonic);
+    try std.testing.expectEqualStrings("0", block.instructions[0].operands[0]);
+    try std.testing.expectEqualStrings("const", block.instructions[1].mnemonic);
+    try std.testing.expectEqualStrings("0", block.instructions[1].operands[0]);
+
+    const ret = block.terminator.return_;
+    try std.testing.expectEqualStrings(block.instructions[0].results[0], ret.ptr);
+    try std.testing.expectEqualStrings(block.instructions[1].results[0], ret.len);
+    try std.testing.expect(!std.mem.eql(u8, ret.ptr, ret.len));
+}
+
+test "parse normalizes inline numeric branch and switch selectors" {
+    const source =
+        \\fn main:
+        \\    entry {
+        \\        => 1 ? @switcher : @done
+        \\    }
+        \\    switcher {
+        \\        switch 2 {
+        \\        2 => @done
+        \\        default => @done
+        \\    }
+        \\    }
+        \\    done {
+        \\        stop
+        \\    }
+    ;
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parse(std.testing.allocator, source, &bag);
+    defer program.deinit();
+
+    const entry = program.functions[0].blocks[0];
+    try std.testing.expectEqual(@as(usize, 1), entry.instructions.len);
+    try std.testing.expectEqualStrings("const", entry.instructions[0].mnemonic);
+    try std.testing.expectEqualStrings(entry.instructions[0].results[0], entry.terminator.branch.condition);
+
+    const switcher = program.functions[0].blocks[1];
+    try std.testing.expectEqual(@as(usize, 1), switcher.instructions.len);
+    try std.testing.expectEqualStrings("const", switcher.instructions[0].mnemonic);
+    try std.testing.expectEqualStrings(switcher.instructions[0].results[0], switcher.terminator.switch_.selector);
 }

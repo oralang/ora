@@ -264,6 +264,13 @@ const Patch = struct {
     byte_offset: usize,
 };
 
+const DataPatch = struct {
+    target: Label,
+    base: ?Label = null,
+    byte_offset: usize,
+    width: u8,
+};
+
 pub const LabelError = error{
     UndefinedLabel,
     DuplicateLabel,
@@ -281,6 +288,7 @@ pub const LabelBytecode = struct {
     bytecode: Bytecode,
     labels: std.ArrayList(?u32) = .empty,
     patches: std.ArrayList(Patch) = .empty,
+    data_patches: std.ArrayList(DataPatch) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) LabelBytecode {
         return .{
@@ -290,6 +298,7 @@ pub const LabelBytecode = struct {
     }
 
     pub fn deinit(self: *LabelBytecode) void {
+        self.data_patches.deinit(self.allocator);
         self.patches.deinit(self.allocator);
         self.labels.deinit(self.allocator);
         self.bytecode.deinit();
@@ -307,6 +316,7 @@ pub const LabelBytecode = struct {
         try self.bytecode.reserve(byte_capacity);
         try self.labels.ensureTotalCapacity(self.allocator, label_capacity);
         try self.patches.ensureTotalCapacity(self.allocator, patch_capacity);
+        try self.data_patches.ensureTotalCapacity(self.allocator, patch_capacity);
     }
 
     pub fn newLabel(self: *LabelBytecode) !Label {
@@ -405,6 +415,27 @@ pub const LabelBytecode = struct {
             .target = target,
             .base = base,
             .byte_offset = byte_offset,
+        });
+    }
+
+    pub fn pushLabelData(self: *LabelBytecode, label: Label, width: u8) !void {
+        try self.pushLabelDeltaData(null, label, width);
+    }
+
+    pub fn pushLabelDeltaData(self: *LabelBytecode, base: ?Label, target: Label, width: u8) !void {
+        // Emit fixed-width raw data containing a label address or label delta.
+        //
+        // Unlike `pushLabelRef`, this is not an EVM PUSH instruction and must
+        // never shrink. Jump tables need a stable entry width so code can
+        // compute `table + index * width` at runtime.
+        std.debug.assert(width > 0 and width <= 4);
+        const byte_offset = self.bytecode.bytes.items.len;
+        try self.bytecode.bytes.appendNTimes(self.allocator, 0, width);
+        try self.data_patches.append(self.allocator, .{
+            .target = target,
+            .base = base,
+            .byte_offset = byte_offset,
+            .width = width,
         });
     }
 
@@ -623,7 +654,30 @@ pub const LabelBytecode = struct {
         output.appendSliceAssumeCapacity(raw[raw_cursor..]);
         std.debug.assert(output.items.len == final_len);
 
+        try self.applyDataPatches(&output, layout);
         return output.toOwnedSlice(self.allocator);
+    }
+
+    fn applyDataPatches(self: *LabelBytecode, output: *std.ArrayList(u8), layout: PatchLayout) !void {
+        for (self.data_patches.items) |patch| {
+            const final_offset = self.finalOffsetForRawOffset(patch.byte_offset, layout.widths);
+            const value = try dataPatchValueFromOffsets(patch, layout.label_offsets);
+            if (value >= (@as(u64, 1) << @as(u6, @intCast(patch.width * 8)))) return LabelError.BytecodeTooLarge;
+            if (final_offset + patch.width > output.items.len) return LabelError.BytecodeTooLarge;
+            for (0..patch.width) |i| {
+                const shift: u5 = @intCast((patch.width - 1 - i) * 8);
+                output.items[final_offset + i] = @intCast((value >> shift) & 0xff);
+            }
+        }
+    }
+
+    fn finalOffsetForRawOffset(self: *LabelBytecode, raw_offset: usize, widths: []const u8) usize {
+        var savings: usize = 0;
+        for (self.patches.items, 0..) |patch, index| {
+            if (patch.byte_offset + 4 > raw_offset) break;
+            savings += 4 - @as(usize, @intCast(widths[index]));
+        }
+        return raw_offset - savings;
     }
 
     fn patchPushOffset(self: *LabelBytecode, patch: Patch) usize {
@@ -676,6 +730,13 @@ const PatchLayout = struct {
 fn patchValueFromOffsets(patch: Patch, label_offsets: []const u32) !u32 {
     // Fast path used by the fixed-point solver after it has cached all final
     // label offsets for the current width guess.
+    const target = label_offsets[@intCast(patch.target.id)];
+    const base = if (patch.base) |base_label| label_offsets[@intCast(base_label.id)] else 0;
+    if (target < base) return LabelError.NegativeDelta;
+    return target - base;
+}
+
+fn dataPatchValueFromOffsets(patch: DataPatch, label_offsets: []const u32) !u32 {
     const target = label_offsets[@intCast(patch.target.id)];
     const base = if (patch.base) |base_label| label_offsets[@intCast(base_label.id)] else 0;
     if (target < base) return LabelError.NegativeDelta;
@@ -919,4 +980,22 @@ test "labels can point at appended data" {
     defer std.testing.allocator.free(bytes);
 
     try std.testing.expectEqualSlices(u8, &.{ op.PUSH1, 0x02, 0x11, 0x22 }, bytes);
+}
+
+test "fixed-width label data patches account for shrunk push patches" {
+    var bytecode = LabelBytecode.init(std.testing.allocator);
+    defer bytecode.deinit();
+
+    const start = try bytecode.newLabel();
+    const target = try bytecode.newLabel();
+    try bytecode.mark(start);
+    try bytecode.pushLabelRef(target);
+    try bytecode.pushLabelDeltaData(start, target, 2);
+    try bytecode.mark(target);
+    try bytecode.pushOp(op.STOP);
+
+    const bytes = try bytecode.toOwnedSlice();
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expectEqualSlices(u8, &.{ op.PUSH1, 0x04, 0x00, 0x04, op.STOP }, bytes);
 }

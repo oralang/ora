@@ -51,6 +51,29 @@ fn runOraProcess(allocator: std.mem.Allocator, argv: []const []const u8) !std.pr
     });
 }
 
+fn expectOraCommandFailsWithoutArtifacts(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    expected_message: []const u8,
+    tmp: *std.testing.TmpDir,
+    missing_artifacts: []const []const u8,
+) !void {
+    const result = try runOraProcess(allocator, argv);
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, expected_message) or
+        std.mem.containsAtLeast(u8, result.stderr, 1, expected_message));
+
+    for (missing_artifacts) |artifact_path| {
+        try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, artifact_path, .{}));
+    }
+}
+
 fn expectSingleUndefinedBogusTypeDiagnostic(source_text: []const u8) !void {
     var compilation = try compileText(source_text);
     defer compilation.deinit();
@@ -1441,6 +1464,204 @@ test "compiler abi emit barrier rejects error-union pipes without bang without a
     try testing.expect((try iter.next(std.testing.io)) == null);
 }
 
+test "compiler artifact policy blocks explicit emit and debug artifact bypasses" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\resource TokenUnit =;
+        \\
+        \\contract Entry {
+        \\    pub fn run() -> u256 {
+        \\        return 0;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+    const bytecode_file_path = try pathFromTmpAlloc(testing.allocator, tmp, "bytecode.hex");
+    defer testing.allocator.free(bytecode_file_path);
+
+    const expected = "expected carrier type in resource declaration";
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=abi",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.abi.json",
+        "out/main.abi.sol.json",
+        "out/main.abi.extras.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.hex",
+        "out/main.sourcemap.json",
+        "out/main.debug.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode",
+        "--out-file",
+        bytecode_file_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "bytecode.hex",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=mlir:ora",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.ora.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=mlir:sir",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.sir.mlir",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=smt-report",
+        "--verify",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.smt.report.md",
+        "out/main.smt.report.json",
+        "out/main.proof.json",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=cfg:ora",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.ora.dot",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=cfg:sir-diff",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.sir.pre-opt.dot",
+        "out/main.sir.post-opt.dot",
+    });
+
+    try expectOraCommandFailsWithoutArtifacts(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "debug",
+        "--no-tui",
+        "-o",
+        out_path,
+        root_path,
+    }, expected, &tmp, &.{
+        "out/main.hex",
+        "out/main.sir",
+        "out/main.sourcemap.json",
+        "out/main.debug.json",
+        "out/main.sir.dot",
+        "out/abi/main.abi.json",
+        "out/abi/main.abi.sol.json",
+        "out/abi/main.abi.extras.json",
+    });
+}
+
+test "compiler writes SMT diagnostic report when verification fails" {
+    std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.SkipZigTest,
+        else => return err,
+    };
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "main.ora",
+        .data =
+        \\contract Entry {
+        \\    pub fn bump(value: u256) -> u256 {
+        \\        return value + 1;
+        \\    }
+        \\}
+        ,
+    });
+    try tmp.dir.createDirPath(std.testing.io, "out");
+
+    const root_path = try pathFromTmpAlloc(testing.allocator, tmp, "main.ora");
+    defer testing.allocator.free(root_path);
+    const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
+    defer testing.allocator.free(out_path);
+
+    const result = try runOraProcess(testing.allocator, &[_][]const u8{
+        ORA_BINARY_REL,
+        "emit",
+        "--emit=bytecode,smt-report",
+        "--verify",
+        "-o",
+        out_path,
+        root_path,
+    });
+    defer testing.allocator.free(result.stdout);
+    defer testing.allocator.free(result.stderr);
+
+    switch (result.term) {
+        .exited => |code| try testing.expect(code != 0),
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(std.mem.containsAtLeast(u8, result.stdout, 1, "Verification failed") or
+        std.mem.containsAtLeast(u8, result.stderr, 1, "Verification failed"));
+
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.md", .{});
+    try tmp.dir.access(std.testing.io, "out/main.smt.report.json", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.proof.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/main.hex", .{}));
+}
+
 test "compiler build rejects unsupported local Result aggregate carriers before bytecode artifacts" {
     std.Io.Dir.cwd().access(std.testing.io, ORA_BINARY_REL, .{}) catch |err| switch (err) {
         error.FileNotFound => return error.SkipZigTest,
@@ -1516,6 +1737,16 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
     const out_path = try pathFromTmpAlloc(testing.allocator, tmp, "out");
     defer testing.allocator.free(out_path);
 
+    try tmp.dir.createDirPath(std.testing.io, "out/abi");
+    try tmp.dir.createDirPath(std.testing.io, "out/bin");
+    try tmp.dir.createDirPath(std.testing.io, "out/mlir");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.sol.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/abi/main.abi.extras.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/bin/main.hex", .data = "0x6000\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/bin/main.sourcemap.json", .data = "{\"stale\":true}\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "out/mlir/main.ora.mlir", .data = "// stale\n" });
+
     const result = try runOraProcess(testing.allocator, &[_][]const u8{
         ORA_BINARY_REL,
         "build",
@@ -1536,7 +1767,12 @@ test "compiler build removes partial artifacts when native SIR lowering fails" {
         std.mem.containsAtLeast(u8, result.stderr, 1, "SIR dispatcher build failed"));
 
     try tmp.dir.access(std.testing.io, "out", .{});
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.sol.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/abi/main.abi.extras.json", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.hex", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/bin/main.sourcemap.json", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(std.testing.io, "out/mlir/main.ora.mlir", .{}));
 }
 
 test "compiler build accepts public fallible returns with no declared custom errors" {

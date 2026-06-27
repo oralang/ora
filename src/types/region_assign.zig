@@ -3,14 +3,10 @@
 //! This is the (intended) single source of truth for the `regionAssignable`
 //! relation — a pure function of the `Region` enum with no `sema` dependencies,
 //! so it can be consumed both by the type checker and by the Lean spec emitter
-//! (`tools/emit_formal_snapshot.zig`).
+//! (`src/formal/emit_compiler_snapshot.zig`).
 //!
-//! DEDUP FOLLOW-UP: `src/sema/region.zig:regionAssignable` currently holds an
-//! identical copy (it lives in a module with heavy deps that the emitter cannot
-//! import). The intended end state is for `sema/region.zig` to re-export this
-//! function so the two cannot drift. Until then they MUST be kept byte-identical
-//! in behavior; the Lean gate checks the emitted table against the spec, which
-//! independently mirrors the rule.
+//! `src/sema/region.zig:regionAssignable` delegates here, so the type checker
+//! and formal snapshot emitter cannot drift on this relation.
 
 const semantic = @import("semantic.zig");
 

@@ -10,6 +10,7 @@ const ir = @import("ir.zig");
 const release_code_to_asm = @import("release_code_to_asm.zig");
 const release_op_graph = @import("release_op_graph.zig");
 const release_schedule = @import("release_schedule.zig");
+const switch_routing = @import("switch_routing.zig");
 
 const word_size: u32 = 0x20;
 
@@ -89,6 +90,11 @@ pub fn generateSimple(
             if (block.terminator == .switch_ and collector.switch_store == null) {
                 collector.switch_store = try collector.alloc(word_size);
             }
+            if (block.terminator == .switch_ and collector.switch_table_store == null) {
+                if (switch_routing.choosePlan(block.terminator.switch_) == .sparse) {
+                    collector.switch_table_store = try collector.alloc(word_size);
+                }
+            }
 
             try enqueueSuccessors(
                 allocator,
@@ -111,6 +117,7 @@ pub fn generateSimple(
             .alloc_start = alloc_start,
             .static_alloc_start = static_alloc_start,
             .switch_store = collector.switch_store,
+            .switch_table_store = collector.switch_table_store,
             .dyn_free_pointer = if (collector.dyn_free_pointer_store) |store_slot| .{
                 .store_slot = store_slot,
                 .start_value = collector.next_free,
@@ -131,6 +138,7 @@ const Collector = struct {
     static_alloc_start: std.ArrayList(release_code_to_asm.StaticAllocAddress) = .empty,
     dyn_free_pointer_store: ?u32 = null,
     switch_store: ?u32 = null,
+    switch_table_store: ?u32 = null,
 
     fn deinit(self: *Collector) void {
         self.alloc_start.deinit(self.allocator);
@@ -392,6 +400,59 @@ test "memory layout allocates switch scratch slot" {
     defer layout.deinit();
 
     try std.testing.expectEqual(@as(?u32, 0), layout.layout.switch_store);
+    try std.testing.expectEqual(@as(?u32, null), layout.layout.switch_table_store);
+}
+
+test "memory layout allocates sparse switch table scratch slot" {
+    var program = try parseProgram(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x0f
+        \\        switch selector {
+        \\        0 => @hit
+        \\        1 => @hit
+        \\        2 => @hit
+        \\        3 => @hit
+        \\        4 => @hit
+        \\        5 => @hit
+        \\        6 => @hit
+        \\        7 => @hit
+        \\        8 => @hit
+        \\        9 => @hit
+        \\        10 => @hit
+        \\        11 => @hit
+        \\        12 => @hit
+        \\        13 => @hit
+        \\        14 => @hit
+        \\        15 => @hit
+        \\        16 => @hit
+        \\        17 => @hit
+        \\        18 => @hit
+        \\        19 => @hit
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    hit {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+    defer program.deinit();
+
+    const schedules = [_]release_op_graph.ScheduledBlock{
+        .{ .function_name = "main", .block_name = "entry", .ops = &.{}, .next_alloc_id = 0 },
+        .{ .function_name = "main", .block_name = "hit", .ops = &.{}, .next_alloc_id = 0 },
+        .{ .function_name = "main", .block_name = "other", .ops = &.{}, .next_alloc_id = 0 },
+    };
+    var layout = try generateSimple(std.testing.allocator, program, "main", &schedules);
+    defer layout.deinit();
+
+    try std.testing.expectEqual(@as(?u32, 0), layout.layout.switch_store);
+    try std.testing.expectEqual(@as(?u32, 32), layout.layout.switch_table_store);
 }
 
 test "memory layout allocates reachable static allocation" {

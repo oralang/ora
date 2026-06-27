@@ -1,0 +1,7 @@
+contract ComptimeDivFloorByZero {
+    pub fn run() -> i256 {
+        return comptime {
+            @divFloor(4, 0);
+        };
+    }
+}

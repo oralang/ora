@@ -4,8 +4,9 @@ GENERATED — DATA ONLY.  Do NOT edit by hand and do NOT add any `theorem`,
 `import` to this file. It contains only `def … := <literal>` facts emitted from
 the compiler. The TRUSTED checks live in `Ora/Sync.lean`.
 
-Regenerate with `scripts/check-formal-sync.sh`. Source: src/types/builtin.zig,
-src/types/semantic.zig, src/types/region_assign.zig.
+Regenerate with `scripts/check-formal-sync.sh`. Source:
+src/formal/emit_compiler_snapshot.zig, src/types/builtin.zig,
+src/types/semantic.zig, src/types/region_assign.zig, src/refinements/root.zig.
 -/
 
 namespace Ora.Generated
@@ -24,6 +25,24 @@ def compilerTypeKinds : List String :=
 
 def compilerRegions : List String :=
   ["none", "storage", "memory", "transient", "calldata"]
+
+def compilerRefinementNames : List String :=
+  ["MinValue", "MaxValue", "InRange", "NonZeroAddress", "NonZero", "BasisPoints", "Exact", "Scaled"]
+
+def compilerRuntimeGuardRefinementNames : List String :=
+  ["MinValue", "MaxValue", "InRange", "NonZeroAddress", "NonZero", "BasisPoints"]
+
+def compilerCompileTimeOnlyRefinementNames : List String :=
+  ["Exact", "Scaled"]
+
+def compilerNativeMlirRefinementNames : List String :=
+  ["MinValue", "MaxValue", "InRange", "NonZeroAddress", "Exact", "Scaled"]
+
+def compilerPathFormRefinementNames : List String :=
+  ["NonZeroAddress"]
+
+def compilerBoundsBackedRefinementNames : List String :=
+  ["MinValue", "MaxValue", "InRange", "NonZero", "BasisPoints"]
 
 def compilerRegionTable : List (String × String × Bool) :=
   [("none", "none", true),
