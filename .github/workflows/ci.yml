@@ -282,6 +282,37 @@ jobs:
           scripts/check-formal-sync.sh
           echo "✅ Formal Lean sync passed"
 
+  sinora:
+    name: Sinora Backend Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Sinora Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            sinora/.zig-cache
+          key: ${{ runner.os }}-sinora-zig-${{ env.ZIG_VERSION }}-${{ hashFiles('sinora/build.zig', 'sinora/src/**', 'sinora/fixtures/**') }}
+          restore-keys: |
+            ${{ runner.os }}-sinora-zig-${{ env.ZIG_VERSION }}-
+
+      - name: Run Sinora tests
+        shell: bash
+        run: |
+          echo "🧪 Running Sinora backend tests, including dispatcher routing..."
+          zig build --build-file sinora/build.zig test --summary all
+          echo "✅ Sinora backend tests passed"
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}
