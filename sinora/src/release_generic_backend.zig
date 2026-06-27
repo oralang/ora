@@ -20,6 +20,7 @@ const release_critical_edges = @import("release_critical_edges.zig");
 const release_memory_layout = @import("release_memory_layout.zig");
 const release_op_graph = @import("release_op_graph.zig");
 const release_schedule = @import("release_schedule.zig");
+const switch_routing = @import("switch_routing.zig");
 
 pub const GenericBackendError = error{
     MissingSchedule,
@@ -325,6 +326,7 @@ pub fn collectReleaseMetrics(
     defer scheduled.deinit();
 
     const schedule_stats = metrics.StackOpStats.fromScheduledBlocks(scheduled.blocks);
+    const switch_routing_stats = metrics.SwitchRoutingStats.fromProgram(prepared.normalized);
 
     if (findFunction(prepared.normalized, "init") != null) {
         var init_layout = try release_memory_layout.generateSimple(allocator, prepared.normalized, "init", scheduled.blocks);
@@ -344,6 +346,7 @@ pub fn collectReleaseMetrics(
             .input_ir = input_stats,
             .commoned_ir = prepared.commoned.stats(),
             .normalized_ir = prepared.normalized.stats(),
+            .switch_routing = switch_routing_stats,
             .schedule = schedule_stats,
             .init_layout = metrics.LayoutStats.fromLayout(init_layout.layout),
             .runtime_layout = if (runtime_layout) |layout| metrics.LayoutStats.fromLayout(layout.layout) else null,
@@ -360,6 +363,7 @@ pub fn collectReleaseMetrics(
         .input_ir = input_stats,
         .commoned_ir = prepared.commoned.stats(),
         .normalized_ir = prepared.normalized.stats(),
+        .switch_routing = switch_routing_stats,
         .schedule = schedule_stats,
         .runtime_layout = metrics.LayoutStats.fromLayout(runtime_layout.layout),
     };
@@ -373,6 +377,7 @@ fn mergeLayout(
         .alloc_start = if (override.alloc_start.len != 0) override.alloc_start else generated.alloc_start,
         .static_alloc_start = if (override.static_alloc_start.len != 0) override.static_alloc_start else generated.static_alloc_start,
         .switch_store = override.switch_store orelse generated.switch_store,
+        .switch_table_store = override.switch_table_store orelse generated.switch_table_store,
         .dyn_free_pointer = override.dyn_free_pointer orelse generated.dyn_free_pointer,
     };
 }
@@ -640,6 +645,99 @@ test "generic backend generates switch scratch layout" {
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.MSTORE) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.MLOAD) != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.JUMPI) != null);
+}
+
+test "generic backend keeps dense candidates linear until table lowering is available" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x21
+        \\        switch selector {
+        \\        0x00000001 => @one
+        \\        0x00000011 => @two
+        \\        0x00000021 => @three
+        \\        0x00000031 => @four
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    one {
+        \\        stop
+        \\    }
+        \\
+        \\    two {
+        \\        stop
+        \\    }
+        \\
+        \\    three {
+        \\        stop
+        \\    }
+        \\
+        \\    four {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+    defer program.deinit();
+
+    const plan = switch (program.functions[0].blocks[0].terminator) {
+        .switch_ => |switch_term| switch_routing.choosePlan(switch_term),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(plan == .linear);
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expectEqual(@as(usize, 4), countByte(bytes, evm_asm.op.JUMPI));
+}
+
+test "generic backend lowers sparse switch routing" {
+    var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer source.deinit();
+
+    try source.writer.writeAll(
+        \\fn main:
+        \\    entry {
+        \\        selector = const 0x101
+        \\        switch selector {
+        \\
+    );
+    for (0..260) |index| {
+        try source.writer.print("        0x{x} => @hit\n", .{index});
+    }
+    try source.writer.writeAll(
+        \\        default => @other
+        \\        }
+        \\    }
+        \\
+        \\    hit {
+        \\        stop
+        \\    }
+        \\
+        \\    other {
+        \\        invalid
+        \\    }
+    );
+
+    var program = try parseTestProgram(source.written());
+    defer program.deinit();
+
+    const plan = switch (program.functions[0].blocks[0].terminator) {
+        .switch_ => |switch_term| switch_routing.choosePlan(switch_term),
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(plan == .sparse);
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.CODECOPY) != null);
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.AND) != null);
+    try std.testing.expect(countByte(bytes, evm_asm.op.JUMPI) >= 260);
 }
 
 test "generic backend generates spill layout for deep stack schedule" {
