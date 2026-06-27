@@ -10,6 +10,7 @@ pub const analyses = @import("analyses.zig");
 pub const passes = @import("passes.zig");
 pub const ssa_transform = @import("ssa_transform.zig");
 pub const optimizations = @import("optimizations.zig");
+pub const metrics = @import("metrics.zig");
 pub const bytecode = @import("asm.zig");
 pub const legality = @import("legality.zig");
 pub const debug_codegen = @import("debug_codegen.zig");

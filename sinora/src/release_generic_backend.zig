@@ -12,6 +12,8 @@ const diagnostics = @import("diagnostics.zig");
 const effects = @import("effects.zig");
 const evm_asm = @import("asm.zig");
 const ir = @import("ir.zig");
+const metrics = @import("metrics.zig");
+const optimizations = @import("optimizations.zig");
 const parser = @import("parser.zig");
 const release_code_to_asm = @import("release_code_to_asm.zig");
 const release_critical_edges = @import("release_critical_edges.zig");
@@ -34,6 +36,30 @@ pub const ScheduledProgram = struct {
         self.* = undefined;
     }
 };
+
+const PreparedReleaseProgram = struct {
+    commoned: ir.Program,
+    normalized: ir.Program,
+
+    fn deinit(self: *PreparedReleaseProgram) void {
+        self.normalized.deinit();
+        self.commoned.deinit();
+        self.* = undefined;
+    }
+};
+
+fn prepareReleaseProgram(allocator: std.mem.Allocator, program: ir.Program) !PreparedReleaseProgram {
+    var commoned = try optimizations.literalCommoning(allocator, program);
+    errdefer commoned.deinit();
+
+    var normalized = try release_critical_edges.split(allocator, commoned);
+    errdefer normalized.deinit();
+
+    return .{
+        .commoned = commoned,
+        .normalized = normalized,
+    };
+}
 
 pub fn scheduleProgramSimple(
     allocator: std.mem.Allocator,
@@ -84,8 +110,9 @@ pub fn emitSimple(
     entry_function_name: []const u8,
     layout: release_code_to_asm.MemoryLayout,
 ) ![]const u8 {
-    var normalized = try release_critical_edges.split(allocator, program);
-    defer normalized.deinit();
+    var prepared = try prepareReleaseProgram(allocator, program);
+    defer prepared.deinit();
+    const normalized = prepared.normalized;
 
     var scheduled = try scheduleProgramSimple(
         allocator,
@@ -125,8 +152,9 @@ pub fn emitSimpleWithSourceMap(
     layout: release_code_to_asm.MemoryLayout,
     source_indices: *const release_code_to_asm.SourceIndexMap,
 ) !release_code_to_asm.EmitResult {
-    var normalized = try release_critical_edges.split(allocator, program);
-    defer normalized.deinit();
+    var prepared = try prepareReleaseProgram(allocator, program);
+    defer prepared.deinit();
+    const normalized = prepared.normalized;
 
     var scheduled = try scheduleProgramSimple(
         allocator,
@@ -164,8 +192,9 @@ pub fn emitDeploymentSimple(
     allocator: std.mem.Allocator,
     program: ir.Program,
 ) ![]const u8 {
-    var normalized = try release_critical_edges.split(allocator, program);
-    defer normalized.deinit();
+    var prepared = try prepareReleaseProgram(allocator, program);
+    defer prepared.deinit();
+    const normalized = prepared.normalized;
 
     var scheduled = try scheduleProgramSimple(
         allocator,
@@ -211,8 +240,9 @@ pub fn emitDeploymentWithSourceMap(
     program: ir.Program,
     source_indices: *const release_code_to_asm.SourceIndexMap,
 ) !release_code_to_asm.EmitResult {
-    var normalized = try release_critical_edges.split(allocator, program);
-    defer normalized.deinit();
+    var prepared = try prepareReleaseProgram(allocator, program);
+    defer prepared.deinit();
+    const normalized = prepared.normalized;
 
     var scheduled = try scheduleProgramSimple(
         allocator,
@@ -273,6 +303,68 @@ pub fn emitReleaseWithSourceMap(allocator: std.mem.Allocator, program: ir.Progra
     return emitSimpleWithSourceMap(allocator, program, "main", .{}, &source_indices);
 }
 
+/// Re-run the deterministic release planning stages and summarize their shape.
+/// This deliberately does not time stages; timing belongs in a separate profiler
+/// because wall-clock numbers are too noisy for checked snapshots.
+pub fn collectReleaseMetrics(
+    allocator: std.mem.Allocator,
+    program: ir.Program,
+    bytecode_bytes: usize,
+    source_map_entries: usize,
+) !metrics.ReleaseMetrics {
+    const input_stats = program.stats();
+    var prepared = try prepareReleaseProgram(allocator, program);
+    defer prepared.deinit();
+
+    var scheduled = try scheduleProgramSimple(
+        allocator,
+        prepared.normalized,
+        release_schedule.ScheduleConfig.pre_amsterdam,
+        0,
+    );
+    defer scheduled.deinit();
+
+    const schedule_stats = metrics.StackOpStats.fromScheduledBlocks(scheduled.blocks);
+
+    if (findFunction(prepared.normalized, "init") != null) {
+        var init_layout = try release_memory_layout.generateSimple(allocator, prepared.normalized, "init", scheduled.blocks);
+        defer init_layout.deinit();
+
+        const runtime_function_name: ?[]const u8 = if (findFunction(prepared.normalized, "main") != null) "main" else null;
+        var runtime_layout: ?release_memory_layout.OwnedLayout = if (runtime_function_name) |name|
+            try release_memory_layout.generateSimple(allocator, prepared.normalized, name, scheduled.blocks)
+        else
+            null;
+        defer if (runtime_layout) |*layout| layout.deinit();
+
+        return .{
+            .mode = .deployment,
+            .bytecode_bytes = bytecode_bytes,
+            .source_map_entries = source_map_entries,
+            .input_ir = input_stats,
+            .commoned_ir = prepared.commoned.stats(),
+            .normalized_ir = prepared.normalized.stats(),
+            .schedule = schedule_stats,
+            .init_layout = metrics.LayoutStats.fromLayout(init_layout.layout),
+            .runtime_layout = if (runtime_layout) |layout| metrics.LayoutStats.fromLayout(layout.layout) else null,
+        };
+    }
+
+    var runtime_layout = try release_memory_layout.generateSimple(allocator, prepared.normalized, "main", scheduled.blocks);
+    defer runtime_layout.deinit();
+
+    return .{
+        .mode = .runtime,
+        .bytecode_bytes = bytecode_bytes,
+        .source_map_entries = source_map_entries,
+        .input_ir = input_stats,
+        .commoned_ir = prepared.commoned.stats(),
+        .normalized_ir = prepared.normalized.stats(),
+        .schedule = schedule_stats,
+        .runtime_layout = metrics.LayoutStats.fromLayout(runtime_layout.layout),
+    };
+}
+
 fn mergeLayout(
     override: release_code_to_asm.MemoryLayout,
     generated: release_code_to_asm.MemoryLayout,
@@ -319,6 +411,63 @@ test "generic backend emits straight-line parsed program" {
 
     try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.MSTORE) != null);
     try std.testing.expectEqual(evm_asm.op.RETURN, bytes[bytes.len - 1]);
+}
+
+test "generic backend accepts inline numeric value operands" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        sum = add 0x1 0x2
+        \\        mstore256 0 sum
+        \\        return 0 0x20
+        \\    }
+    );
+    defer program.deinit();
+
+    const bytes = try emitSimple(std.testing.allocator, program, "main", .{});
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(std.mem.indexOfScalar(u8, bytes, evm_asm.op.MSTORE) != null);
+    try std.testing.expectEqual(evm_asm.op.RETURN, bytes[bytes.len - 1]);
+}
+
+test "generic backend source map skips parser synthetic inline constants" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        sum = add 0x1 0x2
+        \\        mstore256 0 sum
+        \\        return 0 0x20
+        \\    }
+    );
+    defer program.deinit();
+
+    var result = try emitReleaseWithSourceMap(std.testing.allocator, program);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.source_map.len);
+    try std.testing.expectEqual(@as(u32, 0), result.source_map[0].idx);
+    try std.testing.expectEqual(@as(u32, 1), result.source_map[1].idx);
+    try std.testing.expectEqual(@as(u32, 2), result.source_map[2].idx);
+}
+
+test "generic backend commoning emits one push for repeated large literal" {
+    var program = try parseTestProgram(
+        \\fn main:
+        \\    entry {
+        \\        a = large_const 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        \\        b = large_const 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+        \\        sum = xor a b
+        \\        mstore256 0 sum
+        \\        return 0 0x20
+        \\    }
+    );
+    defer program.deinit();
+
+    const bytes = try emitRelease(std.testing.allocator, program);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expectEqual(@as(usize, 1), countByte(bytes, evm_asm.op.PUSH1 + 31));
 }
 
 test "generic backend emits branch parsed program" {

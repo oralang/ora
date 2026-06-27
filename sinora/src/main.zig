@@ -61,14 +61,14 @@ pub fn main(init: std.process.Init) !void {
                     try usage(io, args[0]);
                     return err;
                 };
-                try emitReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path);
+                try emitReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
             },
             .emit_release_generic => {
                 const emit_options = parseEmitReleaseOptions(args[2..]) catch |err| {
                     try usage(io, args[0]);
                     return err;
                 };
-                try emitGenericReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path);
+                try emitGenericReleaseBytecode(allocator, io, emit_options.path, emit_options.source_map_path, emit_options.metrics_path);
             },
             .trace_release => {
                 if (args.len != 3) {
@@ -195,8 +195,8 @@ fn usage(io: std.Io, argv0: []const u8) !void {
         \\  {s} check <file.sir>
         \\  {s} render <file.sir>
         \\  {s} emit-debug <file.sir> [function]
-        \\  {s} emit-release [--source-map <path>] <file.sir>
-        \\  {s} emit-release-generic [--source-map <path>] <file.sir>
+        \\  {s} emit-release [--source-map <path>] [--metrics <path>] <file.sir>
+        \\  {s} emit-release-generic [--source-map <path>] [--metrics <path>] <file.sir>
         \\  {s} trace-release <file.sir>
         \\
         \\emit-debug emits conservative debug bytecode for one supported root.
@@ -235,8 +235,9 @@ fn emitReleaseBytecode(
     io: std.Io,
     path: []const u8,
     source_map_path: ?[]const u8,
+    metrics_path: ?[]const u8,
 ) !void {
-    try emitReleaseBackendBytecode(allocator, io, path, source_map_path);
+    try emitReleaseBackendBytecode(allocator, io, path, source_map_path, metrics_path);
 }
 
 fn traceGenericRelease(
@@ -269,8 +270,9 @@ fn emitGenericReleaseBytecode(
     io: std.Io,
     path: []const u8,
     source_map_path: ?[]const u8,
+    metrics_path: ?[]const u8,
 ) !void {
-    try emitReleaseBackendBytecode(allocator, io, path, source_map_path);
+    try emitReleaseBackendBytecode(allocator, io, path, source_map_path, metrics_path);
 }
 
 fn emitReleaseBackendBytecode(
@@ -278,6 +280,7 @@ fn emitReleaseBackendBytecode(
     io: std.Io,
     path: []const u8,
     source_map_path: ?[]const u8,
+    metrics_path: ?[]const u8,
 ) !void {
     var bag = sinora.DiagnosticBag.init(allocator);
     defer bag.deinit();
@@ -292,6 +295,15 @@ fn emitReleaseBackendBytecode(
         };
         defer result.deinit();
         try writeSourceMap(io, map_path, result.source_map, result.runtime_start_pc);
+        if (metrics_path) |out_path| {
+            const release_metrics = try sinora.release_generic_backend.collectReleaseMetrics(
+                allocator,
+                program,
+                result.bytes.len,
+                result.source_map.len,
+            );
+            try writeReleaseMetrics(io, out_path, release_metrics);
+        }
         try writeBytecodeHexLine(io, result.bytes);
         return;
     }
@@ -305,12 +317,23 @@ fn emitReleaseBackendBytecode(
     };
     defer allocator.free(bytes);
 
+    if (metrics_path) |out_path| {
+        const release_metrics = try sinora.release_generic_backend.collectReleaseMetrics(
+            allocator,
+            program,
+            bytes.len,
+            0,
+        );
+        try writeReleaseMetrics(io, out_path, release_metrics);
+    }
+
     try writeBytecodeHexLine(io, bytes);
 }
 
 const EmitReleaseOptions = struct {
     path: []const u8,
     source_map_path: ?[]const u8 = null,
+    metrics_path: ?[]const u8 = null,
 };
 
 fn parseEmitReleaseOptions(args: []const []const u8) !EmitReleaseOptions {
@@ -323,6 +346,13 @@ fn parseEmitReleaseOptions(args: []const []const u8) !EmitReleaseOptions {
             if (index >= args.len) return error.InvalidArguments;
             if (result.source_map_path != null) return error.InvalidArguments;
             result.source_map_path = args[index];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--metrics")) {
+            index += 1;
+            if (index >= args.len) return error.InvalidArguments;
+            if (result.metrics_path != null) return error.InvalidArguments;
+            result.metrics_path = args[index];
             continue;
         }
         if (std.mem.startsWith(u8, arg, "--")) return error.InvalidArguments;
@@ -348,6 +378,20 @@ fn writeSourceMap(
         try writer.print("{{\"idx\":{},\"pc\":{}}}", .{ entry.idx, entry.pc });
     }
     try writer.writeAll("]}");
+    try std.Io.Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = output.written(),
+    });
+}
+
+fn writeReleaseMetrics(
+    io: std.Io,
+    path: []const u8,
+    metrics: sinora.metrics.ReleaseMetrics,
+) !void {
+    var output: std.Io.Writer.Allocating = .init(std.heap.page_allocator);
+    defer output.deinit();
+    try sinora.metrics.writeReleaseMetricsJson(&output.writer, metrics);
     try std.Io.Dir.cwd().writeFile(io, .{
         .sub_path = path,
         .data = output.written(),

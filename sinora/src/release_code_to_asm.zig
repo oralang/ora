@@ -173,12 +173,14 @@ const SourceIndexBuilder = struct {
             var callees: std.ArrayList([]const u8) = .empty;
             defer callees.deinit(self.allocator);
             for (block.instructions, 0..) |instruction, instruction_index| {
-                try self.op_indices.append(self.allocator, .{
-                    .function_name = function_for_block.name,
-                    .block_name = block.name,
-                    .instruction_index = instruction_index,
-                    .idx = self.takeIndex(),
-                });
+                if (!instruction.synthetic) {
+                    try self.op_indices.append(self.allocator, .{
+                        .function_name = function_for_block.name,
+                        .block_name = block.name,
+                        .instruction_index = instruction_index,
+                        .idx = self.takeIndex(),
+                    });
+                }
                 if (std.mem.eql(u8, instruction.mnemonic, "icall")) {
                     if (instruction.operands.len != 0 and instruction.operands[0].len > 1 and instruction.operands[0][0] == '@') {
                         try callees.append(self.allocator, instruction.operands[0][1..]);
@@ -550,6 +552,7 @@ const GenericEmitter = struct {
         const entry = self.operations.items[op_id];
         const function = self.program.functions[entry.function_index];
         const block = function.blocks[entry.block_index];
+        if (block.instructions[entry.instruction_index].synthetic) return;
         const idx = source_indices.opIndex(function.name, block.name, entry.instruction_index) orelse return;
         try self.pushSourceMapMark(idx);
     }

@@ -94,6 +94,10 @@ pub fn copyPropagation(allocator: std.mem.Allocator, source: ir.Program) Optimiz
     return rewriteProgram(allocator, source, copyPropBlock);
 }
 
+pub fn literalCommoning(allocator: std.mem.Allocator, source: ir.Program) OptimizeError!ir.Program {
+    return rewriteProgram(allocator, source, literalCommoningBlock);
+}
+
 pub fn switchPeephole(allocator: std.mem.Allocator, source: ir.Program) OptimizeError!ir.Program {
     return rewriteProgram(allocator, source, switchPeepholeBlock);
 }
@@ -898,6 +902,50 @@ fn copyPropBlock(arena: std.mem.Allocator, block: ir.Block) OptimizeError!ir.Blo
     };
 }
 
+fn literalCommoningBlock(arena: std.mem.Allocator, block: ir.Block) OptimizeError!ir.Block {
+    var canonical_by_value = std.AutoHashMap(u256, []const u8).init(arena);
+    var replacements = std.StringHashMap([]const u8).init(arena);
+
+    for (block.instructions) |instruction| {
+        const value = constInstructionValue(instruction) orelse continue;
+        const result = instruction.results[0];
+        if (canonical_by_value.get(value)) |canonical| {
+            try replacements.put(result, canonical);
+        } else {
+            try canonical_by_value.put(value, result);
+        }
+    }
+
+    const instructions = try arena.alloc(ir.Instruction, block.instructions.len);
+    for (block.instructions, instructions) |instruction, *out_instruction| {
+        if (instruction.results.len == 1 and replacements.contains(instruction.results[0])) {
+            out_instruction.* = .{
+                .results = &.{},
+                .mnemonic = try arena.dupe(u8, "noop"),
+                .operands = &.{},
+                .line = instruction.line,
+                .synthetic = instruction.synthetic,
+            };
+        } else {
+            out_instruction.* = try rewriteInstructionOperands(arena, instruction, &replacements);
+        }
+    }
+
+    const outputs = try arena.alloc([]const u8, block.outputs.len);
+    for (block.outputs, outputs) |output, *out_output| {
+        out_output.* = try arena.dupe(u8, replacements.get(output) orelse output);
+    }
+
+    return .{
+        .name = try arena.dupe(u8, block.name),
+        .inputs = try cloneStringSlice(arena, block.inputs),
+        .outputs = outputs,
+        .instructions = instructions,
+        .terminator = try rewriteTerminator(arena, block.terminator, &replacements),
+        .line = block.line,
+    };
+}
+
 fn switchPeepholeBlock(arena: std.mem.Allocator, block: ir.Block) OptimizeError!ir.Block {
     var out = try cloneBlock(arena, block);
     const switch_term = switch (block.terminator) {
@@ -912,6 +960,12 @@ fn switchPeepholeBlock(arena: std.mem.Allocator, block: ir.Block) OptimizeError!
         .zero_target = try arena.dupe(u8, switch_term.cases[0].target),
     } };
     return out;
+}
+
+fn constInstructionValue(instruction: ir.Instruction) ?u256 {
+    if (instruction.results.len != 1 or instruction.operands.len != 1) return null;
+    if (!std.mem.eql(u8, instruction.mnemonic, "const") and !std.mem.eql(u8, instruction.mnemonic, "large_const")) return null;
+    return parseU256Literal(instruction.operands[0]);
 }
 
 fn rewriteInstructionOperands(arena: std.mem.Allocator, instruction: ir.Instruction, copy_map: *const std.StringHashMap([]const u8)) OptimizeError!ir.Instruction {
@@ -929,6 +983,7 @@ fn rewriteInstructionOperands(arena: std.mem.Allocator, instruction: ir.Instruct
         .mnemonic = try arena.dupe(u8, instruction.mnemonic),
         .operands = operands,
         .line = instruction.line,
+        .synthetic = instruction.synthetic,
     };
 }
 
@@ -1096,6 +1151,7 @@ fn cloneInstruction(arena: std.mem.Allocator, instruction: ir.Instruction) !ir.I
         .mnemonic = try arena.dupe(u8, instruction.mnemonic),
         .operands = try cloneStringSlice(arena, instruction.operands),
         .line = instruction.line,
+        .synthetic = instruction.synthetic,
     };
 }
 
@@ -1218,6 +1274,65 @@ test "copy propagation rewrites uses but keeps copy ops" {
     try std.testing.expectEqualStrings("b", optimized.functions[0].blocks[0].outputs[0]);
     try std.testing.expectEqualStrings("b", optimized.functions[0].blocks[0].instructions[1].operands[0]);
     try std.testing.expectEqualStrings("a_in", optimized.functions[0].blocks[1].instructions[0].operands[0]);
+}
+
+test "literal commoning shares same-block inline numeric constants" {
+    const diagnostics = @import("diagnostics.zig");
+    const parser = @import("parser.zig");
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator,
+        \\fn main:
+        \\    entry {
+        \\        z = add 3 3
+        \\        stop
+        \\    }
+    , &bag);
+    defer program.deinit();
+
+    var optimized = try literalCommoning(std.testing.allocator, program);
+    defer optimized.deinit();
+
+    const instructions = optimized.functions[0].blocks[0].instructions;
+    try std.testing.expectEqualStrings("const", instructions[0].mnemonic);
+    try std.testing.expect(instructions[0].synthetic);
+    try std.testing.expectEqualStrings("noop", instructions[1].mnemonic);
+    try std.testing.expect(instructions[1].synthetic);
+    try std.testing.expectEqualStrings("add", instructions[2].mnemonic);
+    try std.testing.expectEqualStrings(instructions[0].results[0], instructions[2].operands[0]);
+    try std.testing.expectEqualStrings(instructions[0].results[0], instructions[2].operands[1]);
+}
+
+test "literal commoning shares same-block selector and mask literals" {
+    const diagnostics = @import("diagnostics.zig");
+    const parser = @import("parser.zig");
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator,
+        \\fn main:
+        \\    entry x y {
+        \\        selector_a = large_const 0x1234567800000000000000000000000000000000000000000000000000000000
+        \\        selector_b = large_const 0x1234567800000000000000000000000000000000000000000000000000000000
+        \\        masked_a = large_const 0xffffffffffffffffffffffffffffffffffffffff
+        \\        masked_b = large_const 0xffffffffffffffffffffffffffffffffffffffff
+        \\        left = xor x selector_a
+        \\        right = xor y selector_b
+        \\        out = and masked_b masked_a
+        \\        stop
+        \\    }
+    , &bag);
+    defer program.deinit();
+
+    var optimized = try literalCommoning(std.testing.allocator, program);
+    defer optimized.deinit();
+
+    const instructions = optimized.functions[0].blocks[0].instructions;
+    try std.testing.expectEqualStrings("noop", instructions[1].mnemonic);
+    try std.testing.expectEqualStrings("noop", instructions[3].mnemonic);
+    try std.testing.expectEqualStrings(instructions[0].results[0], instructions[5].operands[1]);
+    try std.testing.expectEqualStrings(instructions[2].results[0], instructions[6].operands[0]);
 }
 
 test "SCCP folds constants propagates block outputs and simplifies branches" {

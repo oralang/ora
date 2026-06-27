@@ -1233,6 +1233,29 @@ test "debug codegen emits simple returning bytecode" {
     try std.testing.expectEqual(evm_asm.op.RETURN, bytes[bytes.len - 1]);
 }
 
+test "debug codegen accepts inline numeric value operands" {
+    const source =
+        \\fn main:
+        \\    entry {
+        \\        sum = add 0x1 0x2
+        \\        mstore256 0 sum
+        \\        return 0 0x20
+        \\    }
+    ;
+
+    var bag = diagnostics.Bag.init(std.testing.allocator);
+    defer bag.deinit();
+    var program = try parser.parse(std.testing.allocator, source, &bag);
+    defer program.deinit();
+
+    const bytes = try emitFunction(std.testing.allocator, program, "main", &bag);
+    defer std.testing.allocator.free(bytes);
+
+    try std.testing.expect(!bag.hasErrors());
+    try std.testing.expect(bytes.len > 0);
+    try std.testing.expectEqual(evm_asm.op.RETURN, bytes[bytes.len - 1]);
+}
+
 test "debug codegen emits branch bytecode" {
     const source =
         \\fn main:
