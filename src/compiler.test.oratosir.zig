@@ -4,6 +4,7 @@ const ora_root = @import("ora_root");
 const compiler = ora_root.compiler;
 const mlir = @import("mlir_c_api").c;
 const mlir_cfg = @import("mlir/cfg.zig");
+const runtime_checks = @import("mlir/runtime_checks.zig");
 const z3_verification = @import("ora_z3_verification");
 
 const h = @import("compiler.test.helpers.zig");
@@ -6906,6 +6907,41 @@ test "OraToSIR lowers signed resource guards with signed comparisons" {
     const settle = try functionSlice(rendered, "settle");
     try testing.expect(std.mem.containsAtLeast(u8, settle, 1, "slt"));
     try testing.expect(std.mem.containsAtLeast(u8, settle, 1, "sgt"));
+}
+
+test "OraToSIR skips resource fallback guards after verified marker" {
+    const source_text =
+        \\resource TokenUnit = u256;
+        \\
+        \\contract ResourceGuardDedup {
+        \\    storage var left: Resource<TokenUnit>;
+        \\    storage var right: Resource<TokenUnit>;
+        \\
+        \\    pub fn transfer(amount: TokenUnit)
+        \\        modifies left, right
+        \\    {
+        \\        @move(left, right, amount);
+        \\    }
+        \\}
+    ;
+
+    var compilation = try compileText(source_text);
+    defer compilation.deinit();
+
+    const hir_result = try compilation.db.lowerToHir(compilation.root_module_id);
+    runtime_checks.markVerifiedResourceRuntimeChecks(hir_result.context, hir_result.module.raw_module);
+    try testing.expect(mlir.oraConvertToSIR(hir_result.context, hir_result.module.raw_module, false));
+
+    const rendered = try renderSirTextForModule(hir_result.context, hir_result.module.raw_module);
+    defer testing.allocator.free(rendered);
+
+    const transfer = try functionSlice(rendered, "transfer");
+    try testing.expect(std.mem.containsAtLeast(u8, transfer, 2, "sload"));
+    try testing.expect(std.mem.containsAtLeast(u8, transfer, 1, "sub"));
+    try testing.expect(std.mem.containsAtLeast(u8, transfer, 1, "add"));
+    try testing.expect(std.mem.containsAtLeast(u8, transfer, 2, "sstore"));
+    try testing.expect(!std.mem.containsAtLeast(u8, transfer, 1, "lt"));
+    try testing.expect(!std.mem.containsAtLeast(u8, transfer, 1, "iszero"));
 }
 
 test "OraToSIR reuses resource map place hash for self move" {

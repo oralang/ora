@@ -21,6 +21,7 @@ const refinements = ora_types.refinement_semantics;
 const project_config = @import("config/mod.zig");
 const import_graph = @import("ora_imports");
 const log = @import("log");
+const runtime_checks = @import("mlir/runtime_checks.zig");
 const Metrics = lib.metrics.Metrics;
 const allocation_stats = lib.lsp.allocation_stats;
 const ManagedArrayList = std.array_list.Managed;
@@ -4952,6 +4953,14 @@ fn runMlirEmitAdvanced(
             refinement_guards.cleanupRefinementGuardsWithOptions(ctx, final_module, &empty_guards, .{
                 .keep_proved_checks = mlir_options.keep_proved_checks,
             });
+        }
+    }
+
+    if (!mlir_options.keep_proved_checks) {
+        if (verification_result_opt) |*vr| {
+            if (vr.success) {
+                runtime_checks.markVerifiedResourceRuntimeChecks(ctx, final_module);
+            }
         }
     }
 

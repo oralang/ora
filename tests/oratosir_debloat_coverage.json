@@ -345,7 +345,7 @@
       "id": "resource.move.static_self_place",
       "tier": "Resource",
       "area": "Storage/Resource",
-      "conversion": "Resource move from a place to itself: compare place identity, check source sufficiency, preserve the value, and avoid creating or destroying balance",
+      "conversion": "Resource move from a statically self-identical place: check source sufficiency, preserve the value, and avoid creating an alias branch or storage write",
       "high_churn": true,
       "executing_tests": [
         "tests/conformance/resource_self_transfer.spec.toml"
@@ -356,8 +356,9 @@
       ],
       "sir_goldens": [
         "tests/mlir_sir/resource_move_self_static.check#func.func @selfTransfer",
-        "tests/mlir_sir/resource_move_self_static.check#[[SAME:%[0-9]+]] = sir.eq %hash_balances",
-        "tests/mlir_sir/resource_move_self_static.check#[[SAME_OK:%[0-9]+]] = sir.iszero [[SAME_UNDERFLOW]]"
+        "tests/mlir_sir/resource_move_self_static.check#[[SAME_OK:%[0-9]+]] = sir.iszero [[SAME_UNDERFLOW]]",
+        "tests/mlir_sir/resource_move_self_static.check#CHECK-NOT: %hash_balances_{{[0-9]+}} = sir.keccak256",
+        "tests/mlir_sir/resource_move_self_static.check#CHECK-NOT: sir.sstore %hash_balances"
       ]
     },
     {
