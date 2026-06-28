@@ -4000,7 +4000,9 @@ pub const VerificationPass = struct {
                 .Obligation => {
                     kind_counts.obligation += 1;
                     if (run.status == z3.Z3_L_TRUE) {
-                        summary.failed_obligations += 1;
+                        if (!loopPostDischargesReportObligation(query, queries.items, report_runs)) {
+                            summary.failed_obligations += 1;
+                        }
                     }
                 },
                 .LoopInvariantStep => {
@@ -7460,19 +7462,46 @@ fn loopPostDischargesObligation(
     queries: []const PreparedQuery,
     results: []const PreparedQueryResult,
 ) bool {
+    std.debug.assert(queries.len == results.len);
     if (obligation_query.kind != .Obligation) return false;
     if (obligation_query.obligation_kind != .Ensures) return false;
     if (!obligation_query.references_loop_post_state) return false;
 
     for (queries, results) |query, result| {
-        if (query.kind != .LoopInvariantPost) continue;
-        if (result.status != z3.Z3_L_FALSE) continue;
-        if (!std.mem.eql(u8, query.function_name, obligation_query.function_name)) continue;
-        if (!std.mem.eql(u8, query.file, obligation_query.file)) continue;
-        if (query.line != obligation_query.line or query.column != obligation_query.column) continue;
+        if (!loopPostQueryProvesObligation(obligation_query, query, result.status)) continue;
         return true;
     }
     return false;
+}
+
+fn loopPostDischargesReportObligation(
+    obligation_query: PreparedQuery,
+    queries: []const PreparedQuery,
+    runs: []const ReportQueryRun,
+) bool {
+    std.debug.assert(queries.len == runs.len);
+    if (obligation_query.kind != .Obligation) return false;
+    if (obligation_query.obligation_kind != .Ensures) return false;
+    if (!obligation_query.references_loop_post_state) return false;
+
+    for (queries, runs) |query, run| {
+        if (!loopPostQueryProvesObligation(obligation_query, query, run.status)) continue;
+        return true;
+    }
+    return false;
+}
+
+fn loopPostQueryProvesObligation(
+    obligation_query: PreparedQuery,
+    loop_post_query: PreparedQuery,
+    loop_post_status: z3.Z3_lbool,
+) bool {
+    return loop_post_query.kind == .LoopInvariantPost and
+        loop_post_status == z3.Z3_L_FALSE and
+        std.mem.eql(u8, loop_post_query.function_name, obligation_query.function_name) and
+        std.mem.eql(u8, loop_post_query.file, obligation_query.file) and
+        loop_post_query.line == obligation_query.line and
+        loop_post_query.column == obligation_query.column;
 }
 
 const PreparedQueryResult = struct {
@@ -12875,6 +12904,47 @@ test "report success checks report counters even when verification result succee
         .total_queries = 1,
         .inconsistent_bases = 1,
     }, &result, false, .Full, true, true));
+}
+
+test "report loop-post discharge matches verifier result collection" {
+    var queries = [_]PreparedQuery{
+        .{
+            .kind = .Obligation,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .references_loop_post_state = true,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [ensures]"),
+        },
+        .{
+            .kind = .LoopInvariantPost,
+            .function_name = "countTo",
+            .obligation_kind = .Ensures,
+            .file = "/tmp/loop.ora",
+            .line = 7,
+            .column = 9,
+            .smtlib_z = try testing.allocator.dupeZ(u8, "(check-sat)"),
+            .log_prefix = try testing.allocator.dupe(u8, "countTo [invariant-post]"),
+        },
+    };
+    defer {
+        for (&queries) |*query| query.deinit(testing.allocator);
+    }
+
+    const verification_results = [_]PreparedQueryResult{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+    const report_runs = [_]ReportQueryRun{
+        .{ .status = z3.Z3_L_TRUE },
+        .{ .status = z3.Z3_L_FALSE },
+    };
+
+    try testing.expect(loopPostDischargesObligation(queries[0], queries[0..], verification_results[0..]));
+    try testing.expect(loopPostDischargesReportObligation(queries[0], queries[0..], report_runs[0..]));
 }
 
 test "report success is false when encoder degraded" {
