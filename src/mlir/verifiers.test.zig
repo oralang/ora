@@ -144,13 +144,11 @@ test "mlir verifier rejects ora.adt.construct with wrong payload type" {
     try expectModuleVerificationFailure(text);
 }
 
-test "mlir verifier rejects ora.div with statically zero divisor" {
+test "mlir rejects removed ora.div operation" {
     const text =
         \\module {
         \\  func.func @f() {
-        \\    %lhs = "arith.constant"() <{value = 42 : i256}> : () -> !ora.int<256, false>
-        \\    %rhs = "arith.constant"() <{value = 0 : i256}> : () -> !ora.int<256, false>
-        \\    %0 = "ora.div"(%lhs, %rhs) : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\    %0 = "ora.div"() : () -> i256
         \\    func.return
         \\  }
         \\}
@@ -159,13 +157,11 @@ test "mlir verifier rejects ora.div with statically zero divisor" {
     try expectModuleVerificationFailure(text);
 }
 
-test "mlir verifier rejects ora.rem with statically zero divisor" {
+test "mlir rejects removed ora.rem operation" {
     const text =
         \\module {
         \\  func.func @f() {
-        \\    %lhs = "arith.constant"() <{value = 42 : i256}> : () -> !ora.int<256, false>
-        \\    %rhs = "arith.constant"() <{value = 0 : i256}> : () -> !ora.int<256, false>
-        \\    %0 = "ora.rem"(%lhs, %rhs) : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
+        \\    %0 = "ora.rem"() : () -> i256
         \\    func.return
         \\  }
         \\}

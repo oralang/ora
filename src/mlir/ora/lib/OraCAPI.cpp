@@ -4723,10 +4723,8 @@ MlirAttribute oraIntegerAttrGetFromString(MlirType type, MlirStringRef valueStr)
         }
         return wrap(attr);
     }
-    catch (const std::exception &e)
+    catch (const std::exception &)
     {
-        // Log the exception for debugging (can be removed in production)
-        // For now, just return null
         return {nullptr};
     }
     catch (...)
@@ -8047,11 +8045,6 @@ bool oraCanonicalizeOraMLIR(MlirContext ctx, MlirModule module)
     return oraCanonicalizeOraMLIRImpl(ctx, module, false, nullptr);
 }
 
-bool oraCanonicalizeOraMLIRWithStatistics(MlirContext ctx, MlirModule module, bool enableStatistics)
-{
-    return oraCanonicalizeOraMLIRImpl(ctx, module, enableStatistics, nullptr);
-}
-
 bool oraCanonicalizeOraMLIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool printStatistics, OraMlirPassStatisticsC *outStatistics)
 {
     return oraCanonicalizeOraMLIRImpl(ctx, module, printStatistics, outStatistics);
@@ -8153,11 +8146,6 @@ static bool oraConvertToSIRImpl(MlirContext ctx, MlirModule module, bool debugIn
 bool oraConvertToSIR(MlirContext ctx, MlirModule module, bool debugInfo)
 {
     return oraConvertToSIRImpl(ctx, module, debugInfo, false, nullptr);
-}
-
-bool oraConvertToSIRWithStatistics(MlirContext ctx, MlirModule module, bool debugInfo, bool enableStatistics)
-{
-    return oraConvertToSIRImpl(ctx, module, debugInfo, enableStatistics, nullptr);
 }
 
 bool oraConvertToSIRWithStatisticsOut(MlirContext ctx, MlirModule module, bool debugInfo, bool printStatistics, OraMlirPassStatisticsC *outStatistics)

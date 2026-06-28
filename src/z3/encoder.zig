@@ -4070,30 +4070,6 @@ pub const Encoder = struct {
         RemSigned,
     };
 
-    fn emitArithmeticSafetyObligations(self: *Encoder, op: ArithmeticOp, lhs: z3.Z3_ast, rhs: z3.Z3_ast) void {
-        switch (op) {
-            // Division/remainder: always check divisor != 0
-            .DivUnsigned, .DivSigned, .RemUnsigned, .RemSigned => {
-                const non_zero_divisor = z3.Z3_mk_not(self.context.ctx, self.checkDivByZero(rhs));
-                self.addObligation(non_zero_divisor);
-            },
-            // For ora.add/sub/mul (old-style ops without ora.assert), add overflow obligations.
-            // For arith.addi/subi/muli, overflow obligations come from ora.assert ops instead.
-            .Add => {
-                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkAddOverflow(lhs, rhs));
-                self.addObligation(no_overflow);
-            },
-            .Sub => {
-                const no_underflow = z3.Z3_mk_not(self.context.ctx, self.checkSubUnderflow(lhs, rhs));
-                self.addObligation(no_underflow);
-            },
-            .Mul => {
-                const no_overflow = z3.Z3_mk_not(self.context.ctx, self.checkMulOverflow(lhs, rhs));
-                self.addObligation(no_overflow);
-            },
-        }
-    }
-
     pub const BitwiseOp = enum {
         And,
         Or,
@@ -6333,26 +6309,6 @@ pub const Encoder = struct {
         // arithmetic operations
         if (std.mem.startsWith(u8, op_name, "arith.")) {
             return try self.encodeArithOp(op_name, operands, mlir_op);
-        }
-
-        if (std.mem.eql(u8, op_name, "ora.div") or std.mem.eql(u8, op_name, "ora.rem")) {
-            self.recordSoundnessLoss(.unsupported_operation, "legacy ora.div/rem has no signedness-safe SMT encoding; use arith.divui/divsi/remui/remsi");
-            return error.UnsupportedOperation;
-        }
-
-        if (std.mem.eql(u8, op_name, "ora.add") or
-            std.mem.eql(u8, op_name, "ora.sub") or
-            std.mem.eql(u8, op_name, "ora.mul"))
-        {
-            if (operands.len < 2) return error.InvalidOperandCount;
-            const arith_op = if (std.mem.eql(u8, op_name, "ora.add"))
-                ArithmeticOp.Add
-            else if (std.mem.eql(u8, op_name, "ora.sub"))
-                ArithmeticOp.Sub
-            else
-                ArithmeticOp.Mul;
-            self.emitArithmeticSafetyObligations(arith_op, operands[0], operands[1]);
-            return self.encodeArithmeticOp(arith_op, operands[0], operands[1]);
         }
 
         if (std.mem.eql(u8, op_name, "ora.add_wrapping") or

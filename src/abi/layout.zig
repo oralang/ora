@@ -254,9 +254,9 @@ pub fn staticWordCountForType(ty: Type) ?usize {
         .resource_place => null,
         .named => |named| if (parseFixedBytesSpelling(named.name) != null) 1 else null,
         .refinement => |refinement| staticWordCountForType(refinement.base_type.*),
-        // Keep the legacy API boundary: `hir.abi.staticAbiWordCount` did not
-        // classify Result carriers. Layout trees still count supported carriers
-        // through `LayoutNode.staticWordCount`.
+        // `hir.abi.staticAbiWordCount` classifies only direct static ABI
+        // shapes. Layout trees count supported Result carriers through
+        // `LayoutNode.staticWordCount`.
         .error_union => null,
         .tuple => |elements| blk: {
             var total: usize = 0;

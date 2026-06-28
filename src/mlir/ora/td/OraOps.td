@@ -695,21 +695,6 @@ def Ora_RangeOp : Ora_PureOp<"range", [AllTypesMatch<["start", "end", "result"]>
 // Arithmetic Operations
 //===----------------------------------------------------------------------===//
 
-def Ora_AddOp : Ora_BinaryIntegerOp<"add", "Add operation",
-    Ora_IntegerLikeValueType,
-    [DeclareOpInterfaceMethods<OpAsmOpInterface, ["getAsmResultNames"]>]> {
-  let summary = "Add operation";
-  let description = [{
-    Adds two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.add %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
 def Ora_AddWrappingOp : Ora_BinaryIntegerOp<"add_wrapping",
     "Wrapping add operation", Ora_IntegerLikeValueType> {
   let summary = "Wrapping add operation";
@@ -746,59 +731,6 @@ def Ora_ShrWrappingOp : Ora_BinaryIntegerOp<"shr_wrapping",
     "Wrapping shift-right operation", Ora_IntegerLikeValueType> {
   let summary = "Wrapping shift-right operation";
   let description = [{Shifts an Ora integer right with wrapping semantics, preserving signedness from the Ora type.}];
-}
-
-def Ora_SubOp : Ora_CheckedBinaryIntegerOp<"sub", "Subtract operation"> {
-  let summary = "Subtract operation";
-  let description = [{
-    Subtracts two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.sub %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
-def Ora_MulOp : Ora_CheckedBinaryIntegerOp<"mul", "Multiply operation"> {
-  let summary = "Multiply operation";
-  let description = [{
-    Multiplies two Ora integer values with proper unsigned semantics and overflow handling.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.mul %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-}
-
-def Ora_DivOp : Ora_CheckedBinaryIntegerOp<"div", "Divide operation"> {
-  let summary = "Divide operation";
-  let description = [{
-    Divides two Ora integer values with proper unsigned semantics.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.div %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
-  let hasVerifier = 1;
-}
-
-def Ora_RemOp : Ora_VerifiedBinaryIntegerOp<"rem", "Remainder operation"> {
-  let summary = "Remainder operation";
-  let description = [{
-    Computes the remainder of dividing two Ora integer values.
-    Accepts !ora.int<width, signed> types and preserves the type in the result.
-    
-    Example:
-    ```mlir
-    %result = ora.rem %lhs, %rhs : (!ora.int<256, false>, !ora.int<256, false>) -> !ora.int<256, false>
-    ```
-  }];
 }
 
 def Ora_CmpOp : Ora_PureOp<"cmp", [SameTypeOperands]> {

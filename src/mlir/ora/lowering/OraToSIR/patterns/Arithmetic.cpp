@@ -388,11 +388,6 @@ static Value maskAddressTo160(ConversionPatternRewriter &rewriter, Location loc,
     return rewriter.create<sir::AndOp>(loc, u256Type, v, mask);
 }
 
-// Note: convertOperandToU256, convertBinaryOperands, and
-// ConvertAddOp/MulOp/SubOp/DivOp/RemOp have been removed.
-// The Zig frontend now emits arith.addi/subi/muli/divui/remui directly,
-// which are converted by ConvertArithAddIOp etc. below.
-
 // -----------------------------------------------------------------------------
 // Convert ora.cmp → sir.eq/lt/gt (+ not/or for derived predicates)
 // -----------------------------------------------------------------------------

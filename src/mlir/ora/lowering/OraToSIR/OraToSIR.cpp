@@ -1435,7 +1435,6 @@ public:
         patterns.add<ConvertExternalCallOp>(typeConverter, ctx);
         patterns.add<ConvertAbiDecodeOp>(typeConverter, ctx);
 
-        // ora.add/sub/mul/div/rem no longer emitted; arith.* used directly.
         patterns.add<ConvertCmpOp>(typeConverter, ctx);
         patterns.add<ConvertConstOp>(typeConverter, ctx);
         patterns.add<ConvertLengthOp>(typeConverter, ctx);
@@ -1621,7 +1620,7 @@ public:
                 return true;
             });
 
-        target.addIllegalOp<ora::AddOp, ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::SubOp, ora::MulOp, ora::DivOp, ora::RemOp, ora::MapGetOp, ora::MapStoreOp, ora::StorageDeriveOp, ora::StorageWordLoadOp, ora::StorageWordStoreOp, ora::StorageRangeEraseOp, ora::CreateOp, ora::DestroyOp, ora::MoveOp>();
+        target.addIllegalOp<ora::AddWrappingOp, ora::SubWrappingOp, ora::MulWrappingOp, ora::ShlWrappingOp, ora::ShrWrappingOp, ora::MapGetOp, ora::MapStoreOp, ora::StorageDeriveOp, ora::StorageWordLoadOp, ora::StorageWordStoreOp, ora::StorageRangeEraseOp, ora::CreateOp, ora::DestroyOp, ora::MoveOp>();
         target.addIllegalOp<ora::GlobalOp>();
         target.addLegalOp<mlir::UnrealizedConversionCastOp>();
 

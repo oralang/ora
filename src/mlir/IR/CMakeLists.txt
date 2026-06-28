@@ -92,7 +92,7 @@ mlir_tablegen(SIROps.cpp.inc
 add_public_tablegen_target(MLIRSIROpsIncGen)
 
 # MLIR renamed/reshuffled interface libraries across versions.
-# Support both legacy and current exports.
+# Link the interface target name exposed by the active MLIR package.
 set(SIR_DIALECT_LINK_LIBS
   MLIRIR
   MLIRSupport
