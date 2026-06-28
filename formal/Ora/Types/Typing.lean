@@ -23,59 +23,14 @@ TWO deliberate design choices, made now so they are not future drift points:
 
 import Ora.Types.Assignable
 import Ora.Types.Internal
+import Ora.Types.Effect
 
 namespace Ora.Types
 
-abbrev Slot := String
 abbrev Var := String
 
-/-! ## Effect lattice — mirrors §9 / `src/sema/model.zig` `Effect` -/
-
-/-- Orthogonal observable-effect flags (mirrors `model.zig` `EffectFlags`). -/
-structure EffectFlags where
-  has_external : Bool := false
-  has_log      : Bool := false
-  has_havoc    : Bool := false
-  has_lock     : Bool := false
-  has_unlock   : Bool := false
-  deriving Repr, DecidableEq
-
-def EffectFlags.merge (a b : EffectFlags) : EffectFlags :=
-  { has_external := a.has_external || b.has_external
-    has_log      := a.has_log      || b.has_log
-    has_havoc    := a.has_havoc    || b.has_havoc
-    has_lock     := a.has_lock     || b.has_lock
-    has_unlock   := a.has_unlock   || b.has_unlock }
-
-/-- The 6-case effect lattice (mirrors `model.zig` `Effect`). Slots are bare names in
-    the skeleton; §9's structured `EffectSlot` paths are the additive next step. -/
-inductive Effect where
-  | pure
-  | external
-  | side_effects (flags : EffectFlags)
-  | writes (slots : List Slot) (flags : EffectFlags)
-  | reads  (slots : List Slot) (flags : EffectFlags)
-  | reads_writes (rd wr : List Slot) (flags : EffectFlags)
-  deriving Repr, DecidableEq
-
-def Effect.readSlots : Effect → List Slot
-  | .reads r _ => r | .reads_writes r _ _ => r | _ => []
-def Effect.writeSlots : Effect → List Slot
-  | .writes w _ => w | .reads_writes _ w _ => w | _ => []
-def Effect.flags : Effect → EffectFlags
-  | .pure => {} | .external => { has_external := true }
-  | .side_effects f => f | .writes _ f => f | .reads _ f => f | .reads_writes _ _ f => f
-
-/-- Effect join (the `⊔` of §5): slot-union, flag-merge, `pure` the identity. -/
-def Effect.join (a b : Effect) : Effect :=
-  let r := a.readSlots ++ b.readSlots
-  let w := a.writeSlots ++ b.writeSlots
-  let f := a.flags.merge b.flags
-  match r, w with
-  | [], []         => if f = {} then .pure else .side_effects f
-  | _ :: _, []     => .reads r f
-  | [], _ :: _     => .writes w f
-  | _ :: _, _ :: _ => .reads_writes r w f
+/-! The effect lattice (`Effect`, `EffectFlags`, `Slot`, `Effect.join` + its monoid laws)
+    lives in `Ora.Types.Effect`; it is in scope here unqualified. -/
 
 /-! ## Core expressions (skeleton) -/
 
@@ -197,6 +152,26 @@ theorem intLit_pure {S Γ Λ Λ' n σ ϵ} (h : HasType S Γ Λ (.intLit n) σ ϵ
   | intLit => rfl
   | sub _ _ ih => exact ih he
   | _ => nomatch he
+
+/-- Every well-typed expression's effect is **canonical** — so the §9 effect-monoid laws
+    (`Effect.pure_join`/`join_pure`) apply to any effect the typing judgment produces. The
+    leaves emit canonical effects (`pure`, `reads [s] {}`, `side_effects`), `sub`/`assign`
+    inherit, and every composite is a `join` (canonical by construction). -/
+theorem effect_canonical {S Γ Λ Λ' e σ ϵ} (h : HasType S Γ Λ e σ ϵ Λ') : ϵ.Canonical := by
+  induction h with
+  | intLit | boolLit | var _ | load _ | lock _ _ | unlock _ =>
+      simp [Effect.Canonical, Effect.readSlots, Effect.writeSlots, Effect.flags, Effect.ofParts]
+  | sub _ _ ih => exact ih
+  | assign _ _ _ ih => exact ih
+  | letE _ _ _ _ => exact Effect.join_canonical _ _
+  | ife _ _ _ _ _ _ => exact Effect.join_canonical _ _
+  | store _ _ _ _ _ => exact Effect.join_canonical _ _
+
+/-- Consequence: `pure` composes away against any typing effect (monoid identity, applied
+    via `effect_canonical`). -/
+theorem pure_join_effect {S Γ Λ Λ' e σ ϵ} (h : HasType S Γ Λ e σ ϵ Λ') :
+    Effect.join .pure ϵ = ϵ :=
+  Effect.pure_join (effect_canonical h)
 
 end HasType
 

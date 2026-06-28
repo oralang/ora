@@ -25,6 +25,7 @@ import Ora.Types.Assignable
 import Ora.Types.AssignableLawful
 import Ora.Types.LocatedLawful
 import Ora.Types.RefinementLocated
+import Ora.Types.Effect
 import Ora.Types.Typing
 import Ora.Types.LocatedProjection
 import Ora.Types.AssignableCoherence

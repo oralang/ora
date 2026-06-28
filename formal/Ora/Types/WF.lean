@@ -337,9 +337,7 @@ theorem DeclEnvWF.examplePoint : DeclEnvWF examplePoint := by
     rcases h with ⟨rfl, rfl⟩
     intro f hf
     simp at hf
-    rcases hf with rfl | rfl
-    · exact WF.prim u256
-    · exact WF.prim u256
+    rcases hf with rfl | rfl <;> exact WF.prim u256
 
 theorem DeclEnvWF.exampleResource : DeclEnvWF exampleResource := by
   constructor
